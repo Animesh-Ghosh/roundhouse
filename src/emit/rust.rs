@@ -922,7 +922,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn _note_hydrated(&self) {{}}\n\
                         pub fn create(attrs: std::collections::HashMap<String, serde_json::Value>) -> {name} {{ let mut m = Self::new(attrs); m.save(); m }}\n\
                     }}\n",
-                    name = lc.name.0.as_str(),
+                    // The struct, not the class: `impl Admin::Note` names no type.
+                    name = rust_struct_name(lc.name.0.as_str()),
                     destroy_body = destroy_body,
                     after_create_commit = after_create_commit,
                     after_update_commit = after_update_commit,

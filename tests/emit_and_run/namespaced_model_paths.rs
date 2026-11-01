@@ -57,3 +57,16 @@ fn crystal_requires_application_record_before_the_models_that_extend_it() {
     assert!(at("application_record") < at("admin::note"), "{app}");
     assert!(at("application_record") < at("account"), "{app}");
 }
+
+/// The per-model record methods (`save`, `persisted_pred`, `saved_changes`,
+/// …) are appended in their own `impl` block, which named the full class
+/// (`impl Admin::Note {`): none of them attached to the struct `Note`.
+#[test]
+fn rust_appends_a_namespaced_model_s_record_methods_to_its_struct() {
+    let (out, errors) = with_models(&[("app/models/admin/note.rb", "module Admin\n  class Note < ApplicationRecord\n  end\nend\n", "notes")])
+        .emit(BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let model = std::fs::read_to_string(out.join("src/models/admin_note.rs")).unwrap();
+    assert!(!model.contains("impl Admin::"), "{}", model.lines().filter(|l| l.starts_with("impl")).collect::<Vec<_>>().join("\n"));
+    assert!(model.lines().filter(|l| *l == "impl Note {").count() >= 2, "{}", model.lines().filter(|l| l.starts_with("impl")).collect::<Vec<_>>().join("\n"));
+}
