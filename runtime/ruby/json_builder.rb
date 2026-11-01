@@ -67,6 +67,21 @@ module JsonBuilder
     json.gsub(JSON_HTML_ESCAPE_PATTERN, ESCAPES)
   end
 
+  # Rails' renderer can disable all extra escaping. JSONP retains the
+  # encoder's escaping, including its separate JS separator setting.
+  def self.escape_json_response(json, jsonp = false)
+    return json unless jsonp || Rails.application.action_controller_escape_json_responses
+    json = escape_html_entities(json)
+    if Rails.application.active_support_escape_js_separators_in_json
+      json = json.gsub("\u2028", "\\u2028").gsub("\u2029", "\\u2029")
+    end
+    json
+  end
+
+  def self.jsonp(json, callback)
+    "/**/#{callback}(#{json})"
+  end
+
   # A Float as Rails' encoder sees it: NaN and the infinities are written
   # `null` (`Float#as_json`), where `JSON.generate` raises on them. The
   # lowerer wraps each Float leaf of a payload it hands `JSON.generate`.

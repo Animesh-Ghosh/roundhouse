@@ -90,7 +90,7 @@ pub(super) const HEADERS: Setting = Setting {
 /// in the Application class body and an environment file, or
 /// `Rails.application.config`, as in an initializer). None for anything
 /// else.
-fn assignment<'pr>(node: &Node<'pr>, setting: &Setting) -> Option<Node<'pr>> {
+pub(super) fn assignment<'pr>(node: &Node<'pr>, setting: &Setting) -> Option<Node<'pr>> {
     let call = node.as_call_node()?;
     if constant_id_str(&call.name()).strip_suffix('=') != Some(setting.key) {
         return None;
@@ -212,6 +212,27 @@ fn steps(stmts: Vec<Node<'_>>, src: &str, setting: &Setting) -> Vec<Step> {
             continue;
         }
         if let Some(call) = stmt.as_call_node() {
+            // Rails 8.1 changes these two independent defaults. Replay the
+            // load_defaults call in order with explicit config assignments.
+            if matches!((setting.section, setting.key),
+                ("action_controller", "escape_json_responses") |
+                ("active_support", "escape_js_separators_in_json"))
+                && constant_id_str(&call.name()) == "load_defaults"
+                && text(&stmt, src).starts_with("config.load_defaults")
+            {
+                let literal = call.arguments().is_some_and(|args| {
+                    let values: Vec<_> = args.arguments().iter().collect();
+                    values.len() == 1 && (values[0].as_float_node().is_some()
+                        || values[0].as_integer_node().is_some() || values[0].as_string_node().is_some())
+                        && text(&values[0], src).trim_matches(|c| c == '"' || c == '\'')
+                            .replace('_', "").parse::<f64>().is_ok_and(f64::is_finite)
+                });
+                let value = literal.then(|| super::app::load_defaults_version(&text(&stmt, src))).flatten()
+                    .map(|version| (version < 8.1).to_string())
+                    .ok_or_else(|| "config.load_defaults must name a literal version to determine JSON escaping".to_string());
+                out.push(Step::Set(value));
+                continue;
+            }
             if constant_id_str(&call.name()) == "configure" {
                 if let Some(body) = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body()) {
                     out.extend(steps(flatten_statements(body), src, setting));

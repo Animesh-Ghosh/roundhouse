@@ -6,8 +6,54 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/json_response_escaping.rs"]
+mod json_response_escaping;
 
 use roundhouse::project::BuildTarget;
+
+#[test]
+fn json_response_defaults_match_rails() {
+    json_response_escaping::oracle_matches_snapshot();
+}
+
+#[test]
+fn json_response_defaults_run_on_ruby() {
+    for defaults in ["none", "8.0", "8.1"] {
+        json_response_escaping::app(defaults).run_ruby(&json_response_escaping::program(defaults)).assert_passes();
+    }
+    json_response_escaping::app("8.1").remove("config/application.rb")
+        .run_ruby(&json_response_escaping::program("8.1")).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn json_response_defaults_run_on_spinel() {
+    for defaults in ["none", "8.0", "8.1"] {
+        json_response_escaping::app(defaults).run_spinel(&json_response_escaping::program(defaults)).assert_passes();
+    }
+    json_response_escaping::app("8.1").remove("config/application.rb")
+        .run_spinel(&json_response_escaping::program("8.1")).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn dispatcher_rescue_uses_its_application_defaults_on_spinel() {
+    use std::{fs, path::Path};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/dispatcher_cases/render-classes");
+    let mut app = emit_and_run::empty_app();
+    for path in ["config/application.rb", "db/schema.rb", "app/controllers/encoded_controller.rb"] {
+        app = app.write(path, &fs::read_to_string(root.join(path)).unwrap());
+    }
+    app.write("config/routes.rb", "Rails.application.routes.draw do\n  get '/encoded', to: 'encoded#index'\nend\n")
+        .run_spinel(r#"
+require_relative "app/controllers/encoded_controller"
+c = EncodedController.new
+c.process_action(:index)
+raise "encoded rescue body" unless c.body.bytes == "{\"text\":\"<tag>&\u2028\u2029\"}".bytes
+raise "encoded rescue status" unless c.status == 422
+puts "dispatcher encoding passed"
+"#).assert_passes();
+}
 
 fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
