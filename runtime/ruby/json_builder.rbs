@@ -18,6 +18,7 @@ module ActionController
   module JsonRender
     %a{abstract}
     def self.encode: (untyped value) -> String
+    %a{abstract}
     def self.encode_escaped: (untyped value) -> String
   end
 end
