@@ -1267,6 +1267,38 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
     true
 }
 
+/// Rust re-exports each model from `src/models/mod.rs` by its struct name
+/// (the last segment of the class name) from a module named by its
+/// flattened stem (`Admin::Note` → `admin_note::Note`). Two models with
+/// one struct name (`Note` and `Admin::Note`) or one stem (`AdminNote`
+/// and `Admin::Note`) would be declared twice; refused, naming both,
+/// rather than renamed.
+fn report_rust_model_name_collisions(app: &App, target: BuildTarget) {
+    if target != BuildTarget::Rust {
+        return;
+    }
+    let mut seen: Vec<(String, String, &crate::dialect::Model)> = Vec::new();
+    for model in &app.models {
+        let name = model.name.0.as_str();
+        let stem = crate::emit::rust::rust_model_stem(name);
+        let strukt = crate::emit::rust::rust_struct_name(name).to_string();
+        if let Some((_, _, other)) = seen.iter().find(|(s, n, _)| *s == stem || *n == strukt) {
+            let span = if model.parent_span.is_synthetic() { other.parent_span } else { model.parent_span };
+            emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                span,
+                Some(crate::ident::Symbol::from(target.as_str())),
+                "model name",
+                format!(
+                    "`{}` and `{}` would both be declared as `src/models/{stem}.rs` or as struct `{strukt}`",
+                    other.name.0.as_str(),
+                    name
+                ),
+            ));
+        }
+        seen.push((stem, strukt, model));
+    }
+}
+
 /// A non-integer primary key (`create_table …, id: :uuid`,
 /// `primary_key: "identifier", id: :string`) is carried end to end by
 /// the ruby-shape emit — CRuby, JRuby and Spinel: the analyzer types
@@ -2894,6 +2926,7 @@ fn target_files_inner(
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    report_rust_model_name_collisions(app, target);
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
