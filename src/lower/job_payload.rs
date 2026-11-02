@@ -12,8 +12,8 @@
 //!   in every corpus app; the sites are typed (Switchyard spikes/t1).
 //!   Target-neutral data, run from `job_class_side` on every target.
 //! - [`apply_ruby`] rewrites the enqueue arm of each planned job's
-//!   `perform_later` from `ActiveJob.enqueue(-> { … })` to
-//!   `ActiveJob.enqueue_payload(JobRegistry.payload_<job>(args))` and
+//!   `perform_later` from `ActiveJob.enqueue_on(queue, -> { … })` to
+//!   `ActiveJob.enqueue_payload_on(queue, JobRegistry.payload_<job>(args))` and
 //!   ledgers each job that keeps its Proc; [`push_model_to_gid_uri`]
 //!   gives every model the GlobalID a payload writes. Called by the Ruby
 //!   emitter only: the other targets have no drain, so their enqueue arm
@@ -488,7 +488,7 @@ fn join(a: Codec, b: Codec) -> Option<Codec> {
 
 /// `queue_as :name` in the job's class body or a job ancestor's,
 /// nearest first; "default" when none says.
-fn queue_name(app: &App, lc: &LibraryClass) -> String {
+pub(super) fn queue_name(app: &App, lc: &LibraryClass) -> String {
     for class in ancestry(app, lc) {
         for call in &class.unknown_calls {
             let ExprNode::Send { recv: None, method, args, .. } = &*call.node else { continue };
@@ -908,19 +908,20 @@ fn ancestry<'a>(app: &'a App, lc: &'a LibraryClass) -> Vec<&'a LibraryClass> {
 /// their Proc and, under `:sidekiq`, the handlers the runtime can't carry.
 pub fn apply_ruby(lcs: &mut [LibraryClass], app: &App) {
     let sidekiq = app.queue_adapter.as_deref() == Some("sidekiq");
+    let solid_queue = app.queue_adapter.as_deref() == Some("solid_queue");
     for d in handler_diagnostics(app) {
         crate::emit::diagnostics::push(d);
     }
     for lc in lcs.iter_mut() {
         let own_name = lc.name.0.as_str().to_string();
         let Some(plan) = app.job_plans.iter().find(|p| p.job == own_name) else { continue };
-        if sidekiq && plan.is_payload() {
+        if (sidekiq || solid_queue) && plan.is_payload() {
             if let Some(with) = lc.methods.iter_mut().find(|m| {
                 m.receiver == crate::dialect::MethodReceiver::Class && m.name.as_str() == "perform_later_with"
             }) {
                 let span = with.name_span;
                 let (lead, args) = wrapper_vars(with, 2);
-                if !rewrite_enqueue(&mut with.body, plan, args, Some(lead)) {
+                if !rewrite_enqueue(&mut with.body, plan, args, sidekiq.then_some(lead)) {
                     crate::emit::diagnostics::push(fallback_diagnostic(
                         plan,
                         &JobFallback {
@@ -1029,7 +1030,7 @@ fn fallback_diagnostic(
     )
 }
 
-/// Find `ActiveJob.enqueue(<lambda>)` in the wrapper `job_class_side`
+/// Find `ActiveJob.enqueue_on(<queue>, <lambda>)` in the wrapper `job_class_side`
 /// writes — `if !ActiveJob.enqueue_only; if ActiveJob.drain_registered;
 /// <here> else <inline> end else <hold> end` — and replace it. The shape
 /// is a contract with that pass; anything else is left alone and
@@ -1047,10 +1048,15 @@ fn rewrite_enqueue(body: &mut Expr, plan: &JobPlan, args: Vec<Expr>, sidekiq: Op
         if !is_active_job_call(cond, "drain_registered") {
             continue;
         }
-        if !is_active_job_call(enqueue, "enqueue") {
+        if !is_active_job_call(enqueue, "enqueue_on") {
             continue;
         }
         let span = enqueue.span;
+        let queue = match &*enqueue.node {
+            ExprNode::Send { args, .. } => args.first().cloned(),
+            _ => None,
+        };
+        let Some(queue) = queue else { continue };
         if let Some(mut push_args) = sidekiq {
             push_args.extend(args);
             let mut call = Expr::new(
@@ -1085,11 +1091,11 @@ fn rewrite_enqueue(body: &mut Expr, plan: &JobPlan, args: Vec<Expr>, sidekiq: Op
                 // `enqueue_payload_after_commit` holds it while a
                 // transaction is open (`runtime/job_registry.rb`).
                 method: Symbol::from(if plan.enqueue_after_commit {
-                    "enqueue_payload_after_commit"
+                    "enqueue_payload_after_commit_on"
                 } else {
-                    "enqueue_payload"
+                    "enqueue_payload_on"
                 }),
-                args: vec![payload],
+                args: vec![queue, payload],
                 block: None,
                 parenthesized: true,
             },
@@ -1196,8 +1202,27 @@ fn arguments_list(plan: &JobPlan) -> String {
 /// `perform_later` calls instead of queueing in process: the payload,
 /// with `scheduled_at` when `at` is set, handed to `SidekiqPush`.
 pub fn registry_source(plans: &[JobPlan], sidekiq: bool) -> String {
+    registry_source_with_broadcasts(plans, sidekiq, &[])
+}
+
+/// [`registry_source`], with the `Turbo::Streams::ActionBroadcastJob`
+/// half (`lower::broadcast_job`) for the models whose `broadcasts_to`
+/// enqueues it: its push, its `perform` arm, and its place in the
+/// discard table (the job says `discard_on ActiveJob::DeserializationError`).
+pub fn registry_source_with_broadcasts(
+    plans: &[JobPlan],
+    sidekiq: bool,
+    broadcasts: &[crate::lower::broadcast_job::BroadcastModel],
+) -> String {
+    let broadcasts = if sidekiq { broadcasts } else { &[] };
     let payload: Vec<&JobPlan> = plans.iter().filter(|p| p.is_payload()).collect();
     let mut s = String::new();
+    let turbo = crate::lower::broadcast_job::JOB_CLASS;
+    let turbo_source = crate::lower::broadcast_job::registry_source(broadcasts);
+    if !turbo_source.is_empty() {
+        s.push_str(&turbo_source);
+        s.push('\n');
+    }
 
     for plan in &payload {
         let list = arguments_list(plan);
@@ -1231,10 +1256,13 @@ pub fn registry_source(plans: &[JobPlan], sidekiq: bool) -> String {
     }
 
     s.push_str("  def self.perform(job_class, args)\n");
-    if payload.is_empty() {
+    if payload.is_empty() && broadcasts.is_empty() {
         s.push_str("    false\n");
     } else {
         s.push_str("    case job_class\n");
+        if !broadcasts.is_empty() {
+            s.push_str(&format!("    when {}\n      perform_turbo_broadcast(args)\n      true\n", ruby_str(turbo)));
+        }
         for plan in &payload {
             s.push_str(&format!("    when {}\n", ruby_str(&plan.job)));
             let mut call_args: Vec<String> = Vec::new();
@@ -1259,10 +1287,13 @@ pub fn registry_source(plans: &[JobPlan], sidekiq: bool) -> String {
     s.push_str("  def self.discards_deserialization_error(job_class)\n");
     let discarding: Vec<&&JobPlan> =
         payload.iter().filter(|p| p.discards_deserialization_error).collect();
-    if discarding.is_empty() {
+    if discarding.is_empty() && broadcasts.is_empty() {
         s.push_str("    false\n");
     } else {
-        let names: Vec<String> = discarding.iter().map(|p| format!("job_class == {}", ruby_str(&p.job))).collect();
+        let mut names: Vec<String> = discarding.iter().map(|p| format!("job_class == {}", ruby_str(&p.job))).collect();
+        if !broadcasts.is_empty() {
+            names.push(format!("job_class == {}", ruby_str(turbo)));
+        }
         s.push_str(&format!("    {}\n", names.join(" || ")));
     }
     s.push_str("  end\n");
