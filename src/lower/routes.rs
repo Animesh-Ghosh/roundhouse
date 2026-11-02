@@ -114,7 +114,15 @@ pub struct FlatRoute {
     /// (`flatten_routes_for_helpers`): building a link needs no matcher,
     /// and a view that only links to the route must not lose the helper.
     pub refused: Option<(String, String)>,
+    /// `scope format: true`: Rails requires `.:format` on every route
+    /// inside, so the helper takes the format as a required last param.
+    /// The router still peels the suffix off like any other.
+    pub format_required: bool,
 }
+
+/// The `defaults` key that carries `scope format: true` through a
+/// [`RouteSpec::Scope`] (not a legal segment name, so it never fills one).
+pub const FORMAT_REQUIRED_KEY: &str = "format!";
 
 /// The `refused` parameter name of a route whose endpoint is Ruby code
 /// (`UNMODELED_ENDPOINT_CONTROLLER`); the value is the endpoint kind.
@@ -429,6 +437,10 @@ impl Ctx {
     /// route does. campfire's bot API is one such scope, and its
     /// inherited `update` answered the html branch (a redirect) to a
     /// bot's PATCH.
+    fn format_required(&self) -> bool {
+        self.param_defaults.iter().any(|(n, _)| n == FORMAT_REQUIRED_KEY)
+    }
+
     fn default_format(&self) -> Option<Symbol> {
         self.param_defaults
             .iter()
@@ -753,6 +765,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     constraints,
                     seg_patterns,
                     refused,
+                    format_required: ctx.format_required(),
                 });
             }
         }
@@ -808,6 +821,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 constraints: vec![],
                 seg_patterns: vec![],
                 refused: None,
+                format_required: false,
             });
         }
         RouteSpec::Resources {
@@ -1052,6 +1066,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                             constraints: vconstraints.clone(),
                             seg_patterns: seg_patterns.clone(),
                             refused: refused.clone(),
+                            format_required: ctx.format_required(),
                         });
                     }
                 }

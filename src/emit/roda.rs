@@ -2209,6 +2209,7 @@ mod tests {
             constraints: vec![],
             seg_patterns: vec![],
             refused: None,
+            format_required: false,
         }
     }
 
