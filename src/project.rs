@@ -3039,10 +3039,15 @@ fn target_files_inner(
     report_dynamic_association_joins(app, target);
     report_typescript_array_sends(app, target);
     report_dry_struct_stdlib(app, target);
-    // Full forwarding currently has a native Ruby contract only. A
-    // declaration must be gated even when its body never forwards.
+    // Spinel carries verified native packets too. Source-contract refusals
+    // still apply: a target's binder cannot repair an unverified destination.
     if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
         for (span, policy) in crate::analyze::forwarding::keyword_calls(app) {
+            if target == BuildTarget::Spinel
+                && policy == crate::analyze::forwarding::KeywordPolicy::Native
+            {
+                continue;
+            }
             if !matches!(policy, crate::analyze::forwarding::KeywordPolicy::Legacy | crate::analyze::forwarding::KeywordPolicy::NativeLibrary) {
                 let (construct, detail) = if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
                     ("keyword splat in ordinary super",
@@ -3058,6 +3063,11 @@ fn target_files_inner(
     }
     // Controller actions too: their `*rest`, `**` and `...` reach the
     // emitted `def` through the same `Param`s (`Action::formal_params`).
+    let unverified_supers = if target == BuildTarget::Spinel {
+        crate::analyze::forwarding::unverified_full_super_declarations(app)
+    } else {
+        Vec::new()
+    };
     let actions = crate::analyze::forwarding::controller_defs(app);
     for method in crate::analyze::forwarding::methods(app)
         .map(|(_, m)| m)
@@ -3068,14 +3078,13 @@ fn target_files_inner(
         }
         report_positional_rest_param(method, target);
         if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby) {
-            let keyword_rest = method
-                .params
-                .iter()
-                .any(|p| p.keyword && p.rest && !p.forwarding);
             let full_forwarding = method.params.iter().any(|p| p.forwarding);
-            // Spinel carries both named `**details` and anonymous `**`
-            // keyword-rest parameters. Full `...` forwarding stays refused.
-            if matches!(target, BuildTarget::Spinel) && keyword_rest && !full_forwarding {
+            // Spinel preserves `...`, named `**details` and anonymous `**`.
+            // An external `super(...)` still needs a verified destination;
+            // Spinel cannot bind a full packet to an unrepresented ancestor.
+            if target == BuildTarget::Spinel
+                && !unverified_supers.contains(&method.name_span)
+            {
                 continue;
             }
             let construct = if full_forwarding {
