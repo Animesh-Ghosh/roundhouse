@@ -1405,7 +1405,10 @@ def main():
             "compare": plan["compare"],
             "spinel-tests": plan["spinel_tests"],
             "spinel-framework-shards": plan["spinel_framework_shards"],
-            "spinel-timings": {"toolchain": timings.get("toolchain", {})},
+            "spinel-timings": {
+                "framework": timings.get("framework", {}),
+                "toolchain": timings.get("toolchain", {}),
+            },
             "smoke": plan["smoke"],
             "smoke-extra": plan["smoke_extra"],
             "extras-advisory": plan["extras_advisory"],

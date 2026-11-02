@@ -249,6 +249,10 @@ impl Overlay {
         if std::env::var("ROUNDHOUSE_SPINEL_SLIM").is_ok_and(|v| v == "0") {
             return self.run_spinel(script);
         }
+        // Not bundled: a slim probe compiles only the runtime it names, so it is already small.
+        if bundle::collecting() {
+            panic!("spinel bundle collect: not bundled");
+        }
         let written: Vec<String> = self
             .edits
             .iter()
@@ -628,7 +632,7 @@ fn copy_tree(src: &Path, dst: &Path) {
 
 // Not a compile per contract: the shared runtime's analysis was most of the spinel-toolchain lane.
 pub mod bundle {
-    use super::{copy_tree, scratch_dir, BuildTarget, Edit, Overlay, Run};
+    use super::{copy_tree, remove_scratch, scratch_dir, BuildTarget, Edit, Overlay, Run};
     use std::collections::BTreeMap;
     use std::hash::{Hash, Hasher};
     use std::path::{Path, PathBuf};
@@ -755,19 +759,21 @@ pub mod bundle {
 
     fn build(cases: &[&Case]) -> Option<PathBuf> {
         // Not merged blindly: two cases writing one path differently would leave only the last.
+        // A path only one case touches, or one every case writes alike: a script would otherwise run against another case's edit of its file.
         let mut written: BTreeMap<&str, Option<&[u8]>> = BTreeMap::new();
         for case in cases {
             let mut own: BTreeMap<&str, Option<&[u8]>> = BTreeMap::new();
             for edit in &case.edits {
                 match edit {
                     Edit::Write { path, content } => own.insert(path.as_str(), Some(content.as_slice())),
-                    Edit::Remove { path } => own.insert(path.as_str(), None),
-                    Edit::Replace { .. } => None,
+                    Edit::Replace { path, .. } | Edit::Remove { path } => own.insert(path.as_str(), None),
                 };
             }
             for (path, now) in own {
-                if written.insert(path, now).is_some_and(|before| before != now) {
-                    return None;
+                if let Some(before) = written.insert(path, now) {
+                    if before.is_none() || before != now {
+                        return None;
+                    }
                 }
             }
         }
@@ -779,6 +785,7 @@ pub mod bundle {
         };
         let (emitted, errors) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| overlay.emit_tree(BuildTarget::Spinel))).ok()?;
         if !errors.is_empty() {
+            remove_scratch(&emitted);
             return None;
         }
         let mut contract = String::from("require_relative \"boot\"\n");
@@ -795,7 +802,11 @@ pub mod bundle {
             .ok()?;
         std::fs::write(emitted.join("compile.stdout"), &compiled.stdout).ok()?;
         std::fs::write(emitted.join("compile.stderr"), &compiled.stderr).ok()?;
-        compiled.status.success().then_some(emitted)
+        if !compiled.status.success() {
+            remove_scratch(&emitted);
+            return None;
+        }
+        Some(emitted)
     }
 
     fn clone_edit(e: &Edit) -> Edit {
@@ -814,6 +825,7 @@ pub mod bundle {
             let dest = out.join(name);
             let _ = std::fs::remove_dir_all(&dest);
             copy_tree(&tree, &dest);
+            remove_scratch(&tree);
             let mut m = manifest.lock().unwrap();
             for (i, case) in cases.iter().enumerate() {
                 m.insert(case.key.clone(), (name.to_string(), i));
