@@ -9,14 +9,10 @@ use roundhouse::ingest::ingest_app_from_tree;
 fn qualified_standard_libraries_are_not_unknown_gems() {
     let missing: Vec<_> = [
         "date",
-        "fileutils",
         "find",
         "openssl",
-        "pathname",
-        "psych",
         "set",
         "singleton",
-        "stringio",
         "strscan",
         "time",
         "tmpdir",
@@ -31,15 +27,19 @@ fn unqualified_standard_libraries_keep_the_previous_source_choice() {
     for gem in [
         "did_you_mean",
         "fiddle",
+        "fileutils",
         "forwardable",
         "getoptlong",
         "net-protocol",
         "open3",
         "optparse",
+        "pathname",
         "pp",
         "prettyprint",
+        "psych",
         "resolv",
         "shellwords",
+        "stringio",
         "tempfile",
         "timeout",
         "weakref",
@@ -76,7 +76,7 @@ fn app(gem: &str, constant: &str, explicit: bool, transitive: bool) -> roundhous
 
 #[test]
 fn installed_stdlib_sources_stay_out_for_direct_and_sourced_dependencies() {
-    for (gem, constant) in [("pathname", "Pathname"), ("fileutils", "FileUtils")] {
+    for (gem, constant) in [("date", "Date"), ("set", "Set")] {
         for transitive in [false, true] {
             let app = app(gem, constant, false, transitive);
             let lock = app.gem_lock.as_ref().unwrap();
@@ -90,10 +90,10 @@ fn installed_stdlib_sources_stay_out_for_direct_and_sourced_dependencies() {
 
 #[test]
 fn explicit_source_gems_still_compiles_stdlib_source() {
-    let app = app("fileutils", "FileUtils", true, false);
-    assert!(app.gem_lock.as_ref().unwrap().is_source("fileutils"));
-    assert!(app.sources.iter().any(|s| s.path.contains("fileutils-1.0/lib/fileutils.rb")));
-    assert!(app.library_classes.iter().any(|c| c.name.0.as_str() == "FileUtils"));
+    let app = app("date", "Date", true, false);
+    assert!(app.gem_lock.as_ref().unwrap().is_source("date"));
+    assert!(app.sources.iter().any(|s| s.path.contains("date-1.0/lib/date.rb")));
+    assert!(app.library_classes.iter().any(|c| c.name.0.as_str() == "Date"));
 }
 
 #[test]
@@ -130,4 +130,24 @@ fn timeout_keeps_the_unknown_gem_native_boundary() {
 #[test]
 fn open3_keeps_the_unknown_gem_native_boundary() {
     assert_previous_native_boundary("open3", "0.2.1", "Open3.capture2(\"cat\", { stdin_data: \"sample\" })[0]");
+}
+
+#[test]
+fn fileutils_keeps_the_unknown_gem_native_boundary() {
+    assert_previous_native_boundary("fileutils", "1.7.3", "options = {noop: true}; FileUtils.cp(\"input.txt\", \"copy.txt\", **options); File.exist?(\"copy.txt\")");
+}
+
+#[test]
+fn pathname_keeps_the_unknown_gem_native_boundary() {
+    assert_previous_native_boundary("pathname", "0.4.0", "Pathname.new(\"a/../b\").cleanpath(true).to_s");
+}
+
+#[test]
+fn psych_keeps_the_unknown_gem_native_boundary() {
+    assert_previous_native_boundary("psych", "5.2.2", "options = {symbolize_names: true}; Psych.safe_load(\"---\\nx: 1\\n\", **options).keys[0].class.to_s");
+}
+
+#[test]
+fn stringio_keeps_the_unknown_gem_native_boundary() {
+    assert_previous_native_boundary("stringio", "3.1.2", "io = StringIO.new(\"abc\", \"a\"); io.write(\"X\"); io.string");
 }
