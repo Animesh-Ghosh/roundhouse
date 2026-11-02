@@ -1052,6 +1052,11 @@ pub fn build_assoc_class_methods(
     let mut wanted: Vec<&(Symbol, Symbol)> = demand.iter().collect();
     wanted.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
     for (aname, mname) in wanted {
+        if is_relation_chain_method(mname.as_str())
+            || crate::catalog::is_relation_context_builder(mname.as_str())
+        {
+            continue;
+        }
         for owner in models {
             let Some((target, _)) = assocs.has_many_fk(&owner.name, aname) else { continue };
             // An association the seed cannot reproduce (`as:`, a
@@ -1093,6 +1098,11 @@ pub fn build_assoc_class_methods(
     wanted_models
         .sort_by(|a, b| (a.0 .0.as_str(), a.1.as_str()).cmp(&(b.0 .0.as_str(), b.1.as_str())));
     for (target, mname) in wanted_models {
+        if is_relation_chain_method(mname.as_str())
+            || crate::catalog::is_relation_context_builder(mname.as_str())
+        {
+            continue;
+        }
         if scopes.get(target).is_some_and(|s| s.contains_key(mname)) {
             continue;
         }
@@ -4869,9 +4879,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return keeps.then_some(m);
                 }
-                if matches!(method.as_str(), "pluck" | "pick")
-                    && ctx.user_returns.defines_class_method(&m, &method)
-                {
+                if ctx.user_returns.defines_class_method(&m, &method) {
                     let returns = ctx.user_returns.class.get(&(m.clone(), method.clone())).cloned();
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return returns;
