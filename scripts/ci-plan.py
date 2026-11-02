@@ -739,6 +739,10 @@ def select(
     wasm = site = spinel = False
     reasons = []
     for path in paths:
+        if path in {"tests/emit_and_run/class_body_calls.rs", "tests/support/class_body_calls.rs"}:
+            reasons.append(f"{path}: unit (emit_and_run), spinel-toolchain (ordinary class-body calls)")
+            spinel = True
+            jobs_selected.update(CORE)
         if path.startswith("tests/support/controller_content_type_writer/"):
             reasons.append(f"{path}: unit (controller_content_type_writer)")
         if path == "src/project.rs" and project_scope in PROJECT_BUILDERS.values():

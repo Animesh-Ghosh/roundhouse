@@ -267,6 +267,10 @@ mod instance_extend;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/class_body_calls.rs"]
+mod class_body_calls_contract;
+#[path = "emit_and_run/class_body_calls.rs"]
+mod class_body_calls;
 #[path = "support/dry_initializer.rs"]
 mod dry_initializer;
 #[path = "support/runtime_block_signature.rs"]

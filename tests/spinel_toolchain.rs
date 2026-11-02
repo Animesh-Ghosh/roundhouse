@@ -52,6 +52,16 @@ mod lobsters_zero;
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/class_body_calls.rs"]
+mod class_body_calls_contract;
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn ordinary_class_body_calls_run_natively() {
+    class_body_calls_contract::settings_overlay()
+        .run_spinel_with_rbs(class_body_calls_contract::ASSERTIONS)
+        .assert_passes();
+}
 #[path = "support/dry_initializer.rs"]
 mod dry_initializer;
 #[path = "support/data_factory.rs"]
