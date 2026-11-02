@@ -384,15 +384,6 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // A support file the class ingest left out, at what failed it.
     out.extend(app.ingest_drops.iter().map(|drop| Diagnostic::ingest_unsupported(drop.span, drop.message.clone())));
     out.extend(conditional_declarations_reopened(app));
-    // A class-body refusal is source semantics, so `check` must report it too.
-    fn collect_class_body_refusals(expr: &Expr, out: &mut Vec<Diagnostic>) {
-        if expr.decisions & crate::expr::CLASS_BODY_BINDING_ORDER != 0 {
-            out.push(Diagnostic::unsupported(expr.span, None, "class-body method binding",
-                "inherited replay requires a single opening, stable self binding, ordinary arguments, and no intervening mixin or unplaced call"));
-        }
-        expr.node.for_each_child(&mut |child| collect_class_body_refusals(child, out));
-    }
-    crate::lower::for_each_hook_body_ref(app, &mut |expr| collect_class_body_refusals(expr, &mut out));
     // Constructor refusals must also reach executable class constants and
     // parameter defaults, which the ordinary method diagnostic policy omits.
     fn collect_storage_constructors(expr: &Expr, out: &mut Vec<Diagnostic>) {

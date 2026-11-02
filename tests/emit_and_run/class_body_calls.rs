@@ -95,78 +95,8 @@ fn each_non_ruby_target_refuses_the_class_body_call() {
 }
 
 #[test]
-fn a_late_override_is_refused_before_spinel_changes_the_earlier_call() {
-    let (_, errors) = contract::overlay()
-        .write("app/models/document_base.rb", r#"
-class DocumentBase
-  def self.label(value = nil)
-    value ? @label = decorate(value) : @label
-  end
-  def self.decorate(value) = "parent:" + value
-end
-"#)
-        .write("app/models/labelled_document.rb", r#"
-class LabelledDocument < DocumentBase
-  label "sample"
-  def self.decorate(value) = "child:" + value
-  def self.value = label
-end
-"#)
-        .emit(BuildTarget::Spinel);
-    assert!(errors.iter().any(|e| e.contains("class-body method binding")), "{errors:#?}");
-}
-
-#[test]
-fn a_redefined_ancestor_is_refused_on_spinel() {
-    let (_, errors) = contract::overlay()
-        .write("app/models/document_reopen.rb", r#"
-class DocumentBase
-  def self.label(value = nil)
-    value ? @label = "new:" + value : @label
-  end
-end
-"#)
-        .emit(BuildTarget::Spinel);
-    assert!(errors.iter().any(|e| e.contains("class-body method binding")), "{errors:#?}");
-}
-
-#[test]
-fn redefined_ancestors_are_refused_on_ruby_as_well() {
-    for target in [BuildTarget::Ruby, BuildTarget::Jruby] {
-        let (_, errors) = contract::overlay()
-            .write("app/models/document_reopen.rb", "class DocumentBase\n def self.label(value = nil)\n value ? @label = \"later:\" + value : @label\n end\nend\n")
-            .emit(target);
-        assert!(errors.iter().any(|e| e.contains("class-body method binding")), "{target:?}: {errors:#?}");
-    }
-}
-
-#[test]
-fn an_inherited_call_does_not_cross_an_unplaced_extension_call() {
-    let (_, errors) = contract::overlay()
-        .write("app/models/prior_settings.rb", "module PriorSettings\n def audit = label\nend\n")
-        .write("app/models/labelled_document.rb", "class LabelledDocument < DocumentBase\n extend PriorSettings\n audit\n label \"sample\"\nend\n")
-        .emit(BuildTarget::Ruby);
-    assert!(errors.iter().any(|e| e.contains("class-body method binding")), "{errors:#?}");
-}
-
-
-#[test]
-fn unproved_inherited_replay_is_a_check_error_on_each_ruby_target() {
-    let parent = r#"
-class DocumentBase
-  def self.label(value = nil)
-    value ? @label = decorate(value) : @label
-  end
-  def self.decorate(value) = "parent:" + value
-  def self.mode = @mode
-  def self.mode=(value)
-    @mode = value
-  end
-  def self.configure(mode: "default")
-    @mode = mode
-  end
-end
-"#;
+fn unproved_inherited_calls_keep_the_warning_without_a_new_check_error() {
+    let parent = "class DocumentBase\n def self.label(value = nil)\n value ? @label = value : @label\n end\n def self.mode = @mode\n def self.mode=(value)\n @mode = value\n end\n def self.configure(mode: nil)\n @mode = mode\n end\nend\n";
     let cases = [
         ("class LabelledDocument < DocumentBase\nend\nclass Other\n LabelledDocument.mode = \"fallback\"\nend\n", ""),
         ("class LabelledDocument < DocumentBase\n self.mode ||= \"fallback\"\nend\n", ""),
@@ -178,14 +108,33 @@ end
     ];
     for target in [BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel] {
         for (body, reopening) in cases {
-            let (_, app, errors) = contract::overlay()
+            let (tree, app, errors) = contract::overlay()
                 .write("app/models/document_base.rb", parent)
                 .write("app/models/labelled_document.rb", body)
                 .write("app/models/later.rb", reopening)
                 .emit_with_app(target);
-            assert!(errors.iter().any(|e| e.message.contains("class-body method binding")), "{target:?}: {body}: {errors:#?}");
-            let check = roundhouse::analyze::diagnose(&app);
-            assert!(check.iter().any(|d| d.message.contains("class-body method binding")), "{target:?}: {body}: {check:#?}");
+            assert!(!errors.iter().any(|e| e.message.contains("class-body method binding")), "{target:?}: {errors:#?}");
+            let emitted = std::fs::read_to_string(tree.join("app/models/labelled_document.rb")).unwrap();
+            assert!(!emitted.contains("label(\"sample\")"), "{emitted}");
+            assert!(!roundhouse::analyze::diagnose(&app).iter().any(|d| d.message.contains("class-body method binding")));
+        }
+    }
+}
+
+#[test]
+fn inherited_dispatch_to_core_or_instance_methods_stays_unreplayed() {
+    for parent in [
+        "class DocumentBase\n def self.label(value)\n @label = name + value\n end\nend\n",
+        "class DocumentBase\n def self.label(value)\n @label = new.decorate\n end\n def decorate = \"parent\"\nend\n",
+    ] {
+        for target in [BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel] {
+            let (tree, errors) = contract::overlay()
+                .write("app/models/document_base.rb", parent)
+                .write("app/models/labelled_document.rb", "class LabelledDocument < DocumentBase\n label \"sample\"\n def self.name = \"later\"\n def decorate = \"child\"\nend\n")
+                .emit(target);
+            assert!(!errors.iter().any(|e| e.contains("class-body method binding")), "{errors:#?}");
+            let text = std::fs::read_to_string(tree.join("app/models/labelled_document.rb")).unwrap();
+            assert!(!text.contains("label(\"sample\")"), "{text}");
         }
     }
 }

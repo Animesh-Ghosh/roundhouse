@@ -9,8 +9,8 @@
 //! The same shape on a plain class is already replayed
 //! (`emit::ruby::library::app_extension_calls`).
 //! Ordinary calls through an app-owned ancestor or extended module use the
-//! same ordered replay. Calls that depend on a late override or redefined
-//! ancestor carry a separate decision so an unverified binding is refused.
+//! same ordered replay only for value-only class state. Dispatching methods
+//! and unverified order retain the existing dropped-call warning.
 //!
 //! Only top-level statements are marked: a call inside a block or
 //! condition (`plugins.each { |p| load_settings(p) }`) is not one the
@@ -29,8 +29,7 @@ pub(super) fn mark(app: &mut App) {
     for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
         let owner = lc.name.0.as_str().to_string();
         for expr in &mut lc.unknown_calls {
-            let ExprNode::Send { recv, method, args, block: None, .. } = &*expr.node else { continue };
-            if recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) { continue; }
+            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { continue };
             let known = |a: &crate::expr::Expr| match &*a.node {
                 ExprNode::Const { path } => {
                     let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
@@ -52,7 +51,7 @@ pub(super) fn mark(app: &mut App) {
             .or_default()
             .extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Class).map(|m| m.name.as_str().to_string()));
     }
-    let (parents, inherited, _module_methods, redefined) = inherited_class_methods(app);
+    let (parents, inherited, redefined, dispatching) = inherited_class_methods(app);
     for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
         let owner = lc.name.0.as_str().to_string();
         let mut own: HashSet<String> = lc
@@ -62,9 +61,6 @@ pub(super) fn mark(app: &mut App) {
             .map(|m| m.name.as_str().to_string())
             .collect();
         let direct = own.clone();
-        let from_ancestry = parents.get(&owner).and_then(|p| inherited.get(p)).cloned().unwrap_or_default();
-        let declarations: Vec<_> = lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Class)
-            .map(|m| (m.name.as_str().to_string(), m.name_span)).collect();
         let mixed_body = !lc.includes.is_empty() || lc.unknown_calls.iter().any(mixin_statement);
         if let Some(methods) = parents.get(&owner).and_then(|p| inherited.get(p)) {
             own.extend(methods.iter().cloned());
@@ -81,28 +77,23 @@ pub(super) fn mark(app: &mut App) {
             // `self.mode = :live` runs the writer.
             if let ExprNode::OpAssign { target: crate::expr::LValue::Attr { recv, name }, .. } = &*expr.node {
                 if matches!(&*recv.node, ExprNode::SelfRef)
-                    && own.contains(name.as_str())
-                    && own.contains(&format!("{}=", name.as_str()))
+                    && direct.contains(name.as_str())
+                    && direct.contains(&format!("{}=", name.as_str()))
                     && !expr.span.is_synthetic()
                 {
                     expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
-                    // Conditional inherited initialization is outside the fixed-order subset.
-                    if !direct.contains(name.as_str()) && from_ancestry.contains(name.as_str()) {
-                        expr.decisions |= crate::expr::CLASS_BODY_BINDING_ORDER;
-                    }
+
                 }
                 continue;
             }
-            let ExprNode::Send { recv, method, block, .. } = &*expr.node else { continue };
+            let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else { continue };
             let on_self = recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
             // Not a Concern's `included do … end`: the hook's own name, which the concern splice owns.
             let hook = matches!(method.as_str(), "included" | "extended" | "prepended" | "inherited" | "class_methods");
             let own_call = on_self && own.contains(method.as_str());
             // A call on what one of its own readers answers (`self.logger.progname
             // = "Gem"` after `self.logger = ::Logger.new(nil)`) runs there too.
-            let through_own_reader = recv.as_ref().is_some_and(|r| reads_through_own(r, &own));
-            let inherited_reader = recv.as_ref().is_some_and(|r|
-                reads_through_own(r, &from_ancestry) && !reads_through_own(r, &direct));
+            let through_own_reader = recv.as_ref().is_some_and(|r| reads_through_own(r, &direct));
             // A call on another of the app's classes, to a class method
             // the app defines there (`Format.register_lazy(:json, …)` in
             // `module ActKit`, after its `require "act-kit/format"`):
@@ -118,18 +109,19 @@ pub(super) fn mark(app: &mut App) {
             });
             let replays = own_call || through_own_reader || on_app_class.is_some();
             if replays && !hook && block.is_none() && !expr.span.is_synthetic() {
-                expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
                 let named_new = on_app_class.as_ref().filter(|name|
                     singletons.get(*name).is_none_or(|m| !m.contains(method.as_str())));
-                let local_new = (own_call && !direct.contains(method.as_str())) || inherited_reader
+                let local_new = (own_call && !direct.contains(method.as_str()))
                     || named_new.is_some_and(|name| name == &owner);
-                if (local_new && (mixed_body || inherited_reader || keyword_splat(expr)
-                    || binding_changes(&owner, expr.span, &from_ancestry, &declarations, &redefined)
+                if (local_new && (mixed_body || args.iter().any(|a| !plain_value(a))
+                    || redefined.contains(&owner) || parents.get(&owner).and_then(|p| dispatching.get(p)).is_some_and(|m| m.contains(method.as_str()))
                     || unplaced.iter().any(|s| s.file == expr.span.file && s.start < expr.span.start)))
                     || named_new.is_some_and(|name| name != &owner || redefined.contains(name))
                 {
-                    expr.decisions |= crate::expr::CLASS_BODY_BINDING_ORDER;
+                    continue;
                 }
+                expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+                if local_new || named_new.is_some() { expr.decisions |= crate::expr::INHERITED_CLASS_BODY; }
                 if let (Some(name), ExprNode::Send { recv: Some(r), .. }) = (on_app_class, &mut *expr.node) {
                     if let ExprNode::Const { path } = &mut *r.node {
                         *path = name.split("::").map(crate::ident::Symbol::from).collect();
@@ -152,9 +144,6 @@ pub(super) fn mark(app: &mut App) {
         let mut own: HashSet<String> =
             model.methods().filter(|m| m.receiver == MethodReceiver::Class).map(|m| m.name.as_str().to_string()).collect();
         let direct = own.clone();
-        let from_ancestry = parents.get(&owner).and_then(|p| inherited.get(p)).cloned().unwrap_or_default();
-        let declarations: Vec<_> = model.methods().filter(|m| m.receiver == MethodReceiver::Class)
-            .map(|m| (m.name.as_str().to_string(), m.name_span)).collect();
         let mixed_body = model.body.iter().any(|item| matches!(item, ModelBodyItem::Unknown { expr, .. } if mixin_statement(expr)));
         if let Some(methods) = parents.get(&owner).and_then(|p| inherited.get(p)) {
             own.extend(methods.iter().cloned());
@@ -163,18 +152,17 @@ pub(super) fn mark(app: &mut App) {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
             // A call of its own class method (`custom_strategy :title, with: …`)
             // runs as the class loads, as a library class's does.
-            if let ExprNode::Send { recv, method, block: None, .. } = &*expr.node
+            if let ExprNode::Send { recv, method, args, block: None, .. } = &*expr.node
                 && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
                 && own.contains(method.as_str())
                 && !expr.span.is_synthetic()
             {
-                expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
-                if let ExprNode::Send { method, .. } = &*expr.node
-                    && !direct.contains(method.as_str())
-                    && (mixed_body || keyword_splat(expr)
-                        || binding_changes(&owner, expr.span, &from_ancestry, &declarations, &redefined))
+                if direct.contains(method.as_str())
+                    || (!mixed_body && !redefined.contains(&owner)
+                        && parents.get(&owner).and_then(|p| dispatching.get(p)).is_none_or(|m| !m.contains(method.as_str())) && args.iter().all(plain_value))
                 {
-                    expr.decisions |= crate::expr::CLASS_BODY_BINDING_ORDER;
+                    expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+                    if !direct.contains(method.as_str()) { expr.decisions |= crate::expr::INHERITED_CLASS_BODY; }
                 }
                 continue;
             }
@@ -223,8 +211,8 @@ fn inherited_class_methods(
 ) -> (
     std::collections::BTreeMap<String, String>,
     std::collections::BTreeMap<String, HashSet<String>>,
-    std::collections::BTreeMap<String, HashSet<String>>,
     HashSet<String>,
+    std::collections::BTreeMap<String, HashSet<String>>,
 ) {
     use std::collections::BTreeMap;
     let mut parents = BTreeMap::new();
@@ -232,17 +220,16 @@ fn inherited_class_methods(
     let mut methods: BTreeMap<String, HashSet<String>> = BTreeMap::new();
     let app_method = |m: &&crate::dialect::MethodDef| app.source_path(m.name_span.file).is_some_and(|path|
         !path.contains(".roundhouse/source_gems/") && !path.contains("/vendor/gems/"));
-    let mut seen = HashSet::default();
     let mut openings = HashSet::default();
     let mut redefined = HashSet::default();
+    let mut dispatching: BTreeMap<String, HashSet<String>> = BTreeMap::new();
     for lc in app.library_classes.iter().filter(|lc| lc.origin.is_none()) {
         let name = lc.name.0.as_str().to_string();
         if !openings.insert(name.clone()) { redefined.insert(name.clone()); }
-        for method in lc.methods.iter().filter(app_method).filter(|m| lc.is_module || m.receiver == MethodReceiver::Class) {
-            if !seen.insert((name.clone(), method.receiver == MethodReceiver::Class, method.name.clone())) {
-                redefined.insert(name.clone());
-            }
-        }
+        dispatching.entry(name.clone()).or_default().extend(lc.methods.iter().filter(app_method)
+            .filter(|m| lc.is_module || m.receiver == MethodReceiver::Class)
+            .filter(|m| !plain_value(&m.body) || m.params.iter().any(|p| p.default.as_ref().is_some_and(|e| !plain_value(e))))
+            .map(|m| m.name.as_str().to_string()));
         if lc.is_module {
             modules.entry(name.clone()).or_default().extend(
                 lc.methods.iter().filter(app_method).filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.as_str().to_string()),
@@ -257,9 +244,10 @@ fn inherited_class_methods(
     for model in &app.models {
         let name = model.name.0.as_str().to_string();
         if !openings.insert(name.clone()) { redefined.insert(name.clone()); }
-        for method in model.methods().filter(app_method).filter(|m| m.receiver == MethodReceiver::Class) {
-            if !seen.insert((name.clone(), true, method.name.clone())) { redefined.insert(name.clone()); }
-        }
+        dispatching.entry(name.clone()).or_default().extend(model.methods().filter(app_method)
+            .filter(|m| m.receiver == MethodReceiver::Class)
+            .filter(|m| !plain_value(&m.body) || m.params.iter().any(|p| p.default.as_ref().is_some_and(|e| !plain_value(e))))
+            .map(|m| m.name.as_str().to_string()));
         methods.entry(name.clone()).or_default().extend(
             model.methods().filter(app_method).filter(|m| m.receiver == MethodReceiver::Class).map(|m| m.name.as_str().to_string()),
         );
@@ -269,7 +257,7 @@ fn inherited_class_methods(
     }
     // Parent paths have already gone through the ingest's constant resolver.
     loop {
-        let before: usize = modules.values().map(HashSet::len).sum::<usize>() + methods.values().map(HashSet::len).sum::<usize>() + redefined.len();
+        let before: usize = modules.values().map(HashSet::len).sum::<usize>() + methods.values().map(HashSet::len).sum::<usize>() + redefined.len() + dispatching.values().map(HashSet::len).sum::<usize>();
         for lc in app.library_classes.iter().filter(|lc| lc.origin.is_none()) {
             let owner = lc.name.0.as_str();
             if lc.is_module {
@@ -277,12 +265,12 @@ fn inherited_class_methods(
                     if let Some(found) = modules.get(include.0.as_str().trim_start_matches("::")).cloned() {
                         modules.entry(owner.to_string()).or_default().extend(found);
                         if redefined.contains(include.0.as_str().trim_start_matches("::")) { redefined.insert(owner.to_string()); }
+                        if let Some(found) = dispatching.get(include.0.as_str().trim_start_matches("::")).cloned() { dispatching.entry(owner.to_string()).or_default().extend(found); }
                     }
                 }
             }
             for expr in &lc.unknown_calls {
-                let ExprNode::Send { recv, method, args, block: None, .. } = &*expr.node else { continue };
-                if recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) { continue; }
+                let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { continue };
                 if method.as_str() != "extend" { continue; }
                 for arg in args {
                     if let ExprNode::Const { path } = &*arg.node
@@ -290,30 +278,22 @@ fn inherited_class_methods(
                     {
                         methods.entry(owner.to_string()).or_default().extend(modules[&module].iter().cloned());
                         if redefined.contains(&module) { redefined.insert(owner.to_string()); }
+                        if let Some(found) = dispatching.get(&module).cloned() { dispatching.entry(owner.to_string()).or_default().extend(found); }
                     }
                 }
             }
         }
         for (child, parent) in &parents {
             if redefined.contains(parent) { redefined.insert(child.clone()); }
+            if let Some(found) = dispatching.get(parent).cloned() { dispatching.entry(child.clone()).or_default().extend(found); }
             if let Some(found) = methods.get(parent).cloned() {
                 methods.entry(child.clone()).or_default().extend(found);
             }
         }
-        let after = modules.values().map(HashSet::len).sum::<usize>() + methods.values().map(HashSet::len).sum::<usize>() + redefined.len();
+        let after = modules.values().map(HashSet::len).sum::<usize>() + methods.values().map(HashSet::len).sum::<usize>() + redefined.len() + dispatching.values().map(HashSet::len).sum::<usize>();
         if before == after { break; }
     }
-    (parents, methods, modules, redefined)
-}
-
-fn binding_changes(
-    owner: &str,
-    _call: crate::span::Span,
-    inherited: &HashSet<String>,
-    declarations: &[(String, crate::span::Span)],
-    redefined: &HashSet<String>,
-) -> bool {
-    redefined.contains(owner) || declarations.iter().any(|(name, _)| inherited.contains(name))
+    (parents, methods, redefined, dispatching)
 }
 
 fn mixin_statement(expr: &crate::expr::Expr) -> bool {
@@ -322,11 +302,17 @@ fn mixin_statement(expr: &crate::expr::Expr) -> bool {
             && matches!(method.as_str(), "extend" | "include" | "prepend"))
 }
 
-fn keyword_splat(expr: &crate::expr::Expr) -> bool {
-    let mut found = matches!(&*expr.node, ExprNode::KeywordSplat { .. })
-        || expr.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0;
-    expr.node.for_each_child(&mut |child| found |= keyword_splat(child));
-    found
+/// No further dispatch: neither Ruby core methods nor later class/instance
+/// overrides can change the meaning of this value-only body or argument.
+fn plain_value(expr: &crate::expr::Expr) -> bool {
+    let allowed = matches!(&*expr.node,
+        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. }
+        | ExprNode::Seq { .. } | ExprNode::If { .. } | ExprNode::BoolOp { .. }
+        | ExprNode::Array { .. } | ExprNode::Hash { .. } | ExprNode::Return { .. }
+        | ExprNode::Assign { target: crate::expr::LValue::Ivar { .. } | crate::expr::LValue::Var { .. }, .. });
+    let mut children = true;
+    expr.node.for_each_child(&mut |child| children &= plain_value(child));
+    allowed && children
 }
 
 /// The constant a path written in `owner`'s body names, as Ruby's
