@@ -32,6 +32,10 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/response_content_type.rs"]
+mod response_content_type_contract;
+#[path = "spinel_toolchain/response_content_type.rs"]
+mod response_content_type;
 #[path = "spinel_toolchain/rack_mounts.rs"]
 mod rack_mounts;
 #[path = "support/time_change_usec.rs"]
@@ -758,3 +762,16 @@ puts "named captures passed"
 mod db_binary_literal;
 #[path = "spinel_toolchain/solid_queue_clear.rs"]
 mod solid_queue_clear;
+
+#[path = "support/full_forwarding.rs"]
+mod full_forwarding;
+
+#[test]
+#[ignore = "requires Spinel; run in its CI lane"]
+fn full_forwarding_keeps_the_native_argument_contract() {
+    let run = emit_and_run::real_blog()
+        .write("app/services/packet_relay.rb", full_forwarding::SOURCE)
+        .run_spinel_slim(&[], full_forwarding::ASSERTIONS);
+    run.assert_passes();
+    assert_eq!(run.stdout, "full forwarding contract passed\n");
+}
