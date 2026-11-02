@@ -215,3 +215,24 @@ fn a_renamed_ivar_takes_no_csharp_name_another_ivar_emits() {
     assert!(probes.contains("this.AppStatus = \"a\""), "{probes}");
     assert!(!probes.contains("this.Status = "), "{probes}");
 }
+
+/// A `begin` body with an `else` discards each statement's value: a block
+/// send that emits a `foreach` statement stays a statement, and a negation
+/// is a value (review, csharp/expr.rs:2126).
+#[test]
+fn a_begin_body_with_an_else_keeps_statements_and_discards_values() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n")
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write(
+            "app/models/widget.rb",
+            "class Widget < ApplicationRecord\n  def each_else\n    total = 0\n    begin\n      [1, 2].each { |x| total += x }\n      !(total > 0)\n    rescue\n      2\n    else\n      total\n    end\n  end\nend\n",
+        )
+        .emit(BuildTarget::CSharp);
+    assert!(errors.is_empty(), "{errors:?}");
+    let widget = std::fs::read_to_string(emitted.join("app/models/Widget.cs")).unwrap();
+    let body = widget.split("EachElse(").nth(1).expect("EachElse").split("\n    }\n").next().unwrap();
+    assert!(body.contains("foreach (") && !body.contains("_ = foreach"), "{body}");
+    assert!(!body.lines().any(|l| l.trim_start().starts_with("!(")), "{body}");
+}

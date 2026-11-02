@@ -2116,11 +2116,16 @@ fn emit_discarded(e: &Expr) -> String {
     // A send is classified by the C# it emits, not its Ruby name: `n + 1`
     // and `items.empty?` (`(items.Count == 0)`) are values, while
     // `items << 1` (`items.Add(1L)`, void) is a call. A call ends in its
-    // argument list and doesn't open with a parenthesis.
+    // argument list and opens with neither a parenthesis nor a negation
+    // (`!(x)` is a value). A block send's loop (`items.each { … }` is a
+    // `foreach (…) { … }`) is a statement; an initializer (`new …{ … }`)
+    // is a value.
     if let ExprNode::Send { .. } = &*e.node {
         let emitted = emit_expr(e);
         let text = emitted.trim();
-        if text.starts_with('(') || !text.ends_with(')') {
+        let call = text.ends_with(')') && !text.starts_with('(') && !text.starts_with('!');
+        let block_statement = text.ends_with('}') && !text.starts_with("new ");
+        if !call && !block_statement {
             return format!("_ = {text};");
         }
     }
