@@ -1337,6 +1337,23 @@ fn keywords_expr(keywords: &[&JobParam]) -> String {
 /// job also gets `push_<job>(queue, at, args)`, which the job's
 /// `perform_later` calls instead of queueing in process: the payload,
 /// with `scheduled_at` when `at` is set, handed to `SidekiqPush`.
+/// A keyword no analyzed call site passes has no codec, so the writers
+/// can't write it. A value other than its default (from a call the
+/// analysis didn't see) raises rather than being dropped.
+fn never_passed_guards(plan: &JobPlan, indent: &str) -> String {
+    let mut s = String::new();
+    for p in plan.params.iter().filter(|p| p.keyword && p.never_passed) {
+        let Some(default) = &p.default else { continue };
+        let message = format!("{}: keyword `{}` is passed by no analyzed call site, so it can't be written", plan.job, p.name);
+        s.push_str(&format!(
+            "{indent}raise ArgumentError, {} unless {} == {default}\n",
+            ruby_str(&message),
+            p.name
+        ));
+    }
+    s
+}
+
 pub fn registry_source(plans: &[JobPlan], sidekiq: bool) -> String {
     registry_source_with_broadcasts(plans, sidekiq, &[])
 }
@@ -1363,6 +1380,7 @@ pub fn registry_source_with_broadcasts(
     for plan in &payload {
         let list = arguments_list(plan);
         s.push_str(&format!("  def self.payload_{}{}\n", plan.suffix(), writer_params(plan)));
+        s.push_str(&never_passed_guards(plan, "    "));
         s.push_str(&format!(
             "    ActiveJob::Payload.build({}, {}, ActiveJob::Arguments.list({list}))\n",
             ruby_str(&plan.job),
@@ -1381,6 +1399,7 @@ pub fn registry_source_with_broadcasts(
             };
             let push = if plan.enqueue_after_commit { "enqueue_after_commit" } else { "enqueue" };
             s.push_str(&format!("  def self.push_{}{params}\n", plan.suffix()));
+            s.push_str(&never_passed_guards(plan, "    "));
             // "" is a `set(...)` with no `queue:`: the job's `queue_as`.
             s.push_str(&format!("    {q} = {queue} == \"\" ? {} : {queue}\n", ruby_str(&plan.queue)));
             s.push_str(&format!(

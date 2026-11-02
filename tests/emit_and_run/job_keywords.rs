@@ -6,7 +6,8 @@
 //! 8.1.3). An optional keyword the caller leaves at its default is not
 //! written, as Rails doesn't write a keyword the caller omits, and reads
 //! back as that default; one no caller passes (`tag:`, whose default
-//! `'#{tag}'` must stay text) is never written.
+//! `'#{tag}'` must stay text) is never written, and the writer raises
+//! if handed any other value.
 
 use super::emit_and_run;
 
@@ -66,8 +67,15 @@ raise "arguments #{args.inspect}" unless args == expected
 # An omitted optional keyword is not written.
 args = JSON.parse(JobRegistry.payload_gadget_job(article, 3, "touched"))["arguments"]
 raise "default arguments #{args.inspect}" unless args[1] == { "count" => 3, "_aj_ruby2_keywords" => ["count"] }
-args = JSON.parse(JobRegistry.payload_gadgets__sync_job(article.id, nil, "ignored"))["arguments"]
+args = JSON.parse(JobRegistry.payload_gadgets__sync_job(article.id, nil, '#{tag}'))["arguments"]
 raise "sync arguments #{args.inspect}" unless args == [{ "article_id" => article.id, "_aj_ruby2_keywords" => ["article_id"] }]
+# A keyword no call site passes can't be written: another value raises.
+begin
+  JobRegistry.payload_gadgets__sync_job(article.id, nil, "other")
+  raise "an unpassed keyword was dropped"
+rescue ArgumentError => e
+  raise "unpassed keyword #{e.message}" unless e.message.include?("keyword `tag`")
+end
 
 article.enqueue_gadget
 article.enqueue_gadget_default
