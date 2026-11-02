@@ -32,6 +32,8 @@ mod inertia_runtime_props;
 mod form_builder_fields;
 #[path = "emit_and_run/time_zone_tzinfo.rs"]
 mod time_zone_tzinfo;
+#[path = "emit_and_run/stylesheet_source.rs"]
+mod stylesheet_source;
 #[path = "emit_and_run/time_tag.rs"]
 mod time_tag;
 #[path = "emit_and_run/multiparameter_params.rs"]
@@ -20606,6 +20608,9 @@ mod record_slice;
 
 #[path = "emit_and_run/csrf_meta_tag_alias.rs"]
 mod csrf_meta_tag_alias;
+
+#[path = "emit_and_run/namespaced_class_consts.rs"]
+mod namespaced_class_consts;
 
 #[path = "emit_and_run/boolop_precedence.rs"]
 mod boolop_precedence;
