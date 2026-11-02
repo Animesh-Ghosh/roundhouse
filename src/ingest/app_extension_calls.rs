@@ -68,8 +68,8 @@ pub(super) fn mark(app: &mut App) {
         // Some existing DSL calls replay after the ordered body. A new
         // inherited call must not cross one and silently reverse its effects.
         let unplaced: Vec<_> = lc.unknown_calls.iter().filter(|e| e.decisions & crate::expr::REPLAYED_CLASS_BODY == 0)
-            .filter(|e| matches!(&*e.node, ExprNode::Send { recv, method, .. }
-                if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) && !own.contains(method.as_str())))
+            .filter(|e| !matches!(&*e.node, ExprNode::Send { recv, method, .. }
+                if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) && own.contains(method.as_str())))
             .map(|e| e.span).collect();
         for expr in &mut lc.unknown_calls {
             // `self.mode ||= :live` through the class's own accessor runs
@@ -102,26 +102,19 @@ pub(super) fn mark(app: &mut App) {
             // to: the emitted body loads that constant's file, and the
             // app's top-level `Format` is not the gem's `Kitgem::Format`.
             let on_app_class = recv.as_ref().and_then(|r| match &*r.node {
-                ExprNode::Const { path } => resolve_from(&owner, path, &|name| inherited.contains_key(name) || singletons.contains_key(name))
-                    .filter(|name| inherited.get(name).is_some_and(|m| m.contains(method.as_str()))
-                        || singletons.get(name).is_some_and(|m| m.contains(method.as_str()))),
+                ExprNode::Const { path } => resolve_from(&owner, path, &|name| singletons.contains_key(name))
+                    .filter(|name| singletons[name].contains(method.as_str())),
                 _ => None,
             });
             let replays = own_call || through_own_reader || on_app_class.is_some();
             if replays && !hook && block.is_none() && !expr.span.is_synthetic() {
-                let named_new = on_app_class.as_ref().filter(|name|
-                    singletons.get(*name).is_none_or(|m| !m.contains(method.as_str())));
-                let local_new = (own_call && !direct.contains(method.as_str()))
-                    || named_new.is_some_and(|name| name == &owner);
-                if (local_new && (mixed_body || args.iter().any(|a| !plain_value(a))
+                let local_new = own_call && !direct.contains(method.as_str());
+                if local_new && (mixed_body || args.iter().any(|a| !literal_argument(a))
                     || redefined.contains(&owner) || parents.get(&owner).and_then(|p| dispatching.get(p)).is_some_and(|m| m.contains(method.as_str()))
-                    || unplaced.iter().any(|s| s.file == expr.span.file && s.start < expr.span.start)))
-                    || named_new.is_some_and(|name| name != &owner || redefined.contains(name))
-                {
-                    continue;
-                }
+                    || unplaced.iter().any(|s| s.file == expr.span.file && s.start < expr.span.start))
+                { continue; }
                 expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
-                if local_new || named_new.is_some() { expr.decisions |= crate::expr::INHERITED_CLASS_BODY; }
+                if local_new { expr.decisions |= crate::expr::INHERITED_CLASS_BODY; }
                 if let (Some(name), ExprNode::Send { recv: Some(r), .. }) = (on_app_class, &mut *expr.node) {
                     if let ExprNode::Const { path } = &mut *r.node {
                         *path = name.split("::").map(crate::ident::Symbol::from).collect();
@@ -148,6 +141,11 @@ pub(super) fn mark(app: &mut App) {
         if let Some(methods) = parents.get(&owner).and_then(|p| inherited.get(p)) {
             own.extend(methods.iter().cloned());
         }
+        let unplaced: Vec<_> = model.body.iter().filter_map(|item| match item {
+            ModelBodyItem::Unknown { expr, .. } if expr.decisions & crate::expr::REPLAYED_CLASS_BODY == 0
+                && !matches!(&*expr.node, ExprNode::Send { recv, method, .. } if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) && own.contains(method.as_str())) => Some(expr.span),
+            _ => None,
+        }).collect();
         for item in &mut model.body {
             let ModelBodyItem::Unknown { expr, .. } = item else { continue };
             // A call of its own class method (`custom_strategy :title, with: …`)
@@ -159,7 +157,8 @@ pub(super) fn mark(app: &mut App) {
             {
                 if direct.contains(method.as_str())
                     || (!mixed_body && !redefined.contains(&owner)
-                        && parents.get(&owner).and_then(|p| dispatching.get(p)).is_none_or(|m| !m.contains(method.as_str())) && args.iter().all(plain_value))
+                        && parents.get(&owner).and_then(|p| dispatching.get(p)).is_none_or(|m| !m.contains(method.as_str())) && args.iter().all(literal_argument)
+                        && !unplaced.iter().any(|s| s.file == expr.span.file && s.start < expr.span.start))
                 {
                     expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
                     if !direct.contains(method.as_str()) { expr.decisions |= crate::expr::INHERITED_CLASS_BODY; }
@@ -308,11 +307,17 @@ fn plain_value(expr: &crate::expr::Expr) -> bool {
     let allowed = matches!(&*expr.node,
         ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. }
         | ExprNode::Seq { .. } | ExprNode::If { .. } | ExprNode::BoolOp { .. }
-        | ExprNode::Array { .. } | ExprNode::Hash { .. } | ExprNode::Return { .. }
+        | ExprNode::Array { .. } | ExprNode::Return { .. }
         | ExprNode::Assign { target: crate::expr::LValue::Ivar { .. } | crate::expr::LValue::Var { .. }, .. });
     let mut children = true;
     expr.node.for_each_child(&mut |child| children &= plain_value(child));
     allowed && children
+}
+
+fn literal_argument(expr: &crate::expr::Expr) -> bool {
+    let mut allowed = matches!(&*expr.node, ExprNode::Lit { .. } | ExprNode::Array { .. });
+    expr.node.for_each_child(&mut |child| allowed &= literal_argument(child));
+    allowed
 }
 
 /// The constant a path written in `owner`'s body names, as Ruby's
