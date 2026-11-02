@@ -10,7 +10,8 @@
 //!   the resource's own path and name, a string path is not;
 //! - `root action:` in a namespace, `path:` on a symbol verb, `as: nil`;
 //! - `scope format: true` makes the helper's format a required last param;
-//! - `load(path_local.join("x.rb"))` follows a path held in a local.
+//! - `load(path_local.join("x.rb"))` follows a path held in a local, and
+//!   a loaded file's own locals do not reach its caller.
 
 use roundhouse::App;
 use roundhouse::ingest::ingest_routes;
@@ -121,4 +122,34 @@ fn load_follows_a_path_held_in_a_local() {
     app.routes = table;
     let routes: Vec<_> = flatten_routes_for_helpers(&app).into_iter().map(|r| r.path).collect();
     assert!(routes.contains(&"/ext/ping".to_string()), "{routes:?}");
+}
+
+/// A loaded file's locals are its own: its `routes_path =` does not change
+/// the caller's `routes_path` for the next `load`.
+#[test]
+fn a_loaded_files_local_does_not_change_the_callers() {
+    let file = |body: &str| format!("Rails.application.routes.draw do\n{body}\nend\n").into_bytes();
+    let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+        b"Rails.application.routes.draw do\n  routes_path = Engine.root.join(\"config\", \"routes\", \"services\")\n  load(routes_path.join(\"first.rb\").to_s)\n  load(routes_path.join(\"second.rb\").to_s)\nend\n",
+        "config/routes.rb",
+        &roundhouse::det::HashMap::from_iter([
+            (
+                "services/first".to_string(),
+                (
+                    file("  routes_path = Engine.root.join(\"config\", \"routes\", \"other\")\n  get \"/first\", to: \"ext#first\""),
+                    "config/routes/services/first.rb".to_string(),
+                ),
+            ),
+            (
+                "services/second".to_string(),
+                (file("  get \"/second\", to: \"ext#second\""), "config/routes/services/second.rb".to_string()),
+            ),
+        ]),
+    )
+    .expect("ingest routes");
+    let mut app = App::default();
+    app.routes = table;
+    let routes: Vec<_> = flatten_routes_for_helpers(&app).into_iter().map(|r| r.path).collect();
+    assert!(routes.contains(&"/first".to_string()), "{routes:?}");
+    assert!(routes.contains(&"/second".to_string()), "{routes:?}");
 }

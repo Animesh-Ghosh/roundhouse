@@ -2897,6 +2897,10 @@ fn ingest_route_file_include(
         });
     };
     cx.active.borrow_mut().push(key);
+    // The included file runs with its own locals (`load`'s top level,
+    // `draw`'s `instance_eval`): a `routes_path =` there must not change
+    // the caller's later `load(routes_path.join(…))`.
+    let caller_locals = ROUTE_PATH_LOCALS.with(|l| std::mem::take(&mut *l.borrow_mut()));
     let included = (|| -> IngestResult<Option<RouteSpec>> {
         let drawn = top_level_app_draws(&root);
         if method != "draw" && !drawn.is_empty() {
@@ -2928,6 +2932,7 @@ fn ingest_route_file_include(
         }))
     })();
     cx.active.borrow_mut().pop();
+    ROUTE_PATH_LOCALS.with(|l| *l.borrow_mut() = caller_locals);
     included
 }
 
@@ -4225,15 +4230,18 @@ fn ingest_resources_route(
         None if singular => crate::naming::pluralize_snake(name_str.as_str()),
         None => name_str.clone(),
     };
-    let mut nested = cx.with_scope_controller(None, || {
-        block_entries(call, file, Some(block_controller.as_str()), cx)
+    // `concerns:` expands into the same block, so its verbs do not inherit
+    // the enclosing `scope controller:` either.
+    let mut nested = cx.with_scope_controller(None, || -> IngestResult<Vec<RouteSpec>> {
+        let mut nested = block_entries(call, file, Some(block_controller.as_str()), cx)?;
+        if !concern_names.is_empty() {
+            let none = eval::RVal::Hash(Vec::new());
+            nested.extend(cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
+                run_concerns(&concern_names, &none, file, Some(block_controller.as_str()), cx)
+            })?);
+        }
+        Ok(nested)
     })?;
-    if !concern_names.is_empty() {
-        let none = eval::RVal::Hash(Vec::new());
-        nested.extend(cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || {
-            run_concerns(&concern_names, &none, file, Some(block_controller.as_str()), cx)
-        })?);
-    }
     // Push the inline `constraints:` kwarg down into every `member do`/
     // `collection do` route and nested resource this call's block
     // flattens to — the same merge an enclosing `constraints(...) do

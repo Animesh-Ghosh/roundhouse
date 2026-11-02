@@ -2,8 +2,9 @@
 //! routes, or their URL helpers, before:
 //!
 //! - `scope controller: :x do … end` and `controller :x do … end` give the
-//!   verbs inside a default controller; a bare verb in a namespace maps to
-//!   the namespace's module;
+//!   verbs inside a default controller, which a resource's block and its
+//!   concerns do not inherit; a bare verb in a namespace maps to the
+//!   namespace's module;
 //! - a scope inside `member` / `collection` keeps its level, so its path
 //!   follows the resource segment;
 //! - a lambda or redirect-block endpoint cannot be dispatched, but Rails
@@ -57,6 +58,20 @@ fn scope_controller_and_controller_block_supply_the_default_controller() {
     );
     assert!(
         routes.contains(&("/signup/check".into(), "DomainsController".into(), "check".into())),
+        "{routes:?}"
+    );
+}
+
+/// A resource's block does not inherit an enclosing `scope controller:`,
+/// and neither do the concerns it expands (Rails: `posts#preview`).
+#[test]
+fn a_resources_concerns_do_not_inherit_the_scope_controller() {
+    let app = app_with(
+        "  concern :previewable do\n    member do\n      get :preview\n    end\n  end\n  scope controller: :landing do\n    resources :posts, only: [], concerns: :previewable\n  end\n",
+    );
+    let routes = dispatched(&app);
+    assert!(
+        routes.contains(&("/posts/:id/preview".into(), "PostsController".into(), "preview".into())),
         "{routes:?}"
     );
 }
