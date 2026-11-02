@@ -1095,6 +1095,21 @@ fn report_typescript_error_class(app: &App, target: BuildTarget) {
     }
 }
 
+/// The TypeScript emit writes `include Enumerable` as `extends Enumerable`, a class its runtime has no port of.
+fn report_typescript_enumerable(app: &App, target: BuildTarget) {
+    if !matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker) {
+        return;
+    }
+    for lc in app.library_classes.iter().filter(|lc| lc.origin.is_none() && lc.includes.iter().any(|m| m.0.as_str() == "Enumerable")) {
+        emit::diagnostics::report_unsupported(
+            lc.methods.first().map(|m| m.name_span).unwrap_or(lc.parent_span),
+            target.as_str(),
+            "Enumerable mixin",
+            format!("`{}` includes Enumerable, which the {} runtime does not port", lc.name.0.as_str(), target.as_str()),
+        );
+    }
+}
+
 /// A model's class-body `extend AppModule` and the calls after it to the
 /// module's methods (`ingest::app_extension_calls`) are replayed by the
 /// Ruby family's emit; no other target carries a class body's own code.
@@ -3008,6 +3023,7 @@ fn target_files_inner(
     report_unemitted_library_classes(app, target);
     report_relation_class_calls(app, target);
     report_typescript_error_class(app, target);
+    report_typescript_enumerable(app, target);
     report_replayed_class_bodies(app, target);
     report_body_statements(app, target);
     report_controller_sibling_classes(app, target);
@@ -4947,6 +4963,7 @@ fn ruby_family_runtime_files(
     }
     apply_conditional_declarations(&mut files, app);
     apply_file_programs(&mut files, app);
+    drop_solid_queue_standin(app, &mut files);
     Ok(files)
 }
 
@@ -8194,6 +8211,10 @@ fn report_unavailable_class_value(
 /// a clean emit. Also ledgers superclass Consts (via `parent_span`) and
 /// lowers-added exception Consts surveyed from a throwaway controller
 /// lower (emit still lowers controllers after this gate today).
+fn unrolled_define(app: &App, name: crate::span::Span) -> bool {
+    app.models.iter().flat_map(|m| m.methods()).chain(app.library_classes.iter().flat_map(|lc| lc.methods.iter())).any(|m| m.name_span == name)
+}
+
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     // Column readers are synthesized inside the emitter, after this walk,
     // so a Send match never sees them. The schema column is the fact.
@@ -8448,6 +8469,8 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             && matches!(method.as_str(), "define_method" | "define_singleton_method")
             && recv.as_ref().is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef))
             && !args.first().is_some_and(|a| matches!(&*a.node, crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { .. } | crate::expr::Literal::Str { .. } }))
+            // Not a loop ingest unrolled: its methods carry the name argument's span, and the call is only the concern's unspliced original.
+            && !args.first().is_some_and(|a| unrolled_define(app, a.span))
         {
             emit::diagnostics::report_unsupported(
                 expr.span,
@@ -8899,6 +8922,24 @@ fn apply_gem_packages(files: &mut Vec<(String, String)>, app: &App) -> Result<()
     let at = boot.find(ANCHOR).ok_or("apply_gem_packages: boot.rb lost its runtime/request_hooks require")? + ANCHOR.len();
     boot.insert_str(at, &boot_lines);
     Ok(())
+}
+
+/// solid_queue's own models replace the queue stand-in: an app that
+/// carries them (`ingest::source_gems::framework_models`) ships
+/// `runtime/solid_queue_runner.rb` in place of `runtime/solid_queue_standin.rb`.
+fn drop_solid_queue_standin(app: &App, files: &mut Vec<(String, String)>) {
+    // Not both: the stand-in's classes would reopen the models, and the runner names the models the stand-in has no part of.
+    let (gone, line) = if app.models.iter().any(|m| m.name.0.as_str() == "SolidQueue::Job") {
+        ("runtime/solid_queue_standin.rb", "require_relative \"runtime/solid_queue_standin\"\n")
+    } else {
+        ("runtime/solid_queue_runner.rb", "require_relative \"runtime/solid_queue_runner\"\n")
+    };
+    files.retain(|(path, _)| path != gone);
+    for (path, text) in files.iter_mut() {
+        if path == "boot.rb" {
+            *text = text.replace(line, "");
+        }
+    }
 }
 
 fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(String, String)>, Vec<String>), String> {
@@ -9618,6 +9659,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_pagination_demand(&mut files)?;
     apply_pagy_demand(&mut files, app)?;
     apply_pay_demand(&mut files, app)?;
+    drop_solid_queue_standin(app, &mut files);
     Ok((files, test_stems))
 }
 

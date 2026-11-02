@@ -543,7 +543,14 @@ fn untyped_subexpressions_baseline() {
     // parses a temporal column's stored text into the Time its reader
     // answers, reading the untyped `[]` value a second time (+1 in
     // active_record/connection.rb), as `_as_json_only` does.
-    const CEILING: usize = 1210;
+    // MEASURED 1228 on 2026-11-03 (on 1210): solid_queue's record models
+    // read the schema through `connection.schema_cache.columns_hash`,
+    // whose `SchemaCache` and `Column` (its name, declared type and the
+    // limit parsed from it) are new in active_record/connection.rb, as
+    // are `Base.table_exists?`/`column_names`; their parameters and the
+    // type text they read are vars on this RBS-less probe (+18), and
+    // connection.rbs types them for the RBS-paired gate.
+    const CEILING: usize = 1228;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

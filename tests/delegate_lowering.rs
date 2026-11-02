@@ -495,11 +495,48 @@ fn an_unreproducible_option_is_left_alone() {
         r#"class Filter
   attr_reader :content
 
-  delegate :fragment, to: :content, private: true
+  delegate :fragment, to: :content, private: Rails.env.test?
 end
 "#,
     );
     assert!(!out.contains("def fragment"), "got:\n{out}");
+}
+
+/// `private: true` makes the forwarders private, as Rails' `private(*method_names)` after defining them does.
+#[test]
+fn private_true_makes_the_forwarder_private() {
+    let out = emit(
+        r#"class Filter
+  attr_reader :content
+
+  delegate :fragment, to: :content, private: true
+end
+"#,
+    );
+    assert!(out.contains("def fragment\n    content.fragment\n  end\n  private :fragment"), "got:\n{out}");
+}
+
+/// A delegated name called only with a block hands the block on, as Rails' `(...)` forwarder does;
+/// Enumerable calls `each` so, with no call site in the class to show it.
+#[test]
+fn a_block_only_call_and_enumerables_each_forward_the_block() {
+    let out = emit(
+        r#"class Filter
+  include Enumerable
+
+  attr_reader :content, :items
+
+  delegate :each, to: :items
+  delegate :each_fragment, to: :content
+
+  def fragments
+    each_fragment { |f| f }
+  end
+end
+"#,
+    );
+    assert!(out.contains("def each(&block)\n    items.each(&block)\n  end"), "got:\n{out}");
+    assert!(out.contains("def each_fragment(&block)\n    content.each_fragment(&block)\n  end"), "got:\n{out}");
 }
 
 #[test]

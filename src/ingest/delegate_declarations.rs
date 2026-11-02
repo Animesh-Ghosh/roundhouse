@@ -19,12 +19,14 @@ pub(super) struct Delegation {
     /// `allow_nil: true`: the forwarder answers nil for a nil target
     /// (`delegate::synthesized_source`).
     pub(super) allow_nil: bool,
+    /// Called only with a block and no arguments: the forwarder hands the block on, as Rails' `...` does.
+    pub(super) block: bool,
 }
 
 #[derive(Default)]
 pub(super) struct CallShapes {
-    positional_arities: HashSet<usize>,
-    has_block: bool,
+    pub(super) positional_arities: HashSet<usize>,
+    pub(super) has_block: bool,
 }
 
 pub(super) type CallsWithArguments = HashMap<String, CallShapes>;
@@ -34,6 +36,7 @@ struct ParsedDeclaration {
     target: Symbol,
     prefix: DelegatePrefix,
     allow_nil: bool,
+    private: Option<bool>,
     has_unsupported_option: bool,
 }
 
@@ -158,8 +161,12 @@ impl<'a> DelegateEligibility<'a> {
             {
                 return None;
             }
+            let mut block = false;
             if !method.as_str().ends_with('=') {
                 if let Some(calls) = self.called_with_args.get(&name) {
+                    let block_only = calls.has_block
+                        && calls.positional_arities.iter().all(|arity| *arity == 0)
+                        && super::operator_forwarder("", method.as_str()).is_none();
                     let forwardable_operator = super::operator_forwarder("", method.as_str())
                         .map(|(params, _)| params.split(", ").count())
                         .is_some_and(|arity| {
@@ -169,7 +176,9 @@ impl<'a> DelegateEligibility<'a> {
                                     .iter()
                                     .all(|call_arity| *call_arity == arity)
                         });
-                    if !forwardable_operator {
+                    if block_only {
+                        block = true;
+                    } else if !forwardable_operator {
                         return None;
                     }
                 }
@@ -180,8 +189,13 @@ impl<'a> DelegateEligibility<'a> {
                 name,
                 file: file.clone(),
                 declaration_span: call.span,
-                visibility,
+                visibility: match declaration.private {
+                    Some(true) => MethodVisibility::Private,
+                    Some(false) => MethodVisibility::Public,
+                    None => visibility,
+                },
                 allow_nil: declaration.allow_nil,
+                block,
             });
         }
         if self.supported_target_methods.is_some_and(|supported| {
@@ -273,6 +287,7 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
     let mut target = None;
     let mut prefix = DelegatePrefix::None;
     let mut allow_nil = false;
+    let mut private = None;
     let mut has_unsupported_option = false;
     for arg in args {
         match &*arg.node {
@@ -327,6 +342,12 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
                             } => allow_nil = true,
                             _ => has_unsupported_option = true,
                         },
+                        "private" => match &*value.node {
+                            ExprNode::Lit {
+                                value: Literal::Bool { value },
+                            } => private = Some(*value),
+                            _ => has_unsupported_option = true,
+                        },
                         _ => has_unsupported_option = true,
                     }
                 }
@@ -343,6 +364,7 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
         target,
         prefix,
         allow_nil,
+        private,
         has_unsupported_option,
     })
 }

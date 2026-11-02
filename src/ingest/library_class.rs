@@ -197,6 +197,12 @@ fn ingest_library_classes_impl(
         if let Some(lc) = file_data_class(&root, file)? {
             return Ok(vec![lc]);
         }
+        // Not an initializer's: the boot program replays that statement, and a class beside it would define the constant twice.
+        if !file.contains("config/initializers/")
+            && let Some(lc) = file_struct_class(&root, file)?
+        {
+            return Ok(vec![lc]);
+        }
     }
     // Constants written at FILE level, outside any class — lobsters'
     // `search_parser.rb` opens with `MYISAM_STOPWORDS = %w[…]` and the
@@ -390,6 +396,41 @@ fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Opti
         unknown_calls,
         class_ivar_initializers: class_initializers,
     }))
+}
+
+/// A file whose only statement is `X = Struct.new(…)` or `A::X = Struct.new(…)`,
+/// the class it defines read as one a class body's `X = Struct.new(…)` defines.
+fn file_struct_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Option<LibraryClass>> {
+    let Some((name, spec)) = file_struct_write(root) else { return Ok(None) };
+    let id = ClassId(Symbol::from(name));
+    let mut class = struct_class(
+        id.clone(),
+        &spec.members,
+        spec.keyword_init,
+        crate::dialect::LibraryClassOrigin::StructConstant {
+            members: spec.members.clone(),
+            keyword_init: spec.keyword_init,
+            positional_written: spec.positional_written,
+        },
+    );
+    if spec.body.is_some() {
+        class.methods.extend(walk_decl_body(spec.body, &id, file, DeclBodyMode::Instance)?.methods);
+    }
+    Ok(Some(class))
+}
+
+fn file_struct_write<'pr>(root: &ruby_prism::Node<'pr>) -> Option<(String, StructConstant<'pr>)> {
+    let statements = root.as_program_node()?.statements().body();
+    let mut iter = statements.iter();
+    let (Some(statement), None) = (iter.next(), iter.next()) else { return None };
+    let (name, value) = match statement.as_constant_write_node() {
+        Some(write) => (constant_id_str(&write.name()).to_string(), write.value()),
+        None => {
+            let write = statement.as_constant_path_write_node()?;
+            (static_constant_path(&write.target().as_node())?.join("::"), write.value())
+        }
+    };
+    Some((name, struct_constant_spec(&value)?))
 }
 
 /// The constant name and the `Data.define` call of a file whose only
@@ -4486,7 +4527,7 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         }
         // `Breadcrumb = Data.define(:name, :path)`: the file declares a
         // value class, not a model (see `file_data_class`).
-        if file_data_factory(&root).is_some_and(|(_, call)| data_members(&call).is_some()) {
+        if file_data_factory(&root).is_some_and(|(_, call)| data_members(&call).is_some()) || file_struct_write(&root).is_some() {
             return Some(ClassKind::LibraryClass);
         }
         // `ExampleError = Class.new(StandardError)`: the file declares a

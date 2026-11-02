@@ -1221,6 +1221,9 @@ impl Analyzer {
                 }
             } else {
                 classes.entry(id.clone()).or_default().source_instance_methods.insert(method.name.clone());
+                if method.name.as_str() == "each" && forwards_block_to_each(method) {
+                    classes.entry(id.clone()).or_default().each_forwards_block = true;
+                }
             }
             if method.receiver == crate::dialect::MethodReceiver::Instance
                 && method.name.as_str() == "initialize"
@@ -8466,6 +8469,19 @@ pub(crate) fn source_finder_classes(app: &App, resolver: &ConstResolver) -> Hash
     classes
 }
 
+/// `def each(&block) = <collection>.each(&block)`, the block handed on untouched.
+fn forwards_block_to_each(method: &crate::dialect::MethodDef) -> bool {
+    let Some(block) = method.block_param.as_ref() else { return false };
+    let mut tail = &method.body;
+    while let ExprNode::Seq { exprs } = &*tail.node {
+        let [only] = exprs.as_slice() else { return false };
+        tail = only;
+    }
+    matches!(&*tail.node, ExprNode::Send { recv: Some(_), method, args, block: Some(passed), .. }
+        if method.as_str() == "each" && args.is_empty()
+            && matches!(&*passed.node, ExprNode::Var { name, .. } if *name == block.name))
+}
+
 /// Shared by ingest qualification and the typed finder registry. Retained
 /// hooks are effects, whereas expanded carriers already have concrete defs.
 pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassInfo>, app: &App, resolver: &ConstResolver) {
@@ -10212,7 +10228,11 @@ fn register_serialized_columns(body: &[ModelBodyItem], methods: &mut HashMap<Sym
         if method.as_str() != "serialize" {
             continue;
         }
-        for name in args.iter().map_while(symbol_arg) {
+        let name_arg = |e: &Expr| match &*e.node {
+            ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
+            _ => symbol_arg(e).cloned(),
+        };
+        for name in args.iter().map_while(name_arg) {
             methods.insert(name.clone(), Ty::Untyped);
             methods.insert(Symbol::from(format!("{}=", name.as_str())), Ty::Untyped);
         }

@@ -330,6 +330,12 @@ pub struct ClassInfo {
     /// class's own methods and before walking the parent. Empty for
     /// most classes.
     pub includes: Vec<crate::ident::ClassId>,
+    /// The class's own `each` hands its block straight to a collection's
+    /// `each` (`delegate :each, to: :values`, `def each(&b) = @items.each(&b)`):
+    /// what it yields is that collection's elements, and what it answers is
+    /// the collection, so the answer's type names what an `include
+    /// Enumerable` method over it iterates.
+    pub each_forwards_block: bool,
     /// Declared by a gem's RBI rather than by the app or the catalog
     /// (`crate::gem_boundary`). Its own table is the gem's whole
     /// declared surface, so a miss on the class itself is a real miss --
@@ -1463,6 +1469,42 @@ impl<'a> BodyTyper<'a> {
                         detail: written_class_id(path).0.as_str().to_string(),
                     }));
                 }
+                // Ruby's own NameError, not a gap: from `class << self` it looks a bare name up through the singleton class,
+                // which never reaches the class's ancestors' constants, so `UndiscardableError` defined on a superclass is not found.
+                if indexed_source && matches!(ty, Ty::Var { .. }) && expr.decisions & crate::expr::SINGLETON_CREF_CONST_REF != 0 && path.len() == 1 {
+                    let name = path[0].as_str().to_string();
+                    let owner = match ctx.self_ty.as_ref().or(ctx.lexical_self.as_ref()) {
+                        Some(Ty::Class { id, .. }) => Some(id.clone()),
+                        _ => None,
+                    };
+                    let inherited = owner.as_ref().is_some_and(|owner| {
+                        let mut at = self.classes().get(owner).and_then(|c| c.parent.clone());
+                        let mut found = false;
+                        for _ in 0..32 {
+                            let Some(class) = at else { break };
+                            if self.classes().contains_key(&ClassId(Symbol::from(format!("{}::{name}", class.0.as_str())))) {
+                                found = true;
+                                break;
+                            }
+                            at = self.classes().get(&class).and_then(|c| c.parent.clone());
+                        }
+                        found
+                    });
+                    if let (true, Some(owner)) = (inherited, owner) {
+                        let span = expr.span;
+                        let message = format!("uninitialized constant #<Class:{}>::{name}", owner.0.as_str());
+                        let mut name_error = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("NameError")] });
+                        name_error.decisions |= crate::expr::GENERATED_CONST_REF;
+                        let text = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Str { value: message } });
+                        let error = Expr::new(
+                            span,
+                            ExprNode::Send { recv: Some(name_error), method: Symbol::from("new"), args: vec![text], block: None, parenthesized: true },
+                        );
+                        *expr.node = ExprNode::Raise { value: error };
+                        expr.decisions |= crate::expr::SINGLETON_NAME_ERROR;
+                        return self.compute(expr, ctx);
+                    }
+                }
                 if indexed_source && matches!(ty, Ty::Var { .. }) {
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,
@@ -2421,7 +2463,7 @@ impl<'a> BodyTyper<'a> {
                 if let Some(t) = self.assoc_extension_ty(recv.as_ref(), method) {
                     return t;
                 }
-                if let Some(t) = self.assoc_loaded_ty(recv.as_ref(), method) {
+                if let Some(t) = self.assoc_loaded_ty(recv.as_ref(), method, ctx.self_ty.as_ref()) {
                     return t;
                 }
                 // `x.attr = v` evaluates to `v` — Ruby's rule for an

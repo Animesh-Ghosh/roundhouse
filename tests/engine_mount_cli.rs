@@ -102,7 +102,7 @@ fn strict_transpile_composes_an_engine_resource_table_and_refuses_a_skipped_stat
     let app = fixture.write_app(true);
     std::fs::write(
         app.join("vendor/catalog/config/routes.rb"),
-        "Catalog::Engine.routes.draw do\n  resources :products, only: [:index, :show] do\n    collection do\n      get :search\n    end\n  end\n  resources :products, only: :index, path: \":status/products\", as: :status_products\n  root to: \"products#index\"\nend\n",
+        "Catalog::Engine.routes.draw do\n  resources :products, only: [:index, :show] do\n    collection do\n      get :search\n    end\n  end\n  resources :products, only: :index, path: \":status/products\", as: :status_products\n  scope path: \"/v1\" do\n    get \"/listing\", to: \"products#index\"\n  end\n  root to: \"products#index\"\nend\n",
     )
     .unwrap();
     std::fs::write(
@@ -116,7 +116,7 @@ fn strict_transpile_composes_an_engine_resource_table_and_refuses_a_skipped_stat
     assert!(result.status.success(), "{stderr}");
     assert!(!stderr.contains("route mount"), "{stderr}");
     let routes = std::fs::read_to_string(out.join("config/routes.rb")).unwrap();
-    for expected in ["/catalog/products/search", "/catalog/products/:id", "/catalog/:status/products"] {
+    for expected in ["/catalog/products/search", "/catalog/products/:id", "/catalog/:status/products", "/catalog/v1/listing"] {
         assert!(routes.contains(expected), "{expected} missing: {routes}");
     }
 
@@ -396,14 +396,6 @@ fn conditional_and_constrained_engine_routes_remain_explicit_errors() {
         (
             "dynamic-verb-target",
             "Catalog::Engine.routes.draw do\n  get \"/products\", to: redirect(products_path)\nend\n",
-        ),
-        (
-            "resources-dsl",
-            "Catalog::Engine.routes.draw do\n  resources :products, only: :index\nend\n",
-        ),
-        (
-            "scope-wrapper",
-            "Catalog::Engine.routes.draw do\n  scope path: \"/v1\" do\n    get \"/products\", to: \"products#index\"\n  end\nend\n",
         ),
         (
             "conditional-routes",

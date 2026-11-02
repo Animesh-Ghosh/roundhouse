@@ -189,6 +189,10 @@ pub const FINDER_DISPATCH_FALLBACK: u64 = 1 << 48;
 pub const IMPLICIT_MODEL_FINDER_RECEIVER: u64 = 1 << 49;
 /// Unknown-hook dynamic dispatch has no established emitted implementation.
 pub const FINDER_IMPLEMENTATION_UNKNOWN: u64 = 1 << 50;
+/// A bare constant read in a `class << self` body: Ruby looks it up from the singleton class, not the class.
+pub const SINGLETON_CREF_CONST_REF: u64 = 1 << 51;
+/// A `raise NameError` standing for such a read Ruby itself cannot resolve.
+pub const SINGLETON_NAME_ERROR: u64 = 1 << 52;
 
 /// On a route-helper call `lower::route_format_suffix` renamed for its
 /// literal `format:` (`widget_url(w, format: :json)` to

@@ -3537,7 +3537,7 @@ fn dynamic_engine_route_targets_keep_their_source_boundary() {
         )
         .emit_with_app(roundhouse::project::BuildTarget::Ruby);
     assert!(
-        engine_mount::has_error_in_source(&app, &errors, path, "dynamic targets"),
+        engine_mount::has_error_in_source(&app, &errors, path, "`redirect` targets are not composed"),
         "dynamic engine route target was not rejected:\n{}",
         engine_mount::describe_errors(&app, &errors)
     );
@@ -20589,6 +20589,22 @@ mod engine_config;
 mod engine_boot_branches;
 #[path = "emit_and_run/resource_dynamic_path.rs"]
 mod resource_dynamic_path;
+#[path = "support/enumerable_mixin.rs"]
+mod enumerable_mixin_contract;
+#[path = "emit_and_run/enumerable_mixin.rs"]
+mod enumerable_mixin;
+#[path = "support/file_level_struct.rs"]
+mod file_level_struct_contract;
+#[path = "emit_and_run/file_level_struct.rs"]
+mod file_level_struct;
+#[path = "support/concern_define_loop.rs"]
+mod concern_define_loop_contract;
+#[path = "emit_and_run/concern_define_loop.rs"]
+mod concern_define_loop;
+#[path = "support/solid_queue_worker.rs"]
+mod solid_queue_worker_contract;
+#[path = "emit_and_run/solid_queue_worker.rs"]
+mod solid_queue_worker;
 #[path = "emit_and_run/route_helper_segment_escape.rs"]
 mod route_helper_segment_escape;
 #[path = "emit_and_run/solid_queue_clear.rs"]

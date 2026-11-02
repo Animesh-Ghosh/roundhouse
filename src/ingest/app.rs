@@ -620,6 +620,16 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     });
     let mut source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
         .map_err(|message| IngestError::Parse { file: dir.join("roundhouse.yml").display().to_string(), message })?;
+    // The queue's records: on solid_queue the compiler runs the jobs, but the records Rails keeps of them are
+    // solid_queue's own models, read from its installed source over the app's `db/queue_schema.rb`.
+    // Not every app on solid_queue: only one whose code (or a gem it carries) names solid_queue's classes reads its records.
+    let solid_queue_models = (read_queue_adapter(vfs, dir).as_deref() == Some("solid_queue")
+        && vfs.exists(&dir.join("db/queue_schema.rb"))
+        && names_solid_queue(vfs, dir, &source_gems))
+        .then(|| super::source_gems::framework_models(vfs, dir, lock.as_ref(), "solid_queue"))
+        .flatten();
+    let solid_queue_root = solid_queue_models.as_ref().and_then(|gem| gem.mount.strip_prefix(dir).ok().map(|m| m.join("app")));
+    source_gems.extend(solid_queue_models);
     // Not fatal for an automatic one: the gem stays a reported boundary, as it was.
     let mut auto_sourced: Vec<String> = Vec::new();
     for gem in auto_source_gems {
@@ -643,7 +653,8 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let (engine_routes, engine_refusals) = engine_route_sources(vfs, dir, &path_gems, lock.as_ref());
     let additional_test_paths = additional_test_paths(dir, &config)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
-    let roots = app_roots(vfs, dir, &path_gems);
+    let mut roots = app_roots(vfs, dir, &path_gems);
+    roots.extend(solid_queue_root.clone());
     let lib_ignores: Vec<String> = vfs
         .read(&dir.join("config/application.rb"))
         .ok()
@@ -719,6 +730,17 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                 unwrap_or_record(ingest_schema(&source, &schema_path.display().to_string()))?
             {
                 app.schema = schema;
+            }
+            // Not its own database: the runtime opens only the primary, so solid_queue's tables join it.
+            if solid_queue_root.is_some() {
+                let queue_schema = dir.join("db/queue_schema.rb");
+                if let Some(source) = read_or_ledger(vfs, &queue_schema)? {
+                    if let Some(queue) = unwrap_or_record(ingest_schema(&source, &queue_schema.display().to_string()))? {
+                        for (name, table) in queue.tables {
+                            app.schema.tables.entry(name).or_insert(table);
+                        }
+                    }
+                }
             }
         }
     } else if vfs.exists(&structure_path) {
@@ -809,6 +831,10 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     // `action_text_markdowns` (not `markdowns`). Seed the framework
     // prefix so ordinary model ingest matches the gem.
     table_prefixes.insert("ActionText".to_string(), "action_text_".to_string());
+    // solid_queue's engine `isolate_namespace SolidQueue`, which its models' tables are named under; the engine itself is not mounted.
+    if solid_queue_root.is_some() {
+        table_prefixes.insert("SolidQueue".to_string(), "solid_queue_".to_string());
+    }
     // An app engine's own `isolate_namespace` (in its `lib/`): a prefix
     // the module's declared `table_name_prefix` overrides.
     let mut isolated_prefixes = super::model::TablePrefixes::default();
@@ -2955,6 +2981,7 @@ end
     qualify_model_class_method_ar_calls(&mut app, &const_resolver.for_sources(&sources));
     // After the splice too: the inverse `has_many …, as: :owner` may be
     // declared in a concern's `included do`.
+    resolve_namespaced_targets(&mut app);
     resolve_polymorphic_targets(&mut app);
     // After the splice too: the source association may come from a
     // concern on the through model.
@@ -3055,6 +3082,15 @@ end
     // Model-to-database ownership reads every model, concern splice and
     // library module, so it runs once they all exist.
     super::database_ownership::resolve(&mut app);
+    // Not an error: the queue's tables joined the primary at ingest, so solid_queue's record runs there, where the runtime's one connection is.
+    if solid_queue_root.is_some() {
+        for refusal in &mut app.database_refusals {
+            if refusal.construct == "connects_to" && refusal.detail.contains("`SolidQueue::Record`") {
+                refusal.warning = true;
+                refusal.detail = "solid_queue's records live in the primary database here, not the queue database `config.solid_queue.connects_to` names: the runtime opens the primary only".to_string();
+            }
+        }
+    }
 
     // After every library class and include is known: a `...` that only
     // reaches a stdlib method of known signature through `super` takes
@@ -7670,6 +7706,41 @@ fn resolve_polymorphic_targets(app: &mut App) {
 /// is a polymorphic `belongs_to` (only `source_type:` names that class).
 /// The pass repeats so that a source association that is itself a
 /// `through:` gives its resolved class.
+/// An association's class named as Rails' `compute_type` finds it: from
+/// the model's own namespace outward (`belongs_to :job` in
+/// `SolidQueue::ClaimedExecution` is `SolidQueue::Job` when that model
+/// exists, else `Job`). Ingest names the target bare; a rooted
+/// `class_name: "::Job"` stays as written.
+fn resolve_namespaced_targets(app: &mut App) {
+    use crate::dialect::{Association, ModelBodyItem};
+    let models: crate::det::HashSet<String> = app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+    for model in &mut app.models {
+        let owner = model.name.0.as_str().to_string();
+        let Some((namespace, _)) = owner.rsplit_once("::") else { continue };
+        let scopes: Vec<String> = {
+            let parts: Vec<&str> = namespace.split("::").collect();
+            (1..=parts.len()).rev().map(|n| parts[..n].join("::")).collect()
+        };
+        for item in &mut model.body {
+            let ModelBodyItem::Association { assoc, .. } = item else { continue };
+            let target = match assoc {
+                Association::BelongsTo { polymorphic: true, .. } => continue,
+                Association::BelongsTo { target, .. }
+                | Association::HasMany { target, .. }
+                | Association::HasOne { target, .. }
+                | Association::HasAndBelongsToMany { target, .. } => target,
+            };
+            let written = target.0.as_str().to_string();
+            if written.starts_with("::") {
+                continue;
+            }
+            if let Some(found) = scopes.iter().map(|scope| format!("{scope}::{written}")).find(|name| models.contains(name)) {
+                *target = crate::ident::ClassId(crate::ident::Symbol::from(found.as_str()));
+            }
+        }
+    }
+}
+
 fn resolve_through_targets(app: &mut App) {
     use crate::dialect::{Association, ModelBodyItem};
     use crate::ident::ClassId;
@@ -12388,6 +12459,18 @@ pub(super) fn queue_adapter_line(line: &str) -> Option<Option<String>> {
 /// line scan as `read_forgery_verification_strategy` reads them. The
 /// last setting wins, and a last setting that isn't a literal leaves the
 /// adapter unknown (`None`) rather than falling back to an earlier one.
+/// Whether the app's own code, or a source gem's, writes `SolidQueue::`.
+fn names_solid_queue<V: Vfs + ?Sized>(vfs: &V, dir: &Path, source_gems: &[super::source_gems::SourceGem]) -> bool {
+    let mut dirs: Vec<PathBuf> = ["app", "lib", "config"].iter().map(|d| dir.join(d)).collect();
+    dirs.extend(source_gems.iter().flat_map(|gem| gem.source_dirs()));
+    dirs.iter().any(|root| {
+        vfs.is_dir(root)
+            && read_rb_files(vfs, root).unwrap_or_default().iter().any(|file| {
+                vfs.read(file).is_ok_and(|text| text.windows(12).any(|w| w == b"SolidQueue::"))
+            })
+    })
+}
+
 fn read_queue_adapter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
     let mut adapter: Option<String> = None;
     for sub in ["config/application.rb", "config/environments/production.rb", "config/initializers"] {

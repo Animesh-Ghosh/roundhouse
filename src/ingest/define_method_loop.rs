@@ -153,9 +153,12 @@ struct Plan<'pr> {
     key_param: String,
     value_param: Option<String>,
     defines: Vec<CallNode<'pr>>,
+    /// Class macros the loop runs beside its `define_method`s
+    /// (`serialize "on_#{type}", coder: JSON`), each once per element.
+    macros: Vec<CallNode<'pr>>,
 }
 
-fn plan<'pr>(stmt: &Node<'pr>, file: &str, named: &HashSet<String>) -> Option<Plan<'pr>> {
+fn plan<'pr>(stmt: &Node<'pr>, file: &str, named: &HashSet<String>, allow_macros: bool) -> Option<Plan<'pr>> {
     let call = stmt.as_call_node()?;
     if constant_id_str(&call.name()) != "each" || call.arguments().is_some() {
         return None;
@@ -179,22 +182,37 @@ fn plan<'pr>(stmt: &Node<'pr>, file: &str, named: &HashSet<String>) -> Option<Pl
         _ => return None,
     };
     let body = block.body()?;
-    let defines: Vec<CallNode<'pr>> = flatten_statements(body)
-        .into_iter()
-        .map(|s| {
-            let c = s.as_call_node()?;
-            (c.receiver().is_none()
-                && constant_id_str(&c.name()) == "define_method"
-                && c.arguments().is_some_and(|a| a.arguments().iter().count() == 1)
+    let mut defines: Vec<CallNode<'pr>> = Vec::new();
+    let mut macros: Vec<CallNode<'pr>> = Vec::new();
+    for s in flatten_statements(body) {
+        let c = s.as_call_node()?;
+        if c.receiver().is_some() {
+            return None;
+        }
+        if constant_id_str(&c.name()) == "define_method" {
+            if !(c.arguments().is_some_and(|a| a.arguments().iter().count() == 1)
                 && c.block().is_some_and(|b| b.as_block_node().is_some()))
-            .then_some(c)
-        })
-        .collect::<Option<Vec<_>>>()?;
+            {
+                return None;
+            }
+            defines.push(c);
+        } else if allow_macros && c.block().is_none() {
+            macros.push(c);
+        } else {
+            return None;
+        }
+    }
     if defines.is_empty() {
         return None;
     }
-    let plan = Plan { constant, entries, key_param, value_param, defines };
-    plan.defines.iter().all(|d| define_ok(d, &plan, named)).then_some(plan)
+    let plan = Plan { constant, entries, key_param, value_param, defines, macros };
+    let loop_params: Vec<&str> = std::iter::once(plan.key_param.as_str()).chain(plan.value_param.as_deref()).collect();
+    let macros_ok = plan.macros.iter().all(|m| {
+        let mut check = MacroCheck { loop_params: &loop_params, ok: true };
+        ruby_prism::Visit::visit(&mut check, &m.as_node());
+        check.ok
+    });
+    (macros_ok && plan.defines.iter().all(|d| define_ok(d, &plan, named))).then_some(plan)
 }
 
 /// Plain required parameter names, or `None` for any other shape.
@@ -293,6 +311,32 @@ fn name_for(arg: &Node<'_>, key_param: &str, key: &str) -> Option<String> {
 /// A `define_method` body the substitution keeps: loop parameters are
 /// only read, no other outer local is reached, and nothing in it means
 /// something else once it is a `def`.
+/// A macro run once per element reads only the loop's parameters, and opens no scope of its own.
+struct MacroCheck<'a> {
+    loop_params: &'a [&'a str],
+    ok: bool,
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for MacroCheck<'_> {
+    fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+        if node.depth() != 0 || !self.loop_params.contains(&constant_id_str(&node.name())) {
+            self.ok = false;
+        }
+    }
+    fn visit_local_variable_write_node(&mut self, _: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        self.ok = false;
+    }
+    fn visit_local_variable_target_node(&mut self, _: &ruby_prism::LocalVariableTargetNode<'pr>) {
+        self.ok = false;
+    }
+    fn visit_block_node(&mut self, _: &ruby_prism::BlockNode<'pr>) {
+        self.ok = false;
+    }
+    fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {
+        self.ok = false;
+    }
+}
+
 struct BodyCheck<'a> {
     /// Blocks and lambdas entered inside the `define_method` block.
     depth: u32,
@@ -408,7 +452,7 @@ impl<'pr> ruby_prism::Visit<'pr> for BodyCheck<'_> {
 /// Whether `stmt` is a loop this unrolls, with the enclosing bodies' tables
 /// in scope.
 pub(super) fn unrollable(stmt: &Node<'_>, named: &HashSet<String>) -> bool {
-    plan(stmt, "", named).is_some()
+    plan(stmt, "", named, false).is_some()
 }
 
 /// The names `private :a, :b`-style markers in `statements` set the
@@ -430,10 +474,44 @@ pub(super) fn unroll(
     receiver: MethodReceiver,
     named: &HashSet<String>,
 ) -> Option<Vec<MethodDef>> {
-    let plan = plan(stmt, file, named)?;
+    unroll_with(stmt, owner, file, receiver, named, None)
+}
+
+/// [`unroll`], also taking a loop that runs class macros beside its
+/// `define_method`s: each macro once per element, in `macros`, with the
+/// element's key in place of the loop's parameter.
+pub(super) fn unroll_with_macros(
+    stmt: &Node<'_>,
+    owner: &ClassId,
+    file: &str,
+    macros: &mut Vec<Expr>,
+) -> Option<Vec<MethodDef>> {
+    unroll_with(stmt, owner, file, MethodReceiver::Instance, &HashSet::default(), Some(macros))
+}
+
+fn unroll_with(
+    stmt: &Node<'_>,
+    owner: &ClassId,
+    file: &str,
+    receiver: MethodReceiver,
+    named: &HashSet<String>,
+    macros: Option<&mut Vec<Expr>>,
+) -> Option<Vec<MethodDef>> {
+    let plan = plan(stmt, file, named, macros.is_some())?;
     let keys = match &plan.entries {
         Entries::Array(k) | Entries::Hash(k) => k.clone(),
     };
+    if let Some(macros) = macros {
+        let calls: Vec<Expr> = plan.macros.iter().map(|m| ingest_expr(&m.as_node(), file).ok()).collect::<Option<_>>()?;
+        for key in &keys {
+            for call in &calls {
+                let mut call = call.clone();
+                substitute(&mut call, &plan, key);
+                fold_literal_interpolation(&mut call);
+                macros.push(call);
+            }
+        }
+    }
     let mut out = Vec::new();
     for define in &plan.defines {
         let names = plan_names(define, &plan)?;
@@ -473,6 +551,24 @@ pub(super) fn unroll(
         }
     }
     Some(out)
+}
+
+/// `"on_#{"finish"}"` once the key is in place: the String it spells, as a macro reads a literal name.
+fn fold_literal_interpolation(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut fold_literal_interpolation);
+    let ExprNode::StringInterp { parts } = &*expr.node else { return };
+    let mut text = String::new();
+    for part in parts {
+        match part {
+            crate::expr::InterpPart::Text { value } => text.push_str(value),
+            crate::expr::InterpPart::Expr { expr } => match &*expr.node {
+                ExprNode::Lit { value: Literal::Str { value } } => text.push_str(value),
+                ExprNode::Lit { value: Literal::Sym { value } } => text.push_str(value.as_str()),
+                _ => return,
+            },
+        }
+    }
+    *expr.node = ExprNode::Lit { value: Literal::Str { value: text } };
 }
 
 /// Each read of a loop parameter becomes the element's key, or for the

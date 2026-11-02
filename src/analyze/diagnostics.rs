@@ -944,6 +944,15 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         });
     }
 
+    if expr.decisions & crate::expr::SINGLETON_NAME_ERROR != 0 {
+        out.push(crate::lower::residue_diagnostic(
+            "singleton_constant",
+            "constant",
+            expr.span,
+            "ruby_name_error",
+            "a bare constant in `class << self` that only the class's ancestors define: Ruby raises NameError there, and so does this".to_string(),
+        ));
+    }
     match &*expr.node {
         ExprNode::Ivar { name } => {
             if is_unknown_ty(expr.ty.as_ref()) {

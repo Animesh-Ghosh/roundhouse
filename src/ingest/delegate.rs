@@ -140,6 +140,8 @@ fn record_synthesis_failure(delegates: &[Delegation], diags: &[crate::diagnostic
 /// whole app; a single-class caller can just extend its own `methods`
 /// with the result).
 pub(crate) fn expand_delegates_in_class(lc: &mut LibraryClass) -> Vec<MethodDef> {
+    // Enumerable calls `each` with a block, a call no source site of the class shows.
+    let implicit_block: &[&str] = if lc.includes.iter().any(|m| m.0.as_str() == "Enumerable") { &["each"] } else { &[] };
     expand_delegates(
         &lc.name,
         &lc.methods,
@@ -149,6 +151,7 @@ pub(crate) fn expand_delegates_in_class(lc: &mut LibraryClass) -> Vec<MethodDef>
         None,
         &crate::det::HashSet::default(),
         &[],
+        implicit_block,
     )
 }
 
@@ -161,8 +164,14 @@ pub(super) fn expand_delegates(
     supported_target_methods: Option<&crate::det::HashSet<(String, String, usize)>>,
     method_targets: &crate::det::HashSet<String>,
     sources: &[crate::span::SourceFile],
+    implicit_block: &[&str],
 ) -> Vec<MethodDef> {
-    let called_with_args = names_called_with_arguments(methods, additional_method_bodies);
+    let mut called_with_args = names_called_with_arguments(methods, additional_method_bodies);
+    for name in implicit_block {
+        let calls = called_with_args.entry(name.to_string()).or_default();
+        calls.positional_arities.insert(0);
+        calls.has_block = true;
+    }
     let mut eligibility = DelegateEligibility::new(
         methods,
         &called_with_args,
@@ -331,6 +340,10 @@ fn synthesized_source(
             forwarder
         } else if let Some(attr) = m.strip_suffix('=') {
             ("value", format!("{t}.{attr} = value"))
+        } else if d.block && d.allow_nil {
+            ("&block", format!("__allow_nil_target__ = {t}\n    __allow_nil_target__.nil? ? nil : __allow_nil_target__.{m}(&block)"))
+        } else if d.block {
+            ("&block", format!("{t}.{m}(&block)"))
         } else if d.allow_nil {
             // Rails' `_ = target; _.m if !_.nil?`: a nil target answers nil
             // (the local is named so that no `to:` target can be shadowed by it)
