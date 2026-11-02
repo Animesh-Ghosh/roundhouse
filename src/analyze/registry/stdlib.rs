@@ -1216,15 +1216,15 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // Not `finish`: spinel's package has `close` only.
         ("close", Ty::Untyped),
     ]);
-    // Whole-message gzip on Ruby and Spinel; no streaming or flush API is modeled.
+    // The body typer admits only the explicit whole-message FINISH form.
     let deflate = Ty::Class { id: ClassId(Symbol::from("Zlib::Deflate")), args: vec![].into() };
     register_stdlib_class(classes, "Zlib::Deflate", &[("new", deflate)], &[
         ("deflate", Ty::Str), ("close", Ty::Nil),
     ]);
     let gzip_reader = Ty::Class { id: ClassId(Symbol::from("Zlib::GzipReader")), args: vec![].into() };
     register_stdlib_class(classes, "Zlib::GzipReader", &[("new", gzip_reader)], &[
-        // read(length) can return nil at EOF; read without a length returns String.
-        ("read", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+        // Only argument-free reads are admitted by the body typer.
+        ("read", Ty::Str),
     ]);
     // `IO` / `Process` / `Timeout` — Campfire tip names these as Consts
     // in indexed app source (`time_limited_video_previewer`, web-push
@@ -1299,15 +1299,6 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // require; on Spinel by its fileutils / openssl package.
     register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
     register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
-    // Spinel supplies AES-GCM and rejects other algorithms at construction.
-    // Both libraries return String from update/final; Spinel buffers until final.
-    let cipher = Ty::Class { id: ClassId(Symbol::from("OpenSSL::Cipher")), args: vec![].into() };
-    register_stdlib_class(classes, "OpenSSL::Cipher", &[("new", cipher.clone())], &[
-        ("encrypt", cipher.clone()), ("decrypt", cipher),
-        ("key=", Ty::Str), ("iv=", Ty::Str),
-        ("auth_data=", Ty::Str), ("auth_tag=", Ty::Str),
-        ("update", Ty::Str), ("final", Ty::Str), ("auth_tag", Ty::Str),
-    ]);
     // `OpenSSL::HMAC.digest(OpenSSL::Digest.new("sha1"), key, data)`: rotp's one-time codes.
     for name in ["OpenSSL::Digest", "OpenSSL::Digest::SHA1", "OpenSSL::Digest::SHA256"] {
         let digest = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() };

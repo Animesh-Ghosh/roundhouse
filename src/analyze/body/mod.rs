@@ -70,6 +70,7 @@ mod narrowing;
 mod pagy;
 mod send;
 mod active_storage;
+mod buffered_stdlib;
 pub(crate) use send::PARAM_VALUE;
 pub(crate) use send::{indexed_pluck, string_answers};
 #[cfg(test)]
@@ -1909,6 +1910,14 @@ impl<'a> BodyTyper<'a> {
                 };
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
                     && recv_ty.as_ref().is_some_and(instance_shaped);
+                if self.inquirers.is_some() && matches!(crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "buffered zlib result") {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
+                }
+                if self.inquirers.is_some() && let Some(detail) = recv_ty.as_ref().and_then(|ty| self.unsupported_zlib_stream_result(ty, name, &[], true)) {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                        target: None, construct: Symbol::from("buffered zlib result"), detail: detail.to_string(),
+                    }));
+                }
                 let dispatched = self.dispatch(recv_ty.as_ref(), name, None, &[]);
                 if matches!(dispatched, Ty::Var { .. })
                     && let Some(Ty::Class { id, .. }) = recv_ty.as_ref()
@@ -2534,6 +2543,16 @@ impl<'a> BodyTyper<'a> {
                 let receiver_is_instance = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx));
                 let instance_receiver = receiver_is_instance
                     && recv_ty.as_ref().is_some_and(instance_shaped);
+                if self.inquirers.is_some() {
+                    if matches!(crate::expr::ExprCold::diagnostic(&expr.cold), Some(crate::diagnostic::DiagnosticKind::Unsupported { construct, .. }) if construct.as_str() == "buffered zlib result") {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
+                    }
+                    if instance_receiver && let Some(detail) = recv_ty.as_ref().and_then(|ty| self.unsupported_zlib_stream_result(ty, method, args, block.is_some())) {
+                        crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
+                            target: None, construct: Symbol::from("buffered zlib result"), detail: detail.to_string(),
+                        }));
+                    }
+                }
                 let mut dispatched =
                     self.dispatch_on(recv_ty.as_ref(), method, block_ret.as_ref(), args, instance_receiver);
                 // One controller arm cannot supply a missing writer on a

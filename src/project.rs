@@ -7998,7 +7998,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         // `packages/strscan` and `packages/zlib` on spinel; no strict runtime carries either.
         | "StringScanner" | "Zlib::GzipWriter" | "Zlib::Deflate" | "Zlib::GzipReader" | "Zlib::Error"
         | "Zlib::BEST_COMPRESSION" | "Zlib::MAX_WBITS" | "Zlib::FINISH"
-        | "OpenSSL::Cipher" | "OpenSSL::Digest::SHA1" | "OpenSSL::Digest::SHA256"
+        | "OpenSSL::Digest::SHA1" | "OpenSSL::Digest::SHA256"
         // runtime/spinel/integration_session.rb and the ruby tree's twin.
         | "ActionDispatch::Integration::Session" | "ActionDispatch::TestResponse"
         // runtime/spinel/solid_queue.rb.
