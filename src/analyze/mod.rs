@@ -1400,6 +1400,7 @@ impl Analyzer {
     }
 
     fn analyze_cached(&mut self, app: &mut App) {
+        app.unknown_association_targets = unknown_association_targets(app, &self.classes);
         self.upload_array_fields = Some(crate::lower::controller_to_library::params::upload_array_fields(&app.controllers));
         self.fixpoint_checks = fixpoint_check::Checks::start();
         // Before any signature is copied. Anonymous `**` / `...` cannot
@@ -8276,6 +8277,33 @@ fn association_member_ty(assoc: &crate::dialect::Association) -> (Symbol, Ty) {
             Ty::Array { elem: std::sync::Arc::new(Ty::Class { id: target.clone(), args: vec![].into() }) },
         ),
     }
+}
+
+/// Each association whose class the registry doesn't hold: no app model
+/// or class, framework class or modeled gem defines it. Rails finds it at
+/// the first read (a gem's model, in a real app); the emitted tree has no
+/// such class, and the query built on it raises where it runs. Refused at
+/// the declaration as naming the constant is (`constant not supported`).
+/// A polymorphic `belongs_to` names no class.
+fn unknown_association_targets(app: &App, classes: &HashMap<ClassId, ClassInfo>) -> Vec<crate::diagnostic::Diagnostic> {
+    use crate::dialect::Association;
+    let mut out = Vec::new();
+    for model in &app.models {
+        for (span, assoc) in model.spanned_associations() {
+            let target = match assoc {
+                Association::BelongsTo { polymorphic: true, .. } => continue,
+                Association::BelongsTo { target, .. }
+                | Association::HasOne { target, .. }
+                | Association::HasMany { target, .. }
+                | Association::HasAndBelongsToMany { target, .. } => target,
+            };
+            if target.0.as_str().is_empty() || classes.contains_key(target) {
+                continue;
+            }
+            out.push(crate::diagnostic::Diagnostic::unsupported(span, None, "constant", target.0.as_str().to_string()));
+        }
+    }
+    out
 }
 
 /// The singular-association BUILDERS Rails generates beside the reader:

@@ -20607,3 +20607,5 @@ mod csrf_meta_tag_alias;
 
 #[path = "emit_and_run/boolop_precedence.rs"]
 mod boolop_precedence;
+#[path = "emit_and_run/unknown_class_association.rs"]
+mod unknown_class_association;
