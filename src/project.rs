@@ -8016,7 +8016,9 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
         | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
         // `packages/strscan` and `packages/zlib` on spinel; no strict runtime carries either.
-        | "StringScanner" | "Zlib::GzipWriter"
+        | "StringScanner" | "Zlib::GzipWriter" | "Zlib::Deflate" | "Zlib::GzipReader" | "Zlib::Error"
+        | "Zlib::BEST_COMPRESSION" | "Zlib::MAX_WBITS" | "Zlib::FINISH"
+        | "OpenSSL::Digest::SHA1" | "OpenSSL::Digest::SHA256"
         // runtime/spinel/integration_session.rb and the ruby tree's twin.
         | "ActionDispatch::Integration::Session" | "ActionDispatch::TestResponse"
         // runtime/spinel/solid_queue.rb.
@@ -8404,6 +8406,18 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 target,
                 "bundled_constant",
                 format!("Regexp::{flag} is Ruby's option bit, which the {target} emit has no Regexp to read"),
+            );
+        }
+        // These are Integer values, so the class/module gate does not see them.
+        if !matches!(target, "jruby" | "spinel")
+            && let crate::expr::ExprNode::Const { path } = &*expr.node
+            && let ["Zlib", flag @ ("BEST_COMPRESSION" | "MAX_WBITS" | "FINISH")] = path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..]
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "bundled_constant",
+                format!("Zlib::{flag} is a bundled zlib constant, which the {target} runtime does not supply"),
             );
         }
         // Typed as IO for the Ruby family; a strict emit spelled them as names its runtime does not define.
