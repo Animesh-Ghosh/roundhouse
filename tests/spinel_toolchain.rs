@@ -32,6 +32,10 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/response_content_type.rs"]
+mod response_content_type_contract;
+#[path = "spinel_toolchain/response_content_type.rs"]
+mod response_content_type;
 #[path = "spinel_toolchain/rack_mounts.rs"]
 mod rack_mounts;
 #[path = "support/time_change_usec.rs"]
@@ -52,6 +56,16 @@ mod lobsters_zero;
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/class_body_calls.rs"]
+mod class_body_calls_contract;
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn ordinary_class_body_calls_run_natively() {
+    class_body_calls_contract::settings_overlay()
+        .run_spinel_with_rbs(class_body_calls_contract::ASSERTIONS)
+        .assert_passes();
+}
 #[path = "support/dry_initializer.rs"]
 mod dry_initializer;
 #[path = "support/data_factory.rs"]
