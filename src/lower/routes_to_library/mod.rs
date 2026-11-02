@@ -468,6 +468,13 @@ pub fn guard_required_segments(funcs: &mut [LibraryFunction], app: &App) {
             targets.entry(name).or_insert(target);
         }
     }
+    // A `direct` helper of the same name is the app's own, defined after
+    // the generated ones, so it's the one Ruby calls: never guarded.
+    for helper in &app.routes.direct_helpers {
+        for suffix in ["path", "url"] {
+            targets.remove(&format!("{}_{suffix}", helper.name.as_str()));
+        }
+    }
     let span = Span::synthetic();
     for f in funcs.iter_mut() {
         if f.module_path.last().map(|s| s.as_str()) != Some("RouteHelpers") {

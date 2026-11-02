@@ -69,3 +69,25 @@ fn a_nil_required_segment_raises_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("nil segment passed"), "{}", run.stdout);
 }
+
+/// A `direct` helper named like a demanded format variant
+/// (`article_path(@article, format: :featured)` demands
+/// `article_featured_path`) is the app's own: Ruby calls its definition,
+/// which comes last, and it gets no route-segment guard (review, mod.rs:468).
+#[test]
+fn a_direct_helper_named_like_a_format_variant_is_not_guarded() {
+    let run = app()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  direct :article_featured do |article, options|\n    article.nil? ? \"/featured\" : \"/featured/#{article.id}\"\n  end\n",
+        )
+        .edit(
+            "app/views/articles/show.html.erb",
+            "<%= link_to \"JSON\", article_comments_path(@article, format: :json) %>\n",
+            "<%= link_to \"JSON\", article_comments_path(@article, format: :json) %>\n<%= link_to \"Featured\", article_path(@article, format: :featured) %>\n",
+        )
+        .run_ruby("raise RouteHelpers.article_featured_path(nil).inspect unless RouteHelpers.article_featured_path(nil) == \"/featured\"\nputs \"direct helper passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("direct helper passed"), "{}", run.stdout);
+}
