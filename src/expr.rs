@@ -102,6 +102,10 @@ pub const HELPER_BODY_TRANSLATE: u64 = 1 << 18;
 /// replays where the source has it (`ingest::app_extension_calls`).
 pub const REPLAYED_CLASS_BODY: u64 = 1 << 19;
 
+/// A newly preserved call whose binding or surrounding statement order is not
+/// stable while classes load. It must be refused until that order is preserved.
+pub const CLASS_BODY_BINDING_ORDER: u64 = 1 << 52;
+
 /// A model's `private :has_role?` naming a method its body does not
 /// define (generated, a superclass's or a gem's): kept as a statement for
 /// the lowering to apply and the analyzer to enforce.
