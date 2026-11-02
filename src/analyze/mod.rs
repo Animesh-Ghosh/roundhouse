@@ -362,15 +362,9 @@ impl Analyzer {
                 Symbol::from("arel"),
                 Ty::Class { id: ClassId(Symbol::from("Arel::SelectManager")), args: vec![].into() },
             );
-            cls.class_methods.insert(Symbol::from("attribute_names"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
             cls.class_methods.insert(Symbol::from("column_names"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
-            cls.class_methods.insert(Symbol::from("columns_hash"), Ty::Untyped);
-            // The rest of the schema-reflection surface every model has:
-            // `columns` is the list of `ActiveRecord::ConnectionAdapters::Column`
-            // objects (not modelled, so their elements stay untyped), the
-            // `sanitize_sql*` family builds a SQL fragment string, and
-            // `base_class` is the STI root, a class.
-            cls.class_methods.insert(Symbol::from("columns"), Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+            // columns_hash, columns and class attribute_names have no runtime methods.
+            // Leave them unresolved; source-defined methods still register below.
             for sanitizer in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_for_conditions", "sanitize_sql_like"] {
                 cls.class_methods.insert(Symbol::from(sanitizer), Ty::Str);
             }
