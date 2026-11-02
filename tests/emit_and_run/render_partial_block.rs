@@ -219,3 +219,19 @@ fn a_strict_locals_partial_under_layouts_yields_nothing_without_a_block() {
     let test = "require \"test_helper\"\n\nclass LayoutsCardControllerTest < ActionDispatch::IntegrationTest\n  test \"card\" do\n    get article_url(articles(:one))\n    assert_match(%r{<div class=\"card\"></div>}, response.body)\n    assert_no_match(%r{<i>x</i>}, response.body)\n  end\nend\n";
     overlay().write("test/controllers/layouts_card_controller_test.rb", test).run_test("test/controllers/layouts_card_controller_test.rb").assert_passes();
 }
+
+/// A `yield` inside a block the partial's helper runs once (campfire's
+/// `rooms/layouts/_form` yields inside `form_with model: room do |form|`)
+/// yields once: not refused, and the block renders there.
+#[test]
+fn a_yield_inside_a_block_run_once_is_the_partials_yield() {
+    let app = || {
+        emit_and_run::real_blog()
+            .write("app/views/shared/_boxed.html.erb", "<%= form_with model: article do |form| %><section class=\"boxed\"><%= yield %></section><% end %>\n")
+            .edit("app/views/articles/show.html.erb", "<% content_for :title, \"Showing article\" %>\n", "<% content_for :title, \"Showing article\" %>\n<%= render layout: \"shared/boxed\", locals: { article: @article } do %>inside<% end %>\n")
+    };
+    let errors = app().check_errors();
+    assert!(!errors.iter().any(|e| e.contains("render with a block")), "{errors:?}");
+    let test = "require \"test_helper\"\n\nclass BoxedControllerTest < ActionDispatch::IntegrationTest\n  test \"boxed\" do\n    get article_url(articles(:one))\n    assert_select \"form section.boxed\", \"inside\"\n  end\nend\n";
+    app().write("test/controllers/boxed_controller_test.rb", test).run_test("test/controllers/boxed_controller_test.rb").assert_passes();
+}

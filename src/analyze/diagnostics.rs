@@ -125,7 +125,9 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
 /// (`render partial: "x", locals: … do` raises in Rails).
 fn unmodeled_block_renders(app: &App) -> Vec<Diagnostic> {
     use crate::lower::view::{classify_render_partial, RenderPartial};
-    // Bare `yield`s, and whether any sits inside a block or loop.
+    // Bare `yield`s, and whether any sits inside a loop: a `while`, or the
+    // block of a method that runs it per element. A block run once
+    // (`form_with … do |form|`, `content_tag … do`) yields once.
     fn yields(e: &Expr, nested: bool, count: &mut usize, in_block: &mut bool) {
         if let ExprNode::Yield { args } = &*e.node
             && args.is_empty()
@@ -133,7 +135,19 @@ fn unmodeled_block_renders(app: &App) -> Vec<Diagnostic> {
             *count += 1;
             *in_block |= nested;
         }
-        let nested = nested || matches!(&*e.node, ExprNode::Lambda { .. } | ExprNode::While { .. });
+        let iterates = match &*e.node {
+            ExprNode::While { .. } => true,
+            ExprNode::Send { method, block: Some(_), .. } => matches!(
+                method.as_str(),
+                "each" | "each_with_index" | "each_with_object" | "each_slice" | "each_cons" | "each_pair"
+                    | "each_key" | "each_value" | "map" | "collect" | "flat_map" | "filter_map" | "select"
+                    | "filter" | "reject" | "times" | "upto" | "downto" | "step" | "loop" | "sum" | "inject"
+                    | "reduce" | "group_by" | "partition" | "sort_by" | "min_by" | "max_by" | "find_each"
+                    | "find_in_batches" | "in_batches" | "cycle" | "zip"
+            ),
+            _ => false,
+        };
+        let nested = nested || iterates;
         e.node.for_each_child(&mut |c| yields(c, nested, count, in_block));
     }
     let carrying = crate::lower::view_to_library::yield_carrying_partials(app);
