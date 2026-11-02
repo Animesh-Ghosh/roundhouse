@@ -110,6 +110,9 @@ fn a_keyword_job_round_trips_through_the_drain() {
 }
 
 const SIDEKIQ: &str = "  config.active_job.queue_adapter = :sidekiq\n";
+/// The Redis an app on `:sidekiq` must name.
+const REDIS_CLIENT: &str =
+    "Sidekiq.configure_client do |config|\n  config.redis = { url: ENV.fetch(\"REDIS_URL\", \"redis://localhost:6379/0\") }\nend\n";
 
 /// Under `queue_adapter :sidekiq` a keyword job is pushed as a payload,
 /// not refused: the ruby and spinel trees emit with no errors, and the
@@ -127,6 +130,7 @@ fn a_keyword_job_on_sidekiq_is_pushed_as_a_payload() {
                 "  config.active_job.queue_adapter = :solid_queue\n",
                 SIDEKIQ,
             )
+            .write("config/initializers/sidekiq.rb", REDIS_CLIENT)
             .emit(target);
         assert!(errors.is_empty(), "{target:?}: {errors:#?}");
         let registry = std::fs::read_to_string(emitted.join("runtime/job_registry.rb")).expect("registry");
