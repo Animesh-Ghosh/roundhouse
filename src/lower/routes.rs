@@ -540,26 +540,6 @@ fn route_name_part(
     (!part.is_empty()).then_some(part)
 }
 
-/// The auto name Rails gives `get "<path>"` outside a resource: the
-/// scope's `as` prefix plus the route's own path, only when that path is
-/// plain words, `-` and `/` (`add_route`'s `/^[\w\-\/]+$/`) and the result
-/// starts with a letter or underscore. A path with a dynamic segment, a
-/// dot or a group names nothing.
-fn own_path_name(path: &str, name_prefix: &str) -> Option<String> {
-    if path.is_empty() || !path.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/')) {
-        return None;
-    }
-    let own = path.trim_start_matches('/').replace(['/', '-'], "_");
-    let name = format!("{name_prefix}{own}");
-    if name.is_empty()
-        || own.is_empty()
-        || !name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-    {
-        return None;
-    }
-    Some(name)
-}
-
 /// The six actions a *singular* `resource :name` expands to — no
 /// `index`, no `:id` segment (`GET /profile`, `PATCH /profile`, …).
 fn singular_resource_actions() -> &'static [(&'static str, HttpMethod, &'static str)] {
@@ -618,10 +598,15 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             };
             let (nested, base_params) =
                 nest_path(written, &ctx.parents, route_scope.unwrap_or(*scope));
+            // Rails normalizes a route's path: `delete "/"` inside
+            // `collection` is `/inventory_levels`, not `/inventory_levels/`,
+            // and a resource's own path at the very top (a canonical action
+            // on `resources :x, path: "/"`) is `/`.
             let full_path = prefix_path(&ctx.ns_path, &nested);
-            // Empty only for a resource's own path at the very top (a
-            // canonical action on `resources :x, path: "/"`), which is `/`.
-            let full_path = if full_path.is_empty() { "/".to_string() } else { full_path };
+            let full_path = match full_path.trim_end_matches('/') {
+                "" => "/".to_string(),
+                trimmed => trimmed.to_string(),
+            };
             // Rails optional `(…)` segments (`get "/s/:id/(:title)"`) match
             // whether or not the segment is present; expand them into
             // concrete routes (`/s/:id/:title` and `/s/:id`) so the

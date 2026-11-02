@@ -2151,7 +2151,7 @@ fn build_path_expr(
                     parts.push(InterpPart::Text { value: std::mem::take(&mut buf) });
                 }
                 parts.push(InterpPart::Expr {
-                    expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident))),
+                    expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident)), c == '*'),
                 });
             } else {
                 buf.push(c);
@@ -2196,8 +2196,9 @@ fn build_optional_path_expr(
     let segments: Vec<&str> = path.split('/').collect();
     let kept: Vec<&str> = shortest.map(|s| s.split('/').collect()).unwrap_or_default();
     // A segment's text as parts: literal text and the params it names.
-    let segment_parts = |segment: &str| -> (Vec<InterpPart>, Option<String>) {
-        let mut parts: Vec<InterpPart> = vec![InterpPart::Text { value: "/".to_string() }];
+    let segment_parts = |segment: &str, slash: bool| -> (Vec<InterpPart>, Option<String>) {
+        let mut parts: Vec<InterpPart> =
+            vec![InterpPart::Text { value: if slash { "/" } else { "" }.to_string() }];
         let mut first_optional = None;
         let mut buf = String::new();
         let mut chars = segment.chars().peekable();
@@ -2220,14 +2221,16 @@ fn build_optional_path_expr(
                 buf.push_str(&ident);
                 continue;
             }
-            if let Some(InterpPart::Text { value }) = parts.last_mut() {
-                value.push_str(&buf);
+            match parts.last_mut() {
+                Some(InterpPart::Text { value }) => value.push_str(&buf),
+                _ if !buf.is_empty() => parts.push(InterpPart::Text { value: buf.clone() }),
+                _ => {}
             }
             buf.clear();
             if optional.contains(ident.as_str()) && first_optional.is_none() {
                 first_optional = Some(ident.clone());
             }
-            parts.push(InterpPart::Expr { expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident))) });
+            parts.push(InterpPart::Expr { expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident)), c == '*') });
         }
         if !buf.is_empty() {
             match parts.last_mut() {
@@ -2252,7 +2255,28 @@ fn build_optional_path_expr(
             next_kept = usize::from(!kept.is_empty());
             continue;
         }
-        let (parts, first_optional) = segment_parts(segment);
+        // A group inside a segment (`web-pixel-:id@:v(~:glue)`): the
+        // shortest segment is the always-present head, the rest the group.
+        if let Some(head) = kept.get(next_kept).filter(|head| {
+            !head.is_empty() && head.len() < segment.len() && segment.starts_with(**head)
+        }) {
+            let (head_parts, _) = segment_parts(head, true);
+            let (tail_parts, tail_param) = segment_parts(&segment[head.len()..], false);
+            next_kept += 1;
+            match pieces.last_mut() {
+                Some(Piece::Always(before)) => {
+                    before.extend(head_parts);
+                    merge_adjacent_text(before);
+                }
+                _ => pieces.push(Piece::Always(head_parts)),
+            }
+            match tail_param {
+                Some(param) => pieces.push(Piece::When(param, tail_parts)),
+                None => pending.extend(tail_parts),
+            }
+            continue;
+        }
+        let (parts, first_optional) = segment_parts(segment, true);
         let in_shortest = match shortest {
             Some(_) => {
                 let hit = kept.get(next_kept) == Some(segment);
@@ -2575,8 +2599,10 @@ fn var_ref(name: &str) -> Expr {
 
 /// A path param's value as Rails writes it into the URL: through
 /// `Journey::Router::Utils.escape_segment`, so `"a/b"` is `a%2Fb` and a
-/// `?` or `#` stays inside the segment. An Integer id needs none.
-fn segment_value(var: Expr) -> Expr {
+/// `?` or `#` stays inside the segment. A `*glob` param is the rest of
+/// the path, so Rails takes `escape_path` for it and its `/`s stay.
+/// An Integer id needs none.
+fn segment_value(var: Expr, glob: bool) -> Expr {
     if matches!(var.ty, Some(Ty::Int)) {
         return var;
     }
@@ -2585,11 +2611,16 @@ fn segment_value(var: Expr) -> Expr {
         Expr::new(span, ExprNode::Send { recv: Some(var), method: Symbol::from("to_s"), args: vec![], block: None, parenthesized: false }),
         Ty::Str,
     );
-    let helpers = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] });
+    let (owner, method) = if glob {
+        (vec![Symbol::from("ActionDispatch"), Symbol::from("Router")], "escape_path")
+    } else {
+        (vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")], "escape_segment")
+    };
+    let helpers = Expr::new(span, ExprNode::Const { path: owner });
     with_ty(
         Expr::new(span, ExprNode::Send {
             recv: Some(helpers),
-            method: Symbol::from("escape_segment"),
+            method: Symbol::from(method),
             args: vec![text],
             block: None,
             parenthesized: true,
