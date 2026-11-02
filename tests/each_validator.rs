@@ -13,6 +13,8 @@
 //! validator class was dropped as a subclass of an unported Rails base.
 //! A key naming no app validator, and a strict target, keep the report.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -142,9 +144,7 @@ fn a_key_naming_no_app_validator_stays_reported() {
 
 /// The `Entry` body after `target`'s lowering, and the warnings it gave.
 fn lowered_entry(target: BuildTarget) -> (Vec<String>, Vec<String>) {
-    let root = std::env::temp_dir().join(format!("roundhouse-each-validator-{}-{}", std::process::id(), target.as_str()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root = scratch::dir(&format!("roundhouse-each-validator-{}", target.as_str()));
     let source = root.join("app");
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
     let schema = std::fs::read_to_string(source.join("db/schema.rb")).unwrap().replacen(SCHEMA_ANCHOR, SCHEMA, 1);
@@ -236,9 +236,7 @@ fn a_model_in_a_module_gets_the_top_level_validator_on_ruby() {
 /// The `validates` warnings ingest and `target`'s lowering give for the
 /// blog with `files` written over it.
 fn lowered_warnings(files: &[(&str, &str)], target: BuildTarget) -> Vec<String> {
-    let root = std::env::temp_dir().join(format!("roundhouse-each-validator-w-{}-{}", std::process::id(), files.len()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root = scratch::dir(&format!("roundhouse-each-validator-w-{}", files.len()));
     let source = root.join("app");
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
     let schema = std::fs::read_to_string(source.join("db/schema.rb")).unwrap().replacen(SCHEMA_ANCHOR, SCHEMA, 1);

@@ -5,14 +5,15 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
 fn native(files: &[(&str, &str)], script: &str) -> String {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!("rh_boot_emit_order_{}_{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("rh_boot_emit_order_{n}"));
     for (path, text) in files {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -207,8 +208,7 @@ fn a_class_declared_in_a_class_body_conditional_is_carried() {
 /// `roundhouse check` on a tree vendoring the gem `gqlc` with `files`
 /// (paths in the gem): its rows.
 fn check_gem_tree(tag: &str, files: &[(&str, &str)]) -> String {
-    let root = std::env::temp_dir().join(format!("rh_boot_emit_order_{tag}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = scratch::dir(&format!("rh_boot_emit_order_{tag}"));
     let gem: Vec<(String, &str)> = files.iter().map(|(path, text)| (format!("vendor/gems/gqlc-1.0.0/{path}"), *text)).collect();
     for (path, text) in [
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),

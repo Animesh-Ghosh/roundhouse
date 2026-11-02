@@ -5,6 +5,8 @@
 //! Ported from the Shopify/roundhouse-1 fork's tests, with the gem written
 //! as a PATH gem of `Gemfile.lock`. A test the compiler does not pass yet
 //! is ignored with the group of behavior it waits on (`fork spec: ...`).
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -58,7 +60,7 @@ fn app_with(files: &[(&str, &str)], application: &str) -> emit_and_run::Overlay 
 
 #[test]
 fn a_gem_source_loads_its_data_modules_and_requires_like_the_gem() {
-    let gem = std::env::temp_dir().join(format!("rh_tessera_native_{}", std::process::id()));
+    let gem = scratch::dir("rh_tessera_native");
     write_gem(&gem, FILES);
     let native = emit_and_run::ruby().arg("-I").arg(gem.join("lib")).args(["-rtessera", "-e", OBSERVE]).output().expect("CRuby control");
     assert!(native.status.success(), "native tessera: {}", String::from_utf8_lossy(&native.stderr));
@@ -169,7 +171,7 @@ fn a_nested_namespace_a_later_file_opens_does_not_shadow_the_top_level_before_it
         ),
     ];
     const SEE: &str = "puts Tessera::Formatter.superclass.name\nputs Tessera::Logger::Sink.tag.inspect\n";
-    let gem = std::env::temp_dir().join(format!("rh_tessera_nested_native_{}", std::process::id()));
+    let gem = scratch::dir("rh_tessera_nested_native");
     write_gem(&gem, NESTED);
     let native = emit_and_run::ruby().arg("-I").arg(gem.join("lib")).args(["-rtessera", "-e", SEE]).output().expect("CRuby control");
     assert!(native.status.success(), "native tessera: {}", String::from_utf8_lossy(&native.stderr));
