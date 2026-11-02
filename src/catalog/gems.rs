@@ -43,6 +43,7 @@ pub enum GemTy {
     Bool,
     Float,
     Sym,
+    Nil,
     /// Gradual escape: the gem returns an object we don't model
     /// structurally. Dispatch resolves and the choice propagates.
     Untyped,
@@ -61,6 +62,7 @@ impl GemTy {
             GemTy::Bool => Ty::Bool,
             GemTy::Float => Ty::Float,
             GemTy::Sym => Ty::Sym,
+            GemTy::Nil => Ty::Nil,
             GemTy::Untyped => Ty::Untyped,
             GemTy::Instance(path) => Ty::Class {
                 id: ClassId(Symbol::from(path)),
@@ -90,7 +92,7 @@ pub const GEM_CATALOG: &[GemClass] = &[
     GemClass {
         name: "Faye::WebSocket",
         class_methods: &[("websocket?", GemTy::Bool)],
-        instance_methods: &[("on", GemTy::Instance("Faye::WebSocket")), ("send", GemTy::Bool),
+        instance_methods: &[("on", GemTy::Nil), ("send", GemTy::Bool),
             ("close", GemTy::Untyped), ("rack_response", GemTy::Untyped)],
     },
     GemClass {

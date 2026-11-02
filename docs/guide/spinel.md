@@ -265,7 +265,11 @@ charts.
 
 The threaded server carries a bounded `faye-websocket` adapter over Tep: upgrade detection, text `send`,
 `rack_response`, and one callback each for `open`, `message` and `close`. Callbacks obtain a `Db` lease.
-The `ping:` interval is in seconds; zero disables it. `EventMachine.schedule` runs on the calling thread.
-Subprotocols, additional constructor options, duplicate callbacks, other events and non-String sends raise.
+The `ping:` interval is in seconds; zero disables it. Keyword, positional Hash and splat options are accepted. `EventMachine.schedule` runs on the calling thread.
+Subprotocols, additional constructor options, duplicate callbacks, other events and binary/non-UTF-8 sends raise.
+`on` returns nil. Event names accept Symbols or Strings. Nil close arguments use the normal defaults.
+Pre-open text sends are buffered in order, with a 16 MiB total cap; overflow raises. Buffered Strings are copied.
+Fragmented or binary input closes with 1003 before callbacks; invalid UTF-8 text closes with 1007.
+These input restrictions apply only to this facade; existing Tep and Cable behavior remains unchanged.
 Other EventMachine APIs are unavailable. This adapter does not provide reactor scheduling or Faye error events.
 Ruby and JRuby use the real gems. Tep's close-handshake deadline remains five seconds.

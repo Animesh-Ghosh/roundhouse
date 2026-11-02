@@ -399,3 +399,28 @@ fn app_gem_overrides_and_reopens_keep_their_return_types() {
         "{sidecars}"
     );
 }
+
+#[test]
+fn blind_review_regressions_refuse_or_preserve_data() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output = Command::new("ruby")
+        .arg(root.join("tests/spinel_faye_websocket/review_regressions.rb"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for name in [
+        "before_open",
+        "fragmented",
+        "binary_send",
+        "invalid_utf8",
+        "options_hash",
+        "on_return",
+    ] {
+        assert!(stdout.contains(&format!("PASS {name}")), "{stdout}");
+    }
+}

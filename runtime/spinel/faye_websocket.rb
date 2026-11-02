@@ -59,13 +59,27 @@ module Faye
 
     attr_reader :driver, :accept_key
 
-    def initialize(env, protocols = nil, ping: 0)
+    def initialize(env, protocols = nil, options = {})
+      raise ArgumentError, "Faye options must be a Hash" unless options.is_a?(Hash)
+      options.each_key { |key| raise ArgumentError, "unsupported Faye option" unless key == :ping }
+      ping = options.fetch(:ping, 0)
+      ping = 0 if ping.nil?
+      raise ArgumentError, "Faye ping must be numeric" unless ping.is_a?(Integer) || ping.is_a?(Float)
       raise ArgumentError, "Faye subprotocols are not supported on Spinel" unless protocols.nil? || (protocols.is_a?(Array) && protocols.empty?)
       raise ArgumentError, "Faye ping must be nonnegative" unless ping >= 0
       raise ArgumentError, "not a WebSocket upgrade" unless WebSocket.websocket?(env)
       @env = env
       @accept_key = Tep::WebSocket::Handshake.check(WebSocket.request_from_env(env)).accept_key
       @driver = Tep::WebSocket::Driver.new(-1)
+      @driver.faye_text_only = true
+      @send_lock = Mutex.new
+      @pending = []
+      @pending_bytes = 0
+      @opened = false
+      @opening = false
+      @close_requested = false
+      @close_code = 1000
+      @close_reason = ""
       @ping_interval = ping
       @ping_threads = []
       @registered = []
@@ -76,6 +90,8 @@ module Faye
     end
 
     def on(type, &callback)
+      raise ArgumentError, "unsupported WebSocket event" unless type.is_a?(Symbol) || type.is_a?(String)
+      type = type.to_sym
       raise ArgumentError, "Faye callback block required" if callback.nil?
       raise ArgumentError, "duplicate Faye callback is not supported" if @registered.include?(type)
       handler = Callback.new(&callback)
@@ -86,10 +102,34 @@ module Faye
       else raise ArgumentError, "unsupported WebSocket event"
       end
       @registered.push(type)
-      self
+      nil
     end
 
     def opened(event)
+      @send_lock.synchronize { @opening = true }
+      done = false
+      until done
+        batch = []
+        @send_lock.synchronize do
+          if @pending.empty?
+            @opened = true
+            @opening = false
+            done = true
+          else
+            batch = @pending
+            @pending = []
+          end
+        end
+        batch.each do |data|
+          raise IOError, "Faye buffered send failed" if @driver.text(data) < 0
+          @send_lock.synchronize { @pending_bytes -= data.bytesize }
+        end
+      end
+      if @close_requested
+        @driver.close(@close_code, @close_reason)
+        return 0
+      end
+      return 0 if @driver.closing?
       if @ping_interval > 0
         timer = Thread.new(@driver, @ping_interval) do |driver, interval|
           loop do
@@ -104,6 +144,7 @@ module Faye
     end
 
     def closed(event)
+      @send_lock.synchronize { @pending.clear; @pending_bytes = 0 }
       @ping_threads.each { |timer| timer.kill }
       @ping_threads.clear
       @on_close.handle_event(event)
@@ -112,13 +153,44 @@ module Faye
 
     def send(data)
       raise ArgumentError, "Faye binary messages are not supported on Spinel" unless data.is_a?(String)
-      @driver.text(data) >= 0
+      unless data.encoding == Encoding::UTF_8 || data.encoding == Encoding::US_ASCII
+        raise ArgumentError, "Faye binary or non-UTF-8 Strings are not supported"
+      end
+      raise ArgumentError, "invalid Faye UTF-8 text" unless data.valid_encoding?
+      result = false
+      send_now = false
+      @send_lock.synchronize do
+        unless @driver.closing? || @close_requested
+          if @opened
+            send_now = true
+          else
+            raise ArgumentError, "Faye pre-open buffer exceeds 16 MiB" if @pending_bytes + data.bytesize > 16777216
+            @pending.push(data.dup)
+            @pending_bytes += data.bytesize
+            result = true
+          end
+        end
+      end
+      send_now ? @driver.text(data) >= 0 : result
     end
 
     def close(code = 1000, reason = "")
+      code = 1000 if code.nil?
+      reason = "" if reason.nil?
+      raise ArgumentError, "unsupported Faye close arguments" unless code.is_a?(Integer) && reason.is_a?(String)
       raise ArgumentError, "unsupported Faye close code" unless code == 1000 || (code >= 3000 && code <= 4999)
       raise ArgumentError, "Faye close reason exceeds 123 bytes" if reason.bytesize > 123
-      @driver.close(code, reason)
+      close_now = false
+      @send_lock.synchronize do
+        unless @close_requested
+          @close_requested = true
+          @close_code = code
+          @close_reason = reason
+          close_now = @opened || @opening
+        end
+      end
+      @driver.close(code, reason) if close_now
+      0
     end
 
     def rack_response
