@@ -1094,9 +1094,9 @@ fn field_storage_setter(table: &Table, field: &Symbol) -> Symbol {
 }
 
 /// The writer one params field goes through and the value it is handed.
-/// A field a merge or a `[]=` writes a non-String value (`written_scalar_ty`)
-/// is assigned as `attributes=` assigns it; a String field is converted
-/// from its text.
+/// A column a merge or a `[]=` writes a non-String value (`written_scalar_ty`)
+/// is assigned as `attributes=` assigns it; any other field keeps its
+/// conversion from the request's text.
 fn params_field_write(
     model: &Model,
     table: Option<&Table>,
@@ -1104,16 +1104,11 @@ fn params_field_write(
     field: &Symbol,
     value: Expr,
 ) -> (Symbol, Expr) {
-    let column = table.and_then(|table| table.columns.iter().find(|c| c.name == *field));
-    if crate::lower::controller_to_library::params::written_scalar_ty(spec, field).is_some() {
-        match column {
-            Some(col) => {
-                if let Some((setter, value)) = mass_assigned_column(model, col, value.clone()) {
-                    return (Symbol::from(setter), value);
-                }
-            }
-            None => return (Symbol::from(format!("{}=", field.as_str())), value),
-        }
+    if crate::lower::controller_to_library::params::written_scalar_ty(spec, field).is_some()
+        && let Some(col) = table.and_then(|table| table.columns.iter().find(|c| c.name == *field))
+        && let Some((setter, value)) = mass_assigned_column(model, col, value.clone())
+    {
+        return (Symbol::from(setter), value);
     }
     match table {
         Some(table) => (field_storage_setter(table, field), typed_param_value(model, table, field, value)),

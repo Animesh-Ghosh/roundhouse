@@ -184,6 +184,49 @@ const MERGED_HELPER: &str = r#"class ItemsController < ApplicationController
 end
 "#;
 
+const TYPED_STORE_USERS: &str = r#"class UsersController < ApplicationController
+  def create
+    user = User.new(user_params)
+    user.save!
+    render json: { avatar_source: user.avatar_source, notify: user.notify }
+  end
+
+  private
+
+  def user_params
+    params.require(:user).permit(:username).merge(avatar_source: 2.7, notify: 0)
+  end
+end
+"#;
+
+#[test]
+fn merged_values_for_typed_store_attributes_keep_their_casts() {
+    let app = || emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"users\", force: :cascade do |t|\n    t.string \"username\"\n    t.text \"settings\"\n  end\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write("app/models/user.rb", "class User < ApplicationRecord\n  typed_store :settings do |s|\n    s.integer :avatar_source\n    s.boolean :notify\n  end\nend\n")
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::API\nend\n")
+        .write("app/controllers/users_controller.rb", TYPED_STORE_USERS)
+        .write("config/routes.rb", "Rails.application.routes.draw do\n  resources :users, only: %i[create]\nend\n");
+    let (emitted, errors) = app().emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let model = std::fs::read_to_string(emitted.join("app/models/user.rb")).expect("model");
+    assert!(model.contains("instance.avatar_source = p.avatar_source.to_i if"), "{model}");
+    assert!(model.contains(r#"instance.notify = !["0", "", "false"].include?((p.notify).to_s) if"#), "{model}");
+    let run = app().run_ruby(
+        r##"
+body = %({"user":{"username":"u"}})
+env = { "REQUEST_METHOD" => "POST", "PATH_INFO" => "/users", "QUERY_STRING" => "", "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => body.bytesize.to_s, "rack.input" => StringIO.new(body) }
+status, _headers, out = Main.run_rack(env)
+text = +""
+out.each { |part| text << part }
+puts "#{status} #{text}"
+"##,
+    );
+    run.assert_passes();
+    assert!(run.stdout.contains(r#"200 {"avatar_source":2,"notify":false}"#), "{}", run.stdout);
+}
+
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn merged_values_of_other_types_go_through_the_spinel_factory() {
