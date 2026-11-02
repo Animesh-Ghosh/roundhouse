@@ -222,7 +222,14 @@ pub(super) fn carries_all(body: Node<'_>, path: &str) -> bool {
                 let at = call.location().start_offset() as u32;
                 match call.receiver() {
                     None => verb == "include" && hook_class(&hook).is_some() && literal_args,
-                    Some(r) => verb == "extend" && hook_class(&hook).is_some() && constant_path_of(&r).is_some() && literal_args && !refused.contains(&at),
+                    // Not any receiver: before the ingest has its classes, only a framework constant's kind is known.
+                    Some(r) => {
+                        verb == "extend"
+                            && hook_class(&hook).is_some()
+                            && constant_path_of(&r).is_some_and(|p| framework_kind(&p.join("::")).is_some())
+                            && literal_args
+                            && !refused.contains(&at)
+                    }
                 }
             })
         })

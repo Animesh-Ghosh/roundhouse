@@ -636,7 +636,11 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let source_vfs = PathGemVfs::new(&mount_vfs, dir, &path_gems);
     let factory_vfs = super::module_factory::expand(&source_vfs, dir);
     let vfs = &factory_vfs;
-    let engine_routes = engine_route_sources(vfs, dir, &path_gems);
+    let engine_config_libs: Vec<PathBuf> = std::iter::once(dir.join("lib")).chain(path_gems.iter().map(|gem| gem.join("lib"))).collect();
+    // Before the mounts are admitted: the ledger that admits one reads what this settles.
+    super::engine_config::prepare(vfs, dir, &engine_config_libs);
+    super::on_load_reopen::reset();
+    let (engine_routes, engine_refusals) = engine_route_sources(vfs, dir, &path_gems);
     let additional_test_paths = additional_test_paths(dir, &config)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
     let roots = app_roots(vfs, dir, &path_gems);
@@ -664,9 +668,6 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
         )
     };
     let mut app = App::new();
-    let engine_config_libs: Vec<PathBuf> = std::iter::once(dir.join("lib")).chain(path_gems.iter().map(|gem| gem.join("lib"))).collect();
-    super::engine_config::prepare(vfs, dir, &engine_config_libs);
-    super::on_load_reopen::reset();
     app.extensions = extensions;
     app.spinel_int_overflow = spinel_int_overflow;
     // `enum` columns declared inside a concern's `included do`, keyed by
@@ -2152,6 +2153,7 @@ end
                     &draw_files,
                     &block_wrappers,
                     &engine_routes,
+                    &engine_refusals,
                     &rack_apps,
                     &helper_sources,
                     &load_helper_sources,
@@ -8989,12 +8991,12 @@ fn engine_route_sources<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
     path_gems: &[PathBuf],
-) -> HashMap<String, EngineRouteSource> {
+) -> (HashMap<String, EngineRouteSource>, HashMap<String, String>) {
     struct Declaration {
         engine_dir: PathBuf,
         namespace: Option<String>,
         is_rails_engine: bool,
-        plain_source_file: bool,
+        in_lib: bool,
     }
 
     let mut declarations: HashMap<String, Vec<Declaration>> = HashMap::default();
@@ -9034,26 +9036,25 @@ fn engine_route_sources<V: Vfs + ?Sized>(
                         .is_some_and(|path| path.len() == 2 && path[0] == "Rails" && path[1] == "Engine")
                 });
                 let namespace = is_rails_engine.then(|| literal_isolated_namespace(&class)).flatten();
-                let plain_source_file = is_rails_engine
-                    && file.starts_with(&lib_dir)
-                    && plain_engine_declaration_file(&parsed.node(), &class_name);
+                let in_lib = is_rails_engine && file.starts_with(&lib_dir);
                 declarations.entry(class_name).or_default().push(Declaration {
                     engine_dir: engine_dir.clone(),
                     namespace,
                     is_rails_engine,
-                    plain_source_file,
+                    in_lib,
                 });
             }
         }
     }
 
     let mut sources = HashMap::default();
+    let mut refusals = HashMap::default();
     for (class_name, declarations) in declarations {
         if declarations.len() != 1 {
             continue;
         }
         let declaration = declarations.into_iter().next().expect("one declaration");
-        if !declaration.is_rails_engine || !declaration.plain_source_file {
+        if !declaration.is_rails_engine || !declaration.in_lib {
             continue;
         }
         let Some(namespace) = declaration.namespace else { continue };
@@ -9069,19 +9070,19 @@ fn engine_route_sources<V: Vfs + ?Sized>(
         // engine. Admit only in-tree literal requires and declarations in
         // lib/; executable file/class-body calls can register initializers,
         // middleware, or route mutations outside the Engine class file.
-        if !plain_engine_library_sources(vfs, &engine_dir, &class_name) {
+        if let Some(at) = first_unplain_library_statement(vfs, &engine_dir, &class_name) {
+            refusals.insert(class_name, format!("its lib/ runs code at load this mount does not check: {at}"));
             continue;
         }
-        // Railties run files in config/initializers even when the Engine
-        // class itself is otherwise plain. This slice does not replay
-        // those side effects (middleware, route prepends, auth setup, …),
-        // so an engine carrying any such files remains an explicit mount
-        // gap. Checking directory presence also avoids following a hidden
-        // symlinked initializer through the original Rails runtime.
+        // Not only a plain class body: what its class body and its config/initializers do at boot is each
+        // read or settled (the initializer ledger), and a mount stays refused while one is not.
         let initializers = engine_dir.join("config/initializers");
-        if vfs.is_dir(&initializers)
-            || path_has_symlink_component(vfs, &engine_dir, &initializers)
-        {
+        if path_has_symlink_component(vfs, &engine_dir, &initializers) {
+            continue;
+        }
+        let unaccounted = super::initializer_ledger::engine_unaccounted(vfs, &engine_dir, &class_name);
+        if !unaccounted.is_empty() {
+            refusals.insert(class_name, format!("its boot statements nothing replays yet: {}", unaccounted.join(", ")));
             continue;
         }
         let Ok(relative) = engine_dir.strip_prefix(dir) else { continue };
@@ -9101,7 +9102,7 @@ fn engine_route_sources<V: Vfs + ?Sized>(
             },
         );
     }
-    sources
+    (sources, refusals)
 }
 
 /// Sources where route helpers can be called. This is collected on the first
@@ -9273,15 +9274,14 @@ fn route_helper_sources<V: Vfs + ?Sized>(
 /// receivers, dynamic arguments, and duplicate declarations are unavailable.
 fn literal_isolated_namespace(class: &ruby_prism::ClassNode<'_>) -> Option<String> {
     let body = class.body()?;
-    let statements = super::util::flatten_statements(body);
-    if statements.len() != 1 {
-        return None;
-    }
-    let call = statements[0].as_call_node()?;
-    if super::util::constant_id_str(&call.name()) != "isolate_namespace"
-        || call.receiver().is_some()
-        || call.block().is_some()
-    {
+    // Not the class body's only statement: the rest is the initializer ledger's to account for.
+    let isolates: Vec<ruby_prism::CallNode<'_>> = super::util::flatten_statements(body)
+        .iter()
+        .filter_map(|statement| statement.as_call_node())
+        .filter(|call| super::util::constant_id_str(&call.name()) == "isolate_namespace")
+        .collect();
+    let [call] = isolates.as_slice() else { return None };
+    if call.receiver().is_some() || call.block().is_some() {
         return None;
     }
     let args = call.arguments()?;
@@ -9293,46 +9293,6 @@ fn literal_isolated_namespace(class: &ruby_prism::ClassNode<'_>) -> Option<Strin
     Some(namespace)
 }
 
-/// The engine class must be the only declaration in its source file, nested
-/// through plain namespace modules. This prevents a top-level side effect or
-/// a sibling declaration in `engine.rb` from changing the loaded engine
-/// after the route-only composition check.
-fn plain_engine_declaration_file(root: &Node<'_>, engine_name: &str) -> bool {
-    fn one_statement<'pr>(node: &Node<'pr>) -> Option<Node<'pr>> {
-        let statements = if let Some(program) = node.as_program_node() {
-            program.statements()
-        } else {
-            node.as_statements_node()?
-        };
-        let mut body = statements.body().iter();
-        let statement = body.next()?;
-        body.next().is_none().then_some(statement)
-    }
-
-    fn follow_chain<'pr>(node: Node<'pr>, scope: &mut Vec<String>, engine_name: &str) -> bool {
-        if let Some(module) = node.as_module_node() {
-            let Some(name) = super::util::module_name_path(&module) else { return false };
-            let old_len = scope.len();
-            scope.extend(name);
-            let valid = module.body().and_then(|body| one_statement(&body))
-                .is_some_and(|statement| follow_chain(statement, scope, engine_name));
-            scope.truncate(old_len);
-            return valid;
-        }
-        let Some(class) = node.as_class_node() else { return false };
-        let Some(mut path) = super::util::class_name_path(&class) else { return false };
-        let mut qualified = scope.clone();
-        qualified.append(&mut path);
-        let Some(parent) = class.superclass() else { return false };
-        qualified.join("::") == engine_name
-            && super::util::constant_path_of(&parent)
-                .is_some_and(|parts| parts.len() == 2 && parts[0] == "Rails" && parts[1] == "Engine")
-            && literal_isolated_namespace(&class).is_some()
-    }
-
-    one_statement(root).is_some_and(|statement| follow_chain(statement, &mut Vec::new(), engine_name))
-}
-
 /// The engine library's source-level loading surface must be plain before a
 /// route-only mount is admitted. Literal requires may target another Ruby
 /// file under this same `lib/` tree (which is checked in this walk), plus the
@@ -9342,6 +9302,74 @@ fn plain_engine_declaration_file(root: &Node<'_>, engine_name: &str) -> bool {
 /// ordinary `self` methods, and scalar constants. Ruby load-hook methods,
 /// aliases, other calls, conditionals, and computed constants remain an
 /// explicit mount gap.
+/// The first statement of the engine's lib/ that [`plain_engine_library_sources`]
+/// does not admit, as `` `head` (path:line) ``; None when every one is.
+fn first_unplain_library_statement<V: Vfs + ?Sized>(vfs: &V, engine_dir: &Path, engine_name: &str) -> Option<String> {
+    if plain_engine_library_sources(vfs, engine_dir, engine_name) {
+        return None;
+    }
+    let lib_dir = engine_dir.join("lib");
+    let files = read_rb_files(vfs, &lib_dir).ok()?;
+    let lib_files: HashSet<PathBuf> = files.iter().cloned().collect();
+    #[allow(clippy::too_many_arguments)]
+    fn rejected<V: Vfs + ?Sized>(
+        vfs: &V,
+        lib_dir: &Path,
+        file: &Path,
+        lib_files: &HashSet<PathBuf>,
+        engine_name: &str,
+        scope: &mut Vec<String>,
+        statement: &Node<'_>,
+        top_level: bool,
+    ) -> Option<usize> {
+        if plain_engine_library_statement(vfs, lib_dir, file, lib_files, engine_name, scope, statement, top_level) {
+            return None;
+        }
+        let here = statement.location().start_offset();
+        let (name, body) = if let Some(module) = statement.as_module_node() {
+            (super::util::module_name_path(&module), module.body())
+        } else if let Some(class) = statement.as_class_node() {
+            let mut qualified = scope.clone();
+            qualified.extend(super::util::class_name_path(&class).unwrap_or_default());
+            if qualified.join("::") == engine_name || class.superclass().is_some() {
+                return Some(here);
+            }
+            (super::util::class_name_path(&class), class.body())
+        } else {
+            return Some(here);
+        };
+        let Some(name) = name else { return Some(here) };
+        let depth = scope.len();
+        scope.extend(name);
+        let inner = body.and_then(|b| {
+            super::util::flatten_statements(b)
+                .iter()
+                .find_map(|s| rejected(vfs, lib_dir, file, lib_files, engine_name, scope, s, false))
+        });
+        scope.truncate(depth);
+        Some(inner.unwrap_or(here))
+    }
+    for file in &files {
+        let relative = file.strip_prefix(engine_dir).unwrap_or(file).display().to_string();
+        if path_has_symlink_component(vfs, &lib_dir, file) {
+            return Some(format!("a linked file ({relative})"));
+        }
+        let source = vfs.read(file).ok()?;
+        let parsed = super::prism::parse_silent(&source);
+        let Some(program) = parsed.node().as_program_node() else { continue };
+        let mut scope = Vec::new();
+        for statement in program.statements().body().iter() {
+            if let Some(at) = rejected(vfs, &lib_dir, file, &lib_files, engine_name, &mut scope, &statement, true) {
+                let line = source[..at.min(source.len())].iter().filter(|b| **b == b'\n').count() + 1;
+                let text = String::from_utf8_lossy(&source[at.min(source.len())..]);
+                let head: String = text.lines().next().unwrap_or("").trim().chars().take(60).collect();
+                return Some(format!("`{head}` ({relative}:{line})"));
+            }
+        }
+    }
+    Some("an unreadable file".to_string())
+}
+
 fn plain_engine_library_sources<V: Vfs + ?Sized>(
     vfs: &V,
     engine_dir: &Path,

@@ -507,6 +507,37 @@ fn customized_engine_boot_behavior_remains_an_explicit_error() {
     }
 }
 
+/// A class body statement the engine's boot accounts for (a block only a
+/// `rails` command runs) leaves the mount admitted; one nothing replays
+/// keeps it refused, and the error names that statement.
+#[test]
+fn an_accounted_engine_boot_admits_the_mount_and_an_unaccounted_one_is_named() {
+    let fixture = Fixture::new("accounted-boot");
+    let app = fixture.write_app(true);
+    std::fs::write(
+        app.join("vendor/catalog/lib/catalog/engine.rb"),
+        "module Catalog\n  class Engine < Rails::Engine\n    isolate_namespace Catalog\n\n    rake_tasks do\n      load \"catalog/tasks.rake\"\n    end\n  end\nend\n",
+    )
+    .unwrap();
+    let out = fixture.0.join("admitted");
+    let result = transpile(&app, "spinel", &out, &[]);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(std::fs::read_to_string(out.join("config/routes.rb")).unwrap().contains("/catalog/products"));
+
+    std::fs::write(
+        app.join("vendor/catalog/lib/catalog/engine.rb"),
+        "module Catalog\n  class Engine < Rails::Engine\n    isolate_namespace Catalog\n\n    config.after_initialize do\n      Catalog.warm!\n    end\n  end\nend\n",
+    )
+    .unwrap();
+    let out = fixture.0.join("refused");
+    let result = transpile(&app, "spinel", &out, &[]);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!result.status.success(), "{stderr}");
+    assert!(stderr.contains("its boot statements nothing replays yet: `config.after_initialize`"), "{stderr}");
+    assert!(!out.exists(), "strict mode wrote partial output");
+}
+
 /// The gem entrypoint executes before mounting. It may load only checked
 /// in-tree Ruby sources (and the Rails engine bootstrap); arbitrary top-level
 /// calls or alias-based initializer registration keep the mount unsupported.

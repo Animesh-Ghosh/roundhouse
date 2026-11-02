@@ -121,6 +121,7 @@ pub fn ingest_routes_with_dsl(
         draws,
         block_wrappers,
         &HashMap::default(),
+        &HashMap::default(),
         &RackAppTargets::default(),
         &OnceCell::new(),
         &|| Vec::new(),
@@ -138,6 +139,7 @@ pub(super) fn ingest_routes_with_engines(
     draws: &HashMap<String, (Vec<u8>, String)>,
     block_wrappers: &HashSet<String>,
     engine_routes: &HashMap<String, EngineRouteSource>,
+    engine_refusals: &HashMap<String, String>,
     rack_apps: &RackAppTargets,
     helper_sources: &OnceCell<Vec<RouteHelperSource>>,
     load_helper_sources: &dyn Fn() -> Vec<RouteHelperSource>,
@@ -149,6 +151,7 @@ pub(super) fn ingest_routes_with_engines(
         draws,
         wrappers: block_wrappers,
         engine_routes,
+        engine_refusals,
         rack_apps,
         helper_sources,
         load_helper_sources,
@@ -248,6 +251,8 @@ struct Ctx<'a> {
     wrappers: &'a HashSet<String>,
     /// Exact source-backed engine classes with literal isolated namespaces.
     engine_routes: &'a HashMap<String, EngineRouteSource>,
+    /// Why an isolated source engine's mount is not admitted, by class.
+    engine_refusals: &'a HashMap<String, String>,
     /// Literal app constants with a source-defined public singleton call(env).
     rack_apps: &'a RackAppTargets,
     /// Per-route-ingest snapshot shared by all accepted-mount helper scans.
@@ -458,6 +463,9 @@ fn ingest_literal_mount(
                 },
             });
         }
+        None if cx.engine_refusals.contains_key(&engine_name) => {
+            return unsupported(&format!("engine `{engine_name}` is not mounted: {}", cx.engine_refusals[&engine_name]));
+        }
         None => return unsupported(&format!(
             "Rack target `{engine_name}` is not a unique in-app class or module with a source-defined public singleton `call(env)` taking one positional argument"
         )),
@@ -485,6 +493,7 @@ fn ingest_literal_mount(
     let empty_draws = HashMap::default();
     let empty_wrappers = HashSet::default();
     let empty_engine_routes = HashMap::default();
+    let empty_engine_refusals = HashMap::default();
     let empty_rack_apps = RackAppTargets::default();
     let empty_helper_sources = OnceCell::new();
     let empty_helper_loader = || Vec::new();
@@ -525,6 +534,7 @@ fn ingest_literal_mount(
             draws: &empty_draws,
             wrappers: &empty_wrappers,
             engine_routes: &empty_engine_routes,
+            engine_refusals: &empty_engine_refusals,
             rack_apps: &empty_rack_apps,
             helper_sources: &empty_helper_sources,
             load_helper_sources: &empty_helper_loader,
@@ -3758,6 +3768,7 @@ mod lazy_helper_source_tests {
             &HashMap::default(),
             &HashSet::default(),
             engines,
+            &HashMap::default(),
             &RackAppTargets::default(),
             helper_sources,
             load_helper_sources,

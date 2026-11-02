@@ -1468,6 +1468,32 @@ fn absolute(dir: &Path, relative: &str) -> String {
 
 /// The whole ledger, file by file, in report order: host initializers,
 /// `config/application.rb`, then each engine's initializers and class body.
+/// The boot statements of the engine `engine_name` at `engine_dir` that
+/// nothing accounts for, as `statement (path:line)`, read as if its mount
+/// were admitted: its `config/initializers` and its class body.
+pub(super) fn engine_unaccounted<V: Vfs + ?Sized>(vfs: &V, engine_dir: &Path, engine_name: &str) -> Vec<String> {
+    let mut ledgers = Vec::new();
+    let initializers = engine_dir.join("config/initializers");
+    if vfs.is_dir(&initializers) {
+        for entry in read_rb_files(vfs, &initializers).unwrap_or_default() {
+            let Ok(bytes) = vfs.read(&entry) else { continue };
+            ledgers.push(initializer_ledger(Origin::EngineInitializer, engine_name, &entry, &bytes, &[]));
+        }
+    }
+    let admitted: HashSet<String> = std::iter::once(engine_name.to_string()).collect();
+    for entry in read_rb_files(vfs, &engine_dir.join("lib")).unwrap_or_default() {
+        let Ok(bytes) = vfs.read(&entry) else { continue };
+        if bytes.windows(10).any(|w| w == b"Rails::Eng") {
+            ledgers.extend(engine_class_ledgers(&entry, &bytes, &admitted, &[]));
+        }
+    }
+    ledgers
+        .into_iter()
+        .flat_map(|l| l.findings)
+        .map(|f| format!("`{}` ({}:{})", f.statement, f.path, f.line))
+        .collect()
+}
+
 pub fn ledger<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
