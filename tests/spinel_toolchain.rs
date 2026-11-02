@@ -58,7 +58,7 @@ mod class_body_calls_contract;
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn ordinary_class_body_calls_run_natively() {
-    class_body_calls_contract::overlay()
+    class_body_calls_contract::settings_overlay()
         .run_spinel_with_rbs(class_body_calls_contract::ASSERTIONS)
         .assert_passes();
 }

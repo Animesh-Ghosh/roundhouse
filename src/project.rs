@@ -1100,16 +1100,6 @@ fn report_typescript_error_class(app: &App, target: BuildTarget) {
 /// Ruby family's emit; no other target carries a class body's own code.
 fn report_replayed_class_bodies(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
-        crate::lower::for_each_emit_body_ref(app, &mut |expr| {
-            if expr.decisions & crate::expr::CLASS_BODY_BINDING_ORDER != 0 {
-                emit::diagnostics::report_unsupported(
-                    expr.span, target.as_str(), "class-body method binding",
-                    "this load-time call crosses a method redefinition or an unplaced class-body statement; its original execution order is not verified on this emission path",
-                );
-            }
-        });
-    }
-    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
         return;
     }
     for model in &app.models {

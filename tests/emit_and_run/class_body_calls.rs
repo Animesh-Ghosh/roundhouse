@@ -3,7 +3,7 @@ use roundhouse::project::BuildTarget;
 
 #[test]
 fn ordinary_class_body_calls_keep_receiver_state_and_order() {
-    contract::overlay().run_ruby(contract::ASSERTIONS).assert_passes();
+    contract::settings_overlay().run_ruby(contract::ASSERTIONS).assert_passes();
 }
 
 #[test]
@@ -147,4 +147,45 @@ fn an_inherited_call_does_not_cross_an_unplaced_extension_call() {
         .write("app/models/labelled_document.rb", "class LabelledDocument < DocumentBase\n extend PriorSettings\n audit\n label \"sample\"\nend\n")
         .emit(BuildTarget::Ruby);
     assert!(errors.iter().any(|e| e.contains("class-body method binding")), "{errors:#?}");
+}
+
+
+#[test]
+fn unproved_inherited_replay_is_a_check_error_on_each_ruby_target() {
+    let parent = r#"
+class DocumentBase
+  def self.label(value = nil)
+    value ? @label = decorate(value) : @label
+  end
+  def self.decorate(value) = "parent:" + value
+  def self.mode = @mode
+  def self.mode=(value)
+    @mode = value
+  end
+  def self.configure(mode: "default")
+    @mode = mode
+  end
+end
+"#;
+    let cases = [
+        ("class LabelledDocument < DocumentBase\nend\nclass Other\n LabelledDocument.mode = \"fallback\"\nend\n", ""),
+        ("class LabelledDocument < DocumentBase\n self.mode ||= \"fallback\"\nend\n", ""),
+        ("class LabelledDocument < DocumentBase\n label \"sample\"\nend\n", "class DocumentBase\n extend LabelMethods\nend\n"),
+        ("class LabelledDocument < DocumentBase\n label \"sample\"\nend\n", "class LabelledDocument\n def self.decorate(value) = \"child:\" + value\nend\n"),
+        ("class LabelledDocument < DocumentBase\n label \"sample\"\n extend LabelMethods\nend\n", ""),
+        ("class LabelledDocument < DocumentBase\n OPTIONS = {mode: \"sample\"}\n configure(**OPTIONS)\nend\n", ""),
+        ("class LabelledDocument < DocumentBase\n configure(**{})\nend\n", ""),
+    ];
+    for target in [BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel] {
+        for (body, reopening) in cases {
+            let (_, app, errors) = contract::overlay()
+                .write("app/models/document_base.rb", parent)
+                .write("app/models/labelled_document.rb", body)
+                .write("app/models/later.rb", reopening)
+                .emit_with_app(target);
+            assert!(errors.iter().any(|e| e.message.contains("class-body method binding")), "{target:?}: {body}: {errors:#?}");
+            let check = roundhouse::analyze::diagnose(&app);
+            assert!(check.iter().any(|d| d.message.contains("class-body method binding")), "{target:?}: {body}: {check:#?}");
+        }
+    }
 }

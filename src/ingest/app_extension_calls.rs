@@ -65,6 +65,7 @@ pub(super) fn mark(app: &mut App) {
         let from_ancestry = parents.get(&owner).and_then(|p| inherited.get(p)).cloned().unwrap_or_default();
         let declarations: Vec<_> = lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Class)
             .map(|m| (m.name.as_str().to_string(), m.name_span)).collect();
+        let mixed_body = !lc.includes.is_empty() || lc.unknown_calls.iter().any(mixin_statement);
         if let Some(methods) = parents.get(&owner).and_then(|p| inherited.get(p)) {
             own.extend(methods.iter().cloned());
         }
@@ -85,8 +86,8 @@ pub(super) fn mark(app: &mut App) {
                     && !expr.span.is_synthetic()
                 {
                     expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
-                    if !direct.contains(name.as_str()) && from_ancestry.contains(name.as_str())
-                        && binding_changes(&owner, expr.span, &from_ancestry, &declarations, &redefined) {
+                    // Conditional inherited initialization is outside the fixed-order subset.
+                    if !direct.contains(name.as_str()) && from_ancestry.contains(name.as_str()) {
                         expr.decisions |= crate::expr::CLASS_BODY_BINDING_ORDER;
                     }
                 }
@@ -122,9 +123,10 @@ pub(super) fn mark(app: &mut App) {
                     singletons.get(*name).is_none_or(|m| !m.contains(method.as_str())));
                 let local_new = (own_call && !direct.contains(method.as_str())) || inherited_reader
                     || named_new.is_some_and(|name| name == &owner);
-                if (local_new && (binding_changes(&owner, expr.span, &from_ancestry, &declarations, &redefined)
+                if (local_new && (mixed_body || inherited_reader || keyword_splat(expr)
+                    || binding_changes(&owner, expr.span, &from_ancestry, &declarations, &redefined)
                     || unplaced.iter().any(|s| s.file == expr.span.file && s.start < expr.span.start)))
-                    || named_new.is_some_and(|name| redefined.contains(name))
+                    || named_new.is_some_and(|name| name != &owner || redefined.contains(name))
                 {
                     expr.decisions |= crate::expr::CLASS_BODY_BINDING_ORDER;
                 }
@@ -153,6 +155,7 @@ pub(super) fn mark(app: &mut App) {
         let from_ancestry = parents.get(&owner).and_then(|p| inherited.get(p)).cloned().unwrap_or_default();
         let declarations: Vec<_> = model.methods().filter(|m| m.receiver == MethodReceiver::Class)
             .map(|m| (m.name.as_str().to_string(), m.name_span)).collect();
+        let mixed_body = model.body.iter().any(|item| matches!(item, ModelBodyItem::Unknown { expr, .. } if mixin_statement(expr)));
         if let Some(methods) = parents.get(&owner).and_then(|p| inherited.get(p)) {
             own.extend(methods.iter().cloned());
         }
@@ -168,7 +171,8 @@ pub(super) fn mark(app: &mut App) {
                 expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
                 if let ExprNode::Send { method, .. } = &*expr.node
                     && !direct.contains(method.as_str())
-                    && binding_changes(&owner, expr.span, &from_ancestry, &declarations, &redefined)
+                    && (mixed_body || keyword_splat(expr)
+                        || binding_changes(&owner, expr.span, &from_ancestry, &declarations, &redefined))
                 {
                     expr.decisions |= crate::expr::CLASS_BODY_BINDING_ORDER;
                 }
@@ -229,9 +233,11 @@ fn inherited_class_methods(
     let app_method = |m: &&crate::dialect::MethodDef| app.source_path(m.name_span.file).is_some_and(|path|
         !path.contains(".roundhouse/source_gems/") && !path.contains("/vendor/gems/"));
     let mut seen = HashSet::default();
+    let mut openings = HashSet::default();
     let mut redefined = HashSet::default();
     for lc in app.library_classes.iter().filter(|lc| lc.origin.is_none()) {
         let name = lc.name.0.as_str().to_string();
+        if !openings.insert(name.clone()) { redefined.insert(name.clone()); }
         for method in lc.methods.iter().filter(app_method).filter(|m| lc.is_module || m.receiver == MethodReceiver::Class) {
             if !seen.insert((name.clone(), method.receiver == MethodReceiver::Class, method.name.clone())) {
                 redefined.insert(name.clone());
@@ -250,6 +256,7 @@ fn inherited_class_methods(
     }
     for model in &app.models {
         let name = model.name.0.as_str().to_string();
+        if !openings.insert(name.clone()) { redefined.insert(name.clone()); }
         for method in model.methods().filter(app_method).filter(|m| m.receiver == MethodReceiver::Class) {
             if !seen.insert((name.clone(), true, method.name.clone())) { redefined.insert(name.clone()); }
         }
@@ -301,13 +308,25 @@ fn inherited_class_methods(
 
 fn binding_changes(
     owner: &str,
-    call: crate::span::Span,
+    _call: crate::span::Span,
     inherited: &HashSet<String>,
     declarations: &[(String, crate::span::Span)],
     redefined: &HashSet<String>,
 ) -> bool {
-    redefined.contains(owner) || declarations.iter().any(|(name, span)|
-        span.file == call.file && span.start > call.start && inherited.contains(name))
+    redefined.contains(owner) || declarations.iter().any(|(name, _)| inherited.contains(name))
+}
+
+fn mixin_statement(expr: &crate::expr::Expr) -> bool {
+    matches!(&*expr.node, ExprNode::Send { recv, method, .. }
+        if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+            && matches!(method.as_str(), "extend" | "include" | "prepend"))
+}
+
+fn keyword_splat(expr: &crate::expr::Expr) -> bool {
+    let mut found = matches!(&*expr.node, ExprNode::KeywordSplat { .. })
+        || expr.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0;
+    expr.node.for_each_child(&mut |child| found |= keyword_splat(child));
+    found
 }
 
 /// The constant a path written in `owner`'s body names, as Ruby's
