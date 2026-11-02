@@ -606,7 +606,8 @@ pub(crate) fn tzinfo_reads(app: &App) -> Vec<Span> {
             && !e.span.is_synthetic()
             && ((method.as_str() == "tzinfo"
                 && (is_time_zone_send(r)
-                    || matches!(&r.ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveSupport::TimeZone")))
+                    // A lookup's zone-or-nil too (`Time.find_zone(…)`).
+                    || matches!(r.ty.as_ref().map(Ty::peel_nilable), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveSupport::TimeZone")))
                 // `Time.zone.tzinfo` as this pass grounds it, which keeps the call's span.
                 || (method.as_str() == "current_tzinfo"
                     && args.is_empty()

@@ -187,3 +187,17 @@ fn a_select_over_collect_renders_as_rails_does() {
         .run_test("test/controllers/collect_select_controller_test.rb")
         .assert_passes();
 }
+
+/// `Time.find_zone(…)` answers a zone or nil; its `tzinfo` is refused off
+/// the ruby family as a zone's is (review, time_calendar.rs:609).
+#[test]
+fn a_looked_up_zones_tzinfo_is_refused_off_the_ruby_family() {
+    let (_, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/views/articles/_form.html.erb",
+            "    <%= form.label :body %>\n",
+            "    <p id=\"zone\"><%= Time.find_zone(\"Tokyo\").tzinfo.name %></p>\n    <%= form.label :body %>\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.iter().any(|e| e.contains("tzinfo not supported")), "{errors:?}");
+}
