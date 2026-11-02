@@ -623,7 +623,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     // The queue's records: on solid_queue the compiler runs the jobs, but the records Rails keeps of them are
     // solid_queue's own models, read from its installed source over the app's `db/queue_schema.rb`.
     // Not every app on solid_queue: only one whose code (or a gem it carries) names solid_queue's classes reads its records.
-    let solid_queue_models = (read_queue_adapter(vfs, dir).as_deref() == Some("solid_queue")
+    let solid_queue_models = (effective_queue_adapter(vfs, dir).as_deref() == Some("solid_queue")
         && vfs.exists(&dir.join("db/queue_schema.rb"))
         && names_solid_queue(vfs, dir, &source_gems))
         .then(|| super::source_gems::framework_models(vfs, dir, lock.as_ref(), "solid_queue"))
@@ -731,17 +731,6 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             {
                 app.schema = schema;
             }
-            // Not its own database: the runtime opens only the primary, so solid_queue's tables join it.
-            if solid_queue_root.is_some() {
-                let queue_schema = dir.join("db/queue_schema.rb");
-                if let Some(source) = read_or_ledger(vfs, &queue_schema)? {
-                    if let Some(queue) = unwrap_or_record(ingest_schema(&source, &queue_schema.display().to_string()))? {
-                        for (name, table) in queue.tables {
-                            app.schema.tables.entry(name).or_insert(table);
-                        }
-                    }
-                }
-            }
         }
     } else if vfs.exists(&structure_path) {
         // `config.active_record.schema_format = :sql` apps (Postgres,
@@ -803,6 +792,17 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                 ))?;
             }
             app.schema = schema;
+        }
+    }
+    // Not its own database: the runtime opens only the primary, so solid_queue's tables join it.
+    if solid_queue_root.is_some() {
+        let queue_schema = dir.join("db/queue_schema.rb");
+        if let Some(source) = read_or_ledger(vfs, &queue_schema)? {
+            if let Some(queue) = unwrap_or_record(ingest_schema(&source, &queue_schema.display().to_string()))? {
+                for (name, table) in queue.tables {
+                    app.schema.tables.entry(name).or_insert(table);
+                }
+            }
         }
     }
 
@@ -12494,6 +12494,37 @@ fn read_queue_adapter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
         }
     }
     adapter
+}
+
+/// The adapter `apply_application_job_queue_adapter` will settle on, read
+/// before ingest: ApplicationJob's own literal `self.queue_adapter =`, the
+/// last one winning, over the config files'.
+fn effective_queue_adapter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
+    let mut set: Option<Option<String>> = None;
+    if let Ok(source) = vfs.read(&dir.join("app/jobs/application_job.rb")) {
+        let parsed = super::prism::parse_silent(&source);
+        for (_, class) in super::util::find_all_classes_with_scope(&parsed.node()) {
+            if super::util::constant_path_of(&class.constant_path()).as_deref() != Some(&["ApplicationJob".to_string()]) {
+                continue;
+            }
+            let Some(body) = class.body() else { continue };
+            for stmt in super::util::flatten_statements(body) {
+                let Some(call) = stmt.as_call_node() else { continue };
+                if super::util::constant_id_str(&call.name()) != "queue_adapter="
+                    || !call.receiver().is_some_and(|r| r.as_self_node().is_some())
+                {
+                    continue;
+                }
+                let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                set = Some(match args.as_slice() {
+                    [arg] => super::util::symbol_value(arg)
+                        .or_else(|| arg.as_string_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned())),
+                    _ => None,
+                });
+            }
+        }
+    }
+    set.unwrap_or_else(|| read_queue_adapter(vfs, dir))
 }
 
 /// `self.queue_adapter = :name` in `ApplicationJob`'s class body. Rails

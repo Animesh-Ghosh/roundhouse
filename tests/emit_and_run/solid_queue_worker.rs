@@ -23,3 +23,16 @@ fn an_app_that_names_no_solid_queue_class_keeps_the_stand_in() {
     let errors = overlay.check_errors();
     assert!(errors.is_empty(), "{errors:#?}");
 }
+
+#[test]
+fn application_jobs_own_adapter_carries_the_models() {
+    let errors = solid_queue_worker::app()
+        .edit(
+            "config/environments/production.rb",
+            "config.active_job.queue_adapter = :solid_queue",
+            "config.active_job.queue_adapter = :async",
+        )
+        .edit("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\n", "class ApplicationJob < ActiveJob::Base\n  self.queue_adapter = :solid_queue\n")
+        .check_errors();
+    assert!(errors.is_empty(), "{errors:#?}");
+}

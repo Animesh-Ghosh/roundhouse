@@ -70,7 +70,7 @@ mod narrowing;
 mod pagy;
 mod send;
 mod active_storage;
-pub(crate) use send::PARAM_VALUE;
+pub(crate) use send::{ENUMERABLE_METHODS, PARAM_VALUE};
 pub(crate) use send::{indexed_pluck, string_answers};
 #[cfg(test)]
 pub(crate) use send::counted_first_last;

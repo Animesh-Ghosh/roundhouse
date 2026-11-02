@@ -146,6 +146,15 @@ fn program_items(
         }
         // A constant rides with the file's classes (`carry_file_constants`).
         if stmt.as_constant_write_node().is_some() || stmt.as_constant_path_write_node().is_some() {
+            // Not for a class the walk made of it (`Token = Struct.new(:value)`): that class loads where Ruby assigns it.
+            let name = match (stmt.as_constant_write_node(), stmt.as_constant_path_write_node()) {
+                (Some(write), _) => Some(constant_id_str(&write.name()).to_string()),
+                (_, Some(write)) => super::util::constant_path_of(&write.target().as_node()).map(|p| p.join("::")),
+                _ => None,
+            };
+            if let Some(name) = name.filter(|n| carried.contains(n)) {
+                items.push(ProgramItem::Declared(vec![ClassId(Symbol::from(name.as_str()))]));
+            }
             continue;
         }
         if let Some((name, feature)) = literal_autoload(&stmt) {

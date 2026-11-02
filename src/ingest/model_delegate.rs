@@ -187,6 +187,12 @@ fn included_concern_reader_targets(
     concern_methods: &HashMap<ClassId, (&[MethodDef], &[ClassId])>,
 ) -> HashSet<String> {
     let associations: HashSet<_> = model.associations().map(|a| a.name().as_str().to_string()).collect();
+    // Not one the model defines itself: Ruby dispatch selects the model's, whatever its arity (`own_reader_targets` judges it).
+    let own: HashSet<String> = model
+        .methods()
+        .filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance)
+        .map(|m| m.name.as_str().to_string())
+        .collect();
     let mut pending = crate::analyze::model_includes(model);
     let mut names = HashSet::default();
     let mut seen = HashSet::default();
@@ -204,7 +210,7 @@ fn included_concern_reader_targets(
                             && !uses_implicit_block(&m.body)
                     })
                     .map(|m| m.name.as_str().to_string())
-                    .filter(|name| !associations.contains(name)),
+                    .filter(|name| !associations.contains(name) && !own.contains(name)),
             );
             pending.extend(includes.iter().cloned());
         }

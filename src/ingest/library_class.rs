@@ -5610,6 +5610,7 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
             let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
             let Some(block_body) = block.body() else { continue };
             let direct = flatten_statements(block_body);
+            let _named = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::named_only(&direct));
             let block_start = items.len();
             let mut unclaimed = false;
             let mut stmts = Vec::new();

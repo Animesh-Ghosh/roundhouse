@@ -1299,7 +1299,7 @@ impl<'a> BodyTyper<'a> {
                 };
             }
             for module in &info.includes {
-                if module.0.as_str() == "Enumerable" {
+                if module_has_enumerable(classes, module, 0) {
                     return elem.map(|elem| Ty::Array { elem });
                 }
                 if classes.get(module).is_some_and(owns) {
@@ -4327,8 +4327,15 @@ fn gradual_array(ty: &Ty) -> bool {
     }
 }
 
+/// `Enumerable` itself, or a module that includes it, at any depth.
+fn module_has_enumerable(classes: &crate::det::HashMap<ClassId, ClassInfo>, module: &ClassId, depth: usize) -> bool {
+    module.0.as_str() == "Enumerable"
+        || (depth < 16
+            && classes.get(module).is_some_and(|m| m.includes.iter().any(|inner| module_has_enumerable(classes, inner, depth + 1))))
+}
+
 /// Enumerable's methods that Spinel answers on an app class including it exactly as CRuby does.
-const ENUMERABLE_METHODS: &[&str] = &[
+pub(crate) const ENUMERABLE_METHODS: &[&str] = &[
     "all?", "any?", "collect", "collect_concat", "compact", "count", "detect", "drop", "drop_while", "each_cons",
     "each_slice", "each_with_index", "each_with_object", "entries", "filter", "filter_map", "find", "find_all",
     "find_index", "first", "flat_map", "group_by", "include?", "inject", "map", "max", "max_by", "member?", "min",

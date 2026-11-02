@@ -61,23 +61,56 @@ enum Entries {
     Hash(Vec<Key>),
 }
 
-/// The literal constants one class or module body assigns, by name.
+/// The literal constants one class or module body assigns, by name, and
+/// the names its `private :name`-style markers set the visibility of.
 #[derive(Clone, Debug, Default)]
 pub(super) struct ConstTable {
     owner: Vec<String>,
     map: HashMap<String, Entries>,
+    named: HashSet<String>,
 }
 
 impl ConstTable {
     pub(super) fn of(owner: &ClassId, statements: &[Node<'_>]) -> Self {
         let mut map = HashMap::default();
+        let mut written: HashMap<String, usize> = HashMap::default();
         for stmt in statements {
             let Some(write) = stmt.as_constant_write_node() else { continue };
+            let name = constant_id_str(&write.name()).to_string();
+            *written.entry(name.clone()).or_default() += 1;
             if let Some(entries) = literal_entries(&write.value()) {
-                map.insert(constant_id_str(&write.name()).to_string(), entries);
+                map.insert(name, entries);
             }
         }
-        ConstTable { owner: owner.0.as_str().split("::").map(str::to_string).collect(), map }
+        // Not one the body writes again or changes in place (`KINDS << "b"`): a loop would run over what it holds then.
+        let mut mutated = Mutations { names: HashSet::default() };
+        for stmt in statements {
+            ruby_prism::Visit::visit(&mut mutated, stmt);
+        }
+        map.retain(|name, _| written.get(name) == Some(&1) && !mutated.names.contains(name));
+        ConstTable { owner: owner.0.as_str().split("::").map(str::to_string).collect(), map, named: named_visibility(statements) }
+    }
+
+    /// Only the visibility markers of a body whose constants another table already holds (an `included do` block).
+    pub(super) fn named_only(statements: &[Node<'_>]) -> Self {
+        ConstTable { named: named_visibility(statements), ..Default::default() }
+    }
+}
+
+/// The constants a call that changes its receiver in place is made on.
+struct Mutations {
+    names: HashSet<String>,
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for Mutations {
+    fn visit_call_node(&mut self, node: &CallNode<'pr>) {
+        const MUTATORS: &[&str] = &["<<", "push", "append", "concat", "unshift", "prepend", "insert", "[]=", "store", "merge!", "update", "delete", "delete_at", "delete_if", "clear", "replace", "map!", "collect!", "select!", "filter!", "reject!", "compact!", "uniq!", "sort!", "sort_by!", "reverse!", "shuffle!", "rotate!", "flatten!", "shift", "pop", "fill", "keep_if", "slice!", "transform_keys!", "transform_values!"];
+        if let Some(read) = node.receiver().and_then(|r| r.as_constant_read_node())
+            && MUTATORS.contains(&constant_id_str(&node.name()))
+        {
+            self.names.insert(constant_id_str(&read.name()).to_string());
+        }
+        ruby_prism::visit_call_node(self, node);
     }
 }
 
@@ -486,7 +519,8 @@ pub(super) fn unroll_with_macros(
     file: &str,
     macros: &mut Vec<Expr>,
 ) -> Option<Vec<MethodDef>> {
-    unroll_with(stmt, owner, file, MethodReceiver::Instance, &HashSet::default(), Some(macros))
+    let named: HashSet<String> = SCOPES.with(|s| s.borrow().iter().flat_map(|t| t.named.iter().cloned()).collect());
+    unroll_with(stmt, owner, file, MethodReceiver::Instance, &named, Some(macros))
 }
 
 fn unroll_with(

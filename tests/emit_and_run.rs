@@ -20601,6 +20601,8 @@ mod file_level_struct;
 mod concern_define_loop_contract;
 #[path = "emit_and_run/concern_define_loop.rs"]
 mod concern_define_loop;
+#[path = "emit_and_run/mutated_loop_constant.rs"]
+mod mutated_loop_constant;
 #[path = "support/solid_queue_worker.rs"]
 mod solid_queue_worker_contract;
 #[path = "emit_and_run/solid_queue_worker.rs"]

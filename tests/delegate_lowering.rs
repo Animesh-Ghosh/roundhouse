@@ -502,6 +502,26 @@ end
     assert!(!out.contains("def fragment"), "got:\n{out}");
 }
 
+/// Enumerable reached through an included module still calls `each` with a block.
+#[test]
+fn enumerable_through_an_included_module_forwards_each_s_block() {
+    let out = emit(
+        r#"module Listing
+  include Enumerable
+end
+
+class Filter
+  include Listing
+
+  attr_reader :items
+
+  delegate :each, to: :items
+end
+"#,
+    );
+    assert!(out.contains("def each(&block)\n    items.each(&block)\n  end"), "got:\n{out}");
+}
+
 /// `private: true` makes the forwarders private, as Rails' `private(*method_names)` after defining them does.
 #[test]
 fn private_true_makes_the_forwarder_private() {
