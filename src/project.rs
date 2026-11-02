@@ -2898,6 +2898,17 @@ fn target_files_inner(
     fixture: &Path,
     target: BuildTarget,
 ) -> Result<Vec<(String, String)>, String> {
+    let without_inherited_replay;
+    let app = if !matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Roda | BuildTarget::Futamura) {
+        let mut trimmed = app.clone();
+        crate::lower::for_each_hook_body(&mut trimmed, &mut |expr| {
+            if expr.decisions & crate::expr::INHERITED_CLASS_BODY != 0 {
+                expr.decisions &= !(crate::expr::REPLAYED_CLASS_BODY | crate::expr::INHERITED_CLASS_BODY);
+            }
+        });
+        without_inherited_replay = trimmed;
+        &without_inherited_replay
+    } else { app };
     if !matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
         refuse_conditional_definitions(app, target);
     }
