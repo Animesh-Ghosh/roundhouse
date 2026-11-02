@@ -602,3 +602,11 @@ fn an_inherited_zlib_constructor_keeps_the_subclass_override() {
         "require \"zlib\"\nclass ChildDeflate < Zlib::Deflate\n  def deflate(text)\n    text\n  end\nend\nclass BufferProbe\n  def self.value\n    ChildDeflate.new.deflate(\"sample\")\n  end\nend\n")
         .run_ruby("raise \"subclass override lost\" unless BufferProbe.value == \"sample\"").assert_passes();
 }
+
+#[test]
+fn a_zlib_override_forwarding_to_super_is_not_qualified() {
+    let (_, errors) = stdlib_app().write("app/models/buffer_probe.rb",
+        "require \"zlib\"\nclass ChildDeflate < Zlib::Deflate\n  def deflate(text)\n    super(text)\n  end\nend\nclass BufferProbe\n  def self.value\n    ChildDeflate.new.deflate(\"sample\")\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.iter().any(|e| e.contains("buffered zlib result")), "{errors:?}");
+}

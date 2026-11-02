@@ -12,10 +12,14 @@ impl BodyTyper<'_> {
         let mut pending: Vec<&ClassId> = vec![id];
         let mut seen = crate::det::HashSet::default();
         let mut owner = None;
+        let mut delegates = false;
         while let Some(id) = pending.pop() {
             if !seen.insert(id) { continue; }
             let Some(info) = self.classes().get(id) else { continue };
-            if info.source_instance_methods.contains(method) { return None; }
+            if info.source_instance_methods.contains(method) {
+                if !info.delegating_instance_methods.contains(method) { return None; }
+                delegates = true;
+            }
             if matches!(id.0.as_str(), "Zlib::Deflate" | "Zlib::GzipReader") {
                 owner = Some(id.0.as_str());
                 break;
@@ -24,6 +28,9 @@ impl BodyTyper<'_> {
             pending.extend(info.includes.iter());
         }
         let owner = owner?;
+        if delegates && matches!((owner, method.as_str()), ("Zlib::Deflate", "deflate") | ("Zlib::GzipReader", "read")) {
+            return Some("zlib overrides forwarding through super are not qualified for buffered results");
+        }
         if matches!(method.as_str(), "send" | "__send__" | "public_send" | "try" | "try!" | "method" | "public_method") {
             let (name, rest) = args.split_first()?;
             let name = match &*name.node {

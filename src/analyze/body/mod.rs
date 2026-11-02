@@ -249,6 +249,8 @@ pub struct ClassInfo {
     pub constructor_calls_super: bool,
     /// Source class methods that call `super`, reaching the inherited one.
     pub delegating_class_methods: crate::det::HashSet<Symbol>,
+    /// Source instance overrides that still reach an inherited implementation.
+    pub delegating_instance_methods: crate::det::HashSet<Symbol>,
     /// Source supplies an initializer body without delegating to `super`.
     pub implements_initializer: bool,
     /// Which of `class_methods` had their return type inferred FROM a
