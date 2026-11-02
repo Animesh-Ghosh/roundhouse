@@ -653,6 +653,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // skips it.
             let action_part = written_action(path);
             let derived = match as_name.as_ref() {
+                // `as: nil`: no helper at all.
+                Some(s) if s.as_str().is_empty() => None,
                 Some(s) => Some(ctx.route_name(
                     route_name_part(Some(s.as_str()), None, route_scope).as_deref(),
                     route_scope,
