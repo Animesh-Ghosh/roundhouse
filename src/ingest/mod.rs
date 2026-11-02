@@ -56,6 +56,7 @@ mod action_controller_caching_config;
 mod active_job_config;
 mod caches_page;
 mod boot_program;
+mod engine_config;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;

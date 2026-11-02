@@ -664,6 +664,8 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
         )
     };
     let mut app = App::new();
+    let engine_config_libs: Vec<PathBuf> = std::iter::once(dir.join("lib")).chain(path_gems.iter().map(|gem| gem.join("lib"))).collect();
+    super::engine_config::prepare(vfs, dir, &engine_config_libs);
     app.extensions = extensions;
     app.spinel_int_overflow = spinel_int_overflow;
     // `enum` columns declared inside a concern's `included do`, keyed by
@@ -2749,7 +2751,8 @@ end
         .map(|n| n.split("::").next().unwrap_or(n).to_string())
         .collect();
     let gem_lock = app.gem_lock.clone();
-    let boot_taken = super::boot_program::build(vfs, dir, &mut app, gem_lock.as_ref(), &app_namespaces, &rate_limit_store_values)?;
+    let mut boot_taken = super::boot_program::build(vfs, dir, &mut app, gem_lock.as_ref(), &app_namespaces, &rate_limit_store_values)?;
+    boot_taken.extend(super::engine_config::carry(&mut app, dir));
     super::boot_program::apply_call_sites(&mut app);
     super::initializer_ledger::record(
         vfs,
