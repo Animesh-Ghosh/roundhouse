@@ -1192,7 +1192,7 @@ fn synth_hydrate_all(owner: &ClassId) -> MethodDef {
         ExprNode::Send {
             recv: Some(Expr::new(
                 Span::synthetic(),
-                ExprNode::Const { path: vec![owner.0.clone()] },
+                ExprNode::Const { path: owner.const_path() },
             )),
             method: Symbol::from("from_stmt"),
             args: vec![var_ref(&stmt)],
