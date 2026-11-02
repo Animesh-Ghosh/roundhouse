@@ -153,3 +153,26 @@ fn a_loaded_files_local_does_not_change_the_callers() {
     assert!(routes.contains(&"/first".to_string()), "{routes:?}");
     assert!(routes.contains(&"/second".to_string()), "{routes:?}");
 }
+
+/// Inside a concern, too: a loaded file's `base =` does not change the
+/// `base` the concern's later routes interpolate.
+#[test]
+fn a_loaded_files_local_does_not_change_a_concerns() {
+    let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+        b"Rails.application.routes.draw do\n  concern :paged do\n    base = \"kept\"\n    load(Rails.root.join(\"config\", \"routes\", \"services\", \"inner.rb\").to_s)\n    get \"#{base}/page\", to: \"pages#show\"\n  end\n  concerns :paged\nend\n",
+        "config/routes.rb",
+        &roundhouse::det::HashMap::from_iter([(
+            "services/inner".to_string(),
+            (
+                b"base = \"clobbered\"\nget \"/inner\", to: \"pages#inner\"\n".to_vec(),
+                "config/routes/services/inner.rb".to_string(),
+            ),
+        )]),
+    )
+    .expect("ingest routes");
+    let mut app = App::default();
+    app.routes = table;
+    let routes: Vec<_> = flatten_routes_for_helpers(&app).into_iter().map(|r| r.path).collect();
+    assert!(routes.contains(&"/kept/page".to_string()), "{routes:?}");
+    assert!(routes.contains(&"/inner".to_string()), "{routes:?}");
+}

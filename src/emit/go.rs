@@ -795,7 +795,9 @@ fn emit_v2_test_compat(app: &App) -> EmittedFile {
     let mut seen = crate::det::HashSet::default();
     for route in &flat {
         let as_name = route.as_name.as_str();
-        if as_name.is_empty() {
+        // An unnamed route's `as_name` is an action-name fallback (an
+        // unmodeled endpoint's is `lambda endpoint`): no helper to shim.
+        if !route.named || as_name.is_empty() {
             continue;
         }
         // Path helper (no _path suffix on as_name; legacy adds Path).

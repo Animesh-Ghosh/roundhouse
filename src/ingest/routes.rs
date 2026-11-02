@@ -2899,8 +2899,10 @@ fn ingest_route_file_include(
     cx.active.borrow_mut().push(key);
     // The included file runs with its own locals (`load`'s top level,
     // `draw`'s `instance_eval`): a `routes_path =` there must not change
-    // the caller's later `load(routes_path.join(…))`.
+    // the caller's later `load(routes_path.join(…))`, nor a concern's
+    // `base =` its later `"#{base}/…"` paths.
     let caller_locals = ROUTE_PATH_LOCALS.with(|l| std::mem::take(&mut *l.borrow_mut()));
+    eval::push_frame();
     let included = (|| -> IngestResult<Option<RouteSpec>> {
         let drawn = top_level_app_draws(&root);
         if method != "draw" && !drawn.is_empty() {
@@ -2931,6 +2933,7 @@ fn ingest_route_file_include(
             entries,
         }))
     })();
+    eval::pop_frame();
     cx.active.borrow_mut().pop();
     ROUTE_PATH_LOCALS.with(|l| *l.borrow_mut() = caller_locals);
     included
