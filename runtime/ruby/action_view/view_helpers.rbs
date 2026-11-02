@@ -202,6 +202,7 @@ module ActionView
     def self.javascript_path: (String source, ?skip_pipeline: bool) -> String
 
     def self.content_tag: (Symbol name, ?(String | Integer | nil) content, ?Hash[Symbol, untyped] opts) -> String
+    def self.content_tag_html: (Symbol name, String html, ?Hash[Symbol, untyped] opts) -> String
   
     # `pins` is the importmap pin array — each entry a record with
     # fixed `:name` and `:path` fields. Record (not `Hash[Symbol,

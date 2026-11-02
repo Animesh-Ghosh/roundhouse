@@ -1132,6 +1132,14 @@ module ActionView
       "<#{n}#{render_attrs(opts.to_h)}>#{html_escape(content.to_s)}</#{n}>"
     end
 
+    # `content_tag(name[, opts]) do … end` in a template: the block's
+    # captured markup, already escaped, is the content (Rails'
+    # `capture`), so it is written as it is.
+    def self.content_tag_html(name, html, opts = EMPTY_HTML_OPTS)
+      n = name.to_s
+      "<#{n}#{render_attrs(opts.to_h)}>#{html}</#{n}>"
+    end
+
     # Emit the importmap script + per-pin modulepreload hints + a
     # module-script that imports the entry point. Mirrors Rails'
     # `javascript_importmap_tags` shape so the cross-target comparison

@@ -1,0 +1,62 @@
+//! #1725: `content_tag … do … end` in a template. The runtime's
+//! `content_tag(name, content, opts)` took no block, so the block was
+//! dropped and the options hash rendered as the content. Rails 8.1.4
+//! (`oracle.rb`): the block's markup is the content, the options its
+//! attributes.
+
+use super::emit_and_run;
+
+fn app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().edit(
+        "app/views/articles/index.html.erb",
+        "<% content_for :title, \"Articles\" %>\n",
+        concat!(
+            "<% content_for :title, \"Articles\" %>\n",
+            "<%= content_tag :section, class: \"boxed\" do %>inside<%= 1 + 1 %><% end %>\n",
+            "<%= content_tag :aside do %>direct<% end %>\n",
+            "<%= content_tag :p, \"text\", class: \"x\" %>\n",
+        ),
+    )
+}
+
+const TEST: &str = r#"require "test_helper"
+
+class ContentTagBlockControllerTest < ActionDispatch::IntegrationTest
+  test "a block is the tag's content" do
+    get articles_url
+    assert_response :success
+    assert_includes response.body, %(<section class="boxed">inside2</section>)
+    assert_includes response.body, %(<aside>direct</aside>)
+    assert_includes response.body, %(<p class="x">text</p>)
+  end
+end
+"#;
+
+#[test]
+fn a_content_tag_block_is_its_content() {
+    app()
+        .write("test/controllers/content_tag_block_controller_test.rb", TEST)
+        .run_test("test/controllers/content_tag_block_controller_test.rb")
+        .assert_passes();
+}
+
+/// The index page in the spinel binary.
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_content_tag_block_is_its_content_on_spinel() {
+    app()
+        .run_spinel(concat!(
+            "Db.configure(\":memory:\")\n",
+            "Schema.statements.each { |sql| Db.exec(sql) }\n",
+            "ActiveRecord.adapter = SqliteAdapter\n",
+            "controller = ArticlesController.new\n",
+            "controller.request_method = \"GET\"\n",
+            "controller.process_action(:index)\n",
+            "body = controller.body\n",
+            "raise body unless body.include?('<section class=\"boxed\">inside2</section>')\n",
+            "raise body unless body.include?('<aside>direct</aside>')\n",
+            "raise body unless body.include?('<p class=\"x\">text</p>')\n",
+            "puts \"content_tag block passed\"\n",
+        ))
+        .assert_passes();
+}

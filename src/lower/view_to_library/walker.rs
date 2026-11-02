@@ -1257,6 +1257,29 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 // that no app in the corpus nested one. campfire does.
                 let cap_owned = next_capture_name(&ctx.accumulator);
                 let cap = cap_owned.as_str();
+                // `content_tag(name[, opts]) do … end`: Rails renders the
+                // block's markup as the tag's content and the second
+                // argument as its options. The runtime's `content_tag` takes
+                // no block, so the capture is a statement and its String the
+                // (already escaped) content of `content_tag_html`.
+                if recv.is_none()
+                    && method.as_str() == "content_tag"
+                    && params.is_empty()
+                    && extra_params.is_empty()
+                    && rest_param.is_none()
+                    && block_param.is_none()
+                    && (1..=2).contains(&sa.len())
+                {
+                    let cap_ctx = ViewCtx { accumulator: cap.to_string(), ..ctx.with_locals(std::iter::empty()) };
+                    let mut stmts = vec![assign_accumulator_string_new(cap)];
+                    stmts.extend(walk_body(body, &cap_ctx));
+                    let mut args = vec![rewrite_helpers_in_expr(&sa[0], ctx), accumulator_result_ref(cap)];
+                    if let Some(opts) = sa.get(1) {
+                        args.push(rewrite_helpers_in_expr(opts, ctx));
+                    }
+                    stmts.push(accumulator_append_call(view_helpers_call("content_tag_html", args), ctx));
+                    return stmts;
+                }
                 // Every parameter the block binds is a local in its body, the
                 // optional and keyword ones too: a read of one is not a
                 // helper call.

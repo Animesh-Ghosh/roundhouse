@@ -283,6 +283,13 @@ class ViewHelpersTest < Minitest::Test
     assert_equal %(<span class="badge">hi</span>), out
   end
 
+  # A template's `content_tag … do … end`: the captured markup is written
+  # as it is (Rails 8.1.4 renders `<section class="boxed">inside2</section>`).
+  def test_content_tag_html_writes_the_captured_markup
+    assert_equal %(<section class="boxed"><b>inside</b></section>), ViewHelpers.content_tag_html(:section, "<b>inside</b>", class: "boxed")
+    assert_equal "<aside>direct</aside>", ViewHelpers.content_tag_html(:aside, "direct")
+  end
+
   # Every expectation below is the byte-for-byte output of Rails 8.1's
   # own `mail_to` for the same call, apart from attribute ORDER (Rails
   # puts the html options before the href; `link_to` above follows
