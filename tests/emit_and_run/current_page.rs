@@ -254,3 +254,33 @@ fn a_controller_current_page_is_left_only_to_its_own_views() {
     let comment = std::fs::read_to_string(emitted.join("app/views/comments/_comment.rb")).unwrap();
     assert!(comment.contains("current_page?(\"/\")") && !comment.contains("current_page_match?"), "{comment}");
 }
+
+/// A module an `app/helpers` module includes is the helper's too: its
+/// `current_page?` answers every template (review, current_page.rs:32).
+#[test]
+fn a_current_page_a_helper_includes_is_left_to_the_app() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write("app/models/page_matching.rb", "module PageMatching\n  def current_page?(path)\n    false\n  end\nend\n")
+        .write("app/helpers/application_helper.rb", "module ApplicationHelper\n  include PageMatching\n\n  def site_name\n    \"blog\"\n  end\nend\n")
+        .edit("app/views/articles/index.html.erb", "<%= turbo_stream_from \"articles\" %>\n", "<%= turbo_stream_from \"articles\" %>\n<p id=\"index\"><%= current_page?(articles_path) %></p>\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let index = std::fs::read_to_string(emitted.join("app/views/articles/index.rb")).unwrap();
+    assert!(!index.contains("current_page_match?"), "{index}");
+}
+
+/// One controller's `current_page?` doesn't answer a helper method that
+/// any controller's views may call: the helper's call is still refused
+/// (review, current_page.rs:76).
+#[test]
+fn a_controller_current_page_leaves_helper_calls_refused() {
+    let errors = emit_and_run::real_blog()
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "class CommentsController < ApplicationController\n",
+            "class CommentsController < ApplicationController\n  helper_method :current_page?\n\n  def current_page?(path)\n    false\n  end\n",
+        )
+        .write("app/helpers/nav_helper.rb", "module NavHelper\n  def on_articles?\n    current_page?(\"/articles\")\n  end\nend\n")
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("current_page? not supported")), "{errors:?}");
+}

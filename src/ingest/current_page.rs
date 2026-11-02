@@ -22,14 +22,15 @@ use crate::ident::Symbol;
 
 /// The app's own `current_page?`, which Rails calls ahead of ActionView's
 /// in the template `view` names (`None`: a helper module's body, which
-/// any controller's views run): an `app/helpers` method answers every
-/// template; a controller's `helper_method`, the templates of that
-/// controller and its subclasses. A template no controller is named for
-/// (a layout, a shared partial), and a `helper_method` only a concern
+/// any controller's views run): an `app/helpers` method (or one a helper
+/// includes) answers every template; a controller's `helper_method`, the
+/// templates of that controller and its subclasses, and a helper body only
+/// when every controller inherits it. A template no controller is named
+/// for (a layout, a shared partial), and a `helper_method` only a concern
 /// declares, count as answered.
 pub(crate) fn app_defines_current_page(app: &App, view: Option<&str>) -> bool {
     let name = Symbol::from("current_page?");
-    if app.helper_method_index.get(&name).is_some_and(|owner| app.helper_modules.contains(owner)) {
+    if app.helper_method_index.get(&name).is_some_and(|owner| app.helper_modules.contains(owner)) || helpers_define(app, &name) {
         return true;
     }
     let declaring: Vec<&crate::ident::ClassId> = app
@@ -41,23 +42,47 @@ pub(crate) fn app_defines_current_page(app: &App, view: Option<&str>) -> bool {
     if declaring.is_empty() {
         return app.view_visible_controller_methods.contains(&name);
     }
-    let Some(view) = view else { return true };
+    let reaches = |controller: Option<&crate::dialect::Controller>| {
+        let mut current = controller;
+        let mut seen = 0;
+        while let Some(c) = current {
+            if declaring.contains(&&c.name) {
+                return true;
+            }
+            seen += 1;
+            if seen > app.controllers.len() {
+                break;
+            }
+            current = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| &o.name == p));
+        }
+        false
+    };
+    // A helper module's body runs in any controller's views: only an
+    // override every controller inherits answers it.
+    let Some(view) = view else { return app.controllers.iter().all(|c| reaches(Some(c))) };
     let dir = view.rsplit_once('/').map_or("", |(d, _)| d);
     let controller = format!("{}Controller", crate::naming::camelize_path(dir));
-    let mut current = app.controllers.iter().find(|c| c.name.0.as_str() == controller);
-    if current.is_none() {
-        return true;
-    }
-    let mut seen = 0;
-    while let Some(c) = current {
-        if declaring.contains(&&c.name) {
+    let current = app.controllers.iter().find(|c| c.name.0.as_str() == controller);
+    current.is_none() || reaches(current)
+}
+
+/// Whether an `app/helpers` module, or an app module one includes
+/// (directly or through another), defines an instance `name`: the
+/// helper's method, ahead of ActionView's. Read from the declarations, as
+/// a module the helper includes may be ingested after it.
+fn helpers_define(app: &App, name: &Symbol) -> bool {
+    let find = |id: &crate::ident::ClassId| app.library_classes.iter().find(|lc| &lc.name == id);
+    let mut stack: Vec<crate::ident::ClassId> = app.helper_modules.iter().cloned().collect();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(lc) = find(&id) else { continue };
+        if lc.methods.iter().any(|m| &m.name == name && matches!(m.receiver, crate::dialect::MethodReceiver::Instance)) {
             return true;
         }
-        seen += 1;
-        if seen > app.controllers.len() {
-            break;
-        }
-        current = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| &o.name == p));
+        stack.extend(lc.includes.iter().cloned());
     }
     false
 }
