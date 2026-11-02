@@ -916,6 +916,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // of the base catches their subclasses.
     for (exc, parent) in [
         ("Date::Error", "ArgumentError"),
+        ("Zlib::Error", "StandardError"),
         ("Psych::Exception", "RuntimeError"),
         ("Psych::SyntaxError", "Psych::Exception"),
         ("Psych::DisallowedClass", "Psych::Exception"),
@@ -1215,6 +1216,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // Not `finish`: spinel's package has `close` only.
         ("close", Ty::Untyped),
     ]);
+    // Whole-message gzip on Ruby and Spinel; no streaming or flush API is modeled.
+    let deflate = Ty::Class { id: ClassId(Symbol::from("Zlib::Deflate")), args: vec![].into() };
+    register_stdlib_class(classes, "Zlib::Deflate", &[("new", deflate)], &[
+        ("deflate", Ty::Str), ("close", Ty::Nil),
+    ]);
+    let gzip_reader = Ty::Class { id: ClassId(Symbol::from("Zlib::GzipReader")), args: vec![].into() };
+    register_stdlib_class(classes, "Zlib::GzipReader", &[("new", gzip_reader)], &[
+        // read(length) can return nil at EOF; read without a length returns String.
+        ("read", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+    ]);
     // `IO` / `Process` / `Timeout` — Campfire tip names these as Consts
     // in indexed app source (`time_limited_video_previewer`, web-push
     // connection pool, unfurl deadline). They were listed in
@@ -1288,13 +1299,26 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // require; on Spinel by its fileutils / openssl package.
     register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
     register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
-    // `OpenSSL::HMAC.digest(OpenSSL::Digest.new("sha1"), key, data)`: rotp's one-time codes.
-    let openssl_digest = Ty::Class { id: ClassId(Symbol::from("OpenSSL::Digest")), args: vec![].into() };
-    register_stdlib_class(classes, "OpenSSL::Digest", &[("new", openssl_digest)], &[
-        ("name", Ty::Str),
-        ("digest", Ty::Str),
-        ("hexdigest", Ty::Str),
+    // Spinel supplies AES-GCM and rejects other algorithms at construction.
+    // Both libraries return String from update/final; Spinel buffers until final.
+    let cipher = Ty::Class { id: ClassId(Symbol::from("OpenSSL::Cipher")), args: vec![].into() };
+    register_stdlib_class(classes, "OpenSSL::Cipher", &[("new", cipher.clone())], &[
+        ("encrypt", cipher.clone()), ("decrypt", cipher),
+        ("key=", Ty::Str), ("iv=", Ty::Str),
+        ("auth_data=", Ty::Str), ("auth_tag=", Ty::Str),
+        ("update", Ty::Str), ("final", Ty::Str), ("auth_tag", Ty::Str),
     ]);
+    // `OpenSSL::HMAC.digest(OpenSSL::Digest.new("sha1"), key, data)`: rotp's one-time codes.
+    for name in ["OpenSSL::Digest", "OpenSSL::Digest::SHA1", "OpenSSL::Digest::SHA256"] {
+        let digest = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() };
+        register_stdlib_class(classes, name, &[("new", digest)], &[
+            ("name", Ty::Str), ("digest", Ty::Str), ("hexdigest", Ty::Str),
+        ]);
+        if name != "OpenSSL::Digest" {
+            register_stdlib_class(classes, name, &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
+            classes.get_mut(&ClassId(Symbol::from(name))).unwrap().parent = Some(ClassId(Symbol::from("OpenSSL::Digest")));
+        }
+    }
     let product = Ty::Class { id: ClassId(Symbol::from("Enumerator::Product")), args: vec![].into() };
     let lazy = Ty::Class { id: ClassId(Symbol::from("Enumerator::Lazy")), args: vec![].into() };
     register_stdlib_class(classes, "Enumerator::Product", &[("new", product)], &[

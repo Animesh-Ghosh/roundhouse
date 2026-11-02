@@ -468,3 +468,129 @@ fn float_domain_error_constant_executes_after_emission() {
     stdlib_app().write("app/services/float_domain_probe.rb", FLOAT_DOMAIN_SOURCE)
         .run_ruby(FLOAT_DOMAIN_SCRIPT).assert_passes();
 }
+
+const CIPHER_GZIP_SOURCE: &str = r#"require "openssl"
+require "zlib"
+require "stringio"
+class CipherGzipProbe
+  def self.seal
+    cipher = OpenSSL::Cipher.new("aes-256-gcm")
+    copy = cipher
+    copy.encrypt
+    cipher.key = "k" * 32
+    cipher.iv = "i" * 12
+    cipher.auth_data = "context"
+    bytes = cipher.update("sample") + cipher.final
+    [bytes, cipher.auth_tag]
+  end
+  def self.open(bytes, tag, key)
+    cipher = ::OpenSSL::Cipher.new("aes-256-gcm")
+    cipher.decrypt
+    cipher.key = key
+    cipher.iv = "i" * 12
+    cipher.auth_tag = tag
+    cipher.auth_data = "context"
+    cipher.update(bytes) + cipher.final
+  rescue OpenSSL::OpenSSLError
+    "rejected"
+  end
+  def self.compress(text)
+    writer = Zlib::Deflate.new(Zlib::BEST_COMPRESSION, Zlib::MAX_WBITS + 16)
+    bytes = writer.deflate(text, Zlib::FINISH)
+    writer.close
+    bytes
+  end
+  def self.decompress(bytes)
+    reader = ::Zlib::GzipReader.new(StringIO.new(bytes))
+    reader.read
+  rescue Zlib::Error
+    "rejected"
+  end
+end
+"#;
+
+const CIPHER_GZIP_SCRIPT: &str = r#"
+sealed = CipherGzipProbe.seal
+raise "valid GCM" unless CipherGzipProbe.open(sealed[0], sealed[1], "k" * 32) == "sample"
+raise "tampered tag accepted" unless CipherGzipProbe.open(sealed[0], "x" * 16, "k" * 32) == "rejected"
+raise "wrong key accepted" unless CipherGzipProbe.open(sealed[0], sealed[1], "x" * 32) == "rejected"
+bytes = CipherGzipProbe.compress("sample")
+raise "gzip round trip" unless CipherGzipProbe.decompress(bytes) == "sample"
+raise "malformed gzip accepted" unless CipherGzipProbe.decompress("not gzip") == "rejected"
+puts "AES-GCM and gzip: round trips and rejection checks passed"
+"#;
+
+#[test]
+fn cipher_and_gzip_execute_after_emission() {
+    stdlib_app().write("app/models/cipher_gzip_probe.rb", CIPHER_GZIP_SOURCE)
+        .run_ruby(CIPHER_GZIP_SCRIPT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn cipher_and_gzip_execute_in_native_spinel() {
+    stdlib_app().write("app/models/cipher_gzip_probe.rb", CIPHER_GZIP_SOURCE)
+        .run_spinel(CIPHER_GZIP_SCRIPT).assert_passes();
+}
+
+#[test]
+fn cipher_and_gzip_remain_unavailable_on_strict_targets() {
+    for constant in ["OpenSSL::Cipher", "Zlib::Deflate", "Zlib::GzipReader", "Zlib::Error",
+                     "Zlib::BEST_COMPRESSION", "Zlib::MAX_WBITS", "Zlib::FINISH",
+                     "OpenSSL::Digest::SHA1", "OpenSSL::Digest::SHA256"] {
+        let source = format!("class ConstantProbe\n  def self.value\n    {constant}\n  end\nend\n");
+        let (_, errors) = stdlib_app().write("app/models/constant_probe.rb", &source)
+            .emit(roundhouse::project::BuildTarget::Rust);
+        assert!(errors.iter().any(|e| e.contains("bundled_constant") && e.contains(constant)),
+                "{constant}: {errors:?}");
+    }
+}
+
+#[test]
+fn unmodeled_cipher_methods_raise_and_unknown_gzip_constants_remain_errors() {
+    for expression in ["OpenSSL::Cipher.encrypt", "OpenSSL::Cipher.new(\"aes-256-gcm\").missing_operation"] {
+        let source = format!("class UnsupportedStdlibProbe\n  def self.value\n    {expression}\n  end\nend\n");
+        let run = stdlib_app().write("app/models/unsupported_stdlib_probe.rb", &source)
+            .run_ruby("UnsupportedStdlibProbe.value");
+        assert!(!run.success && run.stderr.contains("NoMethodError"), "{}", run.stderr);
+    }
+    let (_, errors) = stdlib_app().write("app/models/unsupported_stdlib_probe.rb",
+        "class UnsupportedStdlibProbe\n  def self.value\n    Zlib::UNMODELED_WINDOW\n  end\nend\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(!errors.is_empty(), "unknown Zlib constant accepted");
+}
+
+const DIGEST_SOURCE: &str = r#"require "openssl"
+class DigestProbe
+  def self.sha1(text)
+    OpenSSL::Digest::SHA1.new(text).hexdigest
+  end
+  def self.sha256(text)
+    ::OpenSSL::Digest::SHA256.new(text).hexdigest
+  end
+  def self.sha1_class(text)
+    OpenSSL::Digest::SHA1.digest(text).unpack1("H*")
+  end
+  def self.sha256_class(text)
+    OpenSSL::Digest::SHA256.hexdigest(text)
+  end
+end
+"#;
+const DIGEST_SCRIPT: &str = r#"
+raise "SHA1" unless DigestProbe.sha1("abc") == "a9993e364706816aba3e25717850c26c9cd0d89d"
+raise "SHA256" unless DigestProbe.sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+raise "SHA1 class method" unless DigestProbe.sha1_class("abc") == DigestProbe.sha1("abc")
+raise "SHA256 class method" unless DigestProbe.sha256_class("abc") == DigestProbe.sha256("abc")
+puts "SHA1 and SHA256 digest objects passed"
+"#;
+#[test]
+fn openssl_digest_subclasses_execute_after_emission() {
+    stdlib_app().write("app/models/digest_probe.rb", DIGEST_SOURCE)
+        .run_ruby(DIGEST_SCRIPT).assert_passes();
+}
+#[test]
+#[ignore = "requires the native Spinel compiler; set SPINEL"]
+fn openssl_digest_subclasses_execute_in_native_spinel() {
+    stdlib_app().write("app/models/digest_probe.rb", DIGEST_SOURCE)
+        .run_spinel(DIGEST_SCRIPT).assert_passes();
+}
