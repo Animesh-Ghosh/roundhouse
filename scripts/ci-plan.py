@@ -496,6 +496,7 @@ def native_coverage(path):
         or (path.startswith("tests/spinel") and path.endswith((".rs", ".rb")))
         or path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
         or path == "tests/support/db_concurrency_spinel.rb"
+        or path == "tests/support/full_forwarding.rs"
     ) and not interpreter_only
     suites = set()
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
