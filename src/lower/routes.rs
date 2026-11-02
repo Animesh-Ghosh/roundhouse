@@ -110,6 +110,10 @@ pub struct FlatRoute {
     pub refused: Option<(String, String)>,
 }
 
+/// The `refused` parameter name of a route whose endpoint is Ruby code
+/// (`UNMODELED_ENDPOINT_CONTROLLER`); the value is the endpoint kind.
+pub const ENDPOINT_REFUSAL: &str = "endpoint";
+
 /// Compile every non-digit-class requirement on one concrete route
 /// into the router's segment-pattern form, or refuse the WHOLE route
 /// (returning the first requirement that failed, with no patterns) when
@@ -362,6 +366,12 @@ struct Ctx {
     /// Rails names no route there whose action is not a plain word;
     /// outside every resource such a route takes the scope's own prefix.
     in_resource: bool,
+    /// `Member`/`Collection` while walking a scope written inside a
+    /// `member do`/`collection do` block (`Nested` otherwise), and the scope
+    /// path accumulated since: it belongs after the resource's own segment,
+    /// unlike an ordinary scope's, which prefixes the whole nesting.
+    within: ResourceScope,
+    inner_path: String,
 }
 
 /// One enclosing resource.
@@ -391,6 +401,20 @@ struct Nesting {
 }
 
 impl Ctx {
+    /// A resource declared inside `member`/`collection` nests under that
+    /// level's segment (`/customers/:id`) but is not named after it:
+    /// fold the segment and the scope paths since into the URL prefix and
+    /// drop the enclosing resources.
+    fn materialize_within(&self) -> Ctx {
+        let mut ctx = self.clone();
+        let (prefix, _) = nest_path(&self.inner_path, &self.parents, self.within);
+        ctx.ns_path = prefix_path(&self.ns_path, prefix.trim_end_matches('/'));
+        ctx.parents.clear();
+        ctx.inner_path.clear();
+        ctx.within = ResourceScope::Nested;
+        ctx
+    }
+
     /// `scope defaults: { format: :json }` — the response format every
     /// route under the scope answers in unless the path names one.
     /// Rails seeds `params[:format]` from it, so `respond_to` takes the
@@ -510,6 +534,26 @@ fn route_name_part(
     (!part.is_empty()).then_some(part)
 }
 
+/// The auto name Rails gives `get "<path>"` outside a resource: the
+/// scope's `as` prefix plus the route's own path, only when that path is
+/// plain words, `-` and `/` (`add_route`'s `/^[\w\-\/]+$/`) and the result
+/// starts with a letter or underscore. A path with a dynamic segment, a
+/// dot or a group names nothing.
+fn own_path_name(path: &str, name_prefix: &str) -> Option<String> {
+    if path.is_empty() || !path.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/')) {
+        return None;
+    }
+    let own = path.trim_start_matches('/').replace(['/', '-'], "_");
+    let name = format!("{name_prefix}{own}");
+    if name.is_empty()
+        || own.is_empty()
+        || !name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        return None;
+    }
+    Some(name)
+}
+
 /// The six actions a *singular* `resource :name` expands to — no
 /// `index`, no `:id` segment (`GET /profile`, `PATCH /profile`, …).
 fn singular_resource_actions() -> &'static [(&'static str, HttpMethod, &'static str)] {
@@ -556,11 +600,18 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // at `/widgets/index` — where `/widgets/:id` answers it as a
             // show — under the name of the resource's own helper.
             let own_path = *action_symbol && canonical_action(path, route_scope);
-            let (nested, base_params) = nest_path(
-                if own_path { "" } else { path },
-                &ctx.parents,
-                route_scope.unwrap_or(*scope),
-            );
+            let written = if own_path { "" } else { path.as_str() };
+            // A scope inside a `member do`/`collection do` block puts its
+            // path after the resource's own segment.
+            let inner_joined;
+            let written = if ctx.inner_path.is_empty() {
+                written
+            } else {
+                inner_joined = prefix_path(&ctx.inner_path, written);
+                inner_joined.as_str()
+            };
+            let (nested, base_params) =
+                nest_path(written, &ctx.parents, route_scope.unwrap_or(*scope));
             let full_path = prefix_path(&ctx.ns_path, &nested);
             // Empty only for a resource's own path at the very top (a
             // canonical action on `resources :x, path: "/"`), which is `/`.
@@ -688,6 +739,17 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // it is exactly the original bug.
                 let (seg_patterns, refused) =
                     with_format_requirement(constraints_map, compile_seg_patterns(&constraints, &vpath));
+                // An endpoint written in Ruby (lambda, proc, redirect
+                // block) has no controller action to dispatch: the route
+                // keeps its helper and is refused by name like an
+                // unenforceable requirement.
+                let refused = if controller.0.as_str()
+                    == crate::ingest::routes::UNMODELED_ENDPOINT_CONTROLLER
+                {
+                    Some((ENDPOINT_REFUSAL.to_string(), action.as_str().to_string()))
+                } else {
+                    refused
+                };
                 out.push(FlatRoute {
                     method: method.clone(),
                     source_path: full_path.clone(),
@@ -773,6 +835,13 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             path: path_segment,
             constraints: resource_constraints,
         } => {
+            let materialized;
+            let ctx = if ctx.within.is_nested() {
+                ctx
+            } else {
+                materialized = ctx.materialize_within();
+                &materialized
+            };
             // `path:` moves the URL segment only; the helpers and the
             // controller below still come from `name`.
             let segment = path_segment.as_deref().unwrap_or(name.as_str());
@@ -986,8 +1055,11 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 }
             }
         }
-        RouteSpec::Scope { path, module, as_prefix, defaults, nest, suppress_helpers, entries } => {
+        RouteSpec::Scope { path, module, as_prefix, defaults, nest, suppress_helpers, within, entries } => {
             let mut child = ctx.clone();
+            if !within.is_nested() {
+                child.within = *within;
+            }
             if *suppress_helpers {
                 child.helpers_enabled = false;
             }
@@ -1032,7 +1104,12 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // parent nesting, which `prefix_path(ns_path, nested_path)`
             // below already gets right.
             if let Some(p) = path {
-                child.ns_path = prefix_path(&ctx.ns_path, &format!("/{}", p.trim_matches('/')));
+                let segment = format!("/{}", p.trim_matches('/'));
+                if child.within.is_nested() {
+                    child.ns_path = prefix_path(&ctx.ns_path, &segment);
+                } else {
+                    child.inner_path = prefix_path(&ctx.inner_path, &segment);
+                }
             }
             if let Some(m) = module {
                 for seg in m.split('/').filter(|s| !s.is_empty()) {
@@ -1107,6 +1184,18 @@ fn qualify_controller(module_prefix: &str, controller: &ClassId) -> ClassId {
         crate::ingest::devise_routes::resolve_default_controller(module_prefix, controller.0.as_str())
     {
         return ClassId(Symbol::from(resolved));
+    }
+    // `get "token"` in `namespace :reportify` has no controller of its own;
+    // Rails takes the scope's module (`Admin::Reportify::` →
+    // `Admin::ReportifyController`).
+    if controller.0.as_str() == crate::ingest::routes::MODULE_CONTROLLER {
+        let module = module_prefix.trim_end_matches("::");
+        let (outer, inner) = module.rsplit_once("::").map_or(("", module), |(o, i)| (o, i));
+        return ClassId(Symbol::from(if outer.is_empty() {
+            format!("{inner}Controller")
+        } else {
+            format!("{outer}::{inner}Controller")
+        }));
     }
     // A leading `::` is a target written with a leading slash
     // (`to: "/errors#routing"`): Rails resolves it from the top level,
