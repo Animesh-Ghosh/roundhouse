@@ -159,7 +159,11 @@ fn zeitwerk_dirs(text: &str, dir: &Path, lib: &Path) -> Option<(Vec<PathBuf>, Ve
             let name = name.as_slice();
             if (name == b"push_dir" || name == b"ignore") && node.receiver().is_some() {
                 let arg = node.arguments().and_then(|a| a.arguments().iter().next());
-                let path = arg.and_then(|a| path_of(&a, self.dir)).map(|p| normalize(&p));
+                // Not a glob as the path it spells: Zeitwerk expands it, and a literal `*` would ignore nothing here.
+                let path = arg
+                    .and_then(|a| path_of(&a, self.dir))
+                    .filter(|p| !p.to_string_lossy().contains(['*', '?', '[', '{']))
+                    .map(|p| normalize(&p));
                 if name == b"push_dir" { self.roots.push(path) } else { self.ignores.push(path) }
             }
             ruby_prism::visit_call_node(self, node);
@@ -469,6 +473,13 @@ mod tests {
         files.sort();
         assert_eq!(files, vec!["lib/active_job/querying.rb", "lib/mission_control/jobs.rb", "lib/mission_control/jobs/applications.rb"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_zeitwerk_glob_ignore_reads_as_no_loader() {
+        let lib = Path::new("/gem/lib");
+        let text = "loader = Zeitwerk::Loader.new\nloader.push_dir(__dir__)\nloader.ignore(File.join(__dir__, \"widgets\", \"*_test.rb\"))\nloader.setup\n";
+        assert!(zeitwerk_dirs(text, lib, lib).is_none());
     }
 
     #[test]

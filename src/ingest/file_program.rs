@@ -63,19 +63,24 @@ pub(super) fn file_program(
 /// `require "zeitwerk"`, `loader = Zeitwerk::Loader.new` (or `.for_gem`)
 /// and a call on such a local; `loaders` collects the locals.
 fn is_zeitwerk(stmt: &ruby_prism::Node<'_>, loaders: &mut Vec<String>) -> bool {
-    fn names_loader(node: &ruby_prism::Node<'_>, loaders: &[String]) -> bool {
+    // Not a callback (`on_setup`, `on_load`, `eager_load`): those run code the gem wrote, and stay its program's.
+    const SETUP: &[&str] = &[
+        "push_dir", "ignore", "collapse", "setup", "inflector=", "inflector", "inflect", "tag=", "enable_reloading",
+        "log!", "logger=", "do_not_eager_load",
+    ];
+    fn is_loader(node: &ruby_prism::Node<'_>, loaders: &[String]) -> bool {
         if let Some(read) = node.as_local_variable_read_node() {
             return loaders.iter().any(|l| l == constant_id_str(&read.name()).as_ref() as &str);
         }
-        if let Some(call) = node.as_call_node() {
-            return call.receiver().is_some_and(|r| {
-                super::util::constant_path_of(&r).is_some_and(|p| p == ["Zeitwerk", "Loader"]) || names_loader(&r, loaders)
-            });
-        }
-        false
+        let Some(call) = node.as_call_node() else { return false };
+        let name = constant_id_str(&call.name());
+        let built = matches!(name.as_ref(), "new" | "for_gem")
+            && call.block().is_none()
+            && call.receiver().and_then(|r| super::util::constant_path_of(&r)).is_some_and(|p| p == ["Zeitwerk", "Loader"]);
+        built || (SETUP.contains(&name.as_ref()) && call.block().is_none() && call.receiver().is_some_and(|r| is_loader(&r, loaders)))
     }
     if let Some(write) = stmt.as_local_variable_write_node() {
-        if names_loader(&write.value(), loaders) {
+        if is_loader(&write.value(), loaders) {
             loaders.push(constant_id_str(&write.name()).to_string());
             return true;
         }
@@ -86,7 +91,7 @@ fn is_zeitwerk(stmt: &ruby_prism::Node<'_>, loaders: &mut Vec<String>) -> bool {
         let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
         return matches!(args.as_slice(), [one] if one.as_string_node().is_some_and(|s| s.unescaped() == b"zeitwerk"));
     }
-    names_loader(stmt, loaders)
+    call.receiver().is_some() && is_loader(stmt, loaders)
 }
 
 fn program_items(

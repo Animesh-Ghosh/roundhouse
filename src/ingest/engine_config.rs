@@ -145,7 +145,7 @@ pub(super) fn engine_statement(node: &Node<'_>, path: &str) -> Option<EngineStat
         return None;
     }
     let body = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body());
-    if body.is_some_and(super::on_load_reopen::carries_all) {
+    if body.is_some_and(|b| super::on_load_reopen::carries_all(b, path)) {
         return Some(EngineStatement::Consumed("load-hook mixins (on_load_reopen)"));
     }
     let start = node.location().start_offset() as u32;
@@ -556,6 +556,8 @@ struct Boot<'a> {
     dead: Vec<(String, u32, u32)>,
     /// Statements run that are not a settled `if`/`unless`.
     effects: usize,
+    /// An opaque statement ran: an unset namespace key no longer reads as nil.
+    config_opaque: bool,
 }
 
 impl Boot<'_> {
@@ -588,16 +590,37 @@ impl Boot<'_> {
         self.branch(a);
         let after_a = (std::mem::replace(&mut self.modules, before.0.clone()), std::mem::replace(&mut self.config, before.1.clone()));
         self.branch(b);
-        for (k, v) in after_a.0 {
-            if self.modules.get(&k) != Some(&v) {
+        // Not only the keys `a` wrote: one only `b` wrote holds `b`'s value though `b` may not have run.
+        let module_keys: Vec<(String, String)> = after_a.0.keys().chain(self.modules.keys()).cloned().collect();
+        for k in module_keys {
+            if self.modules.get(&k) != after_a.0.get(&k) {
                 self.modules.insert(k, Val::Unknown);
             }
         }
-        for (k, v) in after_a.1 {
-            if self.config.get(&k) != Some(&v) {
+        let config_keys: Vec<Vec<String>> = after_a.1.keys().chain(self.config.keys()).cloned().collect();
+        for k in config_keys {
+            if self.config.get(&k) != after_a.1.get(&k) {
                 self.config.insert(k, Val::Unknown);
             }
         }
+    }
+
+    /// A statement this evaluator does not model, which may write what it
+    /// tracks: everything it tracks is unknown after it.
+    fn opaque(&mut self, node: &Node<'_>) {
+        let modules: Vec<String> = self.modules.keys().map(|(m, _)| m.clone()).collect();
+        if !touches(node, &modules) {
+            return;
+        }
+        for v in self.modules.values_mut() {
+            *v = Val::Unknown;
+        }
+        for v in self.config.values_mut() {
+            *v = Val::Unknown;
+        }
+        self.queue_adapter = Val::Unknown;
+        // A config key not set yet reads as nil from the namespace; after this it may not.
+        self.config_opaque = true;
     }
 
     fn statement(&mut self, node: &Node<'_>) {
@@ -647,10 +670,15 @@ impl Boot<'_> {
                     None => Val::Unknown,
                 };
                 self.config.insert(key, next);
+            } else {
+                self.opaque(node);
             }
             return;
         }
-        let Some(call) = node.as_call_node() else { return };
+        let Some(call) = node.as_call_node() else {
+            self.opaque(node);
+            return;
+        };
         let name = constant_id_str(&call.name()).to_string();
         let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
         if let Some((path, module)) = forwarder(node) {
@@ -667,7 +695,10 @@ impl Boot<'_> {
                 return;
             }
         }
-        let Some(receiver) = call.receiver() else { return };
+        let Some(receiver) = call.receiver() else {
+            self.opaque(node);
+            return;
+        };
         if let Some(setter) = name.strip_suffix('=').filter(|n| !n.is_empty() && args.len() == 1) {
             let value = self.value(&args[0]);
             if let Some(module) = constant_path_of(&receiver) {
@@ -675,10 +706,15 @@ impl Boot<'_> {
             } else if let Some(mut path) = config_chain(&receiver) {
                 path.push(setter.to_string());
                 self.config.insert(path, value);
+            } else {
+                self.opaque(node);
             }
             return;
         }
-        let Some(key) = self.module_reader(&receiver) else { return };
+        let Some(key) = self.module_reader(&receiver).filter(|_| call.block().is_none()) else {
+            self.opaque(node);
+            return;
+        };
         let current = self.modules.get(&key).cloned().unwrap_or(Val::Unknown);
         let next = match (name.as_str(), current, args.as_slice()) {
             ("<<" | "add", Val::Set(mut members), [member]) => match self.value(member) {
@@ -714,7 +750,7 @@ impl Boot<'_> {
             return v.clone();
         }
         // An unset key of a namespace the engine made an OrderedOptions reads as nil.
-        if self.namespaces.iter().any(|f| path.len() == f.path.len() + 1 && path.starts_with(&f.path)) {
+        if !self.config_opaque && self.namespaces.iter().any(|f| path.len() == f.path.len() + 1 && path.starts_with(&f.path)) {
             return Val::Nil;
         }
         Val::Unknown
@@ -843,6 +879,37 @@ fn app_config_chain(node: &Node<'_>) -> Option<Vec<String>> {
     (constant_id_str(&app.name()) == "application" && rails == ["Rails"]).then(|| vec![constant_id_str(&call.name()).to_string()])
 }
 
+/// Whether `node` names one of `modules` or the engine's `config`, the
+/// only ways a statement reaches what the evaluator tracks.
+fn touches(node: &Node<'_>, modules: &[String]) -> bool {
+    struct Finder<'a> {
+        modules: &'a [String],
+        found: bool,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Finder<'_> {
+        fn visit_constant_path_node(&mut self, node: &ruby_prism::ConstantPathNode<'pr>) {
+            if constant_path_of(&node.as_node()).is_some_and(|p| self.modules.contains(&p.join("::"))) {
+                self.found = true;
+            }
+            ruby_prism::visit_constant_path_node(self, node);
+        }
+        fn visit_constant_read_node(&mut self, node: &ruby_prism::ConstantReadNode<'pr>) {
+            if self.modules.iter().any(|m| m == constant_id_str(&node.name()).as_ref() as &str) {
+                self.found = true;
+            }
+        }
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if node.receiver().is_none() && constant_id_str(&node.name()) == "config" {
+                self.found = true;
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    let mut finder = Finder { modules, found: false };
+    ruby_prism::Visit::visit(&mut finder, node);
+    finder.found
+}
+
 /// The host's single-key `config.<key> = <literal>` writes, as boot has
 /// them once the environment file has loaded: the `Rails::Application`
 /// body, then `config/environments/production.rb`, over Rails' defaults
@@ -944,12 +1011,18 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
                     app: None,
                     dead: Vec::new(),
                     effects: 0,
+                    config_opaque: false,
                 };
-                for stmt in flatten_statements(body) {
-                    if let Some(hook) = config_hook(&stmt, "before_initialize") {
+                let statements = flatten_statements(body);
+                // Not source order: Rails runs every `before_initialize` before the engine's initializers.
+                for stmt in &statements {
+                    if let Some(hook) = config_hook(stmt, "before_initialize") {
                         boot.app = None;
                         boot.statements(&hook);
-                    } else if let Some((app, hook)) = initializer_block(&stmt) {
+                    }
+                }
+                for stmt in statements {
+                    if let Some((app, hook)) = initializer_block(&stmt) {
                         boot.app = app;
                         let before = boot.effects;
                         boot.statements(&hook);
@@ -985,6 +1058,45 @@ fn initializer_block<'pr>(node: &Node<'pr>) -> Option<(Option<String>, Vec<Node<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dead_after(source: &str) -> usize {
+        let parsed = super::super::prism::parse_silent(source.as_bytes());
+        let root = parsed.node();
+        let program = root.as_program_node().unwrap();
+        let nodes: Vec<Node<'_>> = program.statements().body().iter().collect();
+        let mut modules = HashMap::default();
+        modules.insert(("Relay".to_string(), "adapters".to_string()), Val::Set(Vec::new()));
+        modules.insert(("Relay".to_string(), "flag".to_string()), Val::Bool(false));
+        let mut boot = Boot {
+            file: "engine.rb".to_string(),
+            modules,
+            config: HashMap::default(),
+            namespaces: &[],
+            queue_adapter: Val::Nil,
+            app_config: HashMap::default(),
+            app: None,
+            dead: Vec::new(),
+            effects: 0,
+            config_opaque: false,
+        };
+        boot.statements(&nodes);
+        boot.dead.len()
+    }
+
+    #[test]
+    fn a_set_member_added_by_name_settles_a_later_branch() {
+        assert_eq!(dead_after("Relay.adapters << :solid_queue\nif Relay.adapters.include?(:resque)\n  a\nend\n"), 1);
+    }
+
+    #[test]
+    fn a_write_in_one_branch_of_an_unsettled_if_settles_nothing_after_it() {
+        assert_eq!(dead_after("if Relay.other\nelse\n  Relay.flag = true\nend\nif Relay.flag\n  a\nelse\n  b\nend\n"), 0);
+    }
+
+    #[test]
+    fn a_statement_it_cannot_follow_unsettles_what_it_names() {
+        assert_eq!(dead_after("[:resque].each { |a| Relay.adapters << a }\nif Relay.adapters.include?(:resque)\n  a\nend\n"), 0);
+    }
 
     #[test]
     fn a_key_is_a_whole_word() {

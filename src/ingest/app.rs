@@ -666,6 +666,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let mut app = App::new();
     let engine_config_libs: Vec<PathBuf> = std::iter::once(dir.join("lib")).chain(path_gems.iter().map(|gem| gem.join("lib"))).collect();
     super::engine_config::prepare(vfs, dir, &engine_config_libs);
+    super::on_load_reopen::reset();
     app.extensions = extensions;
     app.spinel_int_overflow = spinel_int_overflow;
     // `enum` columns declared inside a concern's `included do`, keyed by
