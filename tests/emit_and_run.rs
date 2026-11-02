@@ -9416,7 +9416,7 @@ ActiveSupport.use_zone("Pacific/Auckland") do
   controller.process_action(:show)
   expected = '{"due_on":"2024-01-31","observed_at":"2024-02-01T12:47:19.123+13:00"}'
   raise controller.body.inspect unless controller.body == expected
-  raise controller.content_type.inspect unless controller.content_type == "application/json"
+  raise controller.content_type.inspect unless controller.content_type == "application/json; charset=utf-8"
   actual = ActionController::JsonRender.encode(entry.as_json)
   raise actual.inspect unless actual == expected
   entry.update!(due_on: nil)
@@ -20618,3 +20618,15 @@ mod namespaced_class_consts;
 
 #[path = "emit_and_run/boolop_precedence.rs"]
 mod boolop_precedence;
+
+#[path = "support/full_forwarding.rs"]
+mod full_forwarding;
+
+#[test]
+fn full_forwarding_keeps_the_native_argument_contract() {
+    let run = emit_and_run::real_blog()
+        .write("app/services/packet_relay.rb", full_forwarding::SOURCE)
+        .run_ruby(full_forwarding::ASSERTIONS);
+    run.assert_passes();
+    assert_eq!(run.stdout, "full forwarding contract passed\n");
+}
