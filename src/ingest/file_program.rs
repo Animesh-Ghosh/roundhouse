@@ -60,6 +60,35 @@ pub(super) fn file_program(
 
 /// The items of a run of top-level statements (`file_program`'s, or a
 /// file-level branch's).
+/// `require "zeitwerk"`, `loader = Zeitwerk::Loader.new` (or `.for_gem`)
+/// and a call on such a local; `loaders` collects the locals.
+fn is_zeitwerk(stmt: &ruby_prism::Node<'_>, loaders: &mut Vec<String>) -> bool {
+    fn names_loader(node: &ruby_prism::Node<'_>, loaders: &[String]) -> bool {
+        if let Some(read) = node.as_local_variable_read_node() {
+            return loaders.iter().any(|l| l == constant_id_str(&read.name()).as_ref() as &str);
+        }
+        if let Some(call) = node.as_call_node() {
+            return call.receiver().is_some_and(|r| {
+                super::util::constant_path_of(&r).is_some_and(|p| p == ["Zeitwerk", "Loader"]) || names_loader(&r, loaders)
+            });
+        }
+        false
+    }
+    if let Some(write) = stmt.as_local_variable_write_node() {
+        if names_loader(&write.value(), loaders) {
+            loaders.push(constant_id_str(&write.name()).to_string());
+            return true;
+        }
+        return false;
+    }
+    let Some(call) = stmt.as_call_node() else { return false };
+    if call.receiver().is_none() && constant_id_str(&call.name()) == "require" {
+        let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        return matches!(args.as_slice(), [one] if one.as_string_node().is_some_and(|s| s.unescaped() == b"zeitwerk"));
+    }
+    names_loader(stmt, loaders)
+}
+
 fn program_items(
     statements: &[ruby_prism::Node<'_>],
     file: &str,
@@ -68,6 +97,7 @@ fn program_items(
     span_of: &dyn Fn(&ruby_prism::Node<'_>) -> Span,
 ) -> Vec<ProgramItem> {
     let mut items = Vec::new();
+    let mut loaders: Vec<String> = Vec::new();
     for stmt in statements {
         if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
             // In source order, as Ruby evaluates them; an enclosing
@@ -120,6 +150,10 @@ fn program_items(
         // `ActiveSupport.on_load(:x) { … }` is `on_load_reopen`'s, which
         // carries the reopen it can and reports the rest.
         if is_on_load(&stmt) {
+            continue;
+        }
+        // A Zeitwerk loader's files are the gem's files the tree already loads (`source_gems::zeitwerk_dirs`); its setup would point at the gem's dir.
+        if is_zeitwerk(&stmt, &mut loaders) {
             continue;
         }
         // `I18n.load_path += Dir[…]`: the gem's locale files are compiled
