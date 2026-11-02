@@ -233,3 +233,24 @@ fn the_runtime_helper_names_no_request_type() {
         assert!(found.is_empty(), "{target:?}: {found:#?}");
     }
 }
+
+/// A controller's own `current_page?` (`helper_method`) answers the views
+/// of that controller (and its subclasses); other views keep ActionView's
+/// (review, diagnostics.rs:123).
+#[test]
+fn a_controller_current_page_is_left_only_to_its_own_views() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "class CommentsController < ApplicationController\n",
+            "class CommentsController < ApplicationController\n  helper_method :current_page?\n\n  def current_page?(path)\n    false\n  end\n",
+        )
+        .edit("app/views/articles/index.html.erb", "<%= turbo_stream_from \"articles\" %>\n", "<%= turbo_stream_from \"articles\" %>\n<p id=\"index\"><%= current_page?(articles_path) %></p>\n")
+        .edit("app/views/comments/_comment.html.erb", "  <p class=\"text-gray-700\"><%= comment.body %></p>\n", "  <p class=\"text-gray-700\"><%= comment.body %></p>\n  <p class=\"here\"><%= current_page?(\"/\") %></p>\n")
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let index = std::fs::read_to_string(emitted.join("app/views/articles/index.rb")).unwrap();
+    assert!(index.contains("current_page_match?"), "{index}");
+    let comment = std::fs::read_to_string(emitted.join("app/views/comments/_comment.rb")).unwrap();
+    assert!(comment.contains("current_page?(\"/\")") && !comment.contains("current_page_match?"), "{comment}");
+}

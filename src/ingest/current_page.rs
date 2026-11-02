@@ -20,20 +20,61 @@ use crate::App;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
 
-/// The app's own `current_page?` (an `app/helpers` method, or a
-/// controller's `helper_method`), which Rails calls ahead of ActionView's.
-pub(crate) fn app_defines_current_page(app: &App) -> bool {
+/// The app's own `current_page?`, which Rails calls ahead of ActionView's
+/// in the template `view` names (`None`: a helper module's body, which
+/// any controller's views run): an `app/helpers` method answers every
+/// template; a controller's `helper_method`, the templates of that
+/// controller and its subclasses. A template no controller is named for
+/// (a layout, a shared partial), and a `helper_method` only a concern
+/// declares, count as answered.
+pub(crate) fn app_defines_current_page(app: &App, view: Option<&str>) -> bool {
     let name = Symbol::from("current_page?");
-    app.helper_method_index.contains_key(&name) || app.view_visible_controller_methods.contains(&name)
+    if app.helper_method_index.get(&name).is_some_and(|owner| app.helper_modules.contains(owner)) {
+        return true;
+    }
+    let declaring: Vec<&crate::ident::ClassId> = app
+        .controllers
+        .iter()
+        .filter(|c| crate::lower::controller_to_library::helper_method_marked_names(c).contains(&name))
+        .map(|c| &c.name)
+        .collect();
+    if declaring.is_empty() {
+        return app.view_visible_controller_methods.contains(&name);
+    }
+    let Some(view) = view else { return true };
+    let dir = view.rsplit_once('/').map_or("", |(d, _)| d);
+    let controller = format!("{}Controller", crate::naming::camelize_path(dir));
+    let mut current = app.controllers.iter().find(|c| c.name.0.as_str() == controller);
+    if current.is_none() {
+        return true;
+    }
+    let mut seen = 0;
+    while let Some(c) = current {
+        if declaring.contains(&&c.name) {
+            return true;
+        }
+        seen += 1;
+        if seen > app.controllers.len() {
+            break;
+        }
+        current = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| &o.name == p));
+    }
+    false
 }
 
 /// The bodies ActionView's `current_page?` can be called from: the views,
 /// and the `app/helpers` modules (Rails runs a helper method in the view's
-/// context). Other library classes are left alone: their own
-/// `current_page?` is theirs.
+/// context), leaving out those the app's own `current_page?` answers
+/// (`app_defines_current_page`). Other library classes are left alone:
+/// their own `current_page?` is theirs.
 pub(crate) fn for_each_view_context_body(app: &App, f: &mut impl FnMut(&Expr)) {
     for view in &app.views {
-        f(&view.body);
+        if !app_defines_current_page(app, Some(view.name.as_str())) {
+            f(&view.body);
+        }
+    }
+    if app_defines_current_page(app, None) {
+        return;
     }
     for lc in app.library_classes.iter().filter(|lc| app.helper_modules.contains(&lc.name)) {
         for method in &lc.methods {
@@ -43,14 +84,14 @@ pub(crate) fn for_each_view_context_body(app: &App, f: &mut impl FnMut(&Expr)) {
 }
 
 pub fn lower_current_page(app: &mut App) {
-    if app_defines_current_page(app) {
-        return;
-    }
     // Views only: in an `app/helpers` module the runtime's
     // `ActionView::ViewHelpers` is not a constant analysis resolves, so a
     // helper's `current_page?` is left as written and refused.
-    for view in &mut app.views {
-        rewrite(&mut view.body);
+    let answered: Vec<bool> = app.views.iter().map(|v| app_defines_current_page(app, Some(v.name.as_str()))).collect();
+    for (view, answered) in app.views.iter_mut().zip(answered) {
+        if !answered {
+            rewrite(&mut view.body);
+        }
     }
 }
 

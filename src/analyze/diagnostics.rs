@@ -118,10 +118,8 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
 /// answers it through `url_for(options)` (an options hash, or
 /// `check_parameters:`/`method:`), which the runtime does not model.
 fn unlowered_current_page(app: &App) -> Vec<Diagnostic> {
-    // The app's own `current_page?` is a call like any other.
-    if crate::ingest::current_page::app_defines_current_page(app) {
-        return Vec::new();
-    }
+    // The app's own `current_page?` is a call like any other: a body it
+    // answers is left out of `for_each_view_context_body`.
     fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
         if let ExprNode::Send { recv: None, method, .. } = &*expr.node
             && method.as_str() == "current_page?"
