@@ -319,7 +319,11 @@ fn keep_initializer_defined(
 /// Admission is based on the callable retained from app source, not a target's
 /// spelling. Inherited, reopened, macro-defined and instance-only endpoints
 /// cannot establish that the mounted constant itself implements Rack's call.
-fn literal_rack_apps(app: &App, dir: &Path, boot_and_routes: &[Vec<u8>]) -> super::routes::RackAppTargets {
+///
+/// The candidates and the app and boot sources' writes are the same for
+/// every route file, so they are read once; `RackAppScan::targets` adds
+/// each route file's own writes.
+fn literal_rack_apps(app: &App, dir: &Path, boot_sources: impl FnOnce() -> Vec<Vec<u8>>) -> RackAppScan {
     use crate::dialect::{MethodReceiver, MethodVisibility};
     let mut counts: HashMap<ClassId, usize> = HashMap::default();
     for class in &app.library_classes {
@@ -364,7 +368,7 @@ fn literal_rack_apps(app: &App, dir: &Path, boot_and_routes: &[Vec<u8>]) -> supe
         Some(class.name.0.as_str().to_string())
     }).collect();
     if candidates.is_empty() {
-        return super::routes::RackAppTargets::default();
+        return RackAppScan::default();
     }
     // Method ownership is not binding ownership: file-level and qualified
     // writes can replace the constant after its class declaration. Inspect
@@ -376,24 +380,44 @@ fn literal_rack_apps(app: &App, dir: &Path, boot_and_routes: &[Vec<u8>]) -> supe
             writes.read(file.text.as_bytes());
         }
     }
-    for source in boot_and_routes {
-        writes.read(source);
+    for source in boot_sources() {
+        writes.read(&source);
     }
-    let mut rebound = HashSet::default();
-    candidates.retain(|name| {
-        let binding = super::routes::RackAppTargets::binding_name(name);
-        let reassigned = writes.names.iter().any(|written| {
-            [name.as_str(), binding].iter().any(|name| {
-                *name == written.as_str() || name.strip_prefix(written.as_str()).is_some_and(|rest| rest.starts_with("::"))
-            })
-        });
-        if reassigned { rebound.insert(binding.to_string()); }
-        !writes.unknown && !reassigned
-    });
-    super::routes::RackAppTargets { callable: candidates, rebound }
+    RackAppScan { candidates, writes }
 }
 
 #[derive(Default)]
+struct RackAppScan {
+    candidates: HashSet<String>,
+    writes: RackBindingWrites,
+}
+
+impl RackAppScan {
+    fn targets(&self, route_sources: &[Vec<u8>]) -> super::routes::RackAppTargets {
+        if self.candidates.is_empty() {
+            return super::routes::RackAppTargets::default();
+        }
+        let mut writes = self.writes.clone();
+        for source in route_sources {
+            writes.read(source);
+        }
+        let mut candidates = self.candidates.clone();
+        let mut rebound = HashSet::default();
+        candidates.retain(|name| {
+            let binding = super::routes::RackAppTargets::binding_name(name);
+            let reassigned = writes.names.iter().any(|written| {
+                [name.as_str(), binding].iter().any(|name| {
+                    *name == written.as_str() || name.strip_prefix(written.as_str()).is_some_and(|rest| rest.starts_with("::"))
+                })
+            });
+            if reassigned { rebound.insert(binding.to_string()); }
+            !writes.unknown && !reassigned
+        });
+        super::routes::RackAppTargets { callable: candidates, rebound }
+    }
+}
+
+#[derive(Default, Clone)]
 struct RackBindingWrites {
     namespace: Vec<String>,
     names: HashSet<String>,
@@ -2130,6 +2154,9 @@ end
         }
         route_inputs.finish();
         let mut drawn = Vec::new();
+        let rack_scan = literal_rack_apps(&app, dir, || {
+            boot_files.iter().filter_map(|file| vfs.read(file).ok()).collect()
+        });
         for root in &route_roots {
             let routes_path = root.join("config/routes.rb");
             let Some(source) = read_or_ledger(vfs, &routes_path)? else { continue };
@@ -2170,11 +2197,10 @@ end
                 route_consts.merge(super::model::ClassConsts::collect(&top, &routes_path.display().to_string()));
             }
             let file_routes = super::routes::with_route_constants(route_consts, || {
-                let rack_sources: Vec<_> = std::iter::once(source.clone())
+                let route_sources: Vec<_> = std::iter::once(source.clone())
                     .chain(draw_files.values().map(|(text, _)| text.clone()))
-                    .chain(boot_files.iter().filter_map(|file| vfs.read(file).ok()))
                     .collect();
-                let rack_apps = literal_rack_apps(&app, dir, &rack_sources);
+                let rack_apps = rack_scan.targets(&route_sources);
                 ingest_route_file(
                     root == dir,
                     &source,
