@@ -1412,10 +1412,10 @@ module ActionView
 
     # `ColorField#render`'s `options["value"] ||= …` for a computed
     # `value:`: the option as given, or the record's value through
-    # `color_value_attr` when it is nil. One call, so the option is
-    # evaluated once.
+    # `color_value_attr` when it is nil or false (`||=`). One call, so the
+    # option is evaluated once.
     def self.color_field_value_attr(option, value)
-      if option.nil?
+      if option.nil? || option == false
         color_value_attr(value)
       else
         %( value="#{html_escape(option.to_s)}")

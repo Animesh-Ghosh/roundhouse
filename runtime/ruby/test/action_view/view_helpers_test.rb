@@ -453,6 +453,9 @@ class ViewHelpersTest < Minitest::Test
     assert_equal %( value="#FF0000"), ViewHelpers.color_field_value_attr("#FF0000", "#00ff00")
     assert_equal %( value="red"), ViewHelpers.color_field_value_attr("red", nil)
     assert_equal %( value="#00ff00"), ViewHelpers.color_field_value_attr(nil, "#00FF00")
+    # `||=` replaces a false option too; the String "false" is kept.
+    assert_equal %( value="#00ff00"), ViewHelpers.color_field_value_attr(false, "#00FF00")
+    assert_equal %( value="false"), ViewHelpers.color_field_value_attr("false", "#00FF00")
   end
 
   # Rails 8.1.4's `form.datetime_local_field` value for a datetime or
