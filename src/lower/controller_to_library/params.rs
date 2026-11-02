@@ -145,8 +145,9 @@ pub struct ParamsSpec {
     /// `Roundhouse::ParamValue` member read with `Params.nested`.
     pub nested_fields: BTreeMap<Symbol, NestedKey>,
     pub written: BTreeMap<Symbol, Vec<Ty>>,
-    /// Keys only a `.merge(k: v)` after the permit adds: the request
-    /// never carries them, so their type is what the merge writes.
+    /// Keys only a `.merge(k: v)` after the permit or a
+    /// `.reverse_merge(k: v)` default adds: the request never carries
+    /// them, so their type is what the merges write.
     pub merged_only: std::collections::BTreeSet<Symbol>,
     pub wants_assign: bool,
 }
@@ -781,12 +782,17 @@ fn scan_lookup_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                 {
                     direct.extend(fields.into_iter().map(|f| (spec.class_id.clone(), f)));
                 }
-                if let ExprNode::Send { recv: Some(chain), method, args, block: None, .. } = &*expr.node
+                if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node
                     && method.as_str() == "merge"
                     && let [arg] = args.as_slice()
-                    && let ExprNode::Hash { entries, .. } = &*arg.node
+                    && let Some((entries, chain)) = match (&*recv.node, &*arg.node) {
+                        (_, ExprNode::Hash { entries, .. }) => Some((entries, recv)),
+                        (ExprNode::Hash { entries, .. }, _) => Some((entries, arg)),
+                        _ => None,
+                    }
                     && let Some((_, permitted, _)) = match_permit_call_full(chain)
-                    && let Some(class) = match_permit_call_full(expr).and_then(|(resource, fields, _)| {
+                    && let Some(class) = match_reverse_merge(expr).or_else(|| match_permit_call_full(expr))
+                        .and_then(|(resource, fields, _)| {
                         specs.find(&resource, &fields, &nested_signature(expr)).map(|spec| spec.class_id.clone())
                     })
                 {
@@ -1757,6 +1763,13 @@ fn match_reverse_merge(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<Symbol>)
         }
     }
     Some((resource, fields, nested))
+}
+
+/// The params class a Form 4 expression lowers to, as
+/// [`params_source_class`] answers for the other forms.
+pub(super) fn reverse_merge_class(expr: &Expr, specs: &ParamsSpecs) -> Option<ClassId> {
+    let (resource, fields, _) = match_reverse_merge(expr)?;
+    specs.find(&resource, &fields, &nested_signature(expr)).map(|spec| spec.class_id.clone())
 }
 
 /// The expression a body returns: the last statement, through nested Seqs
@@ -3135,7 +3148,7 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs, guard: bool) -> Exp
             let (_, permitted) = match_permit_call(&args[0])?;
             let spec = specs.find(&resource, &fields, &nested_signature(e))?;
             let arg = factory_arg(&args[0], guard, e.span);
-            Some(build_from_raw_defaults(&spec.class_id, entries, &permitted, e.span, arg))
+            Some(build_from_raw_defaults(&spec.class_id, entries, &permitted, e.span, arg, &|k| merged_only_ty(spec, k).is_some()))
         };
         if let ExprNode::Return { value } = &*e.node {
             if std::ptr::eq(value, tail) {
@@ -3166,8 +3179,9 @@ fn build_from_raw_defaults(
     permitted: &[Symbol],
     span: Span,
     arg: Expr,
+    typed: &dyn Fn(&Symbol) -> bool,
 ) -> Expr {
-    let ExprNode::Seq { exprs } = *build_from_raw_merge(class_id, entries, span, arg, &|_| false).node else {
+    let ExprNode::Seq { exprs } = *build_from_raw_merge(class_id, entries, span, arg, typed).node else {
         unreachable!("build_from_raw_merge returns a Seq")
     };
     // `_p = from_raw(...)`, then a (value, flag) setter pair per Symbol
