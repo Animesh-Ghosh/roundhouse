@@ -109,7 +109,7 @@ fn a_blob_links_to_its_redirect_route_on_spinel() {
             "controller.process_action(:show)\n",
             "body = controller.body\n",
             "href = '<a href=\"/rails/active_storage/blobs/redirect/'\n",
-            "[\"block\", \"text\", \"attached\", \"override\"].each do |id|\n",
+            "[\"block\", \"text\", \"attached\", \"override\", \"attachment\"].each do |id|\n",
             "  at = body.index('<p id=\"' + id + '\">' + href)\n",
             "  raise id + \": \" + body if at.nil?\n",
             "end\n",
