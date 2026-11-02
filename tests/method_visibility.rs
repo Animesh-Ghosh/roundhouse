@@ -210,11 +210,11 @@ fn a_modifier_if_is_not_a_conditional_visibility_declaration() {
         ("def parse(value)\n    if value\n      private :parse\n    end\n    value\n  end", true),
         ("def parse(value)\n    unless value\n      private :parse\n    else\n      value\n    end\n  end", true),
         ("if ready\n    private\n    def hidden; 1; end\n  end", false),
-        // A neighboring `def` is what makes the module surface. Without
-        // it, an accessor inside `if` would be dropped with the module
-        // and the error would never be raised.
-        ("def present; 1; end\n  if enabled\n    attr_reader :token\n  end", false),
-        ("def present; 1; end\n  unless enabled\n    attr_writer :token\n  else\n    attr_accessor :other\n  end", false),
+        // A plain accessor in a load-time conditional's branch is carried
+        // with its branch (`ConditionalDefinitions`); a class-level one
+        // is not.
+        ("def present; 1; end\n  if enabled\n    attr_reader :token\n  end", true),
+        ("def present; 1; end\n  unless enabled\n    attr_writer :token\n  else\n    attr_accessor :other\n  end", true),
         ("def present; 1; end\n  if enabled\n    cattr_reader :domain\n  end", false),
         ("def present; 1; end\n  mattr_accessor :label", true),
         ("return value if value", true),
@@ -601,4 +601,18 @@ fn a_class_methods_carrier_singleton_is_refused_by_name() {
         ),
         "{error}"
     );
+}
+
+#[test]
+fn a_def_on_the_class_s_own_name_is_a_class_method() {
+    for source in [
+        "class Shape\n  def Shape.configure(x)\n    x\n  end\nend\n",
+        "module Graph\n  class Shape\n    def Shape.configure(x)\n      x\n    end\n  end\nend\n",
+    ] {
+        let classes = ingest_library_classes(source.as_bytes(), "shape.rb").expect(source);
+        let shape = classes.iter().find(|c| c.name.0.as_str().ends_with("Shape")).expect(source);
+        assert_eq!(visibility(&shape.methods, "configure", MethodReceiver::Class), MethodVisibility::Public, "{source}");
+    }
+    let foreign = "class Shape\n  def Other.configure(x)\n    x\n  end\nend\n";
+    assert!(ingest_library_classes(foreign.as_bytes(), "shape.rb").is_err(), "a def on another class stays refused");
 }

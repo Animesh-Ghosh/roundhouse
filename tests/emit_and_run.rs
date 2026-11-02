@@ -7,17 +7,31 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/controller_content_type_writer.rs"]
+mod controller_content_type_writer;
+#[path = "support/time_change_usec.rs"]
+mod time_change_usec_contract;
+#[path = "emit_and_run/time_change_usec.rs"]
+mod time_change_usec;
+#[path = "emit_and_run/rate_limits.rs"]
+mod rate_limits;
+#[path = "emit_and_run/rack_mounts.rs"]
+mod rack_mounts;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
 #[path = "support/pundit_app.rs"]
 mod pundit_app;
+#[path = "emit_and_run/render_notifications.rs"]
+mod render_notifications;
 #[path = "emit_and_run/session_cookie_key.rs"]
 mod session_cookie_key;
 #[path = "emit_and_run/inertia_runtime_props.rs"]
 mod inertia_runtime_props;
 #[path = "emit_and_run/form_builder_fields.rs"]
 mod form_builder_fields;
+#[path = "emit_and_run/time_tag.rs"]
+mod time_tag;
 #[path = "emit_and_run/multiparameter_params.rs"]
 mod multiparameter_params;
 #[path = "emit_and_run/session_options_key.rs"]
@@ -38,6 +52,8 @@ mod active_model_attributes_form;
 mod association_query_arguments;
 #[path = "emit_and_run/tableless_params.rs"]
 mod tableless_params;
+#[path = "emit_and_run/splatted_accessor_params.rs"]
+mod splatted_accessor_params;
 #[path = "emit_and_run/active_model_superclass.rs"]
 mod active_model_superclass;
 #[path = "emit_and_run/arel_nodes.rs"]
@@ -52,6 +68,10 @@ mod framework_exceptions;
 mod active_storage_exceptions;
 #[path = "emit_and_run/rescue_surface.rs"]
 mod rescue_surface;
+#[path = "support/dispatcher_json.rs"]
+mod dispatcher_json_contract;
+#[path = "emit_and_run/dispatcher_json.rs"]
+mod dispatcher_json;
 #[path = "emit_and_run/preloader_runtime.rs"]
 mod preloader_runtime;
 #[path = "emit_and_run/framework_surface_rest.rs"]
@@ -88,6 +108,8 @@ mod model_callbacks;
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "emit_and_run/source_gem_facade.rs"]
+mod source_gem_facade;
 #[path = "support/for_loops.rs"]
 mod for_loops_contract;
 #[path = "emit_and_run/for_loops.rs"]
@@ -128,6 +150,10 @@ mod class_attribute;
 mod string_truncate;
 #[path = "emit_and_run/string_truncate.rs"]
 mod string_truncate_runs;
+#[path = "support/string_truncate_words.rs"]
+mod string_truncate_words;
+#[path = "emit_and_run/string_truncate_words.rs"]
+mod string_truncate_words_runs;
 #[path = "support/array_excluding.rs"]
 mod array_excluding;
 #[path = "emit_and_run/array_excluding.rs"]
@@ -142,6 +168,8 @@ mod view_presence_url_encode;
 mod controller_translate;
 #[path = "emit_and_run/mailer_templates.rs"]
 mod mailer_templates;
+#[path = "emit_and_run/view_paths.rs"]
+mod view_paths;
 #[path = "emit_and_run/unreachable_views.rs"]
 mod unreachable_views;
 #[path = "emit_and_run/job_rest_params.rs"]
@@ -150,6 +178,8 @@ mod job_rest_params;
 mod regexp_constants;
 #[path = "emit_and_run/upsert.rs"]
 mod upsert;
+#[path = "emit_and_run/relation_parts.rs"]
+mod relation_parts;
 #[path = "support/relation_fork.rs"]
 mod relation_fork_contract;
 #[path = "emit_and_run/relation_fork.rs"]
@@ -389,6 +419,8 @@ mod defined_const_fold;
 mod job_payload;
 #[path = "emit_and_run/sidekiq_push.rs"]
 mod sidekiq_adapter;
+#[path = "emit_and_run/sidekiq_retry_on.rs"]
+mod sidekiq_retry_on;
 #[path = "emit_and_run/silent_lowerings.rs"]
 mod silent_lowerings;
 #[path = "emit_and_run/validates_options.rs"]
@@ -405,6 +437,8 @@ mod uniqueness_association_attribute;
 mod default_scope_static;
 #[path = "emit_and_run/default_scope_dynamic.rs"]
 mod default_scope_dynamic;
+#[path = "emit_and_run/acts_as_tenant.rs"]
+mod acts_as_tenant;
 #[path = "emit_and_run/validates_integer_constants.rs"]
 mod validates_integer_constants;
 #[path = "emit_and_run/validation_callback_on.rs"]
@@ -4667,6 +4701,173 @@ fn jwt_is_refused_off_ruby_and_jruby() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const ELASTIC_APM_LIB: &str = "module Traced
+  include ElasticAPM::SpanHelpers
+
+  def double(x)
+    x * 2
+  end
+  span_method :double, 'traced:double'
+end
+
+class Pricer
+  include Traced
+  include ElasticAPM::SpanHelpers
+
+  def call(x, scale: 2)
+    ElasticAPM.set_custom_context(x: x)
+    ElasticAPM.set_label(:pricer, \"on\")
+    block_given? ? yield(x * scale) : x * scale
+  end
+  span_method :call, 'pricer:call'
+
+  def self.quote(x)
+    new.call(x, scale: 3)
+  end
+
+  def self.rate
+    3
+  end
+  span_class_method :rate, 'pricer:rate'
+
+  def traced
+    current = ElasticAPM.current_transaction
+    ElasticAPM.with_span(\"traced\", \"app\") { current.nil? ? :none : :some }
+  end
+
+  def report(error)
+    ElasticAPM.report(error)
+  end
+end
+";
+
+/// ElasticAPM runs as the real gem on Ruby. With no agent started, as an
+/// app that never configures one: `span_method` / `span_class_method` wrap
+/// the method and pass its arguments, keywords and block through, in a
+/// class and in a module; `with_span` answers its block and there is no
+/// transaction.
+#[test]
+fn elastic_apm_runs_as_the_real_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("lib/pricer.rb", ELASTIC_APM_LIB)
+        .run_ruby(
+            r#"pricer = Pricer.new
+raise "call" unless Pricer.quote(5) == 15
+raise "block" unless pricer.call(5) { |v| v + 1 } == 11
+raise "module" unless pricer.double(4) == 8
+raise "class side" unless Pricer.rate == 3
+raise "not wrapped" if Pricer.ancestors.first == Pricer
+raise "not wrapped in the module" if Traced.ancestors.first == Traced
+raise "singleton not wrapped" if Pricer.singleton_class.ancestors.first == Pricer.singleton_class
+raise "span" unless pricer.traced == :none
+pricer.report(RuntimeError.new("boom"))"#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(gemfile.contains("gem \"elastic-apm\""), "Gemfile does not declare elastic-apm:\n{gemfile}");
+}
+
+/// `span_method` and an app module's class-body macro replay in source
+/// order: a macro written after `span_method` sees the method wrapped.
+#[test]
+fn span_method_replays_in_source_order_with_app_macros() {
+    emit_and_run::real_blog()
+        .write(
+            "lib/worker.rb",
+            "module Audit
+  def audited(name)
+    raise \"span_method must run first\" if ancestors.first == self
+    name
+  end
+end
+
+class Worker
+  include ElasticAPM::SpanHelpers
+
+  def work
+    1
+  end
+  span_method :work, 'worker:work'
+
+  extend Audit
+  audited :work
+end
+",
+        )
+        .run_ruby(r#"raise "work" unless Worker.new.work == 1"#)
+        .assert_passes();
+}
+
+/// Off Ruby and JRuby, each ElasticAPM reference and the `SpanHelpers`
+/// include are refused.
+#[test]
+fn elastic_apm_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-elastic-apm-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/pricer.rb", ELASTIC_APM_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: Pricer.new.call(1).inspect\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            !errors.iter().any(|e| e.contains("ElasticAPM")),
+            "{target:?} refused a gem it ships:\n{}",
+            errors.join("\n")
+        );
+        let gemfile = files.get("Gemfile").map(String::as_str).unwrap_or("");
+        assert!(gemfile.contains("gem \"elastic-apm\""), "{target:?} Gemfile:\n{gemfile}");
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`ElasticAPM.set_label`", "`ElasticAPM.with_span`", "`ElasticAPM::SpanHelpers`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && path.contains("pricer") && text.contains("ElasticAPM"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted an ElasticAPM reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// ActiveSupport's `Digest::UUID.uuid_v4` runs as `SecureRandom.uuid`: a
 /// fresh random (version 4) uuid on each call.
 #[test]
@@ -4679,6 +4880,152 @@ fn digest_uuid_v4_runs_as_a_random_uuid() {
              raise \"repeated\" if a == b",
         )
         .assert_passes();
+}
+
+const REST_CLIENT_LIB: &str = "class Remote
+  def self.fetch(base, path)
+    response = RestClient.get(base + path, params: { q: \"x\" })
+    [response.code, response.body]
+  rescue RestClient::NotFound => e
+    [e.http_code, :not_found]
+  end
+
+  def self.send_form(base)
+    RestClient.post(base + \"/echo\", { name: \"a\" }).body
+  end
+
+  def self.execute(base)
+    RestClient::Request.execute(method: :get, url: base + \"/ok\", timeout: 5).body
+  end
+
+  def self.status_of(base, path)
+    RestClient.get(base + path) { |response, _request, _result| [response.code, response.body] }.first
+  end
+
+  CLIENT = ::RestClient
+
+  def self.built(base)
+    ::RestClient::Request.new(method: :get, url: base + \"/built\").execute.body
+  end
+end
+";
+
+/// RestClient runs as the real gem on Ruby: requests against a local
+/// server, a 404 rescued as `RestClient::NotFound`, and a verb with a
+/// block answering the block's value, a 404 included.
+#[test]
+fn rest_client_runs_as_the_real_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("lib/remote.rb", REST_CLIENT_LIB)
+        .run_ruby(
+            r##"require "socket"
+server = TCPServer.new("127.0.0.1", 0)
+port = server.addr[1]
+Thread.new do
+  loop do
+    client = server.accept
+    line = client.gets.to_s
+    headers = {}
+    while (header = client.gets) && header != "\r\n"
+      name, value = header.split(":", 2)
+      headers[name.downcase] = value.strip
+    end
+    body = client.read(headers["content-length"].to_i)
+    reply = if line.include?("/missing") then nil elsif line.include?("/echo") then body else line.split(" ")[1] end
+    if reply
+      client.write "HTTP/1.1 200 OK\r\nContent-Length: #{reply.bytesize}\r\nConnection: close\r\n\r\n#{reply}"
+    else
+      client.write "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    end
+    client.close
+  end
+end
+base = "http://127.0.0.1:#{port}"
+r = Remote.fetch(base, "/ok")
+raise r.inspect unless r == [200, "/ok?q=x"]
+r = Remote.fetch(base, "/missing")
+raise r.inspect unless r == [404, :not_found]
+raise Remote.send_form(base) unless Remote.send_form(base) == "name=a"
+raise Remote.execute(base) unless Remote.execute(base) == "/ok"
+raise Remote.built(base) unless Remote.built(base) == "/built"
+raise "block 200" unless Remote.status_of(base, "/ok") == 200
+raise "block 404" unless Remote.status_of(base, "/missing") == 404
+"##,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(gemfile.contains("gem \"rest-client\""), "Gemfile does not declare rest-client:\n{gemfile}");
+}
+
+/// Off Ruby and JRuby, each RestClient reference is refused.
+#[test]
+fn rest_client_is_refused_off_ruby_and_jruby() {
+    let dir = std::env::temp_dir().join(format!("rh-rest-client-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/remote.rb", REST_CLIENT_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    render plain: Remote.fetch(\"http://example.test\", \"/\").inspect\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(
+            !errors.iter().any(|e| e.contains("RestClient")),
+            "{target:?} refused a gem it ships:\n{}",
+            errors.join("\n")
+        );
+        let gemfile = files.get("Gemfile").map(String::as_str).unwrap_or("");
+        assert!(gemfile.contains("gem \"rest-client\""), "{target:?} Gemfile:\n{gemfile}");
+    }
+    for target in [
+        roundhouse::project::BuildTarget::Spinel,
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`RestClient.get`", "`RestClient::NotFound`", "`RestClient::Request`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby and jruby trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| {
+                !path.ends_with(".map") && path.contains("remote") && text.contains("RestClient")
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a RestClient reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// No other target has an HTTP client behind `Faraday`: each call and
@@ -7532,6 +7879,76 @@ end
         .assert_passes();
 }
 
+/// A class method `ApplicationRecord` defines runs on a subclass's relation,
+/// as Rails' scoping runs it: a relation-returning one filters that
+/// relation, and one that maps `pluck` rows to indifferent hashes answers
+/// that Array (not a relation of the hash class), so `first[:title]` reads
+/// a hash. Called on the subclass directly, it queries the subclass. A
+/// model's own class method after `where(...)` runs on that relation too,
+/// rather than on the rows the chain would otherwise be folded into. An
+/// inherited `scope` chains on a subclass relation, and an inherited class
+/// method runs on an association of the subclass.
+#[test]
+fn an_inherited_class_method_runs_on_a_subclass_relation() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/application_record.rb",
+            "  primary_abstract_class\n",
+            "  primary_abstract_class\n\n  scope :newest_first, -> { order(id: :desc) }\n\n  def self.id_list\n    pluck(:id)\n  end\n\n  def self.titled\n    where.not(title: \"Quiet\")\n  end\n\n  def self.hash_titles\n    pluck(:id, :title).map { |id, title| { id: id, title: title }.with_indifferent_access }\n  end\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }\n\n  def self.titled_count\n    order(:id).titled.to_a.size\n  end\n\n  def self.first_hash_title\n    order(:id).hash_titles.first[:title]\n  end\n\n  def self.hash_title_ids\n    all.hash_titles.map { |h| h[\"id\"] }\n  end\n\n  def self.direct_count\n    titled.count\n  end\n\n  def self.title_list\n    pluck(:title)\n  end\n\n  def self.where_titles\n    where(title: \"One\").title_list\n  end\n\n  def self.newest_title\n    where.not(title: nil).newest_first.first.title\n  end\n\n  def comment_ids\n    comments.id_list\n  end\n",
+        )
+        .run_ruby(
+            r#"a = Article.create!(title: "One", body: "A sufficiently long body.")
+b = Article.create!(title: "Quiet", body: "A sufficiently long body.")
+raise Article.titled_count.inspect unless Article.titled_count == 1
+raise Article.direct_count.inspect unless Article.direct_count == 1
+raise Article.first_hash_title.inspect unless Article.first_hash_title == "One"
+raise Article.hash_title_ids.inspect unless Article.hash_title_ids.sort == [a.id, b.id].sort
+raise Article.where_titles.inspect unless Article.where_titles == ["One"]
+raise Article.newest_title.inspect unless Article.newest_title == "Quiet"
+c = Comment.create!(article: a, commenter: "Reader", body: "Comment body")
+raise a.comment_ids.inspect unless a.comment_ids == [c.id]"#,
+        )
+        .assert_passes();
+}
+
+/// The nearest definition wins across the model hierarchy: a subclass
+/// scope shadows an ancestor's class method on an association, and a
+/// subclass class method shadows an ancestor's scope on a relation.
+#[test]
+fn a_subclass_definition_shadows_an_ancestor_of_the_same_name() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/application_record.rb",
+            "  primary_abstract_class\n",
+            "  primary_abstract_class\n\n  scope :ordered, -> { order(id: :desc) }\n\n  def self.picked(value)\n    where(id: value)\n  end\n",
+        )
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }\n\n  def self.ordered\n    \"own\"\n  end\n\n  def self.picked_titles(value)\n    where.not(title: nil).picked(value).map(&:title)\n  end\n\n  def picked_commenters\n    comments.picked.map(&:commenter)\n  end\n",
+        )
+        .edit(
+            "app/models/comment.rb",
+            "  belongs_to :article\n",
+            "  belongs_to :article\n\n  scope :picked, -> { where(commenter: \"Reader\") }\n",
+        )
+        .run_ruby(
+            r#"a = Article.create!(title: "One", body: "A sufficiently long body.")
+Article.create!(title: "Two", body: "A sufficiently long body.")
+raise Article.where.not(title: nil).ordered.inspect unless Article.where.not(title: nil).ordered == "own"
+raise Article.picked_titles(a.id).inspect unless Article.picked_titles(a.id) == ["One"]
+Comment.create!(article: a, commenter: "Reader", body: "Comment body")
+Comment.create!(article: a, commenter: "Other", body: "Comment body")
+raise a.picked_commenters.inspect unless a.picked_commenters == ["Reader"]"#,
+        )
+        .assert_passes();
+}
+
 /// `ActiveSupport::HashWithIndifferentAccess` reads and writes a Symbol
 /// key as its String, nested hashes included, and its conversions
 /// (`merge`, `reverse_merge`, `dup`, `to_hash`, `symbolize_keys`) answer
@@ -8680,12 +9097,12 @@ fn an_app_without_jobs_runs_its_tests() {
 fn the_job_queue_keeps_its_thread_safe_methods() {
     emit_and_run::real_blog()
         .run_ruby(
-            r#"%i[drain pending_count performed enqueue_locked record_performed_for_tests].each do |m|
+            r#"%i[drain pending_count performed enqueue_locked clear_queue record_performed_for_tests].each do |m|
   file = ActiveJob.method(m).source_location[0]
   raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/thread_state.rb")
 end
 # The serving drain wraps these two, and calls the locked ones above.
-%i[enqueue record_performed].each do |m|
+%i[enqueue_on record_performed].each do |m|
   file = ActiveJob.method(m).source_location[0]
   raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/active_job_cruby.rb")
 end
@@ -18261,6 +18678,75 @@ fn belongs_to_primary_key_option_names_the_key_the_foreign_key_holds() {
         .assert_passes();
 }
 
+#[test]
+fn generated_keyless_model_saves_without_assigning_an_id() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/tagging.rb", "class Tagging < ApplicationRecord\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write(
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table :taggings, id: false do |t|\n    t.integer :tag_id\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"tagging = Tagging.new(tag_id: 7)
+def tagging.id=(_value)
+  raise "id= called for a keyless model"
+end
+raise "save failed" unless tagging.save
+raise "primary key" unless Tagging.primary_key.nil?
+raise "not persisted" unless tagging.persisted? && !tagging.new_record?
+rows = Tagging.connection.select_rows("SELECT tag_id FROM taggings")
+raise "inserted rows: #{rows.inspect}" unless rows == [[7]]
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn a_primary_key_added_by_a_later_migration_persists_updates() {
+    emit_and_run::empty_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n")
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        )
+        .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write(
+            "db/migrate/20260101000000_create_widgets.rb",
+            "class CreateWidgets < ActiveRecord::Migration[8.1]\n  def change\n    create_table :widgets, id: false do |t|\n      t.integer :value\n    end\n  end\nend\n",
+        )
+        .write(
+            "db/migrate/20260102000000_add_widget_id.rb",
+            "class AddWidgetId < ActiveRecord::Migration[8.1]\n  def change\n    add_column :widgets, :id, :integer, primary_key: true\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"# Attach to the existing table produced by Rails 8.1.4's migrations.
+Db.exec("DROP TABLE widgets")
+Db.exec('CREATE TABLE "widgets" ("value" integer, "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL)')
+widget = Widget.new(value: 7)
+raise "insert failed" unless widget.save && widget.persisted?
+widget.value = 8
+raise "update failed" unless widget.save
+rows = Widget.connection.select_rows("SELECT value, id FROM widgets")
+raise "update was lost: #{rows.inspect}" unless rows == [[8, 1]]
+raise "primary key" unless Widget.primary_key == "id" && widget.id == 1
+"#,
+        )
+        .assert_passes();
+}
+
 /// A runtime façade's scalar constants (`Markly::SMART = 0` in
 /// runtime/ruby/gem_facades.rb) used to carry no type: the constant table
 /// typed Hash/Array/`.new` values only, so after the Rubydex integration an
@@ -19884,10 +20370,15 @@ mod proc_new_and_std_streams;
 mod core_constants;
 #[path = "emit_and_run/module_protocol_receivers.rs"]
 mod module_protocol_receivers;
+
+#[path = "emit_and_run/module_protocol_block_self.rs"]
+mod module_protocol_block_self;
 #[path = "emit_and_run/ipaddr_include.rs"]
 mod ipaddr_include;
 #[path = "emit_and_run/hash_subclass_include.rs"]
 mod hash_subclass_include;
+#[path = "emit_and_run/module_query_class_unions.rs"]
+mod module_query_class_unions;
 #[path = "emit_and_run/guarded_declarations.rs"]
 mod guarded_declarations;
 #[path = "emit_and_run/lock_versions.rs"]
@@ -19960,6 +20451,8 @@ mod module_factory;
 mod spinel_unknown_gem;
 #[path = "emit_and_run/json_column_name.rs"]
 mod json_column_name;
+#[path = "emit_and_run/block_locals.rs"]
+mod block_locals;
 
 /// `ActiveSupport::JSON.encode(value, escape: false)` — Rails' document
 /// without the HTML-entity escaping, which campfire's fragment keys can
@@ -20004,3 +20497,113 @@ end
         .run_test("test/models/article_json_escape_test.rb")
         .assert_passes();
 }
+
+#[path = "emit_and_run/fresh_builtin_extend.rs"]
+mod fresh_builtin_extend;
+
+#[path = "emit_and_run/module_function_includer.rs"]
+mod module_function_includer;
+
+#[path = "emit_and_run/unknown_return.rs"]
+mod unknown_return;
+
+#[path = "emit_and_run/hash_ivar_symbol_keys.rs"]
+mod hash_ivar_symbol_keys;
+
+#[path = "emit_and_run/date_time_package.rs"]
+mod date_time_package;
+
+#[path = "emit_and_run/date_error.rs"]
+mod date_error;
+
+#[path = "emit_and_run/data_point_shapes.rs"]
+mod data_point_shapes;
+
+#[path = "emit_and_run/bang_relation_builders.rs"]
+mod bang_relation_builders;
+
+#[path = "emit_and_run/helper_param_after_views.rs"]
+mod helper_param_after_views;
+
+#[path = "emit_and_run/layout_ivar_unset.rs"]
+mod layout_ivar_unset;
+
+#[path = "emit_and_run/stub_facade_source_gem.rs"]
+mod stub_facade_source_gem;
+
+#[path = "emit_and_run/helper_render_partial.rs"]
+mod helper_render_partial;
+
+#[path = "emit_and_run/where_record_seed_redirect_back.rs"]
+mod where_record_seed_redirect_back;
+
+#[path = "emit_and_run/joins_several_associations.rs"]
+mod joins_several_associations;
+
+#[path = "emit_and_run/chained_find_by_association_key.rs"]
+mod chained_find_by_association_key;
+
+#[path = "emit_and_run/bare_save_without_validation.rs"]
+mod bare_save_without_validation;
+
+#[path = "emit_and_run/route_param_recall.rs"]
+mod route_param_recall;
+
+#[path = "emit_and_run/reopened_class_constructor.rs"]
+mod reopened_class_constructor;
+
+#[path = "emit_and_run/flash_any_key.rs"]
+mod flash_any_key;
+
+#[path = "emit_and_run/select_alias_attributes.rs"]
+mod select_alias_attributes;
+
+#[path = "emit_and_run/route_arg_column_named_like_association.rs"]
+mod route_arg_column_named_like_association;
+
+#[path = "emit_and_run/params_merged_key_type.rs"]
+mod params_merged_key_type;
+
+#[path = "emit_and_run/view_nil_seeded_loop_local.rs"]
+mod view_nil_seeded_loop_local;
+
+#[path = "emit_and_run/polymorphic_source_through.rs"]
+mod polymorphic_source_through;
+
+#[path = "emit_and_run/namespaced_controller_symbol.rs"]
+mod namespaced_controller_symbol;
+
+#[path = "emit_and_run/route_format_lookahead.rs"]
+mod route_format_lookahead;
+#[path = "emit_and_run/page_caching.rs"]
+mod page_caching;
+#[path = "emit_and_run/route_requirement_span.rs"]
+mod route_requirement_span;
+#[path = "emit_and_run/boot_program.rs"]
+mod boot_program;
+#[path = "emit_and_run/route_helper_segment_escape.rs"]
+mod route_helper_segment_escape;
+#[path = "emit_and_run/solid_queue_clear.rs"]
+mod solid_queue_clear;
+
+#[path = "emit_and_run/route_dot_span.rs"]
+mod route_dot_span;
+
+#[path = "emit_and_run/params_write_assign.rs"]
+mod params_write_assign;
+
+#[path = "emit_and_run/find_each_mailer.rs"]
+mod find_each_mailer;
+
+#[path = "emit_and_run/model_class_attribute.rs"]
+mod model_class_attribute;
+#[path = "support/record_slice_app.rs"]
+mod record_slice_app;
+#[path = "emit_and_run/record_slice.rs"]
+mod record_slice;
+
+#[path = "emit_and_run/csrf_meta_tag_alias.rs"]
+mod csrf_meta_tag_alias;
+
+#[path = "emit_and_run/boolop_precedence.rs"]
+mod boolop_precedence;

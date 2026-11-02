@@ -25,6 +25,10 @@ pub(crate) mod expr;
 mod library;
 pub(crate) use library::install_lookup_indexes;
 mod rbs;
+/// Host-only, like the `project` tree passes that run it and whose RBS
+/// declaration spans it shares; excluded from the wasm build.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod reopen;
 pub mod shake;
 mod shared;
 pub mod source_markers;
@@ -36,6 +40,12 @@ pub use rbs::ty_to_rbs;
 
 // External API: the historical surface kept for `tests/` and `bin/`.
 pub use expr::emit_expr;
+
+/// The `models/<stem>` anchor of the file a library class is emitted
+/// into: its outermost enclosing app class's (`library::file_owner`).
+pub(crate) fn library_file_anchor(name: &str, app: &App) -> String {
+    format!("models/{}", crate::naming::underscore(&library::file_owner(name, app, &app.library_classes)))
+}
 
 pub(crate) fn with_external_gem_namespaces<R>(
     namespaces: &std::collections::BTreeSet<String>,
@@ -243,7 +253,7 @@ fn materialize_models_with_param_binds(
     let assoc_scopes = crate::lower::scope_chain::assoc_query_method_names(
         &crate::lower::scope_chain::survey_assoc_class_methods(
             app,
-            &crate::lower::scope_chain::build_assoc_registry(&app.models),
+            &crate::lower::scope_chain::build_assoc_registry_for_app(app),
             &crate::lower::scope_chain::build_scope_registry(&app.models),
         )
         .0,
@@ -260,6 +270,7 @@ fn materialize_models_with_param_binds(
         param_binds,
         crate::lower::model_to_library::ErrorsReaders::CreatedOnFirstRead,
         crate::lower::model_to_library::RuntimeRelation::Present,
+        &crate::lower::view_to_library::PartialStems::of(&app.views),
     ).0;
     (lcs, params_specs)
 }
@@ -637,6 +648,8 @@ fn lowered_controller_lcs_with_layout_and_param_binds(app: &App, param_binds: bo
 /// them to resolve `Article.includes(...).order(...)` chain
 /// receivers to a TableRef.
 fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_binds: bool) -> Vec<LibraryClass> {
+    let resolver = app.const_resolver.for_sources(&app.sources);
+    let finder_classes = crate::analyze::source_finder_classes(app, &resolver);
     // Use lower_models_with_registry (not lower_models_to_library_classes
     // + class_info_from_library_class) because the former returns
     // ClassInfo with `table` set — the Arel pass needs `info.table`
@@ -674,6 +687,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_
             schema: Some(&app.schema),
             views: &app.views,
             library_classes: &app.library_classes,
+            finder_classes: Some(&finder_classes),
             assocs: &assocs,
             routed_by_controller: Some(&routed),
             format_breadth,
@@ -947,7 +961,9 @@ fn emit_jbuilder_view_files(
 /// cross-format visibility it needs, exactly as combining jbuilder's
 /// own per-view slices did for the jbuilder-jbuilder case.
 pub(crate) fn emit_lowered_views_and_jbuilder(app: &App) -> Vec<EmittedFile> {
-    let (html_views, html_lcs) = lowered_view_lcs_pre_helper(app);
+    let (html_views, mut html_lcs) = lowered_view_lcs_pre_helper(app);
+    // Not in `lowered_view_lcs_pre_helper`: the views-only entry points serve harnesses that load the views without ActiveSupport::Notifications, which only a whole tree ships.
+    crate::lower::view_instrumentation::apply(&html_views, &mut html_lcs, app);
     let (jbuilder_views, jbuilder_lcs) = jbuilder_view_lcs_pre_helper(app);
     let html_len = html_lcs.len();
     let mut combined = html_lcs;
@@ -1240,6 +1256,7 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
             &app.models,
             fixture_extras,
             &crate::lower::routes::helper_id_segments(app),
+            &crate::lower::routes::direct_helper_names(app),
             true,
         );
         // A test body writes the same relation chains an app body does —

@@ -36,6 +36,16 @@ pub struct Comment {
 // Models ----------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SelectAlias {
+    pub name: Symbol,
+    #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+    pub span: Span,
+    // A flag rather than dropping the alias: a declared `attribute` of that name still takes the selected value.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_method: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Model {
     pub name: ClassId,
     /// `None` only for anonymous/top-level classes we haven't resolved;
@@ -114,6 +124,10 @@ pub struct Model {
     /// `Rooms::Open` rows say `rooms_open`, not `room`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sti_subclass_names: Vec<ClassId>,
+
+    // Stamped at ingest, not derived per model: the `select` naming them may sit on another model or class.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub select_aliases: Vec<SelectAlias>,
 
     /// The catalog entries this model's messages can reach, its i18n
     /// scope and lookup keys; stamped by `i18n::stamp_models`. Default
@@ -1160,6 +1174,10 @@ pub struct LibraryClass {
     /// does), so these replay ahead of the method definitions. That
     /// makes position-sensitive markers unsafe to capture — see the
     /// visibility deny-list at the ingest site.
+    /// Class-body `if` / `unless` statements whose branches define
+    /// methods. See [`ConditionalDefinitions`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditional_definitions: Vec<ConditionalDefinitions>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unknown_calls: Vec<Expr>,
 }
@@ -1714,6 +1732,21 @@ pub struct Filter {
     /// Lambda/proc-form `unless:` guard body, negated at the call site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_cond_expr: Option<Expr>,
+    /// An `if:`/`unless:` whose value ingest could not read (an Array, a
+    /// callable object): the filter may not run, but no predicate is
+    /// carried, so the dispatch chain still calls it unguarded. Analysis
+    /// that relies on a filter running treats it as guarded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread_guard: bool,
+    /// An options container ingest could not decode completely. It may
+    /// hide scope or ordering as well as a guard, so replay cannot place
+    /// this callback's writes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread_options: bool,
+    /// Distinguishes `only: []` (no actions) from an absent `only:`.
+    /// Kept separately so existing consumers of `only` retain their contract.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_present: bool,
     /// The whole call for a block-form filter — `before_action do … end`
     /// as one `Send` with its block — so a chain entry synthesized for
     /// it can be located (the trace's `file:line`) and named. Never set
@@ -1998,6 +2031,13 @@ pub const FORMAT_NONE: &str = "";
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouteSpec {
+    /// A source-proven in-app Rack endpoint. It has prefix semantics rather
+    /// than a controller action's segment/format matching semantics.
+    RackMount {
+        target: ClassId,
+        path: String,
+        span: Span,
+    },
     /// Direct verb call: `get "/path", to: "controller#action"[, as: :name]`.
     /// The explicit form is the only one that can express arbitrary paths
     /// and custom constraints.
@@ -2016,6 +2056,14 @@ pub enum RouteSpec {
         /// verb declared directly in the block and any other case.
         #[serde(default, skip_serializing_if = "ResourceScope::is_nested")]
         scope: ResourceScope,
+        /// Written as an action symbol (`get :index`) rather than a path
+        /// string (`get "index"`). Rails derives a symbol's path from the
+        /// action, and a canonical action (`index`, `create`, `new`,
+        /// `show`, `update`, `destroy`) on a member or collection scope
+        /// adds no segment: `collection { get :index }` is the
+        /// collection's own path, where `get "index"` is `…/index`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        action_symbol: bool,
     },
     /// `root "controller#action"` — shorthand for `GET /` routed to the
     /// given target. Helper name defaults to `{prefix}root`; `as:`
@@ -2433,4 +2481,110 @@ pub fn enum_mapping_reads_label(m: &[(String, crate::expr::Literal)]) -> bool {
 /// The label an enum mapping gives a NULL column (`unknown: nil`), if any.
 pub fn enum_nil_label(m: &[(String, crate::expr::Literal)]) -> Option<&str> {
     m.iter().find(|(_, v)| matches!(v, crate::expr::Literal::Nil)).map(|(l, _)| l.as_str())
+}
+
+/// A class-body (or `class << self`) `if` / `elsif` / `else` or `unless`
+/// / `else` whose branches hold only method definitions:
+///
+/// ```ruby
+/// class << self
+///   if Rails.env.test?
+///     def diagnostic_sampling = "test"
+///   else
+///     def diagnostic_sampling = "other"
+///   end
+/// end
+/// ```
+///
+/// Ruby evaluates the condition when the body runs, at load time, and
+/// only the selected branch defines its methods. Every branch's methods
+/// are ordinary entries of `LibraryClass::methods`, so analysis types
+/// each of them; this record says which branch each belongs to. The Ruby
+/// family writes the conditional around them, where its first member
+/// stands, so the selected branch defines the method as in the source.
+/// Other targets refuse the class by name: they would define every
+/// branch's methods, the last one winning.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConditionalDefinitions {
+    /// The whole `if` / `unless` statement.
+    pub span: Span,
+    /// `unless`: the first branch runs when its condition is falsy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub negated: bool,
+    /// The branches in source order: `if`, each `elsif`, then `else`
+    /// (no condition). A branch that defines nothing is kept, so the
+    /// emitted conditional selects what the source selects.
+    pub arms: Vec<ConditionalArm>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConditionalArm {
+    /// `None` for the `else` branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Expr>,
+    /// The `methods` entries this branch defines, by identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub methods: Vec<ConditionalMember>,
+    /// The load-time conditionals nested in this branch, which Ruby
+    /// evaluates only when the branch runs; written inside it, ordered by
+    /// their start among the branch's methods.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested: Vec<ConditionalDefinitions>,
+    /// The classes and modules this branch declares, in source order.
+    /// Each is an ordinary library class (with what it nests), so analysis
+    /// types it; the Ruby family loads its file inside the branch, so it
+    /// exists only when Ruby runs the branch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declarations: Vec<ConditionalDeclaration>,
+}
+
+/// A `class` / `module` statement in a [`ConditionalArm`]: the name it
+/// declares, qualified, and where the statement starts, which orders it
+/// among the branch's methods.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConditionalDeclaration {
+    pub name: ClassId,
+    pub start: u32,
+}
+
+impl ConditionalDefinitions {
+    /// The names every branch (and every nested conditional) declares.
+    pub fn declared_names(&self) -> Vec<&ClassId> {
+        let mut out = Vec::new();
+        for arm in &self.arms {
+            out.extend(arm.declarations.iter().map(|d| &d.name));
+            for nested in &arm.nested {
+                out.extend(nested.declared_names());
+            }
+        }
+        out
+    }
+}
+
+/// One method a [`ConditionalArm`] defines: its name, side and the span
+/// of its name in the `def` header, which tells it from another branch's
+/// definition of the same name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConditionalMember {
+    pub name: Symbol,
+    pub receiver: MethodReceiver,
+    pub name_span: Span,
+}
+
+impl ConditionalMember {
+    pub fn of(method: &MethodDef) -> Self {
+        Self { name: method.name.clone(), receiver: method.receiver, name_span: method.name_span }
+    }
+
+    pub fn is(&self, method: &MethodDef) -> bool {
+        self.name == method.name && self.receiver == method.receiver && self.name_span == method.name_span
+    }
+}
+
+impl ConditionalDefinitions {
+    /// Whether a branch of this statement, or of a conditional nested in
+    /// one, defines `method`.
+    pub fn contains(&self, method: &MethodDef) -> bool {
+        self.arms.iter().any(|arm| arm.methods.iter().any(|m| m.is(method)) || arm.nested.iter().any(|n| n.contains(method)))
+    }
 }

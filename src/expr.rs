@@ -23,6 +23,12 @@ use crate::ty::Ty;
 pub const RESOLVED_CLASS_REF: u64 = 1 << 2;
 /// The value is a proven class/module object, rather than a nominal instance.
 pub const CLASS_OBJECT_VALUE: u64 = 1 << 5;
+/// Positive instance provenance for generated model-indexer key lowering.
+/// A nominal `Ty::Class` alone is not instance evidence.
+pub const INDEXER_INSTANCE_VALUE: u64 = 1 << 39;
+/// A class-valued query, possibly an unknown subclass. Unlike
+/// `CLASS_OBJECT_VALUE`, this does not establish exact class identity.
+pub const INDEXER_CLASS_QUERY_VALUE: u64 = 1 << 38;
 /// This receiver's operator call is backed by a registered method definition.
 pub const RESOLVED_OPERATOR_RECEIVER: u64 = 1 << 6;
 /// The cast's type was declared by source, rather than synthesized by lowering.
@@ -118,6 +124,10 @@ pub const RESOLVED_MIXIN: u64 = 1 << 22;
 /// can ask; `project::report_unsupported_bundled_constants` reports it elsewhere.
 pub const MODULE_QUERY: u64 = 1 << 23;
 
+/// A runtime Class/Module factory or implicit singleton-class access.
+/// The Ruby and JRuby targets retain these runtime class objects.
+pub const RUNTIME_CLASS_OBJECT: u64 = 1 << 31;
+
 /// The call an `alias new builtin` delegates to (`ingest::library_class::
 /// OBJECT_BUILTINS`): a method every Ruby object answers, which only the
 /// ruby family has; `project::report_builtin_aliases` refuses it elsewhere.
@@ -133,6 +143,59 @@ pub const BUILD_OWNER: u64 = 1 << 24;
 /// the path: `const_get` also finds a top-level constant, which `::` does
 /// not (`Base::String` raises).
 pub const CONST_PATH: u64 = 1 << 25;
+
+/// A library class or module body statement only Ruby itself answers:
+/// a loop that `class_eval`s or `define_method`s, a call to a core
+/// `Module` method (`freeze`), a write through a class-side writer the
+/// class or an ancestor defines (`ingest::body_statements`). The Ruby
+/// and JRuby trees write it back where the source has it, among the
+/// class's methods; every other target drops it and reports it.
+pub const BODY_STATEMENT: u64 = 1 << 27;
+
+/// On a body statement or a constant's value: the source wrote it inside
+/// the class's own `class << self`, where Ruby runs it with the singleton
+/// class as `self` and puts a constant on the singleton class
+/// (`X.singleton_class.constants`, not `X.constants`). The Ruby and JRuby
+/// trees write it back inside a `class << self`; other targets keep the
+/// constant on the class.
+pub const SINGLETON_BODY: u64 = 1 << 28;
+
+/// On a `Const` the analyzer qualified to a constant of `X`'s
+/// `class << self` (Rubydex's `X::<X>::NAME`): the Ruby and JRuby trees
+/// read it as `X.singleton_class::NAME`, where it lives.
+pub const SINGLETON_CONSTANT_REF: u64 = 1 << 29;
+
+/// Analysis admitted this receiverless send as Kernel's `Rational(...)`,
+/// `Pathname(...)` or `URI(...)`: its own class, on its own side, defines
+/// no method of that name. Only the ruby family and spinel have the
+/// libraries, so `project::report_ruby_only_sends` refuses it elsewhere.
+/// The mark stays when lowering spells `Pathname(x)` as `Pathname.new(x)`.
+pub const KERNEL_CONVERSION: u64 = 1 << 30;
+
+/// On the body of a method `ingest::inherited_alias::resolve` copied
+/// from an ancestor for an `alias` of it: the Ruby family writes the
+/// captured `alias_method` back instead, and drops the copy.
+pub const INHERITED_ALIAS_COPY: u64 = 1 << 36;
+
+/// A source-resolved library call whose native keyword ABI is preserved.
+pub const NATIVE_KEYWORD_ARGUMENTS: u64 = 1 << 35;
+/// A retained finder dispatch: subclass arms are explicit, or hook ownership
+/// is unknown. Later registries must not relicense a framework rewrite.
+/// Bits 36–39 belong to inherited aliases, format variants and indexer
+/// decisions. Bits 40–47 are reserved for future decision groups, so finder
+/// decisions start at 48.
+pub const FINDER_DISPATCH_FALLBACK: u64 = 1 << 48;
+/// Ingest qualified a bare model finder; a runtime relation keeps its late-bound self.
+pub const IMPLICIT_MODEL_FINDER_RECEIVER: u64 = 1 << 49;
+/// Unknown-hook dynamic dispatch has no established emitted implementation.
+pub const FINDER_IMPLEMENTATION_UNKNOWN: u64 = 1 << 50;
+
+/// On a route-helper call `lower::route_format_suffix` renamed for its
+/// literal `format:` (`widget_url(w, format: :json)` to
+/// `widget_json_url(w)`): the only calls `routes_to_library` builds a
+/// format variant for. A `<route>_<word>_url` written in the source is
+/// not a Rails helper, whatever it splits into.
+pub const FORMAT_VARIANT_CALL: u64 = 1 << 37;
 
 /// Whether `expr` is a [`SELF_BINDING`] cast.
 pub fn is_self_binding(expr: &Expr) -> bool {

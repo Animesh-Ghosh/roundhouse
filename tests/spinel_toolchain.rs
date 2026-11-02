@@ -32,6 +32,12 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "spinel_toolchain/rack_mounts.rs"]
+mod rack_mounts;
+#[path = "support/time_change_usec.rs"]
+mod time_change_usec_contract;
+#[path = "spinel_toolchain/time_change_usec.rs"]
+mod time_change_usec;
 #[path = "support/string_truncate.rs"]
 mod string_truncate;
 #[path = "spinel_toolchain/string_truncate.rs"]
@@ -128,6 +134,8 @@ mod strong_params;
 mod params_wrapper;
 #[path = "spinel_toolchain/json_request_values.rs"]
 mod json_request_values;
+#[path = "spinel_toolchain/multipart_file_parts.rs"]
+mod multipart_file_parts;
 #[path = "support/default_format_dispatch.rs"]
 mod default_format_dispatch;
 #[path = "spinel_toolchain/route_default_format.rs"]
@@ -180,7 +188,7 @@ mod request_id_runtime;
 fn custom_data_factories_run_natively() {
     let run = emit_and_run::real_blog()
         .write("app/services/factory_examples.rb", data_factory::CUSTOM_DECLARATIONS)
-        .run_spinel(data_factory::CUSTOM_ASSERTIONS);
+        .run_spinel_slim(&[], data_factory::CUSTOM_ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("custom Data factory contract passed"));
 }
@@ -230,7 +238,7 @@ fn anonymous_keyword_forwarding_runs_natively() {
             "app/services/keyword_forwarder.rb",
             anonymous_keywords::SOURCE,
         )
-        .run_spinel(anonymous_keywords::ASSERTIONS);
+        .run_spinel_slim(&[], anonymous_keywords::ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("anonymous keyword forwarding contract passed"));
     let emitted = std::fs::read_to_string(run.emitted.join("app/models/keyword_forwarder.rb"))
@@ -261,7 +269,8 @@ fn active_support_many_block_and_squish_bang_run_natively() {
 end
 "#,
         )
-        .run_spinel(
+        .run_spinel_slim(
+            &["runtime/active_support_ext"],
             r#"raise "many? block zero/one/multiple or short circuit failed" unless ActiveSupportProbe.many_matches == [false, false, true, 3]
 raise "squish! did not match Unicode whitespace semantics" unless ActiveSupportProbe.squish_bang == "foo bar"
 puts "ActiveSupport core extensions native passed"
@@ -358,7 +367,7 @@ fn the_rails_health_check_answers_up_natively() {
         .run_spinel(r#"
 routed = false
 RouteTable.table.each do |route|
-  routed = true if route.verb == "GET" && route.pattern == "/up" && route.controller == :rails_health && route.action == :show
+  routed = true if route.verb == "GET" && route.pattern == "/up" && route.controller == :rails__health && route.action == :show
 end
 raise "no GET /up route to rails_health#show" unless routed
 c = Rails::HealthController.new
@@ -370,7 +379,7 @@ puts "rails health contract passed"
     run.assert_passes();
     assert!(run.stdout.contains("rails health contract passed"));
     let main = std::fs::read_to_string(run.emitted.join("main.rb")).expect("main.rb");
-    assert!(main.contains("when :rails_health then Rails::HealthController.new"), "{main}");
+    assert!(main.contains("when :rails__health then Rails::HealthController.new"), "{main}");
 }
 
 fn scratch_dir(tag: &str) -> PathBuf {
@@ -706,7 +715,7 @@ fn named_capture_matches_assign_their_locals_natively() {
   end
 end
 "##)
-        .run_spinel(r##"raise "map" unless Matcher.map_name(%(<img usemap="#m1">)) == "m1"
+        .run_spinel_slim(&[], r##"raise "map" unless Matcher.map_name(%(<img usemap="#m1">)) == "m1"
 raise "map none" unless Matcher.map_name("none").nil?
 raise "pair" unless Matcher.pair("1-2") == ["1", "2"]
 raise "pair none" unless Matcher.pair("x") == [nil, nil, :none]
@@ -717,3 +726,8 @@ puts "named captures passed"
     run.assert_passes();
     assert!(run.stdout.contains("named captures passed"));
 }
+
+#[path = "spinel_toolchain/db_binary_literal.rs"]
+mod db_binary_literal;
+#[path = "spinel_toolchain/solid_queue_clear.rs"]
+mod solid_queue_clear;

@@ -43,7 +43,8 @@ use crate::ty::Ty;
 /// dispatch is read at startup by the HTTP router.
 pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
     let flat = flatten_routes(app);
-    if flat.is_empty() {
+    let mounts = super::rack_mounts::mounts(app);
+    if flat.is_empty() && mounts.is_empty() {
         return Vec::new();
     }
     let module_path = vec![Symbol::from("RouteTable")];
@@ -114,19 +115,48 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
             is_async: false,
         });
         out.push(LibraryFunction {
-            module_path,
+            module_path: module_path.clone(),
             name: Symbol::from("root"),
             params: Vec::new(),
             unsupported_formals: None,
             has_anonymous_block: false,
             body: root_body,
-            signature: Some(fn_sig(vec![], route_ty)),
+            signature: Some(fn_sig(vec![], route_ty.clone())),
             effects: EffectSet::default(),
             is_async: false,
         });
     }
 
+    if !mounts.is_empty() {
+        for (index, mount) in mounts.iter().enumerate() {
+            out.push(rack_route_array(
+                &format!("rack_routes_before_{index}"), mount.preceding.iter(),
+                &route_class_id, &route_ty,
+            ));
+        }
+        out.push(rack_route_array(
+            "rack_head_routes", flat.iter().filter(|route| route.method == HttpMethod::Head),
+            &route_class_id, &route_ty,
+        ));
+    }
     out
+}
+
+/// Reuse the controller route constructor, including all its requirements.
+fn rack_route_array<'a>(
+    name: &str, routes: impl Iterator<Item = &'a FlatRoute>,
+    class: &ClassId, route_ty: &Ty,
+) -> LibraryFunction {
+    let ty = Ty::Array { elem: std::sync::Arc::new(route_ty.clone()) };
+    LibraryFunction {
+        module_path: vec![Symbol::from("RouteTable")], name: Symbol::from(name),
+        params: Vec::new(), unsupported_formals: None, has_anonymous_block: false,
+        body: with_ty(Expr::new(Span::synthetic(), ExprNode::Array {
+            elements: routes.map(|route| build_route_new(route, class, route_ty)).collect(),
+            style: ArrayStyle::Brackets,
+        }), ty.clone()),
+        signature: Some(fn_sig(vec![], ty)), effects: EffectSet::default(), is_async: false,
+    }
 }
 
 /// Build `ActionDispatch::Router::Route.new("GET", "/x", :articles,
@@ -151,7 +181,7 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
     let controller_sym = controller_symbol(r.controller.0.as_str());
     let mut args = vec![
         lit_str(verb_str.to_string()),
-        lit_str(r.path.clone()),
+        lit_str(crate::lower::segment_pattern::dispatch_path(&r.path, &r.seg_patterns)),
         lit_sym(Symbol::from(controller_sym)),
         lit_sym(r.action.clone()),
     ];
@@ -218,19 +248,32 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
 
 /// `ArticlesController` → `articles` (the controller-symbol form
 /// the spinel router uses). Mirrors the existing per-target convention.
-/// Namespaced controllers flatten with underscores
-/// (`Mod::ActivitiesController` → `mod_activities`) — a plain-ident
+/// Namespaced controllers flatten with a double underscore
+/// (`Mod::ActivitiesController` → `mod__activities`) — a plain-ident
 /// symbol every target's symbol literal can carry (`:mod::activities`
 /// parses as scope resolution, not a symbol, under Ruby).
+// Not a single underscore: lobsters' `Mod::MailsController` and top-level `ModMailsController` both flattened to `mod_mails`, and /mod/mails/* dispatched to the wrong one.
 pub(crate) fn controller_symbol(class_name: &str) -> String {
     let base = class_name.strip_suffix("Controller").unwrap_or(class_name);
-    crate::naming::underscore(base).replace('/', "_")
+    crate::naming::underscore(base).replace('/', "__")
 }
 
 /// Build the `RouteHelpers` module from `app.routes` as a list of
 /// `LibraryFunction`s, one per named route. Empty when the app has
 /// no routes.
 pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
+    lower_route_helpers(app, true)
+}
+
+/// The same helpers with a Hash query option kept a scalar, for the
+/// TypeScript emit: its helper takes the option as `any`, and the Hash
+/// rendering's `keys` throws on the object it is passed, where the
+/// scalar form renders.
+pub fn lower_routes_to_library_functions_without_hash_query(app: &App) -> Vec<LibraryFunction> {
+    lower_route_helpers(app, false)
+}
+
+fn lower_route_helpers(app: &App, hash_query: bool) -> Vec<LibraryFunction> {
     let flat = flatten_routes_for_helpers(app);
     if flat.is_empty() {
         return Vec::new();
@@ -296,7 +339,10 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
             }
         }
     }
-    let query_keys = query_param_demand(app, &helper_shape);
+    let mut query_keys = query_param_demand(app, &helper_shape);
+    if !hash_query {
+        query_keys.values_mut().flatten().for_each(|key| key.hash = false);
+    }
     let string_segments = string_segment_demand(app, &helper_shape);
     for route in &flat {
         // Unnamed dynamic routes (`get "/comments/page/:page"`, no `as:`)
@@ -348,7 +394,17 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // `direct :name do … end` helpers — not routes, so they never reach
     // `flat`; they ride here because they live in the same module and
     // their `route_for` bodies need the flattened table to resolve.
-    funcs.extend(direct::lower_direct_helpers(&module_path, app, &flat));
+    // A `route_for` argument meets its target's signature the way any
+    // other call site does, so the generated helpers' parameter types go
+    // with it.
+    let helper_params: crate::det::HashMap<String, Vec<Ty>> = funcs
+        .iter()
+        .filter_map(|f| match &f.signature {
+            Some(Ty::Fn { params, .. }) => Some((f.name.as_str().to_string(), params.iter().map(|p| (*p.ty).clone()).collect())),
+            _ => None,
+        })
+        .collect();
+    funcs.extend(direct::lower_direct_helpers(&module_path, app, &flat, &helper_params));
     // The `**hash` half of the query string. `query_keys` above covers
     // every key a call site NAMES; a call site that splats a runtime
     // Hash names none, and there is nothing static to read them off —
@@ -987,7 +1043,8 @@ fn build_url_options_function(
 /// `/domains/:id => home#for_domain, as: "domain"`), so the helper's
 /// own name is the fallback resource lookup (`domain_path` → Domain).
 fn model_overrides_to_param(controller: &str, helper_name: &str, app: &App) -> bool {
-    let from_controller = crate::naming::singularize(&controller_symbol(controller));
+    let base = controller.strip_suffix("Controller").unwrap_or(controller);
+    let from_controller = crate::naming::singularize(&crate::naming::underscore(base).replace('/', "_"));
     if named_model_overrides_to_param(&from_controller, app) {
         return true;
     }
@@ -1384,6 +1441,9 @@ fn build_helper_function(
             // campfire's messages_controller_test never link.
             let value_ty = if key.array {
                 Ty::Array { elem: std::sync::Arc::new(param_ty(singular_key(&key.name), false)) }
+            } else if key.hash {
+                // Each value goes through `to_s`, whatever its type.
+                Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }
             } else if key.record_slug == Some(true) {
                 Ty::Str
             } else {
@@ -1499,6 +1559,10 @@ fn is_non_query_option(key: &str) -> bool {
 pub(crate) struct QueryKey {
     pub(crate) name: String,
     pub(crate) array: bool,
+    /// Every site passes a Hash literal of scalars (`domain_allow:
+    /// { domain: d }`), which Rails renders as one `k[sub]=v` pair per
+    /// entry, as `Hash#to_query` does.
+    pub(crate) hash: bool,
     /// Rails' `anchor:` — rendered `#tag` AFTER every query key, which
     /// is the order `path_for` applies them in (`add_params` then
     /// `add_anchor`). Derived from the name, not surveyed: `anchor` is
@@ -1580,8 +1644,12 @@ fn string_segment_demand(
                         .unwrap_or_else(|| method.as_str().to_string());
                     for (i, arg) in positional.iter().enumerate() {
                         let Some(seg) = segments.get(i) else { break };
-                        let string_record = matches!(&arg.ty, Some(Ty::Class { id, .. }) if string_keyed.contains(id.0.as_str()));
-                        if matches!(arg.ty, Some(Ty::Str)) || string_record {
+                        // A String that can be nil (a nullable column read off a
+                        // record that can be nil, `note.route_param`) is the same
+                        // evidence: Rails writes either with `to_param`.
+                        let arg_ty = arg.ty.as_ref().map(Ty::peel_nilable);
+                        let string_record = matches!(arg_ty, Some(Ty::Class { id, .. }) if string_keyed.contains(id.0.as_str()));
+                        if matches!(arg_ty, Some(Ty::Str)) || string_record {
                             out.entry(helper.clone()).or_default().insert(seg.clone());
                         }
                     }
@@ -1643,7 +1711,7 @@ fn route_for_string_segments(
                         .enumerate()
                     {
                         let Some(seg) = segments.get(i) else { break };
-                        if matches!(arg.ty, Some(Ty::Str)) {
+                        if matches!(arg.ty.as_ref().map(Ty::peel_nilable), Some(Ty::Str)) {
                             out.entry(helper.clone()).or_default().insert(seg.clone());
                         }
                     }
@@ -1658,7 +1726,8 @@ fn query_param_demand(
     app: &App,
     helpers: &crate::det::HashMap<String, (Vec<String>, usize)>,
 ) -> crate::det::HashMap<String, Vec<QueryKey>> {
-    type Demand = crate::det::HashMap<String, std::collections::BTreeMap<String, bool>>;
+    // Per key: (every site passes an Array, every site passes a Hash).
+    type Demand = crate::det::HashMap<String, std::collections::BTreeMap<String, (bool, bool)>>;
     type Records = crate::det::HashMap<(String, String), bool>;
     let models: crate::det::HashMap<String, bool> = app
         .models
@@ -1716,6 +1785,15 @@ fn query_param_demand(
                                 // and a different rendering, not just a
                                 // different value.
                                 let is_array = matches!(&*v.node, ExprNode::Array { .. });
+                                // A Hash only one level deep: a nested Hash or
+                                // Array value would need `to_query`'s recursion,
+                                // whether written there or held in a variable.
+                                let is_hash = matches!(&*v.node, ExprNode::Hash { entries, kwargs: false }
+                                    if entries.iter().all(|(k, v)| {
+                                        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } })
+                                            && !matches!(&*v.node, ExprNode::Hash { .. } | ExprNode::Array { .. })
+                                            && !matches!(v.ty.as_ref().map(Ty::peel_nilable), Some(Ty::Hash { .. } | Ty::Array { .. }))
+                                    }));
                                 let helper = method
                                     .as_str()
                                     .strip_suffix("_url")
@@ -1726,10 +1804,10 @@ fn query_param_demand(
                                     .entry(helper)
                                     .or_default()
                                     .entry(key.to_string())
-                                    .or_insert(is_array);
+                                    .or_insert((is_array, is_hash));
                                 // Any scalar site demotes the key: see
                                 // `QueryKey`.
-                                *seen = *seen && is_array;
+                                *seen = (seen.0 && is_array, seen.1 && is_hash);
                                 if let Some(slug) = record_model_slug(v, models) {
                                     records.insert((helper_key.clone(), key.to_string()), slug);
                                 }
@@ -1748,11 +1826,12 @@ fn query_param_demand(
             (
                 helper.clone(),
                 keys.into_iter()
-                    .map(|(name, array)| QueryKey {
+                    .map(|(name, (array, hash))| QueryKey {
                         anchor: name == "anchor",
                         record_slug: records.get(&(helper.clone(), name.clone())).copied(),
                         name,
                         array,
+                        hash,
                     })
                     .collect(),
             )
@@ -1817,7 +1896,12 @@ fn format_variant_demand(
             declared: &crate::det::HashSet<String>,
             out: &mut std::collections::BTreeMap<String, (String, String)>,
         ) {
-            if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+            // Only a call the `format:` lowering renamed. Any other
+            // `<route>_<word>_url` is the app's own method (`widget_from_url`
+            // in a class that defines it), or no helper at all in Rails.
+            if let ExprNode::Send { recv: None, method, .. } = &*e.node
+                && e.decisions & crate::expr::FORMAT_VARIANT_CALL != 0
+            {
                 let raw = method.as_str();
                 if let Some(stem) = raw.strip_suffix("_path").or_else(|| raw.strip_suffix("_url")) {
                     // A real helper of that name wins — never shadow a
@@ -1890,6 +1974,25 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
             let ty = var.ty.clone().map(|t| Ty::Union { variants: vec![t, Ty::Nil].into() });
             with_ty(send_method(Expr { ty, ..var }, "nil?", Vec::new()), Ty::Bool)
         };
+        // Rails renders nothing for an empty Hash either.
+        let omitted = |k: &QueryKey| -> Expr {
+            if !k.hash {
+                return is_nil(&k.name);
+            }
+            let empty = with_ty(send_method(var_ref(&k.name), "empty?", Vec::new()), Ty::Bool);
+            with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::BoolOp {
+                        op: crate::expr::BoolOpKind::Or,
+                        surface: Default::default(),
+                        left: is_nil(&k.name),
+                        right: empty,
+                    },
+                ),
+                Ty::Bool,
+            )
+        };
         let key_name = key.name.as_str();
         // `?` only while nothing earlier was rendered. The first key
         // needs no test — nothing can precede it.
@@ -1897,15 +2000,15 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
             None
         } else {
             Some({
-            let mut cond = is_nil(&keys[0].name);
-            for earlier in keys[1..i].iter().map(|k| k.name.as_str()) {
+            let mut cond = omitted(&keys[0]);
+            for earlier in &keys[1..i] {
                 cond = Expr::new(
                     Span::synthetic(),
                     ExprNode::BoolOp {
                         op: crate::expr::BoolOpKind::And,
                         surface: Default::default(),
                         left: cond,
-                        right: is_nil(earlier),
+                        right: omitted(earlier),
                     },
                 );
             }
@@ -1984,6 +2087,58 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
             }
             parts.push(InterpPart::Expr { expr: joined });
             with_ty(Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }), Ty::Str)
+        } else if key.hash {
+            // `Hash#to_query`: `k[sub]=v` per entry, a nil value as a
+            // bare `k[sub]`, and the pairs sorted. Over `keys`, with a
+            // one-parameter block like the Array form: a two-parameter
+            // `map` is refused by the Python emit.
+            let sub = Symbol::from("rh_query_key");
+            let var = |name: &Symbol| Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
+            let value = || send_method(var_ref(key_name), "[]", vec![var(&sub)]);
+            let assigned = with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond: with_ty(send_method(value(), "nil?", Vec::new()), Ty::Bool),
+                        then_branch: lit_str(String::new()),
+                        else_branch: with_ty(send_method(lit_str("=".to_string()), "+", vec![url_encode(value())]), Ty::Str),
+                    },
+                ),
+                Ty::Str,
+            );
+            let named = send_method(lit_str(format!("{key_name}%5B")), "+", vec![url_encode(var(&sub))]);
+            let named = send_method(named, "+", vec![lit_str("%5D".to_string())]);
+            let body = with_ty(send_method(named, "+", vec![assigned]), Ty::Str);
+            let mapped = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(send_method(var_ref(key_name), "keys", Vec::new())),
+                    method: Symbol::from("map"),
+                    args: Vec::new(),
+                    block: Some(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lambda { extra_params: Vec::new(), rest_param: None,
+                            params: vec![sub],
+                            block_param: None,
+                            body,
+                            block_style: crate::expr::BlockStyle::Brace,
+                        },
+                    )),
+                    parenthesized: false,
+                },
+            );
+            // Typed, so each target maps `sort`/`join` as an Array's: Python's `list.sort()` answers None.
+            let pairs_ty = || Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
+            let mapped = with_ty(mapped, pairs_ty());
+            let sorted = with_ty(send_method(mapped, "sort", Vec::new()), pairs_ty());
+            let joined = send_method(sorted, "join", vec![lit_str("&".to_string())]);
+            let mut parts: Vec<InterpPart> = Vec::new();
+            match separator {
+                None => parts.push(InterpPart::Text { value: "?".to_string() }),
+                Some(sep) => parts.push(InterpPart::Expr { expr: sep }),
+            }
+            parts.push(InterpPart::Expr { expr: joined });
+            with_ty(Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }), Ty::Str)
         } else {
             let mut parts: Vec<InterpPart> = Vec::new();
             match separator {
@@ -2000,7 +2155,7 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
             Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
-                    cond: is_nil(key_name),
+                    cond: omitted(key),
                     then_branch: lit_str(String::new()),
                     else_branch: pair,
                 },
@@ -2123,7 +2278,7 @@ fn build_path_expr(
                     parts.push(InterpPart::Text { value: std::mem::take(&mut buf) });
                 }
                 parts.push(InterpPart::Expr {
-                    expr: var_ref_slug(&ident, slug_params.contains(&ident)),
+                    expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident))),
                 });
             } else {
                 buf.push(':');
@@ -2201,7 +2356,7 @@ fn build_optional_path_expr(
             } else if !buf.is_empty() {
                 chunk.push(InterpPart::Text { value: buf.clone() });
             }
-            chunk.push(InterpPart::Expr { expr: var_ref_slug(&ident, slug_params.contains(&ident)) });
+            chunk.push(InterpPart::Expr { expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident))) });
             chunks.push((ident.clone(), chunk));
             buf.clear();
         } else {
@@ -2209,7 +2364,7 @@ fn build_optional_path_expr(
             if !buf.is_empty() {
                 base_parts.push(InterpPart::Text { value: std::mem::take(&mut buf) });
             }
-            base_parts.push(InterpPart::Expr { expr: var_ref_slug(&ident, slug_params.contains(&ident)) });
+            base_parts.push(InterpPart::Expr { expr: segment_value(var_ref_slug(&ident, slug_params.contains(&ident))) });
         }
     }
     if !buf.is_empty() {
@@ -2461,6 +2616,31 @@ fn build_query_suffix_helper(module_path: &[Symbol]) -> LibraryFunction {
 
 fn var_ref(name: &str) -> Expr {
     var_ref_slug(name, false)
+}
+
+/// A path param's value as Rails writes it into the URL: through
+/// `Journey::Router::Utils.escape_segment`, so `"a/b"` is `a%2Fb` and a
+/// `?` or `#` stays inside the segment. An Integer id needs none.
+fn segment_value(var: Expr) -> Expr {
+    if matches!(var.ty, Some(Ty::Int)) {
+        return var;
+    }
+    let span = var.span;
+    let text = with_ty(
+        Expr::new(span, ExprNode::Send { recv: Some(var), method: Symbol::from("to_s"), args: vec![], block: None, parenthesized: false }),
+        Ty::Str,
+    );
+    let helpers = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] });
+    with_ty(
+        Expr::new(span, ExprNode::Send {
+            recv: Some(helpers),
+            method: Symbol::from("escape_segment"),
+            args: vec![text],
+            block: None,
+            parenthesized: true,
+        }),
+        Ty::Str,
+    )
 }
 
 fn var_ref_slug(name: &str, slug_id: bool) -> Expr {

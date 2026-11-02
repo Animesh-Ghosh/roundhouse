@@ -63,6 +63,19 @@ def git_repository():
 
 
 class Routing(unittest.TestCase):
+    def test_websocket_lifecycle_sources_and_helpers_run_the_native_suite(self):
+        for path in [
+            "runtime/spinel/tep/net.rb", "runtime/spinel/tep/server_threaded.rb",
+            "runtime/spinel/tep/websocket.rb", "runtime/spinel/tep/websocket/connection.rb",
+            "runtime/spinel/tep/websocket/driver.rb", "tests/spinel_websocket_lifecycle.rs",
+            "tests/spinel_websocket_lifecycle_native.rb", "tests/spinel_websocket_lifecycle_cruby.rb",
+            "tests/spinel_websocket_lifecycle_rails.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("spinel_websocket_lifecycle", plan["spinel_tests"])
+
     def extras(self, plan):
         return set(plan["jobs"]) - set(ci.BASE)
 
@@ -651,12 +664,10 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertNotIn("param_binds", ci.select([path])["spinel_tests"])
 
-    def test_sponge_random_selects_native_regression_for_its_inputs_and_full_runs(self):
-        suite = "sponge_random"
+    def test_openssl_random_selects_native_regression_for_its_inputs_and_full_runs(self):
+        suite = "openssl_random"
         for path in [
-            "tests/sponge_random.rs",
-            "runtime/spinel/facades/sponge.rb",
-            "runtime/spinel/facades/sponge.rbs",
+            "tests/openssl_random.rs",
             "runtime/spinel/secure_random_stub.rb",
             "runtime/spinel/secure_random_stub.rbs",
         ]:
@@ -689,6 +700,21 @@ class Routing(unittest.TestCase):
 
         shared = ci.select(["src/emit/shared/schema_sql.rs"])
         self.assertEqual(shared["spinel_tests"], ci.SPINEL_TESTS)
+        self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
+
+    def test_app_reopens_runtime_class_owns_its_pass_and_runtime_inputs(self):
+        suite = "app_reopens_runtime_class"
+        paths = [
+            "tests/app_reopens_runtime_class.rs",
+            "src/emit/ruby/reopen.rs",
+            "runtime/ruby/active_storage.rb",
+            "runtime/ruby/active_storage.rbs",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn(suite, plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
         self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
 
     def test_array_column_storage_spinel_owns_its_pass_and_runtime_inputs(self):
@@ -796,7 +822,6 @@ class Routing(unittest.TestCase):
             "runtime/spinel/active_record_equality_spinel.rb": "framework_tests_spinel",
             "runtime/spinel/param_builder.rb": "spinel_param_builder",
             "runtime/spinel/multipart.rb": "spinel_param_builder",
-            "runtime/spinel/date.rb": "date_columns_spinel",
             "runtime/spinel/active_support_date_parsing.rb": "date_columns_spinel",
             "runtime/spinel/net_http.rb": "spinel_net_http_start",
             "runtime/spinel/http_stub.rb": "spinel_net_http_start",
@@ -916,8 +941,6 @@ class Routing(unittest.TestCase):
                 "spinel_db_lease", *ci.PARAM_BIND_TESTS, "spinel_stmt_cache_lru", "stmt_stats",
                 "db_sqlite_concurrency", "spinel_pg_db", "spinel_db_contract",
             ],
-            "runtime/spinel/date.rb": ["date_columns_spinel"],
-            "runtime/spinel/date.rbs": ["date_columns_spinel"],
             "runtime/spinel/active_support_date_parsing.rb": ["date_columns_spinel"],
             "runtime/spinel/active_support_date_parsing.rbs": ["date_columns_spinel"],
             "runtime/spinel/active_record_date_serialization.rb": [

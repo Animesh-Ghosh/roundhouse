@@ -75,6 +75,8 @@ require_relative "runtime/params"
 require_relative "runtime/action_text"
 require_relative "runtime/importmap"
 require_relative "runtime/rails"
+# Not part of runtime/rails: the instrumented Notifications paths keep per-thread state the strict targets' typing gate does not follow.
+require_relative "runtime/active_support_instrumentation"
 # `ActiveSupport::Cache::MemoryStore` (a `Rails::Cache`) and
 # `ActiveSupport::Cache.expand_cache_key`.
 require_relative "runtime/active_support_cache"
@@ -329,9 +331,15 @@ ActiveSupport.set_default_zone(tz_name)
 # `ActionView::ViewHelpers.fragment_read/_write`, so after every file that
 # defines them.
 require_relative "runtime/action_controller_fragment_caching"
+require_relative "runtime/public_files"
+require_relative "runtime/action_controller_page_caching"
+require_relative "runtime/solid_queue"
+require_relative "runtime/integration_session_cruby"
 # Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
 # feature; strict non-Ruby targets keep the bounded shared implementation.
 require_relative "runtime/action_controller_head"
+# Rails' FlashHash keeps any key; the shared Flash keeps notice/alert, which every target can type.
+require_relative "runtime/flash_any_key"
 # Rails 8.1.4 `send_data(filename:)`: the Content-Disposition escaping
 # works over UTF-8 bytes, so it is a Ruby-family reopen as well.
 require_relative "runtime/action_controller_send_data"

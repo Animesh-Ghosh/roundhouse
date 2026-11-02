@@ -15,7 +15,36 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
-use super::{BodyTyper, Ctx, union_many, union_of, unknown};
+use super::{BodyTyper, ClassInfo, Ctx, union_many, union_of, unknown};
+
+pub(super) fn literal_array_extreme_ty(recv: &Expr, method: &Symbol, args: &[Expr], has_block: bool) -> Option<Ty> {
+    if !matches!(method.as_str(), "max" | "min") || !args.is_empty() || has_block {
+        return None;
+    }
+    let array = match &*recv.node {
+        ExprNode::Array { .. } => recv,
+        ExprNode::Send { recv: Some(array), method, args, block: None, .. }
+            if method.as_str() == "compact" && args.is_empty() => array,
+        _ => return None,
+    };
+    let ExprNode::Array { elements, .. } = &*array.node else { return None };
+    if elements.is_empty() || elements.iter().any(|element| matches!(&*element.node, ExprNode::Splat { .. })) {
+        return None;
+    }
+    if !elements.iter().any(|element| element.ty.as_ref().is_some_and(definitely_present)) {
+        return None;
+    }
+    let Some(Ty::Array { elem }) = recv.ty.as_ref() else { return None };
+    Some((**elem).clone().strip_nil())
+}
+
+fn definitely_present(ty: &Ty) -> bool {
+    match ty {
+        Ty::Nil | Ty::Bottom | Ty::Untyped | Ty::Var { .. } => false,
+        Ty::Union { variants } => variants.iter().all(definitely_present),
+        _ => true,
+    }
+}
 
 /// Hash methods that yield one `[key, value]` pair (CRuby 4.0.5). The
 /// others `block_params_for` types for a Hash (`select`, `filter`,
@@ -173,6 +202,12 @@ impl<'a> BodyTyper<'a> {
     /// for the name (see the call site), so a real class method of this
     /// shape — a `has_secure_password` token finder, say — still wins.
     fn dynamic_finder_ty(&self, model: &ClassId, method: &Symbol) -> Option<Ty> {
+        if ClassInfo::class_method_ownership_unknown(self.classes(), model, method)
+            || self.source_class_side(model, method)
+            || self.source_class_side(model, &Symbol::from("method_missing"))
+        {
+            return None;
+        }
         let (base, bang) = match method.as_str().strip_suffix('!') {
             Some(base) => (base, true),
             None => (method.as_str(), false),
@@ -181,9 +216,19 @@ impl<'a> BodyTyper<'a> {
         if attr.is_empty() {
             return None;
         }
-        let cls = self.classes().get(model)?;
-        if !cls.has_schema_column(&Symbol::from(attr)) {
+        if ClassInfo::schema_column_owner(self.classes(), model, &Symbol::from(attr)).is_none() {
             return None;
+        }
+        // Rails' generated method delegates to find_by / find_by!. A
+        // source delegate owns the return, even when its body is not yet
+        // harvested; never replace that unknown with a record promise.
+        for delegate in if bang { &["find_by!", "find_by"][..] } else { &["find_by"][..] } {
+            let delegate = Symbol::from(*delegate);
+            if ClassInfo::source_class_method(self.classes(), model, &delegate) {
+                let ret = ClassInfo::source_class_method_type(self.classes(), model, &delegate)
+                    .map(unwrap_fn_ret).unwrap_or(Ty::Untyped);
+                return Some(if bang && delegate.as_str() == "find_by" { ret.strip_nil() } else { ret });
+            }
         }
         let kind = if bang {
             crate::catalog::ReturnKind::SelfType
@@ -600,7 +645,13 @@ impl<'a> BodyTyper<'a> {
             }
             return Some(vec![recv_ty.clone()]);
         }
-        if method.as_str() == "in_batches" {
+        // The batch iterators run on a model's rows, from the class
+        // (`Post.find_each`), a relation or a has_many reader. Each yields
+        // its own shape: `find_each` a record, `find_in_batches` an Array
+        // of records, `in_batches` a relation. The app's own class method
+        // of the name answers a class-side call instead, and may yield
+        // anything; a relation still runs Rails' batches.
+        if matches!(method.as_str(), "find_each" | "find_in_batches" | "in_batches") {
             let is_model = |id: &ClassId| self.classes().get(id).is_some_and(|c| c.table.is_some());
             let of = match recv_ty {
                 Ty::Relation { of } => Some(of.clone()),
@@ -608,11 +659,18 @@ impl<'a> BodyTyper<'a> {
                     Ty::Class { id, .. } if is_model(id) => Some(id.clone()),
                     _ => None,
                 },
-                Ty::Class { id, .. } if class_object_receiver && is_model(id) => Some(id.clone()),
+                Ty::Class { id, .. } if class_object_receiver && is_model(id) => {
+                    (!self.source_class_side(id, method)).then(|| id.clone())
+                }
                 _ => None,
             };
             if let Some(of) = of {
-                return Some(vec![Ty::Relation { of }]);
+                let record = Ty::Class { id: of.clone(), args: vec![].into() };
+                return Some(vec![match method.as_str() {
+                    "find_each" => record,
+                    "find_in_batches" => Ty::Array { elem: std::sync::Arc::new(record) },
+                    _ => Ty::Relation { of },
+                }]);
             }
         }
         if let Ty::Tuple { elems } = recv_ty {
@@ -1074,6 +1132,13 @@ impl<'a> BodyTyper<'a> {
         None
     }
 
+    /// Whether the app defines `method` on `of`'s class side: a
+    /// `def self.…` on it or a superclass, or in the `class_methods` of a
+    /// concern either includes.
+    fn source_class_side(&self, of: &ClassId, method: &Symbol) -> bool {
+        ClassInfo::source_class_method(self.classes(), of, method)
+    }
+
     fn source_ancestor(&self, of: &ClassId, method: &Symbol) -> Option<ClassId> {
         let mut current = self.classes().get(of)?.parent.clone();
         for _ in 0..32 {
@@ -1085,6 +1150,35 @@ impl<'a> BodyTyper<'a> {
             current = cls.parent.clone();
         }
         None
+    }
+
+    /// Whether source defines `method` on `of`'s instances (own, included or inherited), harvested or not.
+    fn declares_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
+        let mut stack = vec![of];
+        let mut seen = crate::det::HashSet::default();
+        while let Some(id) = stack.pop() {
+            let Some(cls) = self.classes().get(id).filter(|_| seen.insert(id)) else { continue };
+            if cls.source_instance_methods.contains(method) {
+                return true;
+            }
+            stack.extend(cls.includes.iter().chain(cls.parent.iter()));
+        }
+        false
+    }
+
+    /// Does `of` or an ancestor define `method` class-side (a scope, a
+    /// `def self.…`, a runtime-declared class method)?
+    fn class_side_defines(&self, of: &ClassId, method: &Symbol) -> bool {
+        let mut current = Some(of.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { return false };
+            let Some(cls) = self.classes().get(&id) else { return false };
+            if cls.class_methods.contains_key(method) {
+                return true;
+            }
+            current = cls.parent.clone();
+        }
+        false
     }
 
     fn defines_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
@@ -1100,6 +1194,63 @@ impl<'a> BodyTyper<'a> {
             current = cls.parent.clone();
         }
         false
+    }
+
+    // The controller writer is the only setter whose assignment path
+    // moves past dispatch. Leave other Ruby writers on their existing path.
+    pub(super) fn controller_writer_receiver(&self, recv: &Ty) -> bool {
+        match recv {
+            Ty::Union { variants } => variants.iter().any(|ty| self.controller_writer_receiver(ty)),
+            Ty::Class { id, .. } => {
+                let mut current = Some(id.clone());
+                for _ in 0..32 {
+                    let Some(id) = current else { return false };
+                    if id.0.as_str() == "ActionController::Base" { return true; }
+                    current = self.classes().get(&id).and_then(|cls| cls.parent.clone());
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    // Method existence is separate evidence from its return type. In
+    // particular, an app writer may exist while its body is unresolved.
+    pub(super) fn defines_writer_surface(&self, recv: &Ty, method: &Symbol, instance_receiver: bool) -> bool {
+        match recv {
+            Ty::Union { variants } => !variants.is_empty()
+                && variants.iter().all(|ty| self.defines_writer_surface(ty, method, instance_receiver)),
+            Ty::Class { id, .. } if instance_receiver => self.defines_instance_method(id, method),
+            Ty::Class { id, .. } => {
+                let mut current = Some(id.clone());
+                for _ in 0..32 {
+                    let Some(id) = current else { return false };
+                    let Some(cls) = self.classes().get(&id) else { return false };
+                    if cls.class_methods.contains_key(method) { return true; }
+                    current = cls.parent.clone();
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn writer_has_missing_arm(&self, recv: &Ty, method: &Symbol,
+        block_ret: Option<&Ty>, args: &[Expr], receiver_is_instance: bool) -> bool
+    {
+        let Ty::Union { variants } = recv else { return false };
+        variants.iter().any(|arm| {
+            // An unknown arm cannot turn a known instance into a class
+            // receiver. Apply the shape check to this arm independently.
+            let instance_receiver = receiver_is_instance && super::instance_shaped(arm);
+            match arm {
+                Ty::Union { .. } => self.writer_has_missing_arm(arm, method, block_ret, args, receiver_is_instance),
+                Ty::Var { .. } | Ty::Untyped => false,
+                Ty::Class { id, .. } if self.open_classes.is_some_and(|o| o.open(id, !instance_receiver).is_some()) => false,
+                _ => matches!(self.dispatch_on(Some(arm), method, block_ret, args, instance_receiver), Ty::Var { .. })
+                    && !self.defines_writer_surface(arm, method, instance_receiver),
+            }
+        })
     }
 
     pub(super) fn dispatch(
@@ -1121,6 +1272,15 @@ impl<'a> BodyTyper<'a> {
         args: &[crate::expr::Expr],
         instance_receiver: bool,
     ) -> Ty {
+        if !instance_receiver
+            && (matches!(method.as_str(), "find_by" | "find_by!") || method.as_str().starts_with("find_by_"))
+            && let Some(Ty::Class { id, .. }) = recv_ty
+        {
+            if ClassInfo::class_method_ownership_unknown(self.classes(), id, method) { return Ty::Untyped; }
+            if let Some(ty) = ClassInfo::source_class_method_type(self.classes(), id, method) { return unwrap_fn_ret(ty); }
+        }
+        let controller_writer = method.as_str() == "content_type="
+            && recv_ty.is_some_and(|ty| self.controller_writer_receiver(ty));
         // Not the stdlib's String form too: the port reads `other.octets`, which a String lacks.
         if let Some(Ty::Class { id, .. }) = recv_ty
             && id.0.as_str() == "IPAddr"
@@ -1413,8 +1573,19 @@ impl<'a> BodyTyper<'a> {
                     }
                     _ => None,
                 };
+                // Same receiver, so the same side: an instance's send(:m) is its own m, not a class method m.
                 if let Some(name) = literal_name {
-                    return self.dispatch(recv_ty, &name, block_ret, &args[1..]);
+                    // A source reflection wrapper owns this call too;
+                    // only the builtin send aliases rename the target.
+                    if !instance_receiver && (name.as_str().starts_with("find_by_")
+                        || matches!(name.as_str(), "find_by" | "find_by!"))
+                        && let Some(Ty::Class { id, .. }) = recv_ty
+                        && ClassInfo::source_class_method(self.classes(), id, method)
+                    {
+                        return ClassInfo::source_class_method_type(self.classes(), id, method)
+                            .map(unwrap_fn_ret).unwrap_or(Ty::Untyped);
+                    }
+                    return self.dispatch_on(recv_ty, &name, block_ret, &args[1..], instance_receiver);
                 }
             }
             return match recv_ty {
@@ -1650,6 +1821,29 @@ impl<'a> BodyTyper<'a> {
                         elem: std::sync::Arc::new(Ty::Class { id: id.clone(), args: vec![].into() }),
                     };
                 }
+                // A model's class-side relation builder that no class in
+                // the chain defines (`Widget.includes(:gadget)`,
+                // `Widget.order(:id)`). The analyzer's registry seeds the
+                // catalog's builders onto every model; the registry the
+                // lowered bodies are typed against carries only what the
+                // runtime's `ActiveRecord::Base` declares (`where`, `all`),
+                // so a chain that started with any other builder lost its
+                // model and `find` answered `untyped`. Same answer as the
+                // analyzer, from the same catalog. Ahead of the walk, whose
+                // instance-method fallback would otherwise answer with a
+                // reader of the same name (`belongs_to :order`); a
+                // class-side definition anywhere in the chain still wins,
+                // and so does the reader for a zero-argument call (the
+                // rule above).
+                if !instance_receiver
+                    && self.is_model_class(Some(&Ty::Class { id: id.clone(), args: vec![].into() }))
+                    && !self.class_side_defines(id, method)
+                    && !(call_args.is_empty() && self.defines_instance_method(id, method))
+                    && let Some(entry) = crate::catalog::lookup(method.as_str(), crate::catalog::ReceiverContext::Class)
+                    && let Some(kind) = entry.return_kind
+                {
+                    return crate::analyze::instantiate_return_kind(kind, id);
+                }
                 // Class-side defs stay a fallback: a value typed as an instance may still be a class object (`@klass = Post`).
                 let instance_side = instance_receiver && self.defines_instance_method(id, method);
                 let mut current_id: Option<&ClassId> = Some(id);
@@ -1731,6 +1925,15 @@ impl<'a> BodyTyper<'a> {
                 }
                 let mut steps = 0usize;
                 let mut unknown_named_ancestor = false;
+                // An instance method with a finder-shaped name cannot
+                // answer a model-class send. Continue the class-side
+                // ancestry walk before trying the framework finder or
+                // the application's class-side method_missing.
+                let class_dynamic_finder = !instance_receiver
+                    && ClassInfo::active_record_class(self.classes(), id)
+                    && (matches!(method.as_str(), "find_by" | "find_by!")
+                        || method.as_str().strip_suffix('!').unwrap_or(method.as_str()).strip_prefix("find_by_")
+                            .is_some_and(|attr| ClassInfo::schema_column_owner(self.classes(), id, &Symbol::from(attr)).is_some()));
                 // The first `method_missing` on the ancestor walk (the
                 // class's own, then its mixins', then its parents').
                 // Ruby consults it only once the WHOLE chain has failed
@@ -1773,7 +1976,9 @@ impl<'a> BodyTyper<'a> {
                     // Not the ancestor's own class either: an inherited scope or finder answers the receiver's (`User.active` is a `Relation[User]`).
                     let subst = |ty: &Ty| {
                         let ty = ty.subst_self(&Ty::Class { id: id.clone(), args: Vec::new().into() });
-                        let receiver_is_model = self.classes().get(id).is_some_and(|c| c.table.is_some());
+                        let receiver_is_model = self.classes().get(id).is_some_and(|c| c.table.is_some())
+                            || (method.as_str() == "new" && ClassInfo::active_record_class(self.classes(), id)
+                                && !self.source_class_side(id, method) && !matches!(ty, Ty::Fn { .. }));
                         if cid != id && cls.table.is_some() && receiver_is_model { ty.rebind_class(cid, id) } else { ty }
                     };
                     // The class object and its instances share this one type, so a
@@ -1845,15 +2050,22 @@ impl<'a> BodyTyper<'a> {
                         }
                         return unwrap_fn_ret(&subst(ty));
                     }
-                    if let Some(ty) = cls.instance_methods.get(method) {
-                        return unwrap_fn_ret(&subst(ty));
+                    if !class_dynamic_finder && let Some(ty) = cls.instance_methods.get(method) {
+                        if !controller_writer || instance_receiver {
+                            return unwrap_fn_ret(&subst(ty));
+                        }
+
                     }
                     // Mixed-in modules (`include IntervalHelper`)
                     // contribute their instance methods to this class.
                     // Checked after the class's own methods, before the
                     // parent — Ruby's ancestor order puts an included
                     // module between the class and its superclass.
-                    for module_id in &cls.includes {
+                    for module_id in cls.includes.iter().filter(|_| !class_dynamic_finder) {
+                        if controller_writer && !instance_receiver {
+                            continue;
+                        }
+
                         if let Some(ty) = self.lookup_in_module(module_id, method) {
                             return subst(&ty);
                         }
@@ -1869,6 +2081,18 @@ impl<'a> BodyTyper<'a> {
                             .cloned();
                     }
                     current_id = cls.parent.as_ref();
+                }
+                // Rails synthesizes the same per-column finders on the model
+                // class as on its relations. Keep source definitions above
+                // authoritative; an instance does not get this class-side API.
+                if !instance_receiver && ClassInfo::active_record_class(self.classes(), id)
+                    && call_args.len() == 1 && block_ret.is_none()
+                    && !matches!(&*call_args[0].node, ExprNode::Splat { .. } | ExprNode::KeywordSplat { .. })
+                    && let Some(ty) = self.dynamic_finder_ty(id, method)
+                    && !self.source_class_side(id, method)
+                    && !self.source_class_side(id, &Symbol::from("method_missing"))
+                {
+                    return ty;
                 }
                 let _ = args; // already shadowed below for new-call shortcut
                 // Every class in Ruby responds to `.new`, returning an
@@ -1940,6 +2164,9 @@ impl<'a> BodyTyper<'a> {
                 // to wrap String→&str at `instance.clone().set_body
                 // (row.body())` sites).
                 match method.as_str() {
+                    // Not Module#name when the instance's class defines its own `name`: before the
+                    // first harvest registers that method, the send waits for it like any other.
+                    "name" if instance_receiver && self.declares_instance_method(id, method) => return unknown(),
                     "name" => return Ty::Str,
                     "clone" | "dup" => return Ty::Class { id: id.clone(), args: args.clone() },
                     "superclass" => return Ty::Class {
@@ -2306,6 +2533,9 @@ impl<'a> BodyTyper<'a> {
             //      element (`each`/`map`/`size`/…) — same types the
             //      Array representation gives.
             Some(Ty::Relation { of }) => {
+                if (matches!(method.as_str(), "find_by" | "find_by!") || method.as_str().starts_with("find_by_"))
+                    && ClassInfo::class_method_ownership_unknown(self.classes(), of, method)
+                { return Ty::Untyped; }
                 if let Some(t) = self.column_projection(of, method, args) {
                     return t;
                 }
@@ -2366,9 +2596,12 @@ impl<'a> BodyTyper<'a> {
                         // `@room.messages.last_page` a relation — then
                         // `Message | nil` one hop later. Its Array is the
                         // answer, same as the terminal arm below.
+                        // A model element only: a class method answering
+                        // `Array[HashWithIndifferentAccess[…]]` (a `pluck`
+                        // mapped to hashes) is that Array, not a relation.
                         Some(Ty::Array { elem }) if !cls.materializing_scopes.contains(method) => {
                             return match &**elem {
-                                Ty::Class { id, .. } => Ty::Relation { of: id.clone() },
+                                Ty::Class { id, .. } if self.is_model_class(Some(elem)) => Ty::Relation { of: id.clone() },
                                 _ => Ty::Array { elem: elem.clone() },
                             };
                         }
@@ -2498,6 +2731,19 @@ impl<'a> BodyTyper<'a> {
                 // A union of concrete arms that all lack the method
                 // (`Str | Nil` with `join`) still errors, as it should.
                 let has_var = variants.iter().any(|v| matches!(v, Ty::Var { .. }));
+                // `nil.dup` / `nil.clone` answer `nil` (Ruby >= 2.4), so
+                // the copy of a `T | Nil` is `T' | Nil`, not `T'`. A
+                // `@status_change = status_change.dup.freeze` over
+                // `[String?, String]?` was typed `Array[String?]`, the
+                // reader inherited it, and `status_change.present?` ground
+                // to `!status_change.empty?` -- nil at runtime.
+                if matches!(method.as_str(), "dup" | "clone")
+                    && args.is_empty()
+                    && !resolved.is_empty()
+                    && variants.iter().any(|v| matches!(v, Ty::Nil))
+                {
+                    resolved.push(Ty::Nil);
+                }
                 match resolved.len() {
                     0 if has_var => Ty::Untyped,
                     0 => unknown(),
@@ -2550,15 +2796,16 @@ impl<'a> BodyTyper<'a> {
     /// found on the receiver's class, its mixins, or a parent. The
     /// runtime's `Rails::Cache#fetch` is one by construction: its body
     /// is `yield`, and a hit answers what an earlier miss's block
-    /// stored. Only an INFORMATIVE block type is adopted, as for
-    /// `transaction`; otherwise the registered answer stands.
+    /// stored. A block typed `Untyped` answers `Untyped`: the registered
+    /// answer is what the call returns without a block. A `Var` block is
+    /// not known yet, so the registered answer stands.
     pub(crate) fn block_value_return(
         &self,
         recv_ty: Option<&Ty>,
         method: &Symbol,
         block_ret: Option<&Ty>,
     ) -> Option<Ty> {
-        let ret = block_ret.filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))?;
+        let ret = block_ret.filter(|t| !matches!(t, Ty::Var { .. }))?;
         let Some(Ty::Class { id, .. }) = recv_ty else { return None };
         if id.0.as_str() == "Rails::Cache" && method.as_str() == "fetch" {
             return Some(ret.clone());
@@ -2757,11 +3004,12 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         | "change" | "advance" | "ago" | "since" | "from_now"
         | "round" | "floor" | "ceil" | "to_datetime" => time(),
         "to_date" => Ty::Date,
+        "+" => time(),
         // `Time - x` is `Time` for a Duration arg but a Float for a
         // Time arg — the receiver-only dispatch can't disambiguate, so
         // gradual `Untyped` (the chains read `.before?`/`/ 60`/`> 1.minute`
         // off the result, all of which absorb Untyped).
-        "+" | "-" => Ty::Untyped,
+        "-" => Ty::Untyped,
         "all_day" | "all_week" | "all_month" | "all_year" => Ty::Class {
             id: ClassId(Symbol::from("Range")),
             args: vec![time()].into(),
@@ -2779,7 +3027,7 @@ pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
         // `==`/`!=` are handled by `universal_method` (checked before
         // this arm); the ordered comparisons aren't, so type them here:
         // `created_at >= cutoff` → Bool.
-        "<" | ">" | "<=" | ">=" | "between?"
+        "<" | ">" | "<=" | ">=" | "between?" | "utc?" | "dst?"
         | "after?" | "before?" | "past?" | "future?" | "today?" | "yesterday?" | "tomorrow?"
         | "monday?" | "tuesday?" | "wednesday?" | "thursday?" | "friday?"
         | "saturday?" | "sunday?" | "on_weekend?" | "on_weekday?" => Ty::Bool,
@@ -3452,9 +3700,17 @@ pub(super) fn hash_method(
             (_, Some(default), _) if !default.is_open() => union_of(value.clone(), default),
             _ => Ty::Union { variants: vec![value.clone(), Ty::Nil].into() },
         },
-        "merge" => Ty::Hash {
-            key: std::sync::Arc::new(key.clone()),
-            value: std::sync::Arc::new(value.clone()),
+        // The other Hash's entries join the receiver's: `{}.merge(k => v)`
+        // has `v`s, which the empty literal alone does not say.
+        "merge" => match (args, block_ret) {
+            ([other], None) => match other.ty.as_ref() {
+                Some(Ty::Hash { key: other_key, value: other_value }) => Ty::Hash {
+                    key: std::sync::Arc::new(union_of(key.clone(), (**other_key).clone())),
+                    value: std::sync::Arc::new(union_of(value.clone(), (**other_value).clone())),
+                },
+                _ => Ty::Hash { key: std::sync::Arc::new(key.clone()), value: std::sync::Arc::new(value.clone()) },
+            },
+            _ => Ty::Hash { key: std::sync::Arc::new(key.clone()), value: std::sync::Arc::new(value.clone()) },
         },
         // The supported Rails subset is the non-mutating, one-argument,
         // no-block form. Keep block conflicts and `deep_merge!` unresolved
@@ -3748,7 +4004,7 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "pluralize" | "singularize" | "camelize" | "camelcase"
         | "underscore" | "dasherize" | "titleize" | "titlecase"
         | "humanize" | "demodulize" | "deconstantize" | "classify"
-        | "foreign_key" | "parameterize" | "truncate"
+        | "foreign_key" | "parameterize" | "truncate" | "truncate_words"
         | "squish" | "remove" | "indent"
         | "html_safe" | "to_query" | "to_param" => Ty::Str,
         "constantize" | "safe_constantize" => unknown(),
@@ -3771,6 +4027,10 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
     // Sym-specific shapes here.
     match method.as_str() {
         "to_sym" => Ty::Sym,
+        // `SERIALIZE_PROC = :as_pack.to_proc` (paquito's registry): a
+        // constant holding it was a value with no inferred type, so
+        // every read of it was "constant not supported".
+        "to_proc" => Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from("Proc")), args: vec![].into() },
         "length" | "size" => Ty::Int,
         "upcase" | "downcase" | "capitalize" | "swapcase" => Ty::Sym,
         "empty?" => Ty::Bool,

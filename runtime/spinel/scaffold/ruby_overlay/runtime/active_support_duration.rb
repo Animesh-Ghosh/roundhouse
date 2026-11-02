@@ -27,6 +27,10 @@ module ActiveSupport
       @seconds = seconds
     end
 
+    def self.time_operand(value)
+      value.is_a?(Duration) ? value.seconds : value
+    end
+
     def self.seconds(n) = new(n)
     def self.second(n) = new(n)
     def self.minutes(n) = new(n * SECONDS_PER_MINUTE)
@@ -67,6 +71,7 @@ module ActiveSupport
     # (lobsters embeds durations in cache keys).
     def to_s = @seconds.to_s
     def seconds = @seconds
+    def value = @seconds
 
     # Rails parity: a Duration IS its seconds count for equality, so
     # `1.year == 31556952` is true and `assert_equal 1.year, n` passes

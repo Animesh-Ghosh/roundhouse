@@ -87,9 +87,8 @@ pub fn apply_params_merge_lowering(app: &mut App) -> Vec<Diagnostic> {
     if specs.iter().next().is_none() {
         return Vec::new();
     }
-    // Before the binding scan, and outside its early return: this site
-    // needs no binding to prove, because the callee is the runtime's
-    // own `attributes=`.
+    // Before the binding scan, and outside its early return: these sites
+    // need no binding to prove, because the callee is the runtime's own.
     convert_attributes_assignments(app, &specs);
     let bindings = scan_bindings(app, &specs);
     if bindings.is_empty() {
@@ -337,7 +336,7 @@ fn including_models(app: &App) -> HashMap<ClassId, Vec<Symbol>> {
 
 fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, Binding> {
     let mut seen: HashMap<BindKey, SiteShapes> = HashMap::default();
-    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let assocs = crate::lower::scope_chain::build_assoc_registry_for_app(app);
     let assoc = AssocCtx { assocs: &assocs };
 
     // EVERY call site has to be seen, not just the ones that could bind
@@ -765,20 +764,15 @@ fn hash_assignment_covers_all_paths(expr: &Expr, name: &Symbol) -> bool {
 }
 
 /// Runtime slots that take the Symbol-keyed hash a params object has to
-/// become: `@story.attributes = <params>` and the relation's own
-/// conditions slots, `subscriptions.find_by(<params>)`.
+/// become: the relation's own conditions slots,
+/// `subscriptions.find_by(<params>)`.
 ///
 /// These are the runtime's OWN methods, so unlike
 /// [`convert_attrs_call_sites`] there is no user-defined callee to read
 /// a `Binding::Attrs` off and no binding to prove — the conversion is
 /// keyed on the method's name.
 ///
-/// The `attributes=` half stayed unwritten because the one fixture that
-/// assigns a params object this way — lobsters'
-/// `StoriesController#update_story_attributes` — had a `story_params`
-/// helper that never lowered (its permit list carries `tags_a: []`; see
-/// `match_permit_call_full`), so the right-hand side was not yet a
-/// params object to convert. Lowering that helper is what exposed it.
+/// `attributes=` is not one: no runtime defines it, and the controller lowering hands the record to the model's typed `assign_from_<class>`.
 ///
 /// The conditions half came from campfire's push-subscriptions
 /// controller, `@push_subscriptions.find_by(push_subscription_params)`,
@@ -792,7 +786,6 @@ fn hash_assignment_covers_all_paths(expr: &Expr, name: &Symbol) -> bool {
 /// FRAGMENT, and a params object never reaches that spelling in this
 /// corpus — adding it would be a rule with no site to keep it honest.
 const RUNTIME_ATTRS_SLOTS: &[&str] = &[
-    "attributes=",
     "find_by",
     "find_by!",
     "destroy_by",
@@ -920,7 +913,7 @@ fn convert_attrs_call_sites(
     if !bindings.values().any(|b| matches!(b, Binding::Attrs(_))) {
         return;
     }
-    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let assocs = crate::lower::scope_chain::build_assoc_registry_for_app(app);
     let assoc = AssocCtx { assocs: &assocs };
     for controller in &mut app.controllers {
         let actions: Vec<crate::dialect::Action> = controller.actions().cloned().collect();

@@ -538,9 +538,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         Vec<crate::dialect::LibraryClass>,
         crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
     ) = if !app.models.is_empty() {
-        let (mut lcs, registry) = crate::lower::lower_models_with_registry_and_params(
+        let (mut lcs, registry) = crate::lower::lower_models_with_registry_params_and_views(
             &app.models,
             &app.schema,
+            &app.views,
             vec![],
             &params_specs,
         );
@@ -1189,6 +1190,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     nullable_columns: Vec::new(),
                     origin: None,
                     constants: Vec::new(),
+                    conditional_definitions: Vec::new(),
                     unknown_calls: Vec::new(),
                     class_ivar_initializers: Vec::new(),
                 });
@@ -1300,6 +1302,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             &app.models,
             test_extras,
             &crate::lower::routes::helper_id_segments(app),
+            &crate::lower::routes::direct_helper_names(app),
         );
 
         let mut test_entries: Vec<(String, String)> = Vec::new();

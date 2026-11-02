@@ -202,10 +202,29 @@ fn render_method(m: &MethodDef, enclosing: &[&str]) -> String {
         return render_def(m, enclosing);
     }
     match m.kind {
-        AccessorKind::AttributeReader => render_attr_reader(m, enclosing),
-        AccessorKind::AttributeWriter => render_attr_writer(m, enclosing),
-        AccessorKind::Method => render_def(m, enclosing),
+        AccessorKind::AttributeReader
+            if matches!(&*accessor_body(&m.body).node, ExprNode::Ivar { name } if name == &m.name) =>
+        {
+            render_attr_reader(m, enclosing)
+        }
+        AccessorKind::AttributeWriter if plain_writer(m) => render_attr_writer(m, enclosing),
+        _ => render_def(m, enclosing),
     }
+}
+
+fn accessor_body(body: &Expr) -> &Expr {
+    match &*body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => accessor_body(&exprs[0]),
+        _ => body,
+    }
+}
+
+fn plain_writer(m: &MethodDef) -> bool {
+    let Some(param) = m.params.first() else { return false };
+    matches!(&*accessor_body(&m.body).node,
+        ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value }
+            if name.as_str() == m.name.as_str().trim_end_matches('=')
+                && matches!(&*accessor_body(value).node, ExprNode::Var { name, .. } if name == &param.name))
 }
 
 fn render_attr_reader(m: &MethodDef, enclosing: &[&str]) -> String {
@@ -409,6 +428,10 @@ fn ty_to_rbs_in(ty: &Ty, enclosing: &[&str]) -> String {
         // spells `singleton(C)`; `Class[C]` is not an RBS type.
         Ty::Class { id, args } if id.0.as_str() == "Class" && args.len() == 1 => {
             format!("singleton({})", rbs(&args[0]))
+        }
+        // The source ENV protocol has no runtime class; Spinel passes its Hash snapshot.
+        Ty::Class { id, args } if id.0.as_str() == "_RoundhouseEnvironment" && args.is_empty() => {
+            "Hash[String, String]".into()
         }
         Ty::Class { id, args } => {
             let raw = id.0.as_str();

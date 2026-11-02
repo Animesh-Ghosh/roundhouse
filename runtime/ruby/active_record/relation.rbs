@@ -113,6 +113,13 @@ module ActiveRecord
     def without: (*untyped records) -> Relation
     def or: (Relation other) -> Relation
     def or!: (Relation other) -> Relation
+    def and: (Relation other) -> Relation
+    def readonly: (?bool value) -> Relation
+    def readonly_value!: (bool value) -> Relation
+    def lock_clause!: (String clause) -> Relation
+    def and!: (Relation other) -> Relation
+    def structurally_incompatible_with: (Relation other) -> Array[String]
+    def structural_values: () -> Array[Array[String]]
     def push_where: (String sql) -> Relation
     def push_where_cols: (String sql, Array[String] cols, ?bool null_clause) -> Relation
     def pop_where: () -> String?
@@ -168,11 +175,12 @@ module ActiveRecord
     def group_parts!: (Array[String | Symbol] parts) -> Relation
     def having: (String condition, *untyped args) -> Relation
     def having_args!: (String condition, Array[untyped] args) -> Relation
-    def joins: (String | Symbol spec) -> Relation
+    def joins: (*(String | Symbol) specs) -> Relation
+    def joins_specs!: (String method, Array[String | Symbol] specs) -> Relation
     def joins!: (String | Symbol spec) -> Relation
     def join_fragment: (String | Symbol spec) -> String
-    def left_outer_joins: (String | Symbol spec) -> Relation
-    def left_joins: (String | Symbol spec) -> Relation
+    def left_outer_joins: (*(String | Symbol) specs) -> Relation
+    def left_joins: (*(String | Symbol) specs) -> Relation
     # Two methods sharing a name: field args PROJECT columns and keep
     # the Relation; a block is Enumerable's filter over the loaded
     # records and answers an Array (zero args means the block form —
@@ -196,9 +204,12 @@ module ActiveRecord
     def merge: (Relation other) -> Relation
     def merge!: (Relation other) -> Relation
     def where_clauses: () -> Array[String]
+    def having_clauses: () -> Array[String]
     def unscope: (?where: Symbol | String | Array[Symbol | String]?) -> Relation
     def unscope!: (?where: Symbol | String | Array[Symbol | String]?) -> Relation
     def unscope_where: () -> Relation
+    def unscope_parts: (Array[Symbol] parts) -> Relation
+    def unscope_part!: (Symbol part) -> Relation
     def unscope_where!: () -> Relation
     def arel: () -> Arel::SelectManager
     def none: () -> Relation
@@ -216,6 +227,7 @@ module ActiveRecord
     # array. Same over-claim as `map`/`collect` below.
     def preloaded: (untyped records, bool loaded) -> Relation
     def klass: () -> Class
+    def model: () -> Class
     def primary_key: () -> String
 
     # Collection cache key (see relation.rb for why it is not Rails'
@@ -374,6 +386,9 @@ module ActiveRecord
     def array_with_ranges_predicate: (String qcol, Array[untyped] vals) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String
     def substitute_named_binds: (String sql, Hash[Symbol, untyped] binds) -> String
+    def bound_text: (untyped value) -> String
+    def column_bound_value: (String col, untyped val) -> untyped
+    def integer_column?: (String col) -> bool
     def named_bind_start?: (String ch) -> bool
     def named_bind_char?: (String ch) -> bool
     def escape_list: (Array[untyped] vals) -> String

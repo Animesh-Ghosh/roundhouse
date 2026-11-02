@@ -22,6 +22,7 @@
 //! that haven't migrated.
 
 mod adapter_emit;
+pub(crate) mod primary_key_guard;
 pub(crate) mod accessor_surface;
 pub(crate) mod schema;
 pub use schema::col_storage_name;
@@ -31,6 +32,7 @@ mod associations;
 pub(crate) use associations::polymorphic_type_switch;
 pub(crate) mod broadcasts;
 pub(crate) mod markers;
+pub(crate) mod select_aliases;
 pub mod row;
 
 use crate::det::{HashMap, HashSet};
@@ -191,6 +193,23 @@ pub fn lower_models_with_registry_and_params(
     lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default(), Materialization::Emit, FinderInputs::Scalar)
 }
 
+/// As above, for an app's emit: a model's broadcasts render its partial
+/// by the method `views` give it, which a template of the partial's name
+/// moves (`PartialStems`). Without the views a partial keeps its stem.
+pub fn lower_models_with_registry_params_and_views(
+    models: &[Model],
+    schema: &Schema,
+    views: &[crate::dialect::View],
+    extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
+) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
+    lower_models_inner_with_ruby_values(
+        models, schema, extra_class_infos, params_specs, &Default::default(), Materialization::Emit,
+        FinderInputs::Scalar, false, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent,
+        &crate::lower::view_to_library::PartialStems::of(views),
+    )
+}
+
 /// Lower models with scalar finder inputs when the caller needs classes only;
 /// Ruby-family request consumers select their separate normalization entry.
 pub fn lower_models_to_library_classes(
@@ -265,9 +284,14 @@ pub(crate) fn lower_models_inner(
     materialization: Materialization<'_>,
     finder_inputs: FinderInputs,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
+    // No view inventory reaches these entries, so a model's own partial
+    // keeps its stem (`PartialStems`); an app's emit passes its views
+    // through `lower_models_with_registry_params_and_views` or
+    // `lower_models_inner_with_ruby_values`.
     lower_models_inner_with_ruby_values(
         models, schema, extra_class_infos, params_specs, unfolded, materialization,
         finder_inputs, false, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent,
+        &Default::default(),
     )
 }
 
@@ -283,12 +307,13 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     param_binds: bool,
     errors_readers: ErrorsReaders,
     runtime_relation: RuntimeRelation,
+    partial_stems: &crate::lower::view_to_library::PartialStems,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::default();
     let _body_names = schema::share_model_body_names(models, &Default::default());
     for model in models {
-        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, param_binds, errors_readers, runtime_relation);
+        let methods = build_methods_with_finder_inputs(model, models, schema, params_specs, finder_inputs, param_binds, errors_readers, runtime_relation, partial_stems);
         let table = schema.tables.get(&model.table.0);
         // Register actual production definitions, even for unselected
         // models and when source overrides hide framework ownership.
@@ -307,7 +332,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
                             if matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer")),
                     _ => true,
                 });
-                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, param_binds, errors_readers, runtime_relation);
+                let mut methods = build_methods_with_finder_inputs(&definitions, models, schema, params_specs, finder_inputs, param_binds, errors_readers, runtime_relation, partial_stems);
                 // Preserve original source inputs for late derivations
                 // (e.g. raw helpers) without treating them as framework
                 // claims. Both kinds traverse the canonical Arel/typer.
@@ -419,9 +444,37 @@ pub(crate) fn lower_models_inner_with_ruby_values(
         classes.insert(id, info);
     }
 
+    // A model class method chained on `all` / `where(...)` runs on that
+    // relation (Rails' scoping; the relation delegates it, see
+    // `emit_relation_scope_delegates`), so the chain under it is not
+    // folded into an Array. Only where a runtime Relation exists to
+    // carry it; elsewhere the fold stands.
+    let relation_class_methods: HashSet<Symbol> = if runtime_relation == RuntimeRelation::Present {
+        models
+            .iter()
+            .flat_map(|m| m.body.iter())
+            .filter_map(|item| match item {
+                crate::ModelBodyItem::Method { method, .. } if method.receiver == crate::dialect::MethodReceiver::Class => {
+                    Some(method.name.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    } else {
+        HashSet::default()
+    };
     let mut out = Vec::new();
     for (mut methods, _, table, model) in all_methods {
         for method in &mut methods {
+            if runtime_relation == RuntimeRelation::Present && method.receiver == MethodReceiver::Class {
+                fn late_bound_self(expr: &mut Expr) {
+                    expr.node.for_each_child_mut(&mut late_bound_self);
+                    if matches!(&*expr.node, ExprNode::Const { .. })
+                        && expr.decisions & crate::expr::IMPLICIT_MODEL_FINDER_RECEIVER != 0
+                    { *expr.node = ExprNode::SelfRef; }
+                }
+                late_bound_self(&mut method.body);
+            }
             // Arel pass — rewrite recognized AR call sites
             // (`Comment.where(article_id: @id)`, `Article.find_by(id:
             // @id)`, `Comment.all`, `Comment.count`, `Comment.exists?`)
@@ -442,7 +495,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
             if !unfold {
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                     &mut method.body, schema, &classes, &[], ruby_read_values,
-                    &HashSet::default(),
+                    &relation_class_methods,
                     crate::lower::arel::SqliteVisitor { param_binds },
                 );
             }
@@ -627,6 +680,7 @@ fn model_class(model: &Model, mut methods: Vec<MethodDef>, table: Option<&Table>
             }
             constants
         },
+        conditional_definitions: Vec::new(),
         unknown_calls: replayed_class_body(model),
         class_ivar_initializers: collect_class_attr_initializers(model),
     }
@@ -1113,9 +1167,7 @@ fn writable_permit_fields(
         .iter()
         .filter(|field| {
             let public_writer = model_defines_public_writer(model, field);
-            let private_override =
-                table.is_none() && model_defines_writer(model, field) && !public_writer;
-            if (writable.contains(*field) && !private_override) || public_writer {
+            if writable.contains(*field) || public_writer {
                 return true;
             }
             let private = model_defines_writer(model, field);
@@ -1175,7 +1227,7 @@ fn writable_field_set_for_table(
     table: Option<&crate::schema::Table>,
 ) -> std::collections::BTreeSet<crate::ident::Symbol> {
     use crate::dialect::{Association, ModelBodyItem};
-    use crate::expr::{ExprNode, Literal};
+    use crate::expr::ExprNode;
     use crate::ident::Symbol;
 
     let mut writable: std::collections::BTreeSet<Symbol> = std::collections::BTreeSet::new();
@@ -1187,8 +1239,6 @@ fn writable_field_set_for_table(
             writable.insert(name.clone());
         }
     }
-    // `attr_accessor` / `attr_writer` virtuals (mirrors the scan in
-    // markers::push_attr_accessor_methods).
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
         let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
@@ -1197,11 +1247,7 @@ fn writable_field_set_for_table(
         if !matches!(method.as_str(), "attr_accessor" | "attr_writer") {
             continue;
         }
-        for arg in args {
-            if let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node {
-                writable.insert(value.clone());
-            }
-        }
+        writable.extend(self::markers::accessor_names(model, args));
     }
     for (_store, attrs) in crate::lower::typed_store::typed_store_decls(&model.body) {
         for attr in attrs {
@@ -1244,6 +1290,10 @@ fn writable_field_set_for_table(
     // writer yet (Many appends via the proxy, not mass-assign), so the
     // attrs stay OUT of the writable set — putting them in would make
     // `update(uploads: …)` / permit emit a missing writer (inv. 6).
+    writable.retain(|field| {
+        let is_column = table.is_some_and(|t| t.columns.iter().any(|c| c.name == *field));
+        is_column || !model_defines_writer(model, field) || model_defines_public_writer(model, field)
+    });
     writable
 }
 
@@ -1330,7 +1380,7 @@ pub(crate) fn build_methods(
     schema: &Schema,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<MethodDef> {
-    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent)
+    build_methods_with_finder_inputs(model, models, schema, params_specs, FinderInputs::Scalar, false, ErrorsReaders::FieldRead, RuntimeRelation::Absent, &Default::default())
 }
 
 /// Return the instance method surface synthesized for a model, for ingest
@@ -1358,6 +1408,7 @@ fn build_methods_with_finder_inputs(
     param_binds: bool,
     errors_readers: ErrorsReaders,
     runtime_relation: RuntimeRelation,
+    partial_stems: &crate::lower::view_to_library::PartialStems,
 ) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
     // test callers of the lowering entries are unaffected.
@@ -1393,7 +1444,7 @@ fn build_methods_with_finder_inputs(
             methods.push(adapter_emit::synth_find_primary_key_input(&model.name, table));
             methods.push(adapter_emit::synth_exists_primary_key_input(&model.name, table));
         }
-        push_adapter_methods(&mut methods, model, table, schema, param_binds);
+        push_adapter_methods(&mut methods, model, table, schema, param_binds, runtime_relation == RuntimeRelation::Present);
         match crate::lower::default_scope::default_scope(model) {
             Some(crate::lower::default_scope::DefaultScope::Static(scope)) => {
                 methods.push(crate::lower::default_scope::synth_default_scope_where(model, &scope));
@@ -1423,10 +1474,15 @@ fn build_methods_with_finder_inputs(
         // still keeps the plain name for the canonical list, since
         // nothing else competes for it.
         for spec in params_specs.for_resource(&resource) {
+            let assocs = self::schema::permitted_assocs(model, &through_joins, spec);
+            let scalar: Vec<_> = spec.fields.iter()
+                .filter(|f| !assocs.iter().any(|a| &a.name == *f))
+                .cloned()
+                .collect();
             if spec.is_canonical {
-                let writable = writable_permit_fields(model, Some(table), &spec.fields);
+                let writable = writable_permit_fields(model, Some(table), &scalar);
                 self::schema::push_update_typed_variants(
-                    &mut methods, model, &writable, table, spec,
+                    &mut methods, model, &writable, &assocs, table, spec,
                 );
                 continue;
             }
@@ -1435,8 +1491,9 @@ fn build_methods_with_finder_inputs(
                 &mut methods, model, &writable, Some(table), &spec.class_id,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
             );
+            let writable = writable_permit_fields(model, Some(table), &scalar);
             self::schema::push_update_typed_variants(
-                &mut methods, model, &writable, table, spec,
+                &mut methods, model, &writable, &assocs, table, spec,
             );
         }
         // `create_from_params(p)` / `create_from_params!(p)` — the typed
@@ -1564,14 +1621,16 @@ fn build_methods_with_finder_inputs(
     // AFTER push_user_methods, unlike the macros above: its skip guard
     // reads the accumulated list, so a model's own `to_param` (already
     // pushed) wins over the synthesized `@id.to_s`.
-    self::markers::push_to_param_method(&mut methods, model);
+    self::markers::push_to_param_method(&mut methods, model, schema.tables.get(&model.table.0));
+    // Not before push_user_methods: its skip guard has to see the model's own methods.
+    self::select_aliases::push_select_alias_methods(&mut methods, model, runtime_relation);
     // Also after push_user_methods: its BODY branches on whether the
     // model carries its own `to_key` (campfire's Message does).
     self::markers::push_dom_record_key_method(&mut methods, model);
     // After push_user_methods too: a model that writes its own
     // `cache_key` keeps it.
     self::markers::push_cache_key_methods(&mut methods, model, schema);
-    push_broadcasts_methods(&mut methods, model);
+    push_broadcasts_methods(&mut methods, model, partial_stems);
     // `has_secure_token` — the token default folds into the
     // `before_create` hook, so it runs BEFORE `push_callback_methods`:
     // the fold appends, and the macro's assignment belongs ahead of a
@@ -1581,7 +1640,7 @@ fn build_methods_with_finder_inputs(
     // runtime. After the user methods, so a model's own
     // `generate_token_for` wins.
     crate::lower::generates_token_for::push_token_for_methods(&mut methods, model);
-    push_callback_methods(&mut methods, model);
+    push_callback_methods(&mut methods, model, partial_stems);
 
     // File-grain catch-all (mirrors view_to_library's
     // build_library_class): whatever the synthesizers left span-less —
@@ -1916,7 +1975,7 @@ fn resolve_model_aliases(
 /// handles separately aren't needed here: missing one of those just
 /// means `resolve_model_aliases` falls through to a refusal instead
 /// of a resolution, never to a WRONG one).
-fn attr_accessor_arg_names(expr: &Expr) -> Vec<Symbol> {
+pub(super) fn attr_accessor_arg_names(expr: &Expr) -> Vec<Symbol> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
         return Vec::new();
     };
@@ -1932,7 +1991,7 @@ fn attr_accessor_arg_names(expr: &Expr) -> Vec<Symbol> {
 }
 
 /// The name an `attribute :name, …` call declares, when `expr` is one.
-fn attribute_api_arg_name(expr: &Expr) -> Option<Symbol> {
+pub(super) fn attribute_api_arg_name(expr: &Expr) -> Option<Symbol> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
         return None;
     };
@@ -2432,6 +2491,7 @@ fn build_class_info_with_finder_inputs(
             info.source_class_methods.insert(method.name.clone());
         }
     }
+    info.source_class_methods.extend(model.scopes().map(|s| s.name.clone()));
 
     // Attributes row from schema columns.
     if let Some(t) = table {

@@ -53,7 +53,7 @@ use crate::lower::controller::body::{
 
 use self::params::{helper_spec_map, ParamsSpec, ParamsSpecs};
 use self::process_action::{
-    dispatcher_bodies, halt_if_performed, synthesize_process_action, PreambleStmt,
+    dispatcher_bodies, halt_if_performed, lower_dispatcher_bodies, synthesize_process_action, PreambleStmt,
     RescueHandler,
 };
 use self::rewrites::{
@@ -260,6 +260,8 @@ pub struct LowerControllerOptions<'a> {
     /// App library classes — used to resolve controller-side partial
     /// render contracts.
     pub library_classes: &'a [crate::dialect::LibraryClass],
+    /// Source singleton ownership, including extensions and retained hooks.
+    pub finder_classes: Option<&'a crate::det::HashMap<ClassId, crate::analyze::ClassInfo>>,
     /// Association graph — lowers `includes(:assoc)` to eager-load
     /// preloads (issue #27).
     pub assocs: &'a [crate::lower::model_associations::AssociationEdge],
@@ -302,6 +304,12 @@ pub struct LowerControllerOptions<'a> {
     >,
 }
 
+/// The ivars the controller lowering itself writes for the runtime's own
+/// state: bare `params` / `flash` / `session` become `@params` /
+/// `@flash` / `@session`, and the render rewrite passes `@flash[:notice]`
+/// to every view. They are the runtime's, not the app's.
+pub(crate) const FRAMEWORK_IVARS: [&str; 3] = ["params", "flash", "session"];
+
 pub fn lower_controllers_with_arel_views_assocs_and_routes(
     controllers: &[Controller],
     extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
@@ -314,6 +322,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         schema,
         views,
         library_classes,
+        finder_classes,
         assocs,
         routed_by_controller,
         format_breadth,
@@ -344,6 +353,9 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // What `@parent.<assoc>.build` / `.find` expand to: the same
     // declarations the typed association seed reads.
     let assoc_registry = crate::lower::scope_chain::build_assoc_registry(models);
+    let assoc_registry = if let Some(classes) = finder_classes {
+        assoc_registry.with_finder_classes(classes)
+    } else { assoc_registry };
 
     // The view↔controller ivar contract: each action view's read-ivars,
     // so the render rewrite passes `@<name>` for each (matching the view's
@@ -497,7 +509,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let mut framework_ivars: crate::det::HashMap<Symbol, Ty> =
         crate::det::HashMap::default();
     framework_ivars.insert(
-        Symbol::from("params"),
+        Symbol::from(FRAMEWORK_IVARS[0]),
         Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
             value: std::sync::Arc::new(Ty::Untyped),
@@ -511,7 +523,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // + HWIA-shape shims); type `@flash` as Flash so `@flash[:k]`
     // routes through `Flash#[]` for typed targets.
     framework_ivars.insert(
-        Symbol::from("flash"),
+        Symbol::from(FRAMEWORK_IVARS[1]),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Flash")),
             args: vec![].into(),
@@ -521,12 +533,14 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // ActionDispatch::Session struct (empty for real-blog, HWIA-shape
     // shims preserved on the class for cross-target tests).
     framework_ivars.insert(
-        Symbol::from("session"),
+        Symbol::from(FRAMEWORK_IVARS[2]),
         Ty::Class {
             id: ClassId(Symbol::from("ActionDispatch::Session")),
             args: vec![].into(),
         },
     );
+
+    debug_assert_eq!(framework_ivars.len(), FRAMEWORK_IVARS.len());
 
     // Every relation-RETURNING class method the app registers — its
     // `scope` declarations plus the class methods whose body tail is a
@@ -624,6 +638,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             nullable_columns: Vec::new(),
             origin: None,
             constants: collect_class_constants(controller),
+            conditional_definitions: Vec::new(),
             unknown_calls: collect_delegate_calls(controller),
             class_ivar_initializers: collect_class_ivar_initializers(controller),
         };
@@ -707,6 +722,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         nullable_columns: Vec::new(),
         origin: None,
         constants: collect_class_constants(controller),
+        conditional_definitions: Vec::new(),
         unknown_calls: collect_delegate_calls(controller),
         class_ivar_initializers: collect_class_ivar_initializers(controller),
     };
@@ -1061,7 +1077,7 @@ fn subclass_template_hooks(
                         parenthesized: true,
                     },
                 );
-                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, &[])
+                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, false, &[])
             };
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
@@ -1265,10 +1281,28 @@ fn build_methods(
         .filter(|f| !filter_is_spliceable(f, &privs))
         .map(|f| &f.target)
         .collect();
+    // A target that some method body also calls by name (a strong-params
+    // helper validated up front with `before_action :widget_params` and
+    // read again as `widget_params[:name]`) is still live after
+    // inlining: dropping it leaves those calls dangling (NameError).
+    // Every own method counts, routed or not, and so do its parameter
+    // defaults. A dynamic send whose name is not a literal
+    // (`send(params[:step])`) may reach any of them, so it keeps every
+    // target.
+    let mut called_by_bodies: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
+    let mut sends_dynamically = false;
+    for a in publics.iter().chain(helper_publics.iter()).chain(privs.iter()) {
+        collect_self_send_names(&a.body, &mut called_by_bodies, &mut sends_dynamically);
+        for default in a.formal_params().iter().filter_map(|p| p.default.as_ref()) {
+            collect_self_send_names(default, &mut called_by_bodies, &mut sends_dynamically);
+        }
+    }
     let filter_target_names: crate::det::HashSet<&Symbol> = before_filters
         .iter()
         .map(|f| &f.target)
-        .filter(|t| !called_target_names.contains(*t))
+        .filter(|t| {
+            !sends_dynamically && !called_target_names.contains(*t) && !called_by_bodies.contains(*t)
+        })
         .collect();
     // A subclassed controller keeps its filter targets: descendants
     // inherit the before_action and their preambles call the target
@@ -1407,12 +1441,23 @@ fn build_methods(
             &deferred_renders, &mut deferred_tails,
         ));
     }
-    if let Some((preamble, wraps)) = pending_dispatcher {
-        let rescues = collect_rescue_handlers(controller, all_controllers, format_breadth);
+    if let Some((mut preamble, mut wraps)) = pending_dispatcher {
+        let mut rescues = collect_rescue_handlers(controller, all_controllers, format_breadth);
+        lower_dispatcher_bodies(&mut preamble, &mut wraps, &mut rescues, |body| {
+            lower_action_body(
+                body, controller, "process_action", &privs, &params_privs,
+                /*is_public=*/ false, params_specs, assocs, &[], view_ivars, partials,
+                format_breadth, &shadows, route_id_segments, false, false, None, None, &[],
+                /*preserve_named_layout=*/ true,
+            ).0
+        });
+        // Template lowering can introduce a read of self.action_name.
         let reads = reads_action_name(
             controller,
             all_controllers,
             &dispatcher_bodies(&preamble, &wraps, &rescues),
+            view_ivars,
+            partials,
         );
         let mut dispatcher = synthesize_process_action(
             &preamble,
@@ -1425,12 +1470,9 @@ fn build_methods(
             reads,
             &missing,
         );
-        // Block-form filters are inlined into `process_action` after
-        // `rewrite_controller_route_helpers` has already run on action
-        // bodies. A CSP block calls `service_worker_path(format: :js)`,
-        // which `route_format_suffix` renamed. The rewrite is idempotent
-        // on nodes it has already touched, so every dispatcher gets it —
-        // the next block filter that names a helper would otherwise stay bare.
+        // Assembly adds expressions after action lowering. Route-helper
+        // rewriting is idempotent and must still cover the final dispatcher;
+        // response lowering is not, so deferred action tails stay untouched.
         dispatcher.body =
             rewrite_controller_route_helpers(&dispatcher.body, &shadows, route_id_segments);
         methods.insert(dispatcher_at, dispatcher);
@@ -1464,14 +1506,16 @@ fn build_methods(
 
     // `helper_method :name` exposes a controller method to templates.
     // The lowered views are module functions with no controller
-    // instance, so each ARG-PURE marked method (no ivar reads — the
+    // instance, so each ARG-PURE marked method (no instance state — the
     // corpus members take the record as a parameter) also gets a
     // class-side clone; the bare view call rewrites to
     // `DomainsController.caption_of_button(domain)` via
-    // helper_method_index (registered at ingest). Ivar-reading marked
-    // methods stay instance-only — their view calls remain honest
-    // residue.
-    for name in controller_helper_method_names(controller) {
+    // helper_method_index (registered at ingest). The pure methods of
+    // this controller such a helper calls are cloned with it, so the
+    // clone's bare `default_room` finds a class method. Marked methods
+    // that touch instance state stay instance-only — the view calls
+    // them on `ActionController::Current.controller`.
+    for name in class_side_clone_names(controller) {
         if let Some(m) = methods
             .iter()
             .find(|m| m.name == name && m.receiver == MethodReceiver::Instance)
@@ -1588,44 +1632,55 @@ fn synthesize_controller_string_method(
     }
 }
 
-/// Names a controller marks with `helper_method :x` whose public
-/// method body is pure over its arguments - the set the view-call
-/// rewrite and the class-side clone above serve. Shared with ingest,
-/// which registers these in `app.helper_method_index`.
+/// Names a controller marks with `helper_method :x` whose method body
+/// is pure over its arguments - the set the view-call rewrite and the
+/// class-side clone above serve. Shared with ingest, which registers
+/// these in `app.helper_method_index` from the controller as written
+/// and asks again once its concerns are spliced in, the controller the
+/// clone above is made from: a name only the first answer holds is
+/// dropped (`reconcile_controller_helper_methods`), or the view would
+/// call a clone nobody made.
 ///
-/// Pure means it reads no instance state: no ivar, and none of the
-/// request's state the controller instance carries (`session`,
-/// `cookies`, `request`, `params`, ...). In Rails a helper method runs
-/// on the controller that handles the request; a class-side clone has no
-/// request, and a clone of an `authenticated?` that reads
-/// `session[:authenticated_at]` read `session` off the class, which no
-/// target can compile.
+/// Pure means it touches no instance state - see
+/// `class_side_safe_methods`. In Rails a helper method runs on the
+/// controller that handles the request; a class-side clone has no
+/// request and lives as long as the process, so a clone of an
+/// `authenticated?` that reads `session[:authenticated_at]` read
+/// `session` off the class, which no target can compile, and a clone of
+/// `@current_account ||= Account.find_by(slug: Current.slug)` memoized
+/// on the CLASS: the first request's account answered every later
+/// request.
 pub(crate) fn controller_helper_method_names(controller: &Controller) -> Vec<Symbol> {
-    use crate::expr::Literal;
+    let safe = class_side_safe_methods(controller);
+    let mut marked = helper_method_marked_names(controller);
+    marked.retain(|name| safe.contains_key(name));
+    marked
+}
 
-    const REQUEST_STATE: &[&str] = &[
-        "session", "cookies", "request", "response", "params", "flash", "headers",
-        "reset_session", "request_forgery_protection_token", "form_authenticity_token",
-    ];
-
-    fn has_ivar(e: &Expr) -> bool {
-        if matches!(&*e.node, ExprNode::Ivar { .. }) {
-            return true;
-        }
-        if let ExprNode::Send { recv: None, method, .. } = &*e.node {
-            if REQUEST_STATE.contains(&method.as_str()) {
-                return true;
+/// The methods the class-side clones need: the pure `helper_method`
+/// names and every method of this controller they reach by a bare
+/// call. A pure `last_room_visited` that calls `default_room` is cloned
+/// together with `default_room`, or the clone would call a class method
+/// nobody defined. Each callee is pure itself - a call to an impure one
+/// made the caller impure.
+fn class_side_clone_names(controller: &Controller) -> Vec<Symbol> {
+    let safe = class_side_safe_methods(controller);
+    let mut out = controller_helper_method_names(controller);
+    let mut i = 0;
+    while i < out.len() {
+        if let Some(calls) = safe.get(&out[i]) {
+            for callee in calls {
+                if !out.contains(callee) {
+                    out.push(callee.clone());
+                }
             }
         }
-        let mut found = false;
-        e.node.for_each_child(&mut |c| {
-            if has_ivar(c) {
-                found = true;
-            }
-        });
-        found
+        i += 1;
     }
+    out
+}
 
+fn helper_method_marked_names(controller: &Controller) -> Vec<Symbol> {
     let mut marked: Vec<Symbol> = Vec::new();
     for item in &controller.body {
         let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
@@ -1641,14 +1696,127 @@ pub(crate) fn controller_helper_method_names(controller: &Controller) -> Vec<Sym
             }
         }
     }
-    marked.retain(|name| {
-        controller.actions().any(|a| {
-            a.name == *name
-                && !has_ivar(&a.body)
-                && a.opt_params.iter().all(|(_, d)| !has_ivar(d))
-        })
-    });
     marked
+}
+
+/// This controller's instance methods that may run on the class, each
+/// with the methods of this controller it calls bare. A method is safe
+/// when nothing in it needs the controller instance:
+///
+/// - no ivar read or write. `@x ||= expr`, `@x = expr` and `@x += 1`
+///   write through an `LValue::Ivar` the child walk never visits, and
+///   a clone of a memoizing helper keeps its value on the class across
+///   requests;
+/// - no `self` except as the receiver of a call, no `super` and no
+///   `method(:x)` without a receiver: on the class side `self` is the
+///   class (`self.class` answers `Class`), and the parent has no
+///   class-side counterpart to `super` into;
+/// - every bare call (or `self.x` call) names a Kernel function or a
+///   method of this controller that is safe itself. Request state
+///   (`session`, `params`, `cookies`, ...), framework instance methods
+///   (`redirect_to`, `t`, `url_for`, ...) and methods inherited from a
+///   parent controller (or a concern, until the splice copies them in)
+///   are not visible here and count as instance state: such a helper
+///   stays on the instance, where the view reaches it through
+///   `ActionController::Current.controller` as Rails runs it. A pure
+///   helper misjudged that way only takes the dynamic path; an impure
+///   one cloned onto the class leaks or raises.
+///
+/// Calls make this a fixpoint: `current_account` that calls
+/// `current_slug` that reads `params[:slug]` is impure, and so is a
+/// method that calls `current_account`. Only this controller's own
+/// methods are resolved: ingest asks first on one controller file at a
+/// time, and again, like the lowering, on the controller its concerns
+/// were spliced into.
+fn class_side_safe_methods(controller: &Controller) -> crate::det::HashMap<Symbol, Vec<Symbol>> {
+    use crate::expr::LValue;
+
+    const KERNEL_FUNCTIONS: &[&str] = &[
+        "Array", "Float", "Hash", "Integer", "Rational", "String", "format", "sprintf",
+        "lambda", "proc", "loop", "raise", "fail", "puts", "print", "p", "pp", "rand",
+        "block_given?",
+    ];
+
+    fn touches_instance(
+        e: &Expr,
+        own: &crate::det::HashSet<Symbol>,
+        calls: &mut Vec<Symbol>,
+    ) -> bool {
+        match &*e.node {
+            ExprNode::Ivar { .. } | ExprNode::SelfRef | ExprNode::Super { .. } => return true,
+            ExprNode::MethodRef { recv: None, .. } => return true,
+            ExprNode::Assign { target: LValue::Ivar { .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. } => return true,
+            ExprNode::MultiAssign { targets, .. }
+                if targets.iter().any(|t| matches!(t, LValue::Ivar { .. })) =>
+            {
+                return true;
+            }
+            ExprNode::Defined { operand } => return touches_instance(operand, own, calls),
+            ExprNode::Send { recv, method, args, block, .. }
+                if recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) =>
+            {
+                if own.contains(method) {
+                    if !calls.contains(method) {
+                        calls.push(method.clone());
+                    }
+                } else if !KERNEL_FUNCTIONS.contains(&method.as_str()) {
+                    return true;
+                }
+                return args.iter().any(|a| touches_instance(a, own, calls))
+                    || block.as_ref().is_some_and(|b| touches_instance(b, own, calls));
+            }
+            _ => {}
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| {
+            if !found && touches_instance(c, own, calls) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    // A name also defined class-side (`def self.label` beside
+    // `def label`) is not resolved: a clone's bare `label` would reach
+    // that class method, not the instance method the original called.
+    let class_side: crate::det::HashSet<&Symbol> =
+        controller.class_methods().map(|m| &m.name).collect();
+    let own: crate::det::HashSet<Symbol> = controller
+        .actions()
+        .map(|a| a.name.clone())
+        .filter(|name| !class_side.contains(name))
+        .collect();
+
+    let mut calls_of: crate::det::HashMap<Symbol, Vec<Symbol>> = crate::det::HashMap::default();
+    let mut unsafe_names: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
+    for a in controller.actions() {
+        let calls = calls_of.entry(a.name.clone()).or_default();
+        let touches = !own.contains(&a.name)
+            || touches_instance(&a.body, &own, calls)
+            || a.opt_params.iter().any(|(_, d)| touches_instance(d, &own, calls))
+            || a.kw_params
+                .iter()
+                .any(|(_, d)| d.as_ref().is_some_and(|d| touches_instance(d, &own, calls)));
+        if touches {
+            unsafe_names.insert(a.name.clone());
+        }
+    }
+    loop {
+        let newly: Vec<Symbol> = calls_of
+            .iter()
+            .filter(|(name, calls)| {
+                !unsafe_names.contains(*name) && calls.iter().any(|c| unsafe_names.contains(c))
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if newly.is_empty() {
+            break;
+        }
+        unsafe_names.extend(newly);
+    }
+    calls_of.retain(|name, _| !unsafe_names.contains(name));
+    calls_of
 }
 
 /// Does `f` apply to the action named `action_name`?
@@ -1683,8 +1851,13 @@ fn filter_is_guarded(f: &Filter) -> bool {
 /// instead of running the action. Such a filter stays a call in the
 /// preamble, where its `return` ends the call and `return if
 /// performed?` decides the halt, as Rails does.
+///
+/// Nor a `prepend_before_action`: Rails runs it ahead of every filter
+/// registered before it, which the preamble's hoist does and splicing
+/// in declaration order does not.
 fn filter_is_spliceable(f: &Filter, privs: &[Action]) -> bool {
-    !filter_is_guarded(f)
+    !f.prepend
+        && !filter_is_guarded(f)
         && !privs
             .iter()
             .find(|a| a.name == f.target)
@@ -1739,6 +1912,46 @@ fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> 
         }
     }
     true
+}
+
+/// The names `body` calls on the controller itself: receiverless sends
+/// and sends on `self`, the dynamic sends of a literal name
+/// (`send(:name)`, `public_send`, `__send__`), and the bound methods it
+/// takes the same way (`method(:name)`, `&method(:name)`). One of those
+/// whose name is not a literal sets `dynamic`.
+fn collect_self_send_names(
+    body: &Expr,
+    out: &mut crate::det::HashSet<Symbol>,
+    dynamic: &mut bool,
+) {
+    let on_self = |recv: &Option<Expr>| {
+        recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+    };
+    match &*body.node {
+        ExprNode::Send { recv, method, args, .. } if on_self(recv) => {
+            out.insert(method.clone());
+            let named = match (method.as_str(), args.as_slice()) {
+                ("method", [arg]) => Some(arg),
+                ("send" | "public_send" | "__send__", [arg, ..]) => Some(arg),
+                _ => None,
+            };
+            match named.map(|arg| &*arg.node) {
+                Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => {
+                    out.insert(value.clone());
+                }
+                Some(ExprNode::Lit { value: crate::expr::Literal::Str { value } }) => {
+                    out.insert(Symbol::from(value.as_str()));
+                }
+                Some(_) => *dynamic = true,
+                None => {}
+            }
+        }
+        ExprNode::MethodRef { recv, name } if on_self(recv) => {
+            out.insert(name.clone());
+        }
+        _ => {}
+    }
+    body.node.for_each_child(&mut |c| collect_self_send_names(c, out, dynamic));
 }
 
 /// Return a copy of `action` with every applicable before_action
@@ -2087,6 +2300,9 @@ fn default_forgery_protection() -> Filter {
         unless_cond: None,
         if_cond_expr: None,
         unless_cond_expr: None,
+        unread_guard: false,
+        unread_options: false,
+        only_present: false,
         block: None,
         prepend: false,
     }
@@ -2382,16 +2598,39 @@ fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a
 /// lambda filters stay `Unknown` in the controller body, so only
 /// `dispatched` has them. A concern's methods count too, because ingest
 /// splices them into the controller.
-fn reads_action_name(controller: &Controller, all: &[Controller], dispatched: &[&Expr]) -> bool {
+fn reads_action_name(
+    controller: &Controller,
+    all: &[Controller],
+    dispatched: &[&Expr],
+    view_ivars: &ViewIvarMap,
+    partials: &PartialMap,
+) -> bool {
     let action_name = Symbol::from("action_name");
     let reads = |e: &Expr| body_calls_method(e, &action_name);
     let mut chain = ancestor_chain(controller, all);
     chain.push(controller);
     // A method that renders a partial passes the request's `action_name` on to it, outside an action too (a helper, an inherited one).
     let renders_partial = |e: &Expr| body_renders_partial(e);
+    // Named callback/rescue methods are lowered separately, possibly on
+    // an ancestor. Their template binding can introduce the same reader
+    // as an inline callback. Inspect that binding from source too.
+    let contextual_views = view_ivars.values().any(|view| view.uses_action_name);
+    let renders_with_action_name = |c: &Controller, e: &Expr| {
+        contextual_views && {
+            // This is only a query. Actual body lowering owns any
+            // diagnostics; inspecting its binding must not report them.
+            let (bound, _) = crate::emit::diagnostics::scope(|| rewrite_render_to_views(
+                e, views_module_name(c).as_deref(), &[], view_ivars, partials,
+                "", false, false, &[],
+            ));
+            reads(&bound)
+        }
+    };
     dispatched.iter().any(|e| reads(e))
         || chain.iter().any(|c| {
-            c.actions().any(|a| reads(&a.body) || renders_partial(&a.body))
+            c.actions().any(|a| {
+                reads(&a.body) || renders_partial(&a.body) || renders_with_action_name(c, &a.body)
+            })
                 || c.filters().any(|f| {
                     [&f.block, &f.if_cond_expr, &f.unless_cond_expr]
                         .into_iter()
@@ -2399,6 +2638,48 @@ fn reads_action_name(controller: &Controller, all: &[Controller], dispatched: &[
                         .any(reads)
                 })
         })
+}
+
+#[cfg(test)]
+mod action_name_probe_tests {
+    use super::*;
+
+    #[test]
+    fn action_name_probe_does_not_report_serializer_diagnostics() {
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n"),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  get '/probes', to: 'probes#index'\nend\n"),
+            ("app/controllers/probes_controller.rb", "class ProbesController < ActionController::Base\n  def index\n    render json: { value: 1 }, serializer: :custom\n  end\nend\n"),
+        ].into_iter().map(|(path, source)| {
+            (std::path::PathBuf::from(path), source.as_bytes().to_vec())
+        }).collect();
+        let app = crate::ingest::ingest_app_from_tree(tree).expect("ingest probe");
+        let controller = app.controllers.iter()
+            .find(|c| c.name.0.as_str() == "ProbesController").expect("probe controller");
+        let mut views = ViewIvarMap::default();
+        views.insert(("Probes".into(), "context".into()),
+            crate::lower::view_to_library::ViewArgs {
+                uses_action_name: true,
+                ..Default::default()
+            });
+        let partials = PartialMap::default();
+        let (reads, inspection) = crate::emit::diagnostics::scope(|| {
+            reads_action_name(controller, &app.controllers, &[], &views, &partials)
+        });
+        assert!(!reads);
+        assert!(inspection.is_empty(), "inspection reported diagnostics: {inspection:?}");
+
+        // Isolating inspection must not hide the real lowering refusal.
+        let action = controller.actions().next().expect("index action");
+        let (_, actual) = crate::emit::diagnostics::scope(|| {
+            rewrite_render_to_views(&action.body, Some("Probes"), &[], &views,
+                &partials, "index", true, false, &[])
+        });
+        assert_eq!(actual.len(), 1, "actual lowering diagnostics: {actual:?}");
+        assert!(matches!(&actual[0].kind,
+            crate::diagnostic::DiagnosticKind::LowerResidue { reason, .. }
+                if reason.as_str() == "serializer_render_not_modelled"), "{:?}", actual[0]);
+    }
 }
 
 fn body_renders_partial(e: &Expr) -> bool {
@@ -2582,6 +2863,11 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     info.instance_methods
         .entry(Symbol::from("media_type"))
         .or_insert_with(|| fn_sig(vec![], Ty::Str));
+    // Re-typing a lowered controller needs the same writer surface as
+    // source analysis. Its assignment value is still the RHS, not String.
+    info.instance_methods
+        .entry(Symbol::from("content_type="))
+        .or_insert(Ty::Untyped);
 
     // Rails' implicit `protect_from_forgery` heads every chain; the
     // preamble emits a bare `verify_authenticity_token` send that must
@@ -2902,6 +3188,7 @@ fn action_to_method(
         inherited_spec,
         formats_template.as_ref(),
         &inheritor_modules,
+        /*preserve_named_layout=*/ false,
     );
     if let Some(tail) = deferred_tail {
         deferred_out.insert(a.name.clone(), tail);
@@ -3142,6 +3429,7 @@ fn lower_action_body(
     inherited_params_spec: Option<&ParamsSpec>,
     formats_only_render: Option<&Symbol>,
     inheritor_modules: &[String],
+    preserve_named_layout: bool,
 ) -> (Expr, Option<Expr>) {
     // BEFORE everything else: this turns a helper the permit recognizer
     // could not read into one that yields the params class, so every
@@ -3244,6 +3532,7 @@ fn lower_action_body(
             partials,
             action_name,
             is_public,
+            preserve_named_layout,
             inheritor_modules,
         )
     };
@@ -3264,6 +3553,9 @@ fn lower_action_body(
     // call; downstream call sites see a typed value, not a Hash.
     let with_typed_params =
         self::params::rewrite_to_from_raw(&with_params, params_specs, format_breadth.raises_param_missing);
+    let with_typed_params = self::params::rewrite_params_writes(
+        &with_typed_params, params_privs, params_specs, &controller.name,
+    );
     let with_redirects = rewrite_redirect_to(&with_typed_params, route_id_segments);
     // Rewrite `<Model>.new(<resource>_params)` → `<Model>.from_params(<resource>_params)`
     // BEFORE the assoc-through-parent rewrite, so the build path picks
@@ -3275,6 +3567,8 @@ fn lower_action_body(
     // contract and no longer takes a params object.
     let with_from_params =
         rewrite_update_to_typed_variant(&with_from_params, params_privs, params_specs);
+    let with_from_params =
+        rewrites::rewrite_assign_to_typed_variant(&with_from_params, params_privs, params_specs);
     let with_assoc =
         rewrite_assoc_through_parent_typed(&with_from_params, params_privs, params_specs, assocs);
     // The legacy chain rewrites (`rewrite_drop_includes` +

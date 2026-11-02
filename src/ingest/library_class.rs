@@ -102,6 +102,24 @@ pub fn ingest_nested_library_classes(
     ingest_library_classes_impl(source, file, Some(outer))
 }
 
+/// The modules a file declares with an empty body (`module MarkA; end`):
+/// constants Ruby defines, which the walk above passes over (it keeps
+/// modules that define methods). A gem's marker modules are read by
+/// name (`Globgem::MarkAY.name`); an app's empty helper modules keep
+/// their treatment, so only the gem-source ingest asks for these.
+pub(super) fn ingest_empty_modules(source: &[u8], file: &str) -> IngestResult<Vec<LibraryClass>> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let mut out = Vec::new();
+    for (scope, module) in find_all_module_declarations_with_scope(&root) {
+        if module.body().is_some() {
+            continue;
+        }
+        out.push(library_class_from_module_node_with_scope(&module, &scope, file)?);
+    }
+    Ok(out)
+}
+
 /// `nested_in`: `None` walks every declaration; `Some(outer)` walks
 /// only nested ones and top-level compact names under `outer`.
 fn ingest_library_classes_impl(
@@ -124,7 +142,8 @@ fn ingest_library_classes_impl(
         .into_iter()
         .filter(|(scope, class)| walked(scope, class_name_path(class)))
     {
-        let (mut lc, struct_base) = library_class_and_struct_base(&class, &scope, file)?;
+        let (mut lc, struct_base) =
+            library_class_and_struct_base(&class, &scope, file).map_err(|err| super::error_site::at(err, &class.as_node()))?;
         // BEFORE the class it serves: a superclass has to be defined
         // when the `class X < Y` line runs, and these two share a file.
         if let Some(base) = struct_base {
@@ -155,7 +174,8 @@ fn ingest_library_classes_impl(
         {
             continue;
         }
-        let mut lc = library_class_from_module_node_with_scope(&module, &scope, file)?;
+        let mut lc = library_class_from_module_node_with_scope(&module, &scope, file)
+            .map_err(|err| super::error_site::at(err, &module.as_node()))?;
         let owner = lc.name.clone();
         let structs = struct_constant_classes(&owner, module.body(), file)?;
         lc.constants.retain(|(name, _)| !structs.iter().any(|(s, _)| s == name));
@@ -166,6 +186,12 @@ fn ingest_library_classes_impl(
         out.extend(data_block_classes(module.body(), &owner, file)?);
         out.extend(structs.into_iter().map(|(_, s)| s));
         out.extend(made.into_iter().map(|(_, c)| c));
+    }
+    // The classes and modules a load-time conditional in a class or
+    // module body declares (`ConditionalArm::declarations`), which the
+    // finders above do not reach: each loads only where its branch runs.
+    if nested_in.is_none() {
+        out.extend(conditional_declaration_classes(&root, file)?);
     }
     if out.is_empty() {
         if let Some(lc) = file_data_class(&root, file)? {
@@ -294,7 +320,7 @@ fn data_block_classes(
             continue;
         }
         let name = ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), constant_id_str(&cw.name()))));
-        let DeclBody { includes, include_spans, methods, constants, unknown_calls, class_initializers, class_attributes: _ } =
+        let DeclBody { includes, include_spans, methods, constants, unknown_calls, class_initializers, class_attributes: _, conditional_definitions } =
             walk_decl_body(block.body(), &name, file, DeclBodyMode::Instance)?;
         debug_assert!(includes.is_empty() && constants.is_empty() && unknown_calls.is_empty());
         out.push(LibraryClass {
@@ -308,6 +334,7 @@ fn data_block_classes(
             nullable_columns: Vec::new(),
             origin: None,
             constants,
+            conditional_definitions,
             unknown_calls,
             class_ivar_initializers: class_initializers,
         });
@@ -342,7 +369,7 @@ fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Opti
             });
         }
     }
-    let DeclBody { includes, include_spans, methods, constants, mut unknown_calls, mut class_initializers, class_attributes: _ } =
+    let DeclBody { includes, include_spans, methods, constants, mut unknown_calls, mut class_initializers, class_attributes: _, conditional_definitions } =
         walk_decl_body(body(), &owner, file, DeclBodyMode::Instance)?;
     class_initializers.extend(take_class_ivar_initializers(&mut unknown_calls));
     Ok(Some(LibraryClass {
@@ -359,6 +386,7 @@ fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Opti
             span: super::util::node_span(&call.as_node(), file),
         }),
         constants,
+        conditional_definitions,
         unknown_calls,
         class_ivar_initializers: class_initializers,
     }))
@@ -592,8 +620,18 @@ pub(super) fn library_class_and_struct_base(
         mut constants,
         mut unknown_calls,
         mut class_initializers,
-        class_attributes: _,
+        class_attributes: _, conditional_definitions,
     } = walk_decl_body(class.body(), &owner, file, DeclBodyMode::Instance)?;
+    // Not the write under a superclass: Ruby skips `X = … unless defined?(X)` when the parent holds `X`, which this body cannot see.
+    if class.superclass().is_some()
+        && let Some(stmts) = class.body().and_then(|b| b.as_statements_node())
+    {
+        for stmt in stmts.body().iter() {
+            if let Some(cw) = constant_write_unless_defined(&stmt) {
+                constants.retain(|(n, _)| n.as_str() != constant_id_str(&cw.name()));
+            }
+        }
+    }
     // An alias of a builtin captured the superclass's method where the
     // superclass defines it; the delegation can't tell (`OBJECT_BUILTINS`).
     if class.superclass().is_some() && methods.iter().any(|m| delegates_to_builtin(&m.body)) {
@@ -692,6 +730,7 @@ pub(super) fn library_class_and_struct_base(
             nullable_columns: Vec::new(),
             origin: None,
             constants,
+            conditional_definitions,
             unknown_calls,
             class_ivar_initializers: class_initializers,
         },
@@ -1566,6 +1605,7 @@ fn struct_class(
         nullable_columns: Vec::new(),
         origin: Some(origin),
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     }
@@ -1714,7 +1754,7 @@ pub(super) fn library_class_from_module_node_with_scope(
     full_path.extend(name_path);
     let owner = ClassId(Symbol::from(full_path.join("::")));
 
-    let visibility = Visibility::resolve(module.body().as_ref(), file, Some(&owner))?;
+    let visibility = Visibility::resolve_library(module.body().as_ref(), file, Some(&owner), None)?;
     let DeclBody {
         includes,
         include_spans,
@@ -1722,7 +1762,7 @@ pub(super) fn library_class_from_module_node_with_scope(
         constants,
         mut unknown_calls,
         mut class_initializers,
-        class_attributes: _,
+        class_attributes: _, conditional_definitions,
     } = walk_decl_body_with_visibility(module.body(), &owner, file, DeclBodyMode::Instance, &visibility)?;
     class_initializers.extend(take_class_ivar_initializers(&mut unknown_calls));
     Ok(LibraryClass {
@@ -1736,6 +1776,7 @@ pub(super) fn library_class_from_module_node_with_scope(
         nullable_columns: Vec::new(),
         origin: None,
         constants,
+        conditional_definitions,
         unknown_calls,
         class_ivar_initializers: class_initializers,
     })
@@ -1788,6 +1829,8 @@ pub(super) struct DeclBody {
     /// `mattr_*` / `cattr_*` attribute names declared in this body —
     /// used when folding ClassMethods seeds onto the enclosing module.
     pub(super) class_attributes: HashSet<Symbol>,
+    /// The load-time conditionals whose branches define `methods`.
+    pub(super) conditional_definitions: Vec<crate::dialect::ConditionalDefinitions>,
 }
 
 impl DeclBody {
@@ -1799,6 +1842,7 @@ impl DeclBody {
         self.unknown_calls.extend(other.unknown_calls);
         self.class_initializers.extend(other.class_initializers);
         self.class_attributes.extend(other.class_attributes);
+        self.conditional_definitions.extend(other.conditional_definitions);
     }
 
     fn finalize_classvars(
@@ -1922,6 +1966,202 @@ fn is_relocatable_mattr_seed(expr: &Expr, class_attributes: &HashSet<Symbol>) ->
             class_attributes.iter().any(|attr| attr.as_str() == bare)
         }) && matches!(&*value.node, ExprNode::Lit { value: Literal::Nil })
     )
+}
+
+/// A load-time conditional's record (`ConditionalDefinitions`), its
+/// branches' methods pushed onto `methods`: each `def`, each accessor
+/// half, and the methods of the conditionals nested in a branch.
+fn conditional_definitions(
+    statement: &ruby_prism::Node<'_>,
+    owner: &ClassId,
+    file: &str,
+    class_side: bool,
+    visibility: &Visibility,
+    methods: &mut Vec<MethodDef>,
+) -> IngestResult<crate::dialect::ConditionalDefinitions> {
+    let (negated, arms) = visibility::conditional_definition(statement).expect("a conditional definition");
+    let mut record = crate::dialect::ConditionalDefinitions {
+        span: super::util::node_span(statement, file),
+        negated,
+        arms: Vec::new(),
+    };
+    let recv = if class_side { MethodReceiver::Class } else { MethodReceiver::Instance };
+    for (condition, stmts) in arms {
+        let mut arm = crate::dialect::ConditionalArm {
+            condition: condition.map(|c| ingest_expr(&c, file)).transpose()?,
+            methods: Vec::new(),
+            nested: Vec::new(),
+            declarations: Vec::new(),
+        };
+        for stmt in stmts {
+            // Its library class is ingested by `conditional_declaration_classes`.
+            let declared = stmt
+                .as_class_node()
+                .and_then(|c| class_name_path(&c))
+                .or_else(|| stmt.as_module_node().and_then(|m| module_name_path(&m)));
+            if let Some(path) = declared {
+                arm.declarations.push(crate::dialect::ConditionalDeclaration {
+                    name: ClassId(Symbol::from(format!("{}::{}", owner.0.as_str(), path.join("::")))),
+                    start: stmt.location().start_offset() as u32,
+                });
+                continue;
+            }
+            if visibility::conditional_definition(&stmt).is_some() {
+                arm.nested.push(conditional_definitions(&stmt, owner, file, class_side, visibility, methods)?);
+                continue;
+            }
+            if let Some(call) = visibility::conditional_accessor(&stmt) {
+                let kw = constant_id_str(&call.name());
+                let name_span = super::util::node_span(&stmt, file);
+                for arg in call.arguments().into_iter().flat_map(|a| a.arguments().iter()) {
+                    let Some(name) = super::util::symbol_or_string_value(&arg) else { continue };
+                    let name = Symbol::from(name);
+                    let mut halves = Vec::new();
+                    if kw != "attr_writer" {
+                        halves.push(synth_attr_reader(owner, &name, recv));
+                    }
+                    if kw != "attr_reader" {
+                        halves.push(synth_attr_writer(owner, &name, recv));
+                    }
+                    for mut method in halves {
+                        method.name_span = name_span;
+                        visibility.apply(&stmt, &mut method);
+                        arm.methods.push(crate::dialect::ConditionalMember::of(&method));
+                        methods.push(method);
+                    }
+                }
+                continue;
+            }
+            let Some(def) = visibility::definition(&stmt) else { continue };
+            let mut m = ingest_library_method(&def, owner, file)?;
+            visibility.apply(&stmt, &mut m);
+            if class_side {
+                m.receiver = MethodReceiver::Class;
+            }
+            arm.methods.push(crate::dialect::ConditionalMember::of(&m));
+            methods.push(m);
+        }
+        record.arms.push(arm);
+    }
+    Ok(record)
+}
+
+/// The library classes a file-level `if` / `unless` declares (in any
+/// branch, `elsif`s and nested branches too), with what each nests: a gem
+/// file's program loads each only where its branch runs
+/// (`ProgramItem::Branch`). The finders of `ingest_library_classes` do not
+/// reach them.
+pub(super) fn ingest_file_branch_classes(source: &[u8], file: &str) -> IngestResult<Vec<LibraryClass>> {
+    fn branch_statements<'pr>(node: &ruby_prism::Node<'pr>) -> Vec<ruby_prism::Node<'pr>> {
+        let mut out = Vec::new();
+        let mut take = |s: Option<ruby_prism::StatementsNode<'pr>>| out.extend(s.map(|s| s.body().iter().collect::<Vec<_>>()).unwrap_or_default());
+        if let Some(branch) = node.as_if_node() {
+            if branch.end_keyword_loc().is_none() {
+                return Vec::new();
+            }
+            take(branch.statements());
+            let mut next = branch.subsequent();
+            while let Some(sub) = next {
+                if let Some(elsif) = sub.as_if_node() {
+                    take(elsif.statements());
+                    next = elsif.subsequent();
+                } else {
+                    take(sub.as_else_node().and_then(|e| e.statements()));
+                    next = None;
+                }
+            }
+        } else if let Some(branch) = node.as_unless_node() {
+            if branch.end_keyword_loc().is_none() {
+                return Vec::new();
+            }
+            take(branch.statements());
+            take(branch.else_clause().and_then(|e| e.statements()));
+        }
+        out
+    }
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let Some(program) = root.as_program_node() else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    let mut pending: Vec<ruby_prism::Node<'_>> = program.statements().body().iter().flat_map(|s| branch_statements(&s)).collect();
+    while let Some(stmt) = pending.pop() {
+        if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
+            for (scope, class) in find_all_classes_with_scope(&stmt) {
+                let (lc, base) = library_class_and_struct_base(&class, &scope, file)?;
+                out.extend(base);
+                out.push(lc);
+            }
+            for (scope, module) in find_all_modules_with_scope(&stmt) {
+                out.push(library_class_from_module_node_with_scope(&module, &scope, file)?);
+            }
+        } else {
+            pending.extend(branch_statements(&stmt));
+        }
+    }
+    Ok(out)
+}
+
+/// The library classes the `class` / `module` statements in a class or
+/// module body's load-time conditionals declare (`visibility::
+/// conditional_definition`), with what each nests, qualified by where
+/// the conditional stands. Conditionals nested in a branch are walked too.
+fn conditional_declaration_classes(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Vec<LibraryClass>> {
+    fn declarations(
+        node: &ruby_prism::Node<'_>,
+        scope: &[String],
+        file: &str,
+        out: &mut Vec<LibraryClass>,
+    ) -> IngestResult<()> {
+        let take = |decl: &ruby_prism::Node<'_>, scope: &[String], out: &mut Vec<LibraryClass>| -> IngestResult<()> {
+            for (inner, class) in find_all_classes_with_scope(decl) {
+                let full: Vec<String> = scope.iter().cloned().chain(inner).collect();
+                let (lc, base) = library_class_and_struct_base(&class, &full, file)?;
+                out.extend(base);
+                out.push(lc);
+            }
+            for (inner, module) in find_all_modules_with_scope(decl) {
+                let full: Vec<String> = scope.iter().cloned().chain(inner).collect();
+                out.push(library_class_from_module_node_with_scope(&module, &full, file)?);
+            }
+            Ok(())
+        };
+        fn arms_of<'pr>(stmt: &ruby_prism::Node<'pr>) -> Vec<ruby_prism::Node<'pr>> {
+            visibility::conditional_definition(stmt).map(|(_, arms)| arms.into_iter().flat_map(|(_, s)| s).collect()).unwrap_or_default()
+        }
+        let (path, body) = if let Some(c) = node.as_class_node() {
+            (class_name_path(&c), c.body())
+        } else if let Some(m) = node.as_module_node() {
+            (module_name_path(&m), m.body())
+        } else {
+            return Ok(());
+        };
+        let Some(path) = path else { return Ok(()) };
+        let inner: Vec<String> = scope.iter().cloned().chain(path).collect();
+        let Some(body) = body else { return Ok(()) };
+        for stmt in flatten_statements(body) {
+            if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
+                declarations(&stmt, &inner, file, out)?;
+                continue;
+            }
+            let mut pending = arms_of(&stmt);
+            while let Some(arm_stmt) = pending.pop() {
+                if arm_stmt.as_class_node().is_some() || arm_stmt.as_module_node().is_some() {
+                    take(&arm_stmt, &inner, out)?;
+                    declarations(&arm_stmt, &inner, file, out)?;
+                } else {
+                    pending.extend(arms_of(&arm_stmt));
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    if let Some(program) = root.as_program_node() {
+        for stmt in program.statements().body().iter() {
+            declarations(&stmt, &[], file, &mut out)?;
+        }
+    }
+    Ok(out)
 }
 
 /// A receiver that is `self`, or a call chain on `self` (`self.logger`,
@@ -2214,7 +2454,7 @@ pub(super) fn walk_decl_body<'pr>(
     file: &str,
     mode: DeclBodyMode,
 ) -> IngestResult<DeclBody> {
-    let visibility = Visibility::resolve(body.as_ref(), file, None)?;
+    let visibility = Visibility::resolve_library(body.as_ref(), file, None, Some(owner))?;
     walk_decl_body_with_visibility(body, owner, file, mode, &visibility)
 }
 
@@ -2266,11 +2506,11 @@ fn walk_decl_body_with_visibility<'pr>(
     let mut class_attributes: HashSet<Symbol> = HashSet::default();
     let mut class_attr_defaults: IndexMap<Symbol, Expr> = IndexMap::new();
     // `module_function` (called bare inside a module body) marks every
-    // subsequent direct `def` as a module-function — both an instance
-    // method AND a class method. For our targets (which call these as
-    // `Mod.x(...)`), we only need the class-method form, so flip the
-    // receiver to Class. Doesn't affect nested `class`/`module` bodies
-    // — they get their own walk_decl_body recursion.
+    // subsequent direct `def` as a module-function — both a private
+    // instance method AND a public class method. The def becomes the
+    // class method and a private copy goes to `module_function_copies`.
+    // Doesn't affect nested `class`/`module` bodies — they get their own
+    // walk_decl_body recursion.
     let mut module_function_active = false;
     // `extend self` exposes methods with their instance visibility; unlike
     // module_function, it neither makes a public copy nor ends at `private`.
@@ -2282,6 +2522,7 @@ fn walk_decl_body_with_visibility<'pr>(
     // appended to the same vec but belong to a different scope.
     let mut module_function_named: Vec<String> = Vec::new();
     let mut direct_def_positions: Vec<usize> = Vec::new();
+    let mut module_function_copies = Vec::new();
 
     let Some(b) = body else {
         return Ok(out);
@@ -2397,6 +2638,8 @@ fn walk_decl_body_with_visibility<'pr>(
         }
         names
     });
+    // A module mixed in before `X = … unless defined?(X)` may hold `X` already.
+    let mut mixed_in = false;
     for statement in statements {
         // An `if` / `unless` around a `def`, a visibility marker, or an
         // accessor this walk would otherwise lower is not a statement it
@@ -2404,6 +2647,29 @@ fn walk_decl_body_with_visibility<'pr>(
         // wrapper replaces it with its inner `def`. An accessor in the
         // branch has neither a `def` nor a marker, so reject it here:
         // skipping it would drop `attr_reader :token` with no error.
+        // Not an unmodeled conditional: when the class body runs, a constant it has not written yet is undefined, so svg-graph's `DEFAULT_SHAPE = … unless defined? DEFAULT_SHAPE` is the write.
+        if statement.as_call_node().is_some_and(|c| {
+            c.receiver().is_none_or(|r| r.as_self_node().is_some()) && matches!(constant_id_str(&c.name()), "include" | "extend" | "prepend")
+        }) {
+            mixed_in = true;
+        }
+        if !mixed_in
+            && let Some(cw) = constant_write_unless_defined(&statement)
+            && !out.constants.iter().any(|(n, _)| n.as_str() == constant_id_str(&cw.name()))
+        {
+            let name = Symbol::from(constant_id_str(&cw.name()));
+            out.constants.push((name, ingest_expr(&cw.value(), file)?));
+            continue;
+        }
+        // A load-time conditional whose branches define methods: each is
+        // a method of this class, and the record says which branch
+        // defines it (`ConditionalDefinitions`).
+        if visibility.admits_conditionals() && visibility::conditional_definition(&statement).is_some() {
+            let class_side = mode.is_class_side() || module_function_active || extend_self_active;
+            let record = conditional_definitions(&statement, owner, file, class_side, visibility, &mut out.methods)?;
+            out.conditional_definitions.push(record);
+            continue;
+        }
         if statement.as_if_node().is_some() || statement.as_unless_node().is_some() {
             Visibility::reject_conditional_declaration(&statement, file)?;
             reject_conditional_accessor(&statement, file)?;
@@ -2503,6 +2769,23 @@ fn walk_decl_body_with_visibility<'pr>(
             out.constants.push((name, value));
             continue;
         }
+        // `APPROVED, DECLINED = 1, "declined"`: one constant per target, in
+        // order, as the single writes above.
+        if let Some(writes) = constant_multi_write(&stmt) {
+            for (name, value) in writes {
+                out.constants.push((name, ingest_expr(&value, file)?));
+            }
+            continue;
+        }
+        // `$loaded = true`: a global write runs where it stands as the
+        // body loads (`ingest::body_statements` marks it for the Ruby
+        // family; every other target refuses it by name).
+        if stmt.as_global_variable_write_node().is_some() {
+            if let Ok(e) = ingest_expr(&stmt, file) {
+                out.unknown_calls.push(e);
+            }
+            continue;
+        }
         // A direct write initializes this class/module object. Inside
         // `class << self` the receiver is its singleton class instead.
         if !mode.is_class_side()
@@ -2512,6 +2795,19 @@ fn walk_decl_body_with_visibility<'pr>(
                 || stmt.as_instance_variable_operator_write_node().is_some())
         {
             out.unknown_calls.push(ingest_expr(&stmt, file)?);
+            continue;
+        }
+        // `self.strict ||= :on`: a compound write through a class-side
+        // writer, captured like `self.strict = :on` below rather than
+        // dropped without a word.
+        let self_receiver = |r: Option<ruby_prism::Node<'_>>| r.is_some_and(|r| receiver_rooted_at_self(&r));
+        if stmt.as_call_or_write_node().is_some_and(|w| self_receiver(w.receiver()))
+            || stmt.as_call_and_write_node().is_some_and(|w| self_receiver(w.receiver()))
+            || stmt.as_call_operator_write_node().is_some_and(|w| self_receiver(w.receiver()))
+        {
+            if let Ok(e) = ingest_expr(&stmt, file) {
+                out.unknown_calls.push(e);
+            }
             continue;
         }
         // Retain native nil initialization in source order. Only a declared
@@ -2548,6 +2844,9 @@ fn walk_decl_body_with_visibility<'pr>(
             }
             visibility.apply(&statement, &mut m);
             if module_function_active && m.receiver == MethodReceiver::Instance {
+                let mut copy = m.clone();
+                copy.visibility = crate::dialect::MethodVisibility::Private;
+                module_function_copies.push((out.methods.len(), copy));
                 // The retained singleton copy is public even if the original
                 // instance definition is private/protected, unless
                 // `private_class_method` / `public_class_method` already
@@ -2617,11 +2916,30 @@ fn walk_decl_body_with_visibility<'pr>(
         // `class << self ... end` — singleton class block. Body
         // defines class-level methods on the enclosing scope.
         if let Some(sc) = stmt.as_singleton_class_node() {
+            let own = mode == DeclBodyMode::Instance && sc.expression().as_self_node().is_some();
             let mode = DeclBodyMode::SingletonClass {
                 included_hook: mode == DeclBodyMode::Instance,
                 has_class_methods: mode == DeclBodyMode::Instance && has_class_methods,
             };
-            out.extend(walk_decl_body_with_visibility(sc.body(), owner, file, mode, visibility)?);
+            let captured = super::inherited_alias::captured();
+            let mut inner = walk_decl_body_with_visibility(sc.body(), owner, file, mode, visibility)?;
+            // An alias in another object's singleton is not the class's.
+            if !own && let Some(span) = super::inherited_alias::captured_since(captured) {
+                let err = IngestError::Unsupported { file: file.into(), message: super::inherited_alias::REFUSAL.into() };
+                super::error_site::note(&err, span.start as usize, span.end as usize);
+                return Err(err);
+            }
+            // The class's own singleton: its statements run, and its
+            // constants live, there (`expr::SINGLETON_BODY`).
+            if own {
+                for call in &mut inner.unknown_calls {
+                    call.decisions |= crate::expr::SINGLETON_BODY;
+                }
+                for (_, value) in &mut inner.constants {
+                    value.decisions |= crate::expr::SINGLETON_BODY;
+                }
+            }
+            out.extend(inner);
             continue;
         }
         // `module ClassMethods … end` — ActiveSupport::Concern's OTHER
@@ -2694,11 +3012,25 @@ fn walk_decl_body_with_visibility<'pr>(
                     out.methods.push(copy);
                     continue;
                 }
+                // One an ancestor may define: the support walk captures
+                // it as the call it is, and `inherited_alias::settle`
+                // looks the original up once every file is walked.
+                if super::inherited_alias::is_capturing()
+                    && matches!(mode, DeclBodyMode::Instance | DeclBodyMode::SingletonClass { included_hook: true, .. })
+                {
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: alias.location().start_offset() as u32,
+                        end: alias.location().end_offset() as u32,
+                    };
+                    out.unknown_calls.push(super::inherited_alias::capture(to.as_str(), from.as_str(), span));
+                    continue;
+                }
             }
-            return Err(IngestError::Unsupported {
-                file: file.into(),
-                message: "alias names a method this body has not defined".into(),
-            });
+            return Err(super::error_site::at(
+                IngestError::Unsupported { file: file.into(), message: super::inherited_alias::REFUSAL.into() },
+                &alias.as_node(),
+            ));
         }
         if let Some(call) = stmt.as_call_node() {
             // `include X` and `self.include(X)` are the same call: the
@@ -3082,6 +3414,29 @@ fn walk_decl_body_with_visibility<'pr>(
                 if let Ok(e) = ingest_expr(&stmt, file) {
                     out.unknown_calls.push(e);
                 }
+            } else if call.block().is_none()
+                && call.receiver().is_some_and(|r| r.as_constant_read_node().is_some() || r.as_constant_path_node().is_some())
+            {
+                // A call on a constant (`Format.register_lazy(:json, …)`
+                // in `module ActKit`): Ruby runs it as the body loads.
+                // Captured like the others; `app_extension_calls` marks
+                // the ones the app's own class answers, and the rest are
+                // reported as dropped rather than lost without a word. A
+                // call with a block is not one the replay carries whole
+                // (a require loop is the file program's).
+                if let Ok(e) = ingest_expr(&stmt, file) {
+                    out.unknown_calls.push(e);
+                }
+            } else if call.block().is_some_and(|b| b.as_block_node().is_some()) && !requires_files(&stmt) {
+                // A loop (`%w(month year).each do |m| class_eval … end`):
+                // Ruby runs it as the body loads. Captured for the Ruby
+                // family, which writes it back where it stands when what
+                // it runs on the class is Ruby's own (`body_statements`);
+                // reported where it is dropped. A loop of requires is the
+                // file program's.
+                if let Ok(e) = ingest_expr(&stmt, file) {
+                    out.unknown_calls.push(e);
+                }
             }
         }
         // Nested class/module declarations also fall through here; they
@@ -3101,11 +3456,11 @@ fn walk_decl_body_with_visibility<'pr>(
     // method — and lobsters uses both spellings of the same name
     // (`EmailBlocklistValidation.email_on_blocklist?` from a mailer and
     // a view; a bare `email_on_blocklist?(email)` from the sibling
-    // validation method that runs on an includer instance). We emit one
-    // method per name, so promoting alone would just move the breakage
-    // from the module spelling to the instance one. Retarget the
-    // sibling bare calls to the module spelling instead, which keeps a
-    // single definition and leaves both call sites resolving.
+    // validation method that runs on an includer instance; parslet's
+    // `match` / `str` called bare inside a parser's rules). Both are kept:
+    // the promoted method here, and a private instance copy appended at
+    // the end. The promoted copy's sibling bare calls are retargeted to
+    // the module spelling, since its `self` is the module.
     if !module_function_named.is_empty() {
         let mut promoted: Vec<Symbol> = Vec::new();
         for pos in &direct_def_positions {
@@ -3113,6 +3468,9 @@ fn walk_decl_body_with_visibility<'pr>(
                 .iter()
                 .any(|n| n == out.methods[*pos].name.as_str())
             {
+                let mut copy = out.methods[*pos].clone();
+                copy.visibility = crate::dialect::MethodVisibility::Private;
+                module_function_copies.push((*pos, copy));
                 out.methods[*pos].receiver = MethodReceiver::Class;
                 // Same rule as the bare marker: the copy starts public,
                 // and a later `private_class_method :name` keeps the
@@ -3129,6 +3487,15 @@ fn walk_decl_body_with_visibility<'pr>(
                 // self-recursive call needs the same retarget.
                 retarget_module_function_calls(&mut m.body, owner, &promoted);
             }
+        }
+    }
+
+    // Not kept beside an earlier instance method of the name (an `attr_reader :value`): the module function replaces it, and only a later `def` wins.
+    for (at, copy) in module_function_copies {
+        match out.methods.iter().position(|e| e.name == copy.name && e.receiver == MethodReceiver::Instance) {
+            Some(existing) if existing < at => out.methods[existing] = copy,
+            Some(_) => {}
+            None => out.methods.push(copy),
         }
     }
 
@@ -4720,6 +5087,9 @@ fn content_security_policy_filter(
         unless_cond: None,
         if_cond_expr: None,
         unless_cond_expr: None,
+        unread_guard: false,
+        unread_options: false,
+        only_present: false,
         block: Some(expr),
         prepend: false,
     })
@@ -4812,6 +5182,9 @@ fn block_form_concern_filter(stmt: &ruby_prism::Node<'_>, file: &str) -> Option<
         unless_cond: None,
         if_cond_expr: None,
         unless_cond_expr: None,
+        unread_guard: false,
+        unread_options: false,
+        only_present: false,
         block: Some(expr),
         prepend: false,
     })
@@ -5520,4 +5893,107 @@ fn is_ruby_reserved_word(m: &str) -> bool {
             | "redo" | "rescue" | "retry" | "return" | "self" | "super" | "then" | "true" | "undef"
             | "unless" | "until" | "when" | "while" | "yield"
     )
+}
+
+/// `NAME = value unless defined?(NAME)`, no `else`: the write.
+fn constant_write_unless_defined<'pr>(stmt: &ruby_prism::Node<'pr>) -> Option<ruby_prism::ConstantWriteNode<'pr>> {
+    let unless = stmt.as_unless_node()?;
+    if unless.else_clause().is_some() {
+        return None;
+    }
+    let body: Vec<_> = unless.statements()?.body().iter().collect();
+    let [only] = body.as_slice() else { return None };
+    let write = only.as_constant_write_node()?;
+    let tested = unless.predicate().as_defined_node()?.value().as_constant_read_node()?;
+    (tested.name().as_slice() == write.name().as_slice()).then_some(write)
+}
+
+/// Whether `stmt` calls `require`, `require_relative`, `load` or
+/// `autoload` anywhere in it: a loop that loads files.
+fn requires_files(stmt: &ruby_prism::Node<'_>) -> bool {
+    struct Requires(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Requires {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if node.receiver().is_none()
+                && matches!(constant_id_str(&node.name()), "require" | "require_relative" | "load" | "autoload")
+            {
+                self.0 = true;
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    let mut found = Requires(false);
+    ruby_prism::Visit::visit(&mut found, stmt);
+    found.0
+}
+
+/// `A, B = x, y` in a class or module body: each target a bare constant,
+/// the value a list of as many elements, each one that runs no code
+/// ([`inert_value`]) and reads no target. Ruby evaluates every element
+/// before it assigns any target; with nothing in the elements able to
+/// observe a target, the pairs written one by one, in order, are the
+/// same writes. Anything else (a splat, a nested target, a value array
+/// computed as a whole, an element that calls a method) is not this shape.
+///
+/// Ported from Shopify/roundhouse-1, by Tobi Lütke.
+fn constant_multi_write<'a>(stmt: &ruby_prism::Node<'a>) -> Option<Vec<(Symbol, ruby_prism::Node<'a>)>> {
+    let write = stmt.as_multi_write_node()?;
+    if write.rest().is_some() || !write.rights().is_empty() {
+        return None;
+    }
+    let names: Vec<String> = write
+        .lefts()
+        .iter()
+        .map(|left| left.as_constant_target_node().map(|target| constant_id_str(&target.name()).to_string()))
+        .collect::<Option<_>>()?;
+    let array = write.value().as_array_node()?;
+    let elements: Vec<ruby_prism::Node<'a>> = array.elements().iter().collect();
+    if elements.len() != names.len() || elements.iter().any(|element| element.as_splat_node().is_some()) {
+        return None;
+    }
+    if !elements.iter().all(|element| inert_value(element, &names)) {
+        return None;
+    }
+    Some(names.into_iter().map(Symbol::from).zip(elements).collect())
+}
+
+/// A value whose evaluation runs no method of the app's: a literal, an
+/// array or hash of them, `.freeze` of one, or a constant read naming
+/// none of `targets`. A method call could look at a target
+/// (`const_defined?(:A)`) before Ruby has assigned any.
+fn inert_value(node: &ruby_prism::Node<'_>, targets: &[String]) -> bool {
+    let names_target = |name: &ruby_prism::ConstantId<'_>| targets.iter().any(|t| t == constant_id_str(name));
+    if node.as_integer_node().is_some()
+        || node.as_float_node().is_some()
+        || node.as_rational_node().is_some()
+        || node.as_imaginary_node().is_some()
+        || node.as_string_node().is_some()
+        || node.as_symbol_node().is_some()
+        || node.as_nil_node().is_some()
+        || node.as_true_node().is_some()
+        || node.as_false_node().is_some()
+    {
+        return true;
+    }
+    if let Some(read) = node.as_constant_read_node() {
+        return !names_target(&read.name());
+    }
+    if let Some(path) = node.as_constant_path_node() {
+        return path.name().is_some_and(|name| !names_target(&name))
+            && path.parent().is_none_or(|parent| inert_value(&parent, targets));
+    }
+    if let Some(array) = node.as_array_node() {
+        return array.elements().iter().all(|e| inert_value(&e, targets));
+    }
+    if let Some(hash) = node.as_hash_node() {
+        return hash.elements().iter().all(|e| {
+            e.as_assoc_node().is_some_and(|pair| inert_value(&pair.key(), targets) && inert_value(&pair.value(), targets))
+        });
+    }
+    node.as_call_node().is_some_and(|call| {
+        constant_id_str(&call.name()) == "freeze"
+            && call.arguments().is_none()
+            && call.block().is_none()
+            && call.receiver().is_some_and(|r| inert_value(&r, targets))
+    })
 }

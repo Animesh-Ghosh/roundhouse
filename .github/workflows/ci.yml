@@ -57,15 +57,15 @@ env:
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
   CAMPFIRE_SHA: c8f74a0b0e1e93146c4d7c1d6ac80c9079682216
-  # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
+  # roundhouse-rb/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
   SPINEL_PG_SHA: f48735c91aa8cde258299e1189957972667a0d1f
   # spinel-redis, the Redis client the Sidekiq push runs on in a Spinel
   # tree, tested against a live Redis in sidekiq-live. The same repository
   # and tag the emitted spin.toml pins (src/project.rs); bump both together.
-  SPINEL_REDIS_REPO: rubys/spinel-redis
-  SPINEL_REDIS_REF: v0.3.1
+  SPINEL_REDIS_REPO: roundhouse-rb/spinel-redis
+  SPINEL_REDIS_REF: v0.3.2
 
 jobs:
   plan:
@@ -578,7 +578,7 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
-          gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt
+          gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt rest-client elastic-apm
           gem install --no-document activerecord -v '~> 8.1.0'
       - name: Download current-run test bundle
         uses: actions/download-artifact@v8
@@ -963,7 +963,7 @@ jobs:
         if: ${{ contains(matrix.tests, 'spinel_pg_db') }}
         uses: actions/checkout@v7
         with:
-          repository: rubys/spinel-pg
+          repository: roundhouse-rb/spinel-pg
           ref: ${{ env.SPINEL_PG_SHA }}
           path: spinel-pg
       # Not the runner's system Ruby: a suite compares the binary with CRuby, and the baseline's messages are 3.4's
@@ -1795,6 +1795,9 @@ jobs:
     env:
       MAKEFLAGS: "-j4"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      # run_spinel_slim probes compile alone on PRs and pushes; scheduled
+      # Full validation compiles each inside the whole blog's boot instead.
+      ROUNDHOUSE_SPINEL_SLIM: ${{ inputs.full && '0' || '1' }}
     steps:
       - uses: actions/checkout@v7
       # No setup-rust: the producer archive restores the test binaries.
@@ -2137,6 +2140,12 @@ jobs:
       - name: cargo test --test kotlin_toolchain real_blog_i18n_locales_run
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
         run: cargo test --locked --test kotlin_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
+      - name: cargo test --test kotlin_toolchain controller_ivars_named_like_base_state_compile
+        if: ${{ !cancelled() && matrix.target == 'kotlin' }}
+        run: cargo test --locked --test kotlin_toolchain controller_ivars_named_like_base_state_compile -- --ignored --nocapture --exact
+      - name: cargo test --test kotlin_toolchain controller_ivars_named_like_base_state_render
+        if: ${{ !cancelled() && matrix.target == 'kotlin' }}
+        run: cargo test --locked --test kotlin_toolchain controller_ivars_named_like_base_state_render -- --ignored --nocapture --exact
       - name: cargo test --test framework_tests_swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: |
@@ -2153,9 +2162,18 @@ jobs:
       - name: cargo test --test swift_toolchain real_blog_rescue_modifier_runs
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: cargo test --locked --test swift_toolchain real_blog_rescue_modifier_runs -- --ignored --nocapture --exact
+      - name: cargo test --test swift_toolchain controller_ivars_named_like_base_state_build
+        if: ${{ !cancelled() && matrix.target == 'swift' }}
+        run: cargo test --locked --test swift_toolchain controller_ivars_named_like_base_state_build -- --ignored --nocapture --exact
+      - name: cargo test --test swift_toolchain controller_ivars_named_like_base_state_render
+        if: ${{ !cancelled() && matrix.target == 'swift' }}
+        run: cargo test --locked --test swift_toolchain controller_ivars_named_like_base_state_render -- --ignored --nocapture --exact
       - name: cargo test --test typescript_toolchain real_blog -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
+      - name: cargo test --test typescript_toolchain controller_ivars_named_like_base_state_compile_and_render
+        if: ${{ !cancelled() && matrix.target == 'typescript' }}
+        run: cargo test --locked --test typescript_toolchain controller_ivars_named_like_base_state_compile_and_render -- --ignored --nocapture --exact
       - name: cargo test --test emit_and_run render json writer on typescript
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
         run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_typescript -- --ignored --nocapture --exact
@@ -2253,20 +2271,39 @@ jobs:
   # for tailwindcss asset compilation; no target compile step
   # (Ruby is interpreted).
   compare-ruby:
-    needs: [generate-fixture, plan]
+    # Waits for builds, never for tests: the CRuby gates run from
+    # unit-build's archive and scripts/compare emits with build-roundhouse's
+    # binary, so this job compiles no Roundhouse of its own.
+    needs: [generate-fixture, plan, unit-build, build-roundhouse]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-ruby') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # The archive embeds the producer's checkout and target paths.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
     steps:
       - uses: actions/checkout@v7
+      # tools/compare (scripts/compare's HTTP differ) is still built here.
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-nextest
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - *stage-roundhouse-debug-bin
+      - name: Download current-run test bundle
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.unit-build.outputs.unit-test-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/unit-tests
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
@@ -2281,22 +2318,19 @@ jobs:
         with:
           node-version: '24'
       # Not a separate job: framework-tests-ruby needs this same MRI + scaffold bundle (#273).
-      - name: cargo test --test framework_tests_ruby -- --ignored
-        run: cargo test --test framework_tests_ruby -- --ignored --nocapture
-      - name: cargo test --test uuid_key_ruby -- --ignored
-        if: ${{ !cancelled() }}
-        run: cargo test --test uuid_key_ruby -- --ignored --nocapture
-      # Only the passing CRuby cases: tests named after an open issue are
-      # ignored too, and a blanket --ignored would select them (#321).
-      - name: cargo test --test tiny_api cruby_gate_ -- --ignored
-        if: ${{ !cancelled() }}
-        run: cargo test --test tiny_api cruby_gate_ -- --ignored --nocapture
-      # The Roda + Sequel front-end's 19-check oracle, on the fixture and
-      # on its CRuby emit. Unscheduled until 10-26, it went red twice in
-      # October (CSRF default, `<%==`) and nothing saw it.
-      - name: cargo test --test roda_toolchain -- --ignored
-        if: ${{ !cancelled() }}
-        run: cargo test --test roda_toolchain -- --ignored --nocapture
+      # tiny_api: only the passing CRuby cases; tests named after an open
+      # issue are ignored too, and a blanket --ignored would select them (#321).
+      # roda_toolchain: the Roda + Sequel front-end's 19-check oracle, on the
+      # fixture and on its CRuby emit. Unscheduled until 10-26, it went red
+      # twice in October (CSRF default, `<%==`) and nothing saw it.
+      - name: Run the CRuby gates from the unit-build archive
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-ruby/selection.json" \
+            --select framework_tests_ruby --select uuid_key_ruby \
+            --select tiny_api:cruby_gate_ --select roda_toolchain
       - name: scripts/compare ruby
         if: ${{ !cancelled() }}
         run: scripts/compare ruby
@@ -2306,33 +2340,42 @@ jobs:
   # compare-ruby, so the two lines run in parallel and a failure names
   # the Ruby version that broke. The Rails comparison stays on MRI_RUBY.
   compare-ruby-next:
-    needs: [generate-fixture, plan]
+    needs: [generate-fixture, plan, unit-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-ruby-next') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
     steps:
       - uses: actions/checkout@v7
+      # Nextest runs through Cargo; nothing here compiles Roundhouse.
       - uses: ./.github/actions/setup-rust
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-nextest
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - name: Download current-run test bundle
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.unit-build.outputs.unit-test-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/unit-tests
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY_NEXT }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
-      - name: cargo test --test framework_tests_ruby -- --ignored
-        run: cargo test --test framework_tests_ruby -- --ignored --nocapture
-      - name: cargo test --test uuid_key_ruby -- --ignored
-        if: ${{ !cancelled() }}
-        run: cargo test --test uuid_key_ruby -- --ignored --nocapture
-      - name: cargo test --test tiny_api cruby_gate_ -- --ignored
-        if: ${{ !cancelled() }}
-        run: cargo test --test tiny_api cruby_gate_ -- --ignored --nocapture
+      - name: Run the CRuby gates from the unit-build archive
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-ruby-next/selection.json" \
+            --select framework_tests_ruby --select uuid_key_ruby \
+            --select tiny_api:cruby_gate_
 
   # compare-jruby: same emitted tree as compare-ruby but served by Puma
   # on the JVM via JRuby with the JDBC db backend (runtime/db.rb =
@@ -2757,7 +2800,7 @@ jobs:
   # campfire-archive-build: ONCE Campfire for the spinel target, packaged
   # the way the blog archives are.
   #
-  # Published at rubys.github.io/roundhouse/campfire/spinel.tgz — NOT
+  # Published at roundhouse-rb.dev/campfire/spinel.tgz — NOT
   # under browse/, which names the source VIEWER and has no manifest for
   # this archive to render. Linked from site/apps/campfire.html.
   #
@@ -3096,7 +3139,7 @@ jobs:
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +
   # static HTML/CSS/JS from site/. Per matz/spinel#314, the archives at
-  # rubys.github.io/roundhouse/browse/<target>.tgz are matz's primary
+  # roundhouse-rb.dev/browse/<target>.tgz are matz's primary
   # extraction surface for spinel-side bug repros — they need to
   # publish *current emit* even when per-target toolchain/compare jobs
   # fail (broken emit is exactly what's interesting to investigate).
@@ -3223,7 +3266,7 @@ jobs:
       - name: Build live SharedWorker blog demo (→ _site/blog)
         if: needs.plan.outputs.site == 'true'
         env:
-          ROUNDHOUSE_BASE: /roundhouse/blog/
+          ROUNDHOUSE_BASE: /blog/
         run: |
           set -euo pipefail
           DEMO="$(mktemp -d)"
@@ -3570,7 +3613,7 @@ jobs:
         run: scripts/campfire-suite-report _site/bench/campfire-suite-spinel _site/bench/campfire-suite-spinel/index.html
 
       # The per-target archives, for the e2e-<target> jobs to download and
-      # boot — the exact bytes published to rubys.github.io/roundhouse.
+      # boot — the exact bytes published to roundhouse-rb.dev.
       - name: Record archive producer evidence
         if: always()
         env:
@@ -3690,7 +3733,7 @@ jobs:
       # job, is attached after restoring this run's site-base artifact.
       # Assembly never re-emits archives or rebuilds from a newer main.
       #
-      # The bytes go live at rubys.github.io/roundhouse/campfire/spinel.tgz
+      # The bytes go live at roundhouse-rb.dev/campfire/spinel.tgz
       # (source; needs a spinel checkout) and campfire/docker.tgz (the
       # `spin pack` output with a Dockerfile; needs Docker and nothing
       # else), if publication guards pass. Both are linked from

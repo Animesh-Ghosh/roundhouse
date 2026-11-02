@@ -6,7 +6,7 @@ rust-version = "1.89"
 authors = ["Sam Ruby <sam@rubyred.us>"]
 description = "Rails as a specification; deployment is a build flag"
 license = "MIT OR Apache-2.0"
-homepage = "https://rubys.github.io/roundhouse/"
+homepage = "https://roundhouse-rb.dev/"
 repository = "https://github.com/rubys/roundhouse"
 publish = false
 
@@ -40,7 +40,9 @@ yaml-rust2 = { version = "0.13.0", default-features = false }
 # Pin the reviewed tag so installers without Cargo.lock still resolve Prism 2.
 rubydex = { git = "https://github.com/Shopify/rubydex", tag = "v0.4.2" }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+# macOS process probes, and the signal dispositions `fractal verify` holds
+# while an overlay is applied (any Unix).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

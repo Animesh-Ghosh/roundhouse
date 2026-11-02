@@ -17,6 +17,8 @@ extensions:
 - [`test_paths`](#test_paths) adds test folders to the default list.
 - [`extensions`](#extensions) lists directories that describe the app's
   gems and class-body DSLs.
+- [`spinel`](#spinel) passes a compiler mode the Spinel target needs
+  (provisional).
 
 Roundhouse reads the file during ingest, so every tool sees it:
 [`roundhouse check`](check.md), the [editor](editor.md), the
@@ -235,6 +237,30 @@ source_gems:
   before `roundhouse check`; a gem that is not installed, not in the
   lockfile, or also named by another fact is an error.
 
+A `PATH` or source gem's files also run as Ruby loads them on the `ruby`
+and `jruby` trees. Each file's top level, its statements and its
+`require`s in source order, is written as a program under
+`app/models/roundhouse_files/`. `Bundler.require` loads the gem's entry
+file at boot, before the app's own files, and that file's requires load
+the rest. A literal-list loop of `require_relative` and a
+`Dir[File.join(__dir__, "x/**/*.rb")]` glob become one require per file.
+An `autoload :Name, "path"` (or `ActiveSupport::Autoload`'s path-less
+`autoload :Name`) loads that file's program when the constant is first
+read. Once the boot loads a gem, its classes and modules load only where
+its own requires and autoloads reach them, as natively: a file nothing
+requires defines nothing. The boot loads a gem through `Bundler.require`,
+a literal `require` in `config/boot.rb`, `config/application.rb` or
+`config/environment.rb`, or an app file's `require` of it.
+A file-level `if` / `unless` that declares a class or module runs its
+branches as Ruby does, so the class exists only where its branch ran.
+A `require` of a Rails framework feature is left to the runtime, as are
+`ActiveSupport.on_load` (see `on_load` reopens) and `I18n.load_path`
+(the gem's locale files are compiled in). A
+statement that cannot be carried is an error (`file_statement_unsupported`),
+as is a `require_relative` of a file the tree does not carry
+(`file_require_not_carried`). The `spinel` tree compiles the gem's
+declarations only.
+
 Extension gem facts also select the locked gems' Tapioca RBIs under
 `sorbet/rbi/gems/`. This includes gems classified as infrastructure or
 standard-library gems. An RBI supplies types and ownership, not executable
@@ -295,3 +321,23 @@ extensions.
 
 Extension facts belong to the app that lists them. An app that lists no
 extensions behaves as before.
+
+## `spinel`
+
+```yaml
+spinel:
+  int_overflow: promote
+```
+
+`int_overflow` is handed to Spinel as `--int-overflow` on every compile
+the emitted Makefile runs: the app binary and each test binary. Ruby's
+Integer never overflows; Spinel's default (`raise`) stops with a
+`RangeError` when a value passes 64 bits, `promote` turns it into a
+big integer as Ruby does, and `wrap` wraps it. An app needs `promote`
+when it, or a gem compiled from source, computes past 64 bits: rotp
+builds its Base32 secret in one shifted integer, so lobsters' two-factor
+sign-in needs it. `promote` with the emitted RBS needs Spinel with
+matz/spinel#10494.
+
+This setting is provisional. Whether a program needs the mode should be
+decided without asking the app, and the setting will go once it is.

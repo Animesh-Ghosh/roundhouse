@@ -208,6 +208,12 @@ const RECOGNIZERS: &[Recognizer] = &[
         reads: |p| extract_collection_cache_store(p.text.as_bytes(), PROBE).is_some(),
     },
     Recognizer {
+        name: "view_paths (X.prepend_view_path / X.append_view_path / X.view_paths =, bare or in ActiveSupport.on_load)",
+        origins: INIT,
+        levels: TOP_HOOK,
+        reads: |p| super::view_paths::reads_initializer_statement(p.text.as_bytes()),
+    },
+    Recognizer {
         name: "initializer_filters (X.before_action :m, only:)",
         origins: INIT,
         levels: TOP_HOOK,
@@ -227,6 +233,12 @@ const RECOGNIZERS: &[Recognizer] = &[
             (p.text.contains("create_function") || p.text.contains("create_aggregate"))
                 && !super::sql_functions::scan_sql_functions(p.text.as_bytes(), PROBE).is_empty()
         },
+    },
+    Recognizer {
+        name: "gem_package_settings (<package config receiver>.<attr> = literal, replayed after the Spinel package loads)",
+        origins: INIT,
+        levels: TOP_HOOK,
+        reads: |p| super::gem_package_settings::extract(p.text.as_bytes(), PROBE).iter().any(|s| s.carried()),
     },
     Recognizer {
         name: "default_per_page (Kaminari.configure { |c| c.default_per_page = })",
@@ -1249,7 +1261,7 @@ impl Holder {
 /// The receiver-and-method target of each call or write in `node`, by
 /// syntax: `config.middleware.use`, `Rack::Attack.throttle`, `self.at_exit`,
 /// `def`, `const=NAME`. A conditional answers its branches' statements.
-fn targets_of(node: &Node<'_>, src: &str) -> Vec<String> {
+pub(super) fn targets_of(node: &Node<'_>, src: &str) -> Vec<String> {
     let text_of = |n: &Node<'_>| {
         let loc = n.location();
         let text = normalize_target(&src[loc.start_offset()..loc.end_offset()]);
@@ -1416,12 +1428,20 @@ pub(super) fn record<V: Vfs + ?Sized>(
     admitted: &HashSet<String>,
     lock: Option<&crate::gems::Lockfile>,
     app_namespaces: &HashSet<String>,
+    carried_rate_limit_stores: &[Span],
+    boot_taken: &super::boot_program::Taken,
 ) {
     let findings = ledger(vfs, dir, path_gems, admitted);
     for f in findings.into_iter().flat_map(|l| l.findings) {
+        if boot_taken.contains(&(f.path.clone(), f.start)) {
+            continue;
+        }
         let holder = holder_of(&f.targets, lock, app_namespaces);
         let location = format!("{}:{}:{}", f.path, f.line, f.column);
         let file = sources::file_id(&absolute(dir, &f.path));
+        if carried_rate_limit_stores.iter().any(|value| value.file == file && value.start >= f.start && value.end <= f.end) {
+            continue;
+        }
         let span = if file.0 == 0 { Span::synthetic() } else { Span { file, start: f.start, end: f.end } };
         let kind = DiagnosticKind::UnconsumedInitializer {
             owner: Symbol::from(f.owner.as_str()),

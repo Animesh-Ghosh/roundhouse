@@ -78,12 +78,24 @@ module Rails
 
     # Pathname#join takes any number of parts
     # (`Rails.root.join("source", "posts")`), and with none it answers
-    # the path itself.
+    # the path itself. As in Pathname, an absolute part starts the path
+    # over and a separator is not doubled: `Rails.root.join("/var/", "x")`
+    # is `/var/x`.
     def join(*parts)
       if parts.empty?
         self
       else
-        AppPath.new(@base + "/" + parts.join("/"))
+        base = @base
+        parts.each do |part|
+          text = part.to_s
+          if text.start_with?("/")
+            base = text
+          else
+            base = base.chomp("/") while base.end_with?("/")
+            base = base + "/" + text
+          end
+        end
+        AppPath.new(base)
       end
     end
 
@@ -122,6 +134,15 @@ module Rails
 
     def exist?
       File.exist?(@base)
+    end
+
+    # Pathname#expand_path: the absolute path. Here the root is the
+    # directory the app serves from, which `File.expand_path` reads. Rails.root
+    # is absolute, so a directory argument never moves the path, but it is
+    # still converted as File.expand_path converts it (an Integer raises TypeError).
+    def expand_path(dir = nil)
+      path = File.expand_path(@base)
+      AppPath.new(dir.nil? ? path : File.expand_path(path, dir))
     end
   end
 
@@ -386,11 +407,16 @@ module Rails
       nil
     end
 
-    def read(key)
+    # `opts` is Rails' entry-options Hash (`expires_in:`, `raw:`,
+    # `namespace:` ...) on every entry call, as on `fetch`. This store
+    # keeps nothing, so there is nothing to read them against; taking
+    # them is what keeps `write(k, v, expires_in: 30.minutes)` from
+    # raising on arity.
+    def read(key, opts = {})
       nil
     end
 
-    def write(key, value)
+    def write(key, value, opts = {})
       value
     end
 
@@ -398,11 +424,11 @@ module Rails
     # `user:<id>:unread_replies` on write paths, and a stale fragment
     # surviving its explicit delete would be a behaviour change, not a
     # missing optimization.
-    def delete(key)
+    def delete(key, opts = {})
       forget(key.to_s)
     end
 
-    def exist?(key)
+    def exist?(key, opts = {})
       false
     end
   end
@@ -495,6 +521,23 @@ module Rails
     # (src/ingest/public_file_server_config.rs).
     def public_file_server_headers
       {}
+    end
+
+    # `config.action_controller.perform_caching` (AbstractController::
+    # Caching's default) and actionpack-page_caching's
+    # `page_cache_directory` (its Railtie's `||=` with the app's
+    # `public/`). Ingest replays an app's assignments, per environment,
+    # into overrides on the reopen (`ingest::action_controller_caching_config`).
+    def action_controller_perform_caching
+      true
+    end
+
+    def active_job_queue_adapter
+      "async"
+    end
+
+    def action_controller_page_cache_directory
+      Rails.public_path.to_s
     end
 
     # Action Cable's three origin settings, as the `/cable` handshake

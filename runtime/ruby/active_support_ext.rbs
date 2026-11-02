@@ -49,6 +49,7 @@ module ActiveSupport
   end
   def self.index_by: (untyped list) { (untyped) -> untyped } -> Hash[untyped, untyped]
   def self.excluding: [A] (Array[A] list, *A elements) -> Array[A]
+  def self.pluck: (untyped list, *(Symbol | String | Integer) keys) -> Array[untyped]
   # The lowerer routes Array receivers here, Relation receivers to
   # `size > 1` (campfire `@room.users.many?`), and Array/Relation unions
   # the same way. An Array contract cannot coerce an association into
@@ -81,6 +82,8 @@ module ActiveSupport
   def self.squish: (String text) -> String
   def self.squish!: (String text) -> String
   def self.truncate: (String text, Integer truncate_to, String? omission, String? separator) -> String
+  def self.word_space_byte?: (Integer b) -> bool
+  def self.truncate_words: (String text, Integer words_count, String? omission) -> String
   # `untyped`, and this one was learned the hard way: it said
   # `Array[untyped]` for a day, on the reasoning that the only receiver
   # is a channel's `streams`, a plain Array. It is — an
@@ -105,6 +108,7 @@ module ActiveSupport
   def self.months_ago: (Time t, ?Integer n) -> Time
   def self.years_since: (Time t, ?Integer n) -> Time
   def self.years_ago: (Time t, ?Integer n) -> Time
+  def self.change_time_usec: (Time time, Integer usec) -> Time
   def self.beginning_of_minute: (Time t) -> Time
   def self.end_of_minute: (Time t) -> Time
   def self.beginning_of_hour: (Time t) -> Time

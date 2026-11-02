@@ -24,6 +24,7 @@ module Rails
     def readlines: (?chomp: bool) -> Array[String]
     def read: () -> String
     def exist?: () -> bool
+    def expand_path: (?(String | AppPath)? dir) -> AppPath
   end
 
   class Env
@@ -55,14 +56,14 @@ module Rails
     # as a miss would re-render it on every request forever.
     def read_str: (String key) -> String?
     def write_str: (String key, String value, Integer ttl) -> String
-    def increment: (String key, ?Integer amount, ?expires_in: Integer) -> Integer
+    def increment: (String key, ?Integer amount, ?expires_in: Integer) -> Integer?
     def increment_str: (String key, Integer amount, Integer ttl) -> Integer
     def forget: (String k) -> void
     def clear: () -> void
-    def read: (String | Symbol | Array[untyped] key) -> untyped
-    def write: (String | Symbol | Array[untyped] key, untyped value) -> untyped
-    def delete: (String | Symbol | Array[untyped] key) -> untyped
-    def exist?: (String | Symbol | Array[untyped] key) -> bool
+    def read: (String | Symbol | Array[untyped] key, ?Hash[untyped, untyped] opts) -> untyped
+    def write: (String | Symbol | Array[untyped] key, untyped value, ?Hash[untyped, untyped] opts) -> untyped
+    def delete: (String | Symbol | Array[untyped] key, ?Hash[untyped, untyped] opts) -> untyped
+    def exist?: (String | Symbol | Array[untyped] key, ?Hash[untyped, untyped] opts) -> bool
   end
 
   class Logger
@@ -78,6 +79,9 @@ module Rails
     def propshaft_asset_path: (String source) -> String
     def forgery_protection_verification_strategy: () -> String
     def public_file_server_headers: () -> Hash[String, String]
+    def action_controller_perform_caching: () -> bool
+    def active_job_queue_adapter: () -> String
+    def action_controller_page_cache_directory: () -> String
     def action_cable_origin_listed?: (String origin) -> bool
     def action_cable_allow_same_origin_as_host: () -> bool
     def action_cable_disable_request_forgery_protection: () -> bool

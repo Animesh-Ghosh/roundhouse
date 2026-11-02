@@ -1,4 +1,21 @@
 # frozen_string_literal: true
+module ActiveModel
+  # Rails' (activemodel 8.1.4) `initialize(record, attribute)` builds its
+  # message from `record.class.name`; this file transpiles into the strict
+  # runtimes, which have no `class` reflection. So the caller builds the
+  # message, as for the ActiveRecord classes below: the Ruby targets'
+  # `_unknown_mass_attribute` (connection.rb) passes Rails' text.
+  class UnknownAttributeError < NoMethodError
+    attr_reader :record, :attribute
+
+    def initialize(record, attribute, message = "ActiveModel::UnknownAttributeError")
+      @record = record
+      @attribute = attribute
+      super(message)
+    end
+  end
+end
+
 module ActiveRecord
   # Not StandardError subclasses each: Rails' hierarchy (8.1.4), so `rescue ActiveRecord::StatementInvalid` catches what Rails' does.
   class ActiveRecordError < StandardError
@@ -98,22 +115,6 @@ module ActiveRecord
     end
   end
 
-  class StaleObjectError < ActiveRecordError
-    attr_reader :record, :attempted_action
-
-    def initialize(record = nil, attempted_action = nil)
-      @record = nil
-      @attempted_action = nil
-      message = "Stale object error."
-      if record && attempted_action
-        @record = record
-        @attempted_action = attempted_action
-        message = "Attempted to #{attempted_action} a stale object: #{record.class.name}."
-      end
-      super(message)
-    end
-  end
-
   class RecordNotFound < ActiveRecordError
     # Rails' readers (activerecord 8.1.4): the model's class name, its
     # primary key and the id that was looked up, as passed. `find` sets
@@ -196,7 +197,7 @@ module ActiveRecord
     end
   end
 
-  # Raised by app code; no runtime path marks a record read-only yet.
+  # Raised saving or destroying a read-only record (connection.rb), or by app code.
   class ReadOnlyRecord < ActiveRecordError
     def initialize(message = "ActiveRecord::ReadOnlyRecord")
       super(message)

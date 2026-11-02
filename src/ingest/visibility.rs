@@ -12,6 +12,12 @@ use super::util::{constant_id_str, flatten_statements, module_name_path, symbol_
 use super::{IngestError, IngestResult};
 
 use crate::ingest::prism_api::PrismLocation;
+
+thread_local! {
+    /// The statement the walk is at: where a refusal happened
+    /// (`super::error_site`).
+    static STATEMENT: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+}
 const PRIVATE_HOOKS: &[&str] = &[
     "initialize", "initialize_copy", "initialize_dup", "initialize_clone",
 ];
@@ -29,6 +35,173 @@ pub(super) struct Visibility {
     /// Walking a concern's `ClassMethods` carrier, whose body is the
     /// includers' class side rather than a singleton of its own.
     carrier: bool,
+    /// The declaring class's path, which `def Owner.name` spells for `def self.name`.
+    owner: Option<String>,
+    /// Each def in a load-time conditional's branch: its statement offset
+    /// to (the conditional's offset, the branch index). Two definitions
+    /// of a name in different branches of one conditional are
+    /// alternatives, not a redefinition.
+    alternatives: HashMap<usize, (usize, usize)>,
+    /// A load-time conditional's offset to its branch count, when it ends
+    /// in `else` (some branch always runs).
+    exhaustive: HashMap<usize, usize>,
+    /// Load-time conditional definitions are admitted: a library class or
+    /// module body, whose emit writes the conditional. A model body's is
+    /// not, and stays refused.
+    conditionals: bool,
+}
+
+impl Visibility {
+    /// `DataPoint` in svg-graph's `def DataPoint.configure_shape_criteria`, inside `class DataPoint`.
+    pub(super) fn names_owner(&self, receiver: &Node<'_>) -> bool {
+        let (Some(owner), Some(read)) = (&self.owner, receiver.as_constant_read_node()) else { return false };
+        let written = constant_id_str(&read.name());
+        owner == written || owner.ends_with(&format!("::{written}"))
+    }
+}
+
+/// A class-body `if` (with its `elsif`s and `else`) or `unless` (with
+/// its `else`), not a ternary or modifier, whose branches hold only
+/// method definitions (`def`, or `private def` and the other inline
+/// markers), plain accessors, `class` / `module` declarations and nested
+/// conditionals of the same shape, at least one: `(unless, [(condition,
+/// statements)])`, the `else` branch with no condition. Ruby runs it when
+/// the body loads, and only the selected branch defines what it holds.
+pub(super) fn conditional_definition<'pr>(node: &Node<'pr>) -> Option<(bool, Vec<(Option<Node<'pr>>, Vec<Node<'pr>>)>)> {
+    // Declares nothing in the emitted app (`if defined?(Rails::Console)`).
+    if console_only(node) {
+        return None;
+    }
+    let body = |statements: Option<ruby_prism::StatementsNode<'pr>>| -> Vec<Node<'pr>> {
+        statements.map(|s| flatten_statements(s.as_node())).unwrap_or_default()
+    };
+    let mut arms = Vec::new();
+    let negated;
+    if let Some(branch) = node.as_if_node() {
+        // Not a ternary, nor a modifier (`def x = 1 if y`): no `end`.
+        branch.if_keyword_loc()?;
+        branch.end_keyword_loc()?;
+        negated = false;
+        arms.push((Some(branch.predicate()), body(branch.statements())));
+        let mut next = branch.subsequent();
+        while let Some(sub) = next {
+            if let Some(elsif) = sub.as_if_node() {
+                arms.push((Some(elsif.predicate()), body(elsif.statements())));
+                next = elsif.subsequent();
+            } else if let Some(other) = sub.as_else_node() {
+                arms.push((None, body(other.statements())));
+                next = None;
+            } else {
+                return None;
+            }
+        }
+    } else if let Some(branch) = node.as_unless_node() {
+        branch.end_keyword_loc()?;
+        negated = true;
+        arms.push((Some(branch.predicate()), body(branch.statements())));
+        if let Some(other) = branch.else_clause() {
+            arms.push((None, body(other.statements())));
+        }
+    } else {
+        return None;
+    }
+    let defines = arms.iter().any(|(_, stmts)| !stmts.is_empty());
+    let only_defs = arms.iter().all(|(_, stmts)| {
+        stmts.iter().all(|stmt| {
+            definition(stmt).is_some()
+                || conditional_accessor(stmt).is_some()
+                || conditional_definition(stmt).is_some()
+                || stmt.as_class_node().is_some()
+                || stmt.as_module_node().is_some()
+        })
+    });
+    (defines && only_defs).then_some((negated, arms))
+}
+
+/// A class-body `if` / `unless` whose branches define a method but hold
+/// a statement [`conditional_definition`] does not admit: that statement,
+/// and why it keeps the conditional refused.
+fn refused_conditional_definition<'pr>(node: &Node<'pr>) -> Option<(Node<'pr>, &'static str)> {
+    if console_only(node) || conditional_definition(node).is_some() {
+        return None;
+    }
+    let mut arms: Vec<Vec<Node<'pr>>> = Vec::new();
+    let body = |statements: Option<ruby_prism::StatementsNode<'pr>>| -> Vec<Node<'pr>> {
+        statements.map(|s| flatten_statements(s.as_node())).unwrap_or_default()
+    };
+    if let Some(branch) = node.as_if_node() {
+        branch.if_keyword_loc()?;
+        branch.end_keyword_loc()?;
+        arms.push(body(branch.statements()));
+        let mut next = branch.subsequent();
+        while let Some(sub) = next {
+            if let Some(elsif) = sub.as_if_node() {
+                arms.push(body(elsif.statements()));
+                next = elsif.subsequent();
+            } else {
+                arms.push(body(sub.as_else_node()?.statements()));
+                next = None;
+            }
+        }
+    } else if let Some(branch) = node.as_unless_node() {
+        branch.end_keyword_loc()?;
+        arms.push(body(branch.statements()));
+        if let Some(other) = branch.else_clause() {
+            arms.push(body(other.statements()));
+        }
+    } else {
+        return None;
+    }
+    if !arms.iter().flatten().any(|stmt| definition(stmt).is_some()) {
+        return None;
+    }
+    let admitted = |stmt: &Node<'_>| {
+        definition(stmt).is_some()
+            || conditional_accessor(stmt).is_some()
+            || conditional_definition(stmt).is_some()
+            || stmt.as_class_node().is_some()
+            || stmt.as_module_node().is_some()
+    };
+    let stmt = arms.into_iter().flatten().find(|stmt| !admitted(stmt))?;
+    let why = if stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c)) {
+        "a visibility declaration inside a load-time conditional definition is not modeled \
+         (the visibility in effect after it would depend on the branch taken)"
+    } else if stmt.as_if_node().is_some() || stmt.as_unless_node().is_some() || stmt.as_case_node().is_some() {
+        "a conditional nested in a load-time conditional definition is not modeled"
+    } else if stmt.as_singleton_class_node().is_some() {
+        "`class << self` inside a load-time conditional definition is not modeled"
+    } else if stmt.as_constant_write_node().is_some() {
+        "a constant assigned in a load-time conditional definition is not modeled"
+    } else if stmt.as_alias_method_node().is_some()
+        || stmt.as_call_node().is_some_and(|c| {
+            c.receiver().is_none() && matches!(constant_id_str(&c.name()), "attr_reader" | "attr_writer" | "attr_accessor" | "alias_method")
+        })
+    {
+        "an accessor or alias declared in a load-time conditional definition is not modeled"
+    } else {
+        "a load-time conditional definition whose branch holds a statement other than a `def` is not modeled"
+    };
+    Some((stmt, why))
+}
+
+/// A bare `attr_reader` / `attr_writer` / `attr_accessor` of literal
+/// names. In a load-time conditional's branch it defines its methods
+/// only when the branch runs, as a `def` there does (activemerchant
+/// 1.137.0's `Connection` has `attr_accessor :min_version` under `if
+/// Net::HTTP.instance_methods.include?(:min_version=)`).
+pub(super) fn conditional_accessor<'pr>(stmt: &Node<'pr>) -> Option<CallNode<'pr>> {
+    let call = stmt.as_call_node()?;
+    (call.receiver().is_none()
+        && call.block().is_none()
+        && matches!(constant_id_str(&call.name()), "attr_reader" | "attr_writer" | "attr_accessor")
+        && call.arguments().is_some_and(|args| args.arguments().iter().all(|arg| symbol_or_string_value(&arg).is_some())))
+    .then_some(call)
+}
+
+/// Whether `node` declares only for the Rails console
+/// (`if defined?(Rails::Console)`), which the emitted app never runs.
+pub(super) fn console_only_node(node: &Node<'_>) -> bool {
+    console_only(node)
 }
 
 pub(super) fn marker(call: &CallNode<'_>) -> bool {
@@ -106,16 +279,25 @@ const THOR_DSL_ANNOTATIONS: &[&str] = &["desc", "long_desc", "option", "method_o
 /// through [`branch_has_unmodeled_call`]'s own recursion, never through
 /// this exemption, so it stays refused too — conditionally annotating a
 /// Thor command isn't a shape its DSL produces either.
+///
+/// When every marker is bare, a call BEFORE the first one is exempt too:
+/// a bare `private` sets the default for the definitions after it, so
+/// what an earlier `validates` or `has_many` generates keeps its own
+/// visibility. A named marker (`has_many :items; private :items`) can
+/// reach back, so with one the whole body still counts.
 fn marker_mixed_with_unmodeled_call(body: &Node<'_>) -> bool {
     let Some(statements) = body.as_statements_node() else { return false };
     let stmts = flatten_statements(statements.as_node());
-    let has_marker = stmts.iter().any(|stmt| {
-        stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c))
-    });
-    if !has_marker {
+    let is_marker = |stmt: &Node<'_>| stmt.as_call_node().is_some_and(|c| c.receiver().is_none() && marker(&c));
+    let Some(first_marker) = stmts.iter().position(is_marker) else {
         return false;
-    }
-    stmts.iter().any(|stmt| !is_bare_thor_annotation(stmt) && statement_has_unmodeled_call(stmt))
+    };
+    let all_bare = stmts
+        .iter()
+        .filter(|stmt| is_marker(stmt))
+        .all(|stmt| stmt.as_call_node().is_some_and(|c| c.arguments().is_none()));
+    let from = if all_bare { first_marker } else { 0 };
+    stmts[from..].iter().any(|stmt| !is_bare_thor_annotation(stmt) && statement_has_unmodeled_call(stmt))
 }
 
 /// A direct, receiverless call naming one of [`THOR_DSL_ANNOTATIONS`] —
@@ -225,7 +407,37 @@ impl Visibility {
         file: &str,
         module_owner: Option<&ClassId>,
     ) -> IngestResult<Self> {
-        let out = Self::resolve_carrying_inherited(body, file, module_owner)?;
+        Self::resolve_owned(body, file, module_owner, None)
+    }
+
+    /// [`Self::resolve_owned`] for a library class or module body, whose
+    /// load-time conditional definitions are admitted
+    /// (`conditional_definition`).
+    pub(super) fn resolve_library(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+        owner: Option<&ClassId>,
+    ) -> IngestResult<Self> {
+        let out = Self::resolve_carrying_inherited_with(body, file, module_owner, owner, true)?;
+        match out.inherited.first() {
+            Some((_, name, _)) => Err(Self::undefined(file, name)),
+            None => Ok(out),
+        }
+    }
+
+    /// Whether this body's load-time conditional definitions are admitted.
+    pub(super) fn admits_conditionals(&self) -> bool {
+        self.conditionals
+    }
+
+    pub(super) fn resolve_owned(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+        owner: Option<&ClassId>,
+    ) -> IngestResult<Self> {
+        let out = Self::resolve_carrying_inherited_owned(body, file, module_owner, owner)?;
         match out.inherited.first() {
             Some((_, name, _)) => Err(Self::undefined(file, name)),
             None => Ok(out),
@@ -237,7 +449,26 @@ impl Visibility {
         file: &str,
         module_owner: Option<&ClassId>,
     ) -> IngestResult<Self> {
-        let mut out = Self::default();
+        Self::resolve_carrying_inherited_owned(body, file, module_owner, None)
+    }
+
+    fn resolve_carrying_inherited_owned(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+        owner: Option<&ClassId>,
+    ) -> IngestResult<Self> {
+        Self::resolve_carrying_inherited_with(body, file, module_owner, owner, false)
+    }
+
+    fn resolve_carrying_inherited_with(
+        body: Option<&Node<'_>>,
+        file: &str,
+        module_owner: Option<&ClassId>,
+        owner: Option<&ClassId>,
+        conditionals: bool,
+    ) -> IngestResult<Self> {
+        let mut out = Self { owner: owner.map(|o| o.0.to_string()), conditionals, ..Self::default() };
         if let Some(body) = body {
             let Some(statements) = body.as_statements_node() else {
                 return Err(Self::unsupported(
@@ -312,10 +543,14 @@ impl Visibility {
     }
 
     fn unsupported(file: &str, message: impl Into<String>) -> IngestError {
-        IngestError::Unsupported {
+        let err = IngestError::Unsupported {
             file: file.into(),
             message: message.into(),
+        };
+        if let Some((start, end)) = STATEMENT.get() {
+            super::error_site::note(&err, start, end);
         }
+        err
     }
 
     fn define(
@@ -327,7 +562,10 @@ impl Visibility {
         file: &str,
     ) -> IngestResult<()> {
         let key = (class_side, name.clone());
-        if let Some(previous) = self.known.get(&key) {
+        let alternative = |a: usize, b: usize| {
+            matches!((self.alternatives.get(&a), self.alternatives.get(&b)), (Some((sa, ba)), Some((sb, bb))) if sa == sb && ba != bb)
+        };
+        if let Some(previous) = self.known.get(&key).filter(|previous| !previous.iter().all(|p| alternative(*p, offset))) {
             // A repeated ordinary constructor has the same implicit
             // visibility on every definition. Keep the pre-existing duplicate
             // bodies so semantic consumers (e.g. Alba's evidence gate) can
@@ -367,6 +605,34 @@ impl Visibility {
             self.inherited.push((class_side, name, statement));
             return Ok(());
         };
+        // Every definition in a different branch of one conditional: the
+        // change applies to whichever branch ran.
+        // Only when every branch defines it and some branch always runs:
+        // otherwise Ruby raises NameError here when the branch that
+        // defines it did not.
+        if positions.iter().any(|p| self.alternatives.contains_key(p)) {
+            let statement = self.alternatives.get(&positions[0]).map(|(s, _)| *s);
+            let same = positions.iter().all(|p| self.alternatives.get(p).map(|(s, _)| *s) == statement);
+            let branches: HashSet<usize> = positions.iter().filter_map(|p| self.alternatives.get(p).map(|(_, b)| *b)).collect();
+            let covered = statement.and_then(|s| self.exhaustive.get(&s)).is_some_and(|n| branches.len() == *n && branches.len() == positions.len());
+            if !same {
+                return Err(Self::unsupported(file, "conditional or dynamic visibility declarations are not modeled"));
+            }
+            if !covered {
+                return Err(Self::unsupported(
+                    file,
+                    format!("visibility change for `{name}`, which a load-time conditional defines in only some branches, is not modeled"),
+                ));
+            }
+        }
+        let alternatives = positions.len() > 1 && positions.iter().all(|p| self.alternatives.contains_key(p));
+        if alternatives {
+            for position in positions.clone() {
+                self.values.insert((position, name.clone()), visibility);
+            }
+            self.changed.insert(key);
+            return Ok(());
+        }
         let [position] = positions.as_slice() else {
             return Err(Self::unsupported(
                 file,
@@ -375,6 +641,77 @@ impl Visibility {
         };
         self.values.insert((*position, name), visibility);
         self.changed.insert(key);
+        Ok(())
+    }
+
+    /// A load-time conditional's definitions (and those of the
+    /// conditionals nested in its branches): each takes the visibility in
+    /// effect at the statement, or its inline marker's, and the defs in
+    /// different branches of one conditional are alternatives.
+    fn walk_conditional(&mut self, statement: &Node<'_>, class_side: bool, default: MethodVisibility, file: &str) -> IngestResult<()> {
+        let offset = statement.location().start_offset();
+        let Some((_, arms)) = conditional_definition(statement) else { return Ok(()) };
+        if arms.last().is_some_and(|(condition, _)| condition.is_none()) {
+            self.exhaustive.insert(offset, arms.len());
+        }
+        for (index, (_, stmts)) in arms.iter().enumerate() {
+            for stmt in stmts {
+                let at = stmt.location().start_offset();
+                STATEMENT.set(Some((at, stmt.location().end_offset())));
+                self.defaults.insert(at, default);
+                if conditional_definition(stmt).is_some() {
+                    self.walk_conditional(stmt, class_side, default, file)?;
+                    continue;
+                }
+                // A declaration has its own pass and namespace, but not
+                // one on the singleton class.
+                if stmt.as_class_node().is_some() || stmt.as_module_node().is_some() {
+                    if class_side {
+                        return Err(Self::unsupported(
+                            file,
+                            "a class or module declared in a load-time conditional inside `class << self` is not modeled",
+                        ));
+                    }
+                    continue;
+                }
+                if let Some(call) = conditional_accessor(stmt) {
+                    let kw = constant_id_str(&call.name());
+                    for arg in call.arguments().into_iter().flat_map(|a| a.arguments().iter()) {
+                        let Some(name) = symbol_or_string_value(&arg) else { continue };
+                        self.alternatives.insert(at, (offset, index));
+                        if kw != "attr_writer" {
+                            self.define(at, name.clone(), class_side, default, file)?;
+                        }
+                        if kw != "attr_reader" {
+                            self.define(at, format!("{name}="), class_side, default, file)?;
+                        }
+                    }
+                    continue;
+                }
+                let Some(def) = definition(stmt) else { continue };
+                let inline = stmt.as_call_node().filter(marker).map(|call| match constant_id_str(&call.name()) {
+                    "public" | "public_class_method" => MethodVisibility::Public,
+                    "protected" => MethodVisibility::Protected,
+                    _ => MethodVisibility::Private,
+                });
+                if def.receiver().is_some_and(|r| r.as_self_node().is_none() && !self.names_owner(&r)) || (class_side && def.receiver().is_some()) {
+                    return Err(Self::unsupported(file, "visibility of a definition on a foreign receiver is not modeled"));
+                }
+                let name = constant_id_str(&def.name()).to_string();
+                let side = class_side || def.receiver().is_some();
+                let visibility = inline.unwrap_or_else(|| {
+                    if !side && PRIVATE_HOOKS.contains(&name.as_str()) {
+                        MethodVisibility::Private
+                    } else if def.receiver().is_some() {
+                        MethodVisibility::Public
+                    } else {
+                        default
+                    }
+                });
+                self.alternatives.insert(at, (offset, index));
+                self.define(at, name, side, visibility, file)?;
+            }
+        }
         Ok(())
     }
 
@@ -555,14 +892,34 @@ impl Visibility {
         file: &str,
         module_owner: Option<&ClassId>,
     ) -> IngestResult<()> {
+        let outer = STATEMENT.get();
+        let walked = self.walk_statements(body, class_side, file, module_owner);
+        STATEMENT.set(outer);
+        walked
+    }
+
+    fn walk_statements(
+        &mut self,
+        body: Option<Node<'_>>,
+        class_side: bool,
+        file: &str,
+        module_owner: Option<&ClassId>,
+    ) -> IngestResult<()> {
         let Some(body) = body else { return Ok(()) };
         // A new lexical body always starts public. A marker in the enclosing
         // class must not privatize def self.x or leak into class_methods.
         let mut default = MethodVisibility::Public;
         let mut module_function = false;
         for statement in flatten_statements(body) {
+            STATEMENT.set(Some((statement.location().start_offset(), statement.location().end_offset())));
             let offset = statement.location().start_offset();
             self.defaults.insert(offset, default);
+            // A load-time conditional's definitions take the visibility in
+            // effect at the statement, or their inline marker's.
+            if self.conditionals && conditional_definition(&statement).is_some() {
+                self.walk_conditional(&statement, class_side, default, file)?;
+                continue;
+            }
             let def = definition(&statement);
             let node = &statement;
             let mut inline = None;
@@ -648,7 +1005,7 @@ impl Visibility {
                     continue;
                 }
                 if let Some(receiver) = def.receiver() {
-                    if receiver.as_self_node().is_none() {
+                    if receiver.as_self_node().is_none() && !self.names_owner(&receiver) {
                         return Err(Self::unsupported(
                             file,
                             "visibility of a definition on a foreign receiver is not modeled",
@@ -739,8 +1096,15 @@ impl Visibility {
                 }
                 // A `def` is handled above. Anything else — an `if` that
                 // wraps a definition, a modifier that does not — still
-                // has to be rejected when it hides a marker or a `def`.
-                Self::reject_dynamic_declarations(node, file)?;
+                // has to be rejected when it hides a marker or a `def`;
+                // a conditional definition says which statement keeps it
+                // refused.
+                if let Err(err) = Self::reject_dynamic_declarations(node, file) {
+                    return Err(match self.conditionals.then(|| refused_conditional_definition(node)).flatten() {
+                        Some((at, message)) => super::error_site::at(Self::unsupported(file, message), &at),
+                        None => err,
+                    });
+                }
                 continue;
             };
             if call.receiver().is_some() {

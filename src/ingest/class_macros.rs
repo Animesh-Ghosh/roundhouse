@@ -48,6 +48,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
         .filter_map(|m| Some((m.name.clone(), m.parent.clone()?)))
         .chain(app.library_classes.iter().filter(|lc| !lc.is_module).filter_map(|lc| Some((lc.name.clone(), lc.parent.clone()?))))
         .collect();
+    let named = Named::of(app);
     let hooks = hook_macro_table(app);
     let cvar_readers: HashMap<(String, String), Symbol> = app
         .library_classes
@@ -88,8 +89,8 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
         .chain(app.models.iter().map(|m| m.name.0.as_str().to_string()))
         .collect();
     for model_index in 0..app.models.len() {
-        let ancestors = ancestors(app, &parents, &app.models[model_index].name);
-        let mut table = class_method_table(app, &ancestors);
+        let ancestors = ancestors(&named, &parents, &app.models[model_index].name);
+        let mut table = class_method_table(app, &named, &ancestors);
         // Not the model's own: the `on_load` reopen of ActiveRecord::Base carries the hook's very definitions (audited's Concern).
         let own_names: HashSet<Symbol> =
             table.iter().filter(|(name, def)| hooks.get(*name).is_none_or(|hook| hook.name_span != def.name_span)).map(|(name, _)| name.clone()).collect();
@@ -259,8 +260,8 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             continue;
         }
         let mut lineage = vec![lc.name.clone()];
-        lineage.extend(ancestors(app, &parents, &lc.name));
-        let table = class_method_table(app, &lineage);
+        lineage.extend(ancestors(&named, &parents, &lc.name));
+        let table = class_method_table(app, &named, &lineage);
         let macros: HashSet<Symbol> = table.keys().filter(|name| reaches_definition(name, &table, 0)).cloned().collect();
         if macros.is_empty() {
             continue;
@@ -378,26 +379,82 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
         lc.unknown_calls = calls.into_iter().enumerate().filter(|(i, _)| !consumed.contains(i)).map(|(_, e)| e).collect();
     }
     // So does an ancestor's (`class Phrases < RuleBase; rule(:word) { … }`), once every call anywhere expanded.
-    // Not counted: the name inside the macro's own body (`define_method(:precedence)` in `def self.precedence`).
-    let own_mentions = |name: &Symbol| -> usize {
+    // Counted on the IR, not the text: a comment that says "precedence" is no call, and neither is an
+    // instance method's own receiverless `precedence`. What is left is a call by name the expansion did
+    // not consume — `Base.precedence(…)`, a class method's `precedence(…)`, or `:precedence` handed to `send`.
+    // A receiver counts when it is a class that has the macro (it or an ancestor defines it), not `Rails.root`.
+    let owners = |name: &Symbol| -> HashSet<String> {
+        let defining: Vec<&ClassId> = app
+            .library_classes
+            .iter()
+            .filter(|lc| lc.methods.iter().any(|m| m.receiver == MethodReceiver::Class && &m.name == name))
+            .map(|lc| &lc.name)
+            .collect();
         app.library_classes
             .iter()
+            .filter(|lc| ancestors(&named, &parents, &lc.name).iter().chain(std::iter::once(&lc.name)).any(|a| defining.contains(&a)))
+            .map(|lc| lc.name.0.as_str().to_string())
+            .collect()
+    };
+    fn class_side_mentions(e: &Expr, name: &Symbol, class_body: bool, owners: &HashSet<String>) -> usize {
+        let on_owner = |recv: Option<&Expr>| match recv.map(|r| &*r.node) {
+            Some(ExprNode::Const { path }) => {
+                let full = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+                owners.iter().any(|o| o == &full || o.ends_with(&format!("::{full}"))) as usize
+            }
+            Some(ExprNode::SelfRef) | None => class_body as usize,
+            _ => 0,
+        };
+        let here = match &*e.node {
+            ExprNode::Send { recv, method, .. } if method == name => on_owner(recv.as_ref()),
+            // `send(:root)`, `method(:root)`: a call by a name held as a Symbol, on the macro's owner.
+            ExprNode::Send { recv, method, args, .. }
+                if matches!(method.as_str(), "send" | "public_send" | "__send__" | "method" | "public_method" | "respond_to?")
+                    && matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { value } }) if value == name) =>
+            {
+                on_owner(recv.as_ref())
+            }
+            // `&method(:level)`: ingest's bound-method reference.
+            ExprNode::MethodRef { recv, name: referenced } if referenced == name => on_owner(recv.as_ref()),
+            _ => 0,
+        };
+        let mut inner = 0;
+        e.node.for_each_child(&mut |c| inner += class_side_mentions(c, name, class_body, owners));
+        here + inner
+    }
+    let remaining = |name: &Symbol| -> usize {
+        let owners = owners(name);
+        let mut everywhere = 0;
+        crate::lower::for_each_emit_body_ref(app, &mut |e| everywhere += class_side_mentions(e, name, false, &owners));
+        let class_bodies: Vec<&MethodDef> = app
+            .library_classes
+            .iter()
             .flat_map(|lc| lc.methods.iter())
-            .filter(|m| m.receiver == MethodReceiver::Class && &m.name == name)
-            .filter_map(|m| source_text(m.body.span, sources))
-            .map(|text| {
-                let mut words = HashMap::default();
-                count_words(std::str::from_utf8(text).unwrap_or(""), &mut words);
-                words.get(name.as_str()).copied().unwrap_or(0)
+            .filter(|m| m.receiver == MethodReceiver::Class && &m.name != name)
+            .collect();
+        // Not every call in a same-named class method: a subclass's `def self.level(v) = RuleBase.level(v)` still reaches the macro.
+        let own: usize = app
+            .library_classes
+            .iter()
+            .flat_map(|lc| {
+                let only: HashSet<String> = std::iter::once(lc.name.0.to_string()).collect();
+                lc.methods
+                    .iter()
+                    .filter(|m| m.receiver == MethodReceiver::Class && &m.name == name)
+                    .map(move |m| class_side_mentions(&m.body, name, false, &only))
+                    .collect::<Vec<_>>()
             })
-            .sum()
+            .sum();
+        let class_side: usize = class_bodies
+            .iter()
+            .map(|m| class_side_mentions(&m.body, name, true, &owners) - class_side_mentions(&m.body, name, false, &owners))
+            .sum();
+        everywhere.saturating_sub(own) + class_side
     };
     let spent: HashSet<Symbol> = expanded_total
-        .iter()
-        .filter(|(name, calls)| {
-            !failed_total.contains(*name) && mention_counts.count(name.as_str()).saturating_sub(own_mentions(name)) == **calls
-        })
-        .map(|(name, _)| name.clone())
+        .keys()
+        .filter(|name| !failed_total.contains(*name) && remaining(name) == 0)
+        .cloned()
         .collect();
     if !spent.is_empty() {
         for lc in app.library_classes.iter_mut().filter(|lc| !lc.is_module) {
@@ -844,11 +901,34 @@ fn synthesized_names(app: &App, model_index: usize) -> HashSet<Symbol> {
     out
 }
 
-fn ancestors(app: &App, parents: &HashMap<ClassId, ClassId>, model: &ClassId) -> Vec<ClassId> {
+/// Where each class name sits: the first model of the name, and every
+/// library class of it, in order. Names are not written while the macros
+/// expand, so the positions stay good (the methods they hold are read fresh,
+/// as the expansion rewrites models as it goes).
+struct Named {
+    model: HashMap<ClassId, usize>,
+    library: HashMap<ClassId, Vec<usize>>,
+}
+
+impl Named {
+    fn of(app: &App) -> Self {
+        let mut model: HashMap<ClassId, usize> = HashMap::default();
+        for (i, m) in app.models.iter().enumerate() {
+            model.entry(m.name.clone()).or_insert(i);
+        }
+        let mut library: HashMap<ClassId, Vec<usize>> = HashMap::default();
+        for (i, lc) in app.library_classes.iter().enumerate() {
+            library.entry(lc.name.clone()).or_default().push(i);
+        }
+        Named { model, library }
+    }
+}
+
+fn ancestors(named: &Named, parents: &HashMap<ClassId, ClassId>, model: &ClassId) -> Vec<ClassId> {
     let mut out = Vec::new();
     let mut cur = parents.get(model);
     while let Some(p) = cur {
-        if out.contains(p) || !(app.models.iter().any(|m| &m.name == p) || app.library_classes.iter().any(|lc| &lc.name == p)) {
+        if out.contains(p) || !(named.model.contains_key(p) || named.library.contains_key(p)) {
             break;
         }
         out.push(p.clone());
@@ -858,12 +938,12 @@ fn ancestors(app: &App, parents: &HashMap<ClassId, ClassId>, model: &ClassId) ->
 }
 
 /// The class methods the ancestors define, the nearest one's winning.
-fn class_method_table(app: &App, ancestors: &[ClassId]) -> HashMap<Symbol, MethodDef> {
+fn class_method_table(app: &App, named: &Named, ancestors: &[ClassId]) -> HashMap<Symbol, MethodDef> {
     let mut table = HashMap::default();
     for id in ancestors.iter().rev() {
-        let methods: Vec<&MethodDef> = match app.models.iter().find(|m| &m.name == id) {
-            Some(model) => model.methods().collect(),
-            None => app.library_classes.iter().filter(|lc| &lc.name == id).flat_map(|lc| lc.methods.iter()).collect(),
+        let methods: Vec<&MethodDef> = match named.model.get(id) {
+            Some(&i) => app.models[i].methods().collect(),
+            None => named.library.get(id).into_iter().flatten().flat_map(|&i| app.library_classes[i].methods.iter()).collect(),
         };
         for m in methods.into_iter().filter(|m| m.receiver == MethodReceiver::Class) {
             table.insert(m.name.clone(), m.clone());
@@ -2189,6 +2269,7 @@ fn valid_def_name(name: &Symbol) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn the_word_index_counts_what_the_scan_counts() {
@@ -2246,5 +2327,86 @@ mod tests {
             assert_eq!(mentions.count("[]"), 0);
         }
         assert_eq!(mentions.scans.borrow().len(), 2);
+    }
+
+    /// What `ancestors` and `class_method_table` were before `Named`: a scan
+    /// of every model and library class per link of the chain.
+    fn scanned_ancestors(app: &App, parents: &HashMap<ClassId, ClassId>, model: &ClassId) -> Vec<ClassId> {
+        let mut out = Vec::new();
+        let mut cur = parents.get(model);
+        while let Some(p) = cur {
+            if out.contains(p) || !(app.models.iter().any(|m| &m.name == p) || app.library_classes.iter().any(|lc| &lc.name == p)) {
+                break;
+            }
+            out.push(p.clone());
+            cur = parents.get(p);
+        }
+        out
+    }
+
+    fn scanned_class_method_table(app: &App, ancestors: &[ClassId]) -> HashMap<Symbol, MethodDef> {
+        let mut table = HashMap::default();
+        for id in ancestors.iter().rev() {
+            let methods: Vec<&MethodDef> = match app.models.iter().find(|m| &m.name == id) {
+                Some(model) => model.methods().collect(),
+                None => app.library_classes.iter().filter(|lc| &lc.name == id).flat_map(|lc| lc.methods.iter()).collect(),
+            };
+            for m in methods.into_iter().filter(|m| m.receiver == MethodReceiver::Class) {
+                table.insert(m.name.clone(), m.clone());
+            }
+        }
+        table
+    }
+
+    /// Models and library classes with the awkward shapes: a name reopened
+    /// in two files (its methods merge, the later winning), a library class
+    /// that shares a model's name (the model is read, not the library
+    /// class), a parent cycle, and a parent no class defines.
+    fn app() -> App {
+        let tree: crate::vfs::FileTree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"things\" do |t|\n    t.string \"name\"\n  end\nend\n"),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  def self.shared = 1\nend\n"),
+            ("app/models/thing.rb", "class Thing < ApplicationRecord\n  def self.own = 2\nend\n"),
+            ("app/models/odd.rb", "class Odd < Vague\nend\n"),
+        ]
+        .into_iter()
+        .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        for (file, src) in [
+            ("lib/a.rb", "class Plain\n  def self.first = 1\nend\nclass Leaf < Plain\n  def self.leaf = 1\nend\n"),
+            ("lib/b.rb", "class Plain\n  def self.second = 2\n  def self.first = 3\nend\nclass Thing\n  def self.shadowed = 4\nend\n"),
+            ("lib/c.rb", "class Ping < Pong\n  def self.ping = 1\nend\nclass Pong < Ping\n  def self.pong = 1\nend\nclass Lost < Missing\nend\n"),
+            ("lib/d.rb", "class Deep < Leaf\nend\nclass Deeper < Deep\nend\nclass Under < Thing\nend\n"),
+        ] {
+            app.library_classes.extend(crate::ingest::ingest_library_classes(src.as_bytes(), file).expect("library classes"));
+        }
+        app
+    }
+
+    #[test]
+    fn named_lookups_match_the_scans_they_replaced() {
+        let app = app();
+        let parents: HashMap<ClassId, ClassId> = app
+            .models
+            .iter()
+            .filter_map(|m| Some((m.name.clone(), m.parent.clone()?)))
+            .chain(app.library_classes.iter().filter(|lc| !lc.is_module).filter_map(|lc| Some((lc.name.clone(), lc.parent.clone()?))))
+            .collect();
+        let named = Named::of(&app);
+        let names: Vec<ClassId> =
+            app.models.iter().map(|m| m.name.clone()).chain(app.library_classes.iter().map(|lc| lc.name.clone())).chain([ClassId(Symbol::from("Nobody"))]).collect();
+        let mut longest = 0;
+        for name in &names {
+            let chain = ancestors(&named, &parents, name);
+            assert_eq!(chain, scanned_ancestors(&app, &parents, name), "ancestors of {name:?}");
+            longest = longest.max(chain.len());
+            let mut lineage = vec![name.clone()];
+            lineage.extend(chain);
+            assert_eq!(class_method_table(&app, &named, &lineage), scanned_class_method_table(&app, &lineage), "class methods of {name:?}");
+        }
+        assert!(longest >= 3, "the fixture holds a chain of several links");
+        let plain = class_method_table(&app, &named, &[ClassId(Symbol::from("Plain"))]);
+        assert_eq!(plain.len(), 2, "a reopened class's methods merge: {:?}", plain.keys().collect::<Vec<_>>());
     }
 }

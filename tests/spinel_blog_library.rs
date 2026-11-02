@@ -39,16 +39,17 @@ fn errors_rb_ingests_and_emits_via_library_path() {
     let names: Vec<&str> = classes.iter().map(|c| c.name.0.as_str()).collect();
     assert_eq!(classes.len(), 25, "names: {names:?}");
 
-    // Rails 8.1's hierarchy: ActiveRecordError under StandardError, and every other class under it.
+    // Rails 8.1's ActiveRecord hierarchy, plus ActiveModel's NoMethodError subclass.
     for lc in &classes {
         assert!(!lc.is_module, "{} should be a class, not module", lc.name.0.as_str());
         let parent = lc.parent.as_ref().map(|p| p.0.as_str()).unwrap_or("(none)");
         let expected = match lc.name.0.as_str() {
+            "ActiveModel::UnknownAttributeError" => "NoMethodError",
             "ActiveRecord::ActiveRecordError" => "StandardError",
             "ActiveRecord::RecordNotFound" | "ActiveRecord::RecordInvalid" | "ActiveRecord::RecordNotSaved"
             | "ActiveRecord::RecordNotDestroyed"
             | "ActiveRecord::ReadOnlyRecord" | "ActiveRecord::SoleRecordExceeded" | "ActiveRecord::StatementInvalid"
-            | "ActiveRecord::ReadOnlyError" | "ActiveRecord::StaleObjectError" => "ActiveRecordError",
+            | "ActiveRecord::ReadOnlyError" => "ActiveRecordError",
             "ActiveRecord::RecordNotUnique" | "ActiveRecord::InvalidForeignKey" => "WrappedDatabaseException",
             "ActiveRecord::SerializationFailure" | "ActiveRecord::Deadlocked" => "TransactionRollbackError",
             "ActiveRecord::StatementTimeout" | "ActiveRecord::QueryCanceled" => "QueryAborted",

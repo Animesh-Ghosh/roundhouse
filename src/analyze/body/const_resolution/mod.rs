@@ -202,6 +202,7 @@ fn core_rbs() -> &'static str {
             out.push_str(name);
             out.push_str(": String\n");
         }
+        out.push_str("interface _RoundhouseEnvironment\nend\nENV: _RoundhouseEnvironment\n");
         out.push_str(STDLIB_NAMESPACES_RBS);
         out
     })
@@ -235,8 +236,11 @@ module REXML\n\
   class ParseException < StandardError\n  end\n\
 end\n";
 
-/// The type of a value constant `core_rbs()` declares, as Ruby defines it.
+/// The value contract contributed by a constant declared in `core_rbs()`.
 fn core_value_type(name: &str) -> Option<Ty> {
+    if name.trim_start_matches("Object::") == "ENV" {
+        return Some(Ty::Class { id: ClassId(Symbol::from("_RoundhouseEnvironment")), args: vec![].into() });
+    }
     if CORE_TOP_CONSTS.contains(&name.trim_start_matches("Object::")) {
         return Some(io_ty());
     }
@@ -260,7 +264,9 @@ pub(super) enum ResolvedConstant {
     Namespace { class: Arc<ClassId>, runtime: bool },
     /// `runtime_decl`: declared only by the runtime's sources, so a
     /// registry class of the same exact name describes this constant.
-    Value { declaration: DeclarationId, name: Arc<ClassId>, runtime: Option<Arc<Ty>>, runtime_decl: bool },
+    /// `singleton`: declared in a `class << self` (`X::<X>::NAME`), whose
+    /// segment `name` leaves out.
+    Value { declaration: DeclarationId, name: Arc<ClassId>, runtime: Option<Arc<Ty>>, runtime_decl: bool, singleton: bool },
 }
 
 /// Rubydex answers for one source file.
@@ -274,6 +280,9 @@ struct FileAnswers {
     /// Each constant definition as (offset where its name ends, name,
     /// declaration), sorted by offset.
     constants: Vec<(u32, Box<str>, DeclarationId)>,
+    /// A multiple assignment's values (`A, B = 1, 2`), each keyed by
+    /// where it starts, to the end of its own target's name.
+    multi_values: HashMap<u32, u32>,
     /// Exact source declaration names, including their lexical owners.
     constant_classes: IdentityHashMap<DeclarationId, ClassId>,
     namespace_definitions: HashSet<Box<str>>,
@@ -555,6 +564,59 @@ pub(crate) fn definition_index(sources: &[SourceFile]) -> DefinitionIndex {
     index
 }
 
+/// Does any `class`/`module` definition in `sources` name its namespace
+/// with a relative constant path (`class B::C` written inside `module A`)
+/// whose namespace the indexed sources do not define? Ruby looks that
+/// namespace up lexically first (`A::B`), so the fully qualified name
+/// depends on files the graph has not seen. A scoped fractal build asks
+/// this of the files it compiles, to know when naming their bodies needs
+/// the rest of the app.
+pub(crate) fn has_ambiguous_namespace(sources: &[SourceFile]) -> bool {
+    if sources.is_empty() {
+        return false;
+    }
+    let mut graph = index_sources(sources);
+    Resolver::new(&mut graph).resolve();
+    sources.iter().filter(|source| is_indexed(source)).any(|source| {
+        let Some(document) = graph.documents().get(&UriId::from(source.path.as_str())) else { return false };
+        document.definitions().iter().any(|definition_id| {
+            let Some(definition @ (Definition::Class(_) | Definition::Module(_))) = graph.definitions().get(definition_id) else {
+                return false;
+            };
+            definition.name_id().is_some_and(|name_id| namespace_is_ambiguous(&graph, *name_id))
+        })
+    })
+}
+
+/// Is `name_id` a relative path (`B::C`) written inside a body, whose
+/// namespace (`B`) no indexed `class`, `module` or constant defines?
+/// Rubydex still creates a declaration for such a namespace; it just has
+/// no definitions.
+fn namespace_is_ambiguous(graph: &Graph, name_id: NameId) -> bool {
+    let Some(name) = graph.names().get(&name_id) else { return false };
+    let ParentScope::Some(namespace_id) = name.parent_scope() else { return false };
+    let mut leftmost_id = *namespace_id;
+    loop {
+        let Some(segment) = graph.names().get(&leftmost_id) else { return false };
+        match segment.parent_scope() {
+            ParentScope::Some(next_id) => leftmost_id = *next_id,
+            // `::B::C`, or a path on a singleton, resolves without lexical scope.
+            ParentScope::TopLevel | ParentScope::Attached(_) => return false,
+            ParentScope::None => {
+                if segment.nesting().is_none() {
+                    // Written at the top level: `B` can only be `::B`.
+                    return false;
+                }
+                break;
+            }
+        }
+    }
+    graph
+        .name_id_to_declaration_id(*namespace_id)
+        .and_then(|declaration_id| graph.declarations().get(declaration_id))
+        .is_none_or(|namespace| namespace.definitions().is_empty())
+}
+
 impl ConstResolver {
     /// Index real Ruby app sources with their original 1-based file IDs.
     pub(crate) fn from_app_sources(sources: &[SourceFile]) -> Self {
@@ -720,7 +782,18 @@ impl ConstResolver {
             .partition_point(|(end, ..)| *end <= value.start)
             .checked_sub(1)?;
         let (_, defined, id) = &constants[index];
-        (defined.as_ref() == name).then_some(*id)
+        if defined.as_ref() == name {
+            return Some(*id);
+        }
+        // `A, B = 1, 2`: every target precedes every value, so the value
+        // `1` follows `B`; the parsed assignment pairs it with `A`.
+        let target = *self.file(value.file)?.multi_values.get(&value.start)?;
+        let at = constants.partition_point(|(end, ..)| *end < target);
+        constants[at..]
+            .iter()
+            .take_while(|(end, ..)| *end == target)
+            .find(|(_, defined, _)| defined.as_ref() == name)
+            .map(|(_, _, id)| *id)
     }
 
     pub(crate) fn constant_class(&self, value: Span, name: &str) -> Option<ClassId> {
@@ -945,6 +1018,35 @@ fn parenthesized_factory_receivers(text: &str) -> HashSet<u32> {
     receivers.0
 }
 
+/// Each `A, B = x, y` value's start, to the end of its own target's
+/// name: the parsed assignment, so a target written across lines, or a
+/// constant defined inside another value, does not shift the pairing.
+fn multi_write_values(text: &str) -> HashMap<u32, u32> {
+    struct Values(HashMap<u32, u32>);
+    impl<'pr> ruby_prism::Visit<'pr> for Values {
+        fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+            if node.rest().is_none()
+                && node.rights().iter().next().is_none()
+                && let Some(array) = node.value().as_array_node()
+                && array.elements().iter().count() == node.lefts().iter().count()
+            {
+                for (target, value) in node.lefts().iter().zip(array.elements().iter()) {
+                    if target.as_constant_target_node().is_some() || target.as_constant_path_target_node().is_some() {
+                        self.0.insert(value.location().start_offset() as u32, target.location().end_offset() as u32);
+                    }
+                }
+            }
+            ruby_prism::visit_multi_write_node(self, node);
+        }
+    }
+    let parsed = ruby_prism::parse(text.as_bytes());
+    let mut values = Values(HashMap::default());
+    if parsed.errors().next().is_none() {
+        ruby_prism::Visit::visit(&mut values, &parsed.node());
+    }
+    values.0
+}
+
 fn answer_file(
     graph: &Graph,
     source: &SourceFile,
@@ -954,6 +1056,9 @@ fn answer_file(
     let Some(document) = graph.documents().get(&UriId::from(source.path.as_str())) else {
         return answers;
     };
+    // A constant definition followed by `,` is a multiple assignment's
+    // target; only then is the file parsed for `multi_values`.
+    let mut has_multi_write = false;
     let parenthesized_receivers = if document.diagnostics().iter()
         .any(|diagnostic| *diagnostic.rule() == Rule::DynamicSingletonDefinition)
     {
@@ -1050,7 +1155,7 @@ fn answer_file(
                     } else {
                         None
                     };
-                    ResolvedConstant::Value { declaration: id, name: Arc::new(ClassId(Symbol::from(hoisted_name(name).as_ref()))), runtime, runtime_decl }
+                    ResolvedConstant::Value { declaration: id, name: Arc::new(ClassId(Symbol::from(hoisted_name(name).as_ref()))), runtime, runtime_decl, singleton: name.contains("::<") }
                 }
             });
         match answers.references.entry(key) {
@@ -1163,6 +1268,9 @@ fn answer_file(
             .and_then(|name| graph.strings().get(name.str()));
         let id = definition.and_then(|definition| graph.definition_to_declaration_id(definition));
         if let (Some(name), Some(id)) = (name, id) {
+            if source.text.get(offset.end() as usize..).is_some_and(|after| after.trim_start_matches([' ', '\t']).starts_with(',')) {
+                has_multi_write = true;
+            }
             answers.constants.push((offset.end(), name.as_str().into(), *id));
             if let Some(declaration) = graph.declarations().get(id) {
                 answers.constant_classes.insert(*id, ClassId(Symbol::from(hoisted_name(declaration.name()).as_ref())));
@@ -1170,6 +1278,9 @@ fn answer_file(
         }
     }
     answers.constants.sort_unstable_by_key(|(end, ..)| *end);
+    if has_multi_write {
+        answers.multi_values = multi_write_values(&source.text);
+    }
     answers
 }
 

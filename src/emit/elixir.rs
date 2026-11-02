@@ -306,9 +306,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             expr::register_field_names(&class_name, &field_names);
         }
         let (model_lcs, model_registry) =
-            crate::lower::model_to_library::lower_models_with_registry_and_params(
+            crate::lower::model_to_library::lower_models_with_registry_params_and_views(
                 &app.models,
                 &app.schema,
+                &app.views,
                 vec![],
                 &specs,
             );
@@ -436,6 +437,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // and would get a `create` calling an absent `new`.
             if model_names.contains(lc.name.0.as_str()) {
                 materialize_inherited(&mut lc, &base_methods);
+                crate::lower::model_to_library::primary_key_guard::fold(&mut lc.methods);
                 // Pick up per-model dual methods (the synthesized `update`,
                 // dual by tail-call propagation to `save`) for the
                 // controller field-receiver call sites (`if @article.update`).
@@ -841,6 +843,7 @@ fn module_funcs_to_library_class(
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        conditional_definitions: Vec::new(),
         unknown_calls: Vec::new(),
         class_ivar_initializers: Vec::new(),
     }
