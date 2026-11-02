@@ -71,6 +71,7 @@ fn register_connection_surface(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("select_value", Ty::Untyped),
         ("tables", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
         ("columns", untyped_list.clone()),
+        ("indexes", untyped_list),
         ("insert", Ty::Untyped),
         ("update", Ty::Int),
         ("delete", Ty::Int),
