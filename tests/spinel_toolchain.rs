@@ -52,6 +52,16 @@ mod lobsters_zero;
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/class_body_calls.rs"]
+mod class_body_calls_contract;
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn ordinary_class_body_calls_run_natively() {
+    class_body_calls_contract::settings_overlay()
+        .run_spinel_with_rbs(class_body_calls_contract::ASSERTIONS)
+        .assert_passes();
+}
 #[path = "support/dry_initializer.rs"]
 mod dry_initializer;
 #[path = "support/data_factory.rs"]
@@ -180,6 +190,17 @@ mod unix_listener;
 mod request_id_runtime_contract;
 #[path = "spinel_toolchain/request_id_runtime.rs"]
 mod request_id_runtime;
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn spinel_bundle_build() {
+    let (Some(collected), Some(out)) =
+        (std::env::var_os("RH_SPINEL_BUNDLE_COLLECT"), std::env::var_os("RH_SPINEL_BUNDLE_OUT"))
+    else {
+        return;
+    };
+    emit_and_run::bundle::build_all(std::path::Path::new(&collected), std::path::Path::new(&out));
+}
 
 /// Compile and execute the shared custom Data factory contract with Spinel;
 /// successful Ruby emission alone does not establish native target support.
@@ -447,6 +468,9 @@ fn real_blog_spinel_tests_pass() {
     let scratch = scratch_dir("real-blog");
     generate_project(fixture, &scratch);
 
+    if std::env::var_os("RH_SPINEL_BUNDLE_COLLECT").is_some() {
+        panic!("spinel bundle collect: not bundled");
+    }
     let output = Command::new("make")
         .arg("spinel-test")
         .current_dir(&scratch)
@@ -511,6 +535,9 @@ fn identical_cli_emission_reuses_native_build_but_changed_ruby_rebuilds() {
         assert!(output.status.success(), "strict emit failed: {stderr}");
         stderr
     };
+    if std::env::var_os("RH_SPINEL_BUNDLE_COLLECT").is_some() {
+        panic!("spinel bundle collect: not bundled");
+    }
     let build = || {
         let output = Command::new("spin")
             .args(["build", "blog"])
