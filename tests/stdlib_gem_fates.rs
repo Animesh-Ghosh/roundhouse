@@ -11,7 +11,6 @@ fn qualified_standard_libraries_are_not_unknown_gems() {
         "date",
         "fileutils",
         "find",
-        "open3",
         "openssl",
         "pathname",
         "psych",
@@ -20,7 +19,6 @@ fn qualified_standard_libraries_are_not_unknown_gems() {
         "stringio",
         "strscan",
         "time",
-        "timeout",
         "tmpdir",
         "zlib",
     ].into_iter().filter(|gem| fate_of(gem) != GemFate::Stdlib).collect();
@@ -36,12 +34,14 @@ fn unqualified_standard_libraries_keep_the_previous_source_choice() {
         "forwardable",
         "getoptlong",
         "net-protocol",
+        "open3",
         "optparse",
         "pp",
         "prettyprint",
         "resolv",
         "shellwords",
         "tempfile",
+        "timeout",
         "weakref",
     ] {
         assert_eq!(fate_of(gem), GemFate::Unknown, "unqualified gem {gem}");
@@ -76,7 +76,7 @@ fn app(gem: &str, constant: &str, explicit: bool, transitive: bool) -> roundhous
 
 #[test]
 fn installed_stdlib_sources_stay_out_for_direct_and_sourced_dependencies() {
-    for (gem, constant) in [("pathname", "Pathname"), ("fileutils", "FileUtils"), ("timeout", "Timeout")] {
+    for (gem, constant) in [("pathname", "Pathname"), ("fileutils", "FileUtils")] {
         for transitive in [false, true] {
             let app = app(gem, constant, false, transitive);
             let lock = app.gem_lock.as_ref().unwrap();
@@ -101,4 +101,33 @@ fn unfamiliar_installed_gems_still_compile_from_source() {
     let app = app("widgets", "Widgets", false, false);
     assert!(app.gem_lock.as_ref().unwrap().is_source("widgets"));
     assert!(app.library_classes.iter().any(|c| c.name.0.as_str() == "Widgets"));
+}
+
+fn assert_previous_native_boundary(gem: &str, version: &str, expression: &str) {
+    use roundhouse::project::BuildTarget;
+    use std::path::Path;
+    assert_eq!(fate_of(gem), GemFate::Unknown);
+    let lock = format!("GEM\n  remote: https://rubygems.org/\n  specs:\n    {gem} ({version})\n\nDEPENDENCIES\n  {gem}\n");
+    let code = format!("require \"{gem}\"\nclass Probe\n  def self.value\n    {expression}\n  end\nend\n");
+    let files = HashMap::from([
+        (PathBuf::from("Gemfile.lock"), lock.into_bytes()),
+        (PathBuf::from("app/services/probe.rb"), code.into_bytes()),
+    ]);
+    let mut app = ingest_app_from_tree(files).expect("ingest locked program");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let (_, diagnostics) = roundhouse::emit::diagnostics::scope(|| {
+        roundhouse::project::target_files(&app, Path::new("."), BuildTarget::Spinel)
+    });
+    assert!(diagnostics.iter().any(|d| d.severity == roundhouse::diagnostic::Severity::Error
+        && d.message.contains("unknown gem") && d.message.contains(gem)), "{diagnostics:#?}");
+}
+
+#[test]
+fn timeout_keeps_the_unknown_gem_native_boundary() {
+    assert_previous_native_boundary("timeout", "0.4.3", "Timeout.timeout(0) { sleep(0.01); \"done\" }");
+}
+
+#[test]
+fn open3_keeps_the_unknown_gem_native_boundary() {
+    assert_previous_native_boundary("open3", "0.2.1", "Open3.capture2(\"cat\", { stdin_data: \"sample\" })[0]");
 }
