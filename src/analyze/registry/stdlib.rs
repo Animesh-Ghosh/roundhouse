@@ -1217,12 +1217,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("close", Ty::Untyped),
     ]);
     // The body typer admits only the explicit whole-message FINISH form.
-    let deflate = Ty::Class { id: ClassId(Symbol::from("Zlib::Deflate")), args: vec![].into() };
-    register_stdlib_class(classes, "Zlib::Deflate", &[("new", deflate)], &[
+    register_stdlib_class(classes, "Zlib::Deflate", &[("new", Ty::SelfInstance)], &[
         ("deflate", Ty::Str), ("close", Ty::Nil),
     ]);
-    let gzip_reader = Ty::Class { id: ClassId(Symbol::from("Zlib::GzipReader")), args: vec![].into() };
-    register_stdlib_class(classes, "Zlib::GzipReader", &[("new", gzip_reader)], &[
+    register_stdlib_class(classes, "Zlib::GzipReader", &[("new", Ty::SelfInstance)], &[
         // Only argument-free reads are admitted by the body typer.
         ("read", Ty::Str),
     ]);
