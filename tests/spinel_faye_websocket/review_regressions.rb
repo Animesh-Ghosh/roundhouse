@@ -47,6 +47,17 @@ failures = []
       raise "close during flush discarded accepted text or changed Faye order" unless expected.map { review_frame(peer) } == expected
     end
   },
+  "open_callback_close" => -> {
+    review_pair do |ws, owner, peer|
+      ws.on(:open) do |_|
+        ws.close
+        raise "send accepted after an immediate open-callback close" if ws.send("late")
+      end
+      ws.driver.set_fd(owner.fileno)
+      Tep::WebSocket::Connection.dispatch_open(ws.driver)
+      raise "open-callback close missing" unless review_frame(peer)[0] == 8
+    end
+  },
   "before_open_close" => -> {
     review_pair do |ws, owner, peer|
       ws.send("before")

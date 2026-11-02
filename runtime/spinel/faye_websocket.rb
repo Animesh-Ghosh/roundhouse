@@ -130,6 +130,7 @@ module Faye
         @driver.close(@close_code, @close_reason)
         return 0
       end
+      @send_lock.synchronize { @opening = false unless @close_requested }
       return 0 if @driver.closing?
       if @ping_interval > 0
         timer = Thread.new(@driver, @ping_interval) do |driver, interval|
