@@ -235,3 +235,17 @@ fn a_yield_inside_a_block_run_once_is_the_partials_yield() {
     let test = "require \"test_helper\"\n\nclass BoxedControllerTest < ActionDispatch::IntegrationTest\n  test \"boxed\" do\n    get article_url(articles(:one))\n    assert_select \"form section.boxed\", \"inside\"\n  end\nend\n";
     app().write("test/controllers/boxed_controller_test.rb", test).run_test("test/controllers/boxed_controller_test.rb").assert_passes();
 }
+
+/// A partial that reads its record only through `local_assigns[:article]`
+/// (or `local_assigns["article"]`) reads it: it doesn't carry the yield,
+/// and a block-less render passes the record (review, mod.rs:3825).
+#[test]
+fn a_partial_reading_its_record_through_local_assigns_keeps_it() {
+    for read in ["local_assigns[:article].title", "local_assigns[\"article\"].title"] {
+        let app = emit_and_run::real_blog()
+            .write("app/views/articles/_card.html.erb", &format!("<p class=\"card\"><%= {read} %></p><%= yield %>\n"))
+            .edit("app/views/articles/show.html.erb", "<% content_for :title, \"Showing article\" %>\n", "<% content_for :title, \"Showing article\" %>\n<%= render \"articles/card\", article: @article %>\n");
+        let test = "require \"test_helper\"\n\nclass CardControllerTest < ActionDispatch::IntegrationTest\n  test \"card\" do\n    article = articles(:one)\n    get article_url(article)\n    assert_select \"p.card\", article.title\n  end\nend\n";
+        app.write("test/controllers/card_controller_test.rb", test).run_test("test/controllers/card_controller_test.rb").assert_passes();
+    }
+}

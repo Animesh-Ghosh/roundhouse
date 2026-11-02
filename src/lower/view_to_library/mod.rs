@@ -3814,11 +3814,13 @@ pub(crate) fn yields_body(e: &Expr) -> bool {
 /// the record slot can carry the yielded markup.
 pub(crate) fn carries_yield(body: &Expr, record: &str) -> bool {
     fn reads(e: &Expr, name: &str) -> bool {
+        // `local_assigns[:name]` reads it too: this runs on the raw body,
+        // before `rewrite_local_assigns_to_locals`.
         let hit = match &*e.node {
             ExprNode::Var { name: n, .. } => n.as_str() == name,
             ExprNode::Send { recv: None, method, args, .. } => method.as_str() == name && args.is_empty(),
             _ => false,
-        };
+        } || local_assigns_key(e).is_some_and(|key| key == name);
         let mut found = hit;
         e.node.for_each_child(&mut |c| found = found || reads(c, name));
         found
