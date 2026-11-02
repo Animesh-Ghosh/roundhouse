@@ -156,9 +156,12 @@ pub fn apply_tag_builder_lowering(
     let app_stylesheet = app_defines_stylesheet_link_tag(app);
     // Not a helper module a class includes: in a view, Rails' helper
     // answers the helper's call (one defining it is `app_stylesheet`).
-    // A class method counts: a class body's bare call reaches it.
+    // A class method counts: a class body's bare call reaches it. A
+    // helper is an owner when an app module it includes defines it
+    // (`helpers_including`).
     let mut owns_stylesheet = classes_owning(app, registry, "stylesheet_link_tag", true);
     owns_stylesheet.retain(|c| !app.helper_modules.contains(c));
+    owns_stylesheet.extend(helpers_including(app, "stylesheet_link_tag"));
     super::for_each_owned_hook_body(app, &mut |owner, body| {
         let own_tag = owner.is_some_and(|c| owns_tag.contains(c));
         let own_stylesheet = app_stylesheet || owner.is_some_and(|c| owns_stylesheet.contains(c));
@@ -177,6 +180,39 @@ pub(crate) fn app_defines_stylesheet_link_tag(app: &App) -> bool {
         lc.methods.iter().any(|m| m.name == name && matches!(m.receiver, crate::dialect::MethodReceiver::Instance))
     });
     in_helper || app.view_visible_controller_methods.contains(&name)
+}
+
+/// The `app/helpers` modules that include, directly or through other app
+/// modules, a module defining an instance `method`: Ruby's lookup finds
+/// that one ahead of ActionView's. Read from the app's own declarations
+/// (the registry gives a helper module the view surface), instance
+/// methods only, not the helpers themselves.
+fn helpers_including(app: &App, method: &str) -> HashSet<ClassId> {
+    let name = Symbol::from(method);
+    let by_name: HashMap<&ClassId, &crate::dialect::LibraryClass> =
+        app.library_classes.iter().map(|lc| (&lc.name, lc)).collect();
+    let defines = |lc: &crate::dialect::LibraryClass| {
+        lc.methods.iter().any(|m| m.name == name && matches!(m.receiver, crate::dialect::MethodReceiver::Instance))
+    };
+    app.helper_modules
+        .iter()
+        .filter(|helper| {
+            let mut stack: Vec<&ClassId> = by_name.get(helper).map(|lc| lc.includes.iter().collect()).unwrap_or_default();
+            let mut seen = HashSet::default();
+            while let Some(c) = stack.pop() {
+                if !seen.insert(c) {
+                    continue;
+                }
+                let Some(lc) = by_name.get(c) else { continue };
+                if defines(lc) {
+                    return true;
+                }
+                stack.extend(lc.includes.iter());
+            }
+            false
+        })
+        .cloned()
+        .collect()
 }
 
 /// Classes whose bodies read a bare `method` (`tag`) as their own: APP
@@ -209,18 +245,22 @@ fn classes_owning(
         .collect();
     let tag = Symbol::from(method);
     let has_tag = |class: &ClassId| {
-        // Self, then app ancestors (includes and parents), each once.
-        let mut stack = vec![class];
+        // Self, then app ancestors (includes and parents), each once. A
+        // class method counts on the class and its parents only: an
+        // included module's `def self.…` isn't the includer's.
+        let mut stack = vec![(class, false)];
         let mut seen = HashSet::default();
-        while let Some(c) = stack.pop() {
+        while let Some((c, included)) = stack.pop() {
             if !app_classes.contains(c) || !seen.insert(c) {
                 continue;
             }
             let Some(info) = registry.get(c) else { continue };
-            if info.instance_methods.contains_key(&tag) || (class_side && info.class_methods.contains_key(&tag)) {
+            if info.instance_methods.contains_key(&tag)
+                || (class_side && !included && info.class_methods.contains_key(&tag))
+            {
                 return true;
             }
-            stack.extend(info.includes.iter().chain(info.parent.iter()));
+            stack.extend(info.includes.iter().map(|m| (m, true)).chain(info.parent.iter().map(|p| (p, included))));
         }
         false
     };

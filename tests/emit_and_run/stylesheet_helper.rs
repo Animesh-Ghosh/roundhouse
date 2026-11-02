@@ -148,3 +148,21 @@ fn class_side_stylesheet_link_tags_answer_only_class_side_calls() {
     let badge = std::fs::read_to_string(emitted.join("app/models/badge.rb")).unwrap();
     assert!(badge.contains("stylesheet_link_tag(\"theme\")") && !badge.contains("ViewHelpers.stylesheet_link_tag"), "{badge}");
 }
+
+/// A helper including an app module that defines `stylesheet_link_tag`
+/// calls that module's method, as Ruby's lookup does (review,
+/// tag_builder.rs:177).
+#[test]
+fn a_helper_including_a_module_with_its_own_stylesheet_link_tag_keeps_the_call() {
+    let (emitted, errors) = app(
+        "module ThemeHelper\n  include StylesheetOverride\n\n  def theme_stylesheet(name)\n    stylesheet_link_tag(name, data: { turbo_track: \"reload\" })\n  end\nend\n",
+    )
+    .write(
+        "app/models/stylesheet_override.rb",
+        "module StylesheetOverride\n  def stylesheet_link_tag(name, opts = {})\n    \"own:\" + name\n  end\nend\n",
+    )
+    .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let helper = std::fs::read_to_string(emitted.join("app/models/theme_helper.rb")).unwrap();
+    assert!(helper.contains("stylesheet_link_tag(name") && !helper.contains("ViewHelpers.stylesheet_link_tag"), "{helper}");
+}
