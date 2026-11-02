@@ -72,6 +72,8 @@ struct State {
     settings: Vec<Setting>,
     superclasses: HashMap<(String, String), String>,
     dead: Vec<(String, u32, u32)>,
+    quiet: Vec<(String, u32, u32)>,
+    namespaces: Vec<Vec<String>>,
 }
 
 thread_local! {
@@ -87,7 +89,10 @@ pub(super) fn prepare<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf]) {
         state.settings = host_settings(vfs, dir, &forwarders);
         state.superclasses = superclasses(vfs, dir, &forwarders, &state.settings);
     }
-    state.dead = dead_branches(vfs, dir, libs, &forwarders);
+    let settled = dead_branches(vfs, dir, libs, &forwarders);
+    state.dead = settled.dead;
+    state.quiet = settled.quiet;
+    state.namespaces = forwarders.iter().map(|f| f.path.clone()).collect();
     STATE.with(|s| *s.borrow_mut() = state);
 }
 
@@ -110,6 +115,72 @@ pub(super) fn folded_superclass(node: &Node<'_>) -> Option<Vec<String>> {
 /// The branches of the engines' `before_initialize` that boot does not take, by file path.
 pub(super) fn dead_spans() -> Vec<(String, u32, u32)> {
     STATE.with(|s| s.borrow().dead.clone())
+}
+
+/// How the initializer ledger should take a statement of an engine's
+/// class body that this file accounts for.
+pub(super) enum EngineStatement {
+    Consumed(&'static str),
+    Inert(&'static str),
+}
+
+/// An engine class body statement this file reads or settles: a block
+/// only a `rails` command runs, the declaration of a config namespace the
+/// engine copies onto a module, an initializer of load-hook mixins the
+/// ingest carries, or an initializer whose every branch boot does not take.
+pub(super) fn engine_statement(node: &Node<'_>, path: &str) -> Option<EngineStatement> {
+    let call = node.as_call_node();
+    if let Some(call) = &call
+        && call.receiver().is_none()
+        && call.block().is_some()
+        && matches!(constant_id_str(&call.name()).as_ref(), "rake_tasks" | "console" | "generators" | "runner")
+    {
+        return Some(EngineStatement::Inert("a block only a `rails` command (rake, console, generators, runner) runs, never the app"));
+    }
+    if declares_namespace(node) {
+        return Some(EngineStatement::Consumed("config namespace the engine copies onto a module (engine_config)"));
+    }
+    let call = call?;
+    if call.receiver().is_some() || constant_id_str(&call.name()) != "initializer" {
+        return None;
+    }
+    let body = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body());
+    if body.is_some_and(super::on_load_reopen::carries_all) {
+        return Some(EngineStatement::Consumed("load-hook mixins (on_load_reopen)"));
+    }
+    let start = node.location().start_offset() as u32;
+    let quiet = STATE.with(|s| {
+        s.borrow().quiet.iter().any(|(file, at, _)| *at == start && (file == path || file.ends_with(&format!("/{path}"))))
+    });
+    quiet.then_some(EngineStatement::Consumed("an initializer whose every branch boot does not take (engine_config)"))
+}
+
+/// `config.<ns> = ActiveSupport::OrderedOptions.new` (possibly `unless
+/// config.try(:<ns>)`) for a namespace a forwarder copies.
+fn declares_namespace(node: &Node<'_>) -> bool {
+    let call = if let Some(n) = node.as_unless_node() {
+        let stmts: Vec<Node<'_>> = n.statements().map(|s| s.body().iter().collect()).unwrap_or_default();
+        if n.else_clause().is_some() {
+            return false;
+        }
+        match stmts.as_slice() {
+            [only] => return declares_namespace(only),
+            _ => return false,
+        }
+    } else {
+        let Some(call) = node.as_call_node() else { return false };
+        call
+    };
+    let Some(attr) = constant_id_str(&call.name()).strip_suffix('=').map(str::to_string) else { return false };
+    let Some(mut path) = call.receiver().and_then(|r| config_chain(&r)) else { return false };
+    path.push(attr);
+    let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    let options = matches!(args.as_slice(), [value] if value.as_call_node().is_some_and(|c| {
+        constant_id_str(&c.name()) == "new"
+            && c.arguments().is_none()
+            && c.receiver().and_then(|r| constant_path_of(&r)).is_some_and(|p| p == ["ActiveSupport", "OrderedOptions"])
+    }));
+    options && STATE.with(|s| s.borrow().namespaces.iter().any(|ns| ns.starts_with(&path)))
 }
 
 /// Puts the host's settings at the head of the boot program; returns the
@@ -478,7 +549,13 @@ struct Boot<'a> {
     config: HashMap<Vec<String>, Val>,
     namespaces: &'a [Forwarder],
     queue_adapter: Val,
+    /// The host's `config.<key>` as an initializer's `app.config.<key>` reads it.
+    app_config: HashMap<String, Val>,
+    /// The name an `initializer` block gives the app (`do |app|`).
+    app: Option<String>,
     dead: Vec<(String, u32, u32)>,
+    /// Statements run that are not a settled `if`/`unless`.
+    effects: usize,
 }
 
 impl Boot<'_> {
@@ -524,6 +601,9 @@ impl Boot<'_> {
     }
 
     fn statement(&mut self, node: &Node<'_>) {
+        if node.as_if_node().is_none() && node.as_unless_node().is_none() {
+            self.effects += 1;
+        }
         if let Some(n) = node.as_if_node() {
             let then = n.statements().map(|s| s.as_node());
             let other = n.subsequent();
@@ -640,7 +720,31 @@ impl Boot<'_> {
         Val::Unknown
     }
 
+    /// `["api_only"]` for `app.config.api_only`, `app` the initializer's block parameter.
+    fn app_config_path(&self, node: &Node<'_>) -> Option<Vec<String>> {
+        fn chain(node: &Node<'_>, app: &str) -> Option<Vec<String>> {
+            if let Some(read) = node.as_local_variable_read_node() {
+                return (constant_id_str(&read.name()) == app).then(Vec::new);
+            }
+            let call = node.as_call_node()?;
+            if call.arguments().is_some() || call.block().is_some() {
+                return None;
+            }
+            let mut names = chain(&call.receiver()?, app)?;
+            names.push(constant_id_str(&call.name()).to_string());
+            Some(names)
+        }
+        let names = chain(node, self.app.as_deref()?)?;
+        (names.first().map(String::as_str) == Some("config")).then(|| names[1..].to_vec())
+    }
+
     fn value(&self, node: &Node<'_>) -> Val {
+        if let Some(path) = self.app_config_path(node) {
+            return match path.as_slice() {
+                [key] => self.app_config.get(key).cloned().unwrap_or(Val::Unknown),
+                _ => Val::Unknown,
+            };
+        }
         if let Some(p) = node.as_parentheses_node() {
             let stmts: Vec<Node<'_>> = p.body().and_then(|b| b.as_statements_node()).map(|s| s.body().iter().collect()).unwrap_or_default();
             return match stmts.as_slice() {
@@ -739,9 +843,56 @@ fn app_config_chain(node: &Node<'_>) -> Option<Vec<String>> {
     (constant_id_str(&app.name()) == "application" && rails == ["Rails"]).then(|| vec![constant_id_str(&call.name()).to_string()])
 }
 
-/// The spans of the branches each engine's `before_initialize` does not take.
-fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forwarders: &[Forwarder]) -> Vec<(String, u32, u32)> {
+/// The host's single-key `config.<key> = <literal>` writes, as boot has
+/// them once the environment file has loaded: the `Rails::Application`
+/// body, then `config/environments/production.rb`, over Rails' defaults
+/// for the keys an engine's initializer reads.
+fn host_app_config<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> HashMap<String, Val> {
+    let mut out: HashMap<String, Val> = HashMap::default();
+    out.insert("api_only".to_string(), Val::Bool(false));
+    for file in [APPLICATION, "config/environments/production.rb"] {
+        let Ok(source) = vfs.read(&dir.join(file)) else { continue };
+        let parsed = super::prism::parse_silent(&source);
+        struct Writes(Vec<(String, Val)>);
+        impl<'pr> ruby_prism::Visit<'pr> for Writes {
+            fn visit_call_node(&mut self, call: &ruby_prism::CallNode<'pr>) {
+                let name = constant_id_str(&call.name());
+                if let Some(key) = name.strip_suffix('=').filter(|k| !k.is_empty() && !k.ends_with(['=', '!', '<', '>']))
+                    && call.receiver().and_then(|r| config_chain(&r)).is_some_and(|p| p.is_empty())
+                {
+                    let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+                    self.0.push((key.to_string(), args.first().map(literal_val).unwrap_or(Val::Unknown)));
+                }
+                ruby_prism::visit_call_node(self, call);
+            }
+        }
+        let mut writes = Writes(Vec::new());
+        ruby_prism::Visit::visit(&mut writes, &parsed.node());
+        let mut seen: HashMap<String, Val> = HashMap::default();
+        for (key, value) in writes.0 {
+            // Not the last write alone: one under a condition may be the one that ran.
+            let merged = match seen.get(&key) {
+                Some(prev) if *prev != value => Val::Unknown,
+                _ => value,
+            };
+            seen.insert(key, merged);
+        }
+        out.extend(seen);
+    }
+    out
+}
+
+/// What each engine's boot blocks settle: the spans of the branches its
+/// `before_initialize` and `initializer` blocks do not take, and the
+/// `initializer` calls whose blocks run nothing at all.
+struct Settled {
+    dead: Vec<(String, u32, u32)>,
+    quiet: Vec<(String, u32, u32)>,
+}
+
+fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forwarders: &[Forwarder]) -> Settled {
     let queue_adapter = host_queue_adapter(vfs, dir);
+    let app_config = host_app_config(vfs, dir);
     let mut config: HashMap<Vec<String>, Val> = HashMap::default();
     if let Ok(source) = vfs.read(&dir.join(APPLICATION)) {
         let parsed = super::prism::parse_silent(&source);
@@ -762,14 +913,14 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
             }
         }
     }
-    let mut dead = Vec::new();
+    let mut settled = Settled { dead: Vec::new(), quiet: Vec::new() };
     for lib in libs {
         if !vfs.is_dir(lib) {
             continue;
         }
         for file in super::app::read_rb_files(vfs, lib).unwrap_or_default() {
             let Ok(source) = vfs.read(&file) else { continue };
-            if !contains(&source, b"Engine") || !contains(&source, b"before_initialize") {
+            if !contains(&source, b"Engine") || !(contains(&source, b"before_initialize") || contains(&source, b"initializer")) {
                 continue;
             }
             let lib_sources: Vec<Vec<u8>> = super::app::read_rb_files(vfs, lib).unwrap_or_default().iter().filter_map(|f| vfs.read(f).ok()).collect();
@@ -789,18 +940,46 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
                     config: config.clone(),
                     namespaces: forwarders,
                     queue_adapter: queue_adapter.clone(),
+                    app_config: app_config.clone(),
+                    app: None,
                     dead: Vec::new(),
+                    effects: 0,
                 };
                 for stmt in flatten_statements(body) {
                     if let Some(hook) = config_hook(&stmt, "before_initialize") {
+                        boot.app = None;
                         boot.statements(&hook);
+                    } else if let Some((app, hook)) = initializer_block(&stmt) {
+                        boot.app = app;
+                        let before = boot.effects;
+                        boot.statements(&hook);
+                        if boot.effects == before {
+                            let loc = stmt.location();
+                            settled.quiet.push((boot.file.clone(), loc.start_offset() as u32, loc.end_offset() as u32));
+                        }
                     }
                 }
-                dead.extend(boot.dead);
+                settled.dead.extend(boot.dead);
             }
         }
     }
-    dead
+    settled
+}
+
+/// `initializer "name" do |app| … end`: the block's app parameter and statements.
+fn initializer_block<'pr>(node: &Node<'pr>) -> Option<(Option<String>, Vec<Node<'pr>>)> {
+    let call = node.as_call_node()?;
+    if call.receiver().is_some() || constant_id_str(&call.name()) != "initializer" {
+        return None;
+    }
+    let block = call.block()?.as_block_node()?;
+    let app = block
+        .parameters()
+        .and_then(|p| p.as_block_parameters_node())
+        .and_then(|p| p.parameters())
+        .and_then(|p| p.requireds().iter().next())
+        .and_then(|p| p.as_required_parameter_node().map(|p| constant_id_str(&p.name()).to_string()));
+    Some((app, block.body().map(|b| flatten_statements(b)).unwrap_or_default()))
 }
 
 #[cfg(test)]

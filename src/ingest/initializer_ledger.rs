@@ -906,6 +906,11 @@ fn judge_all(
                 Verdict::Consumed("isolate_namespace (literal, admitted engine)")
             } else if let Some(reason) = inert_reason(&st.node, src) {
                 Verdict::Inert(reason)
+            } else if let Some(read) = super::engine_config::engine_statement(&st.node, path) {
+                match read {
+                    super::engine_config::EngineStatement::Consumed(reason) => Verdict::Consumed(reason),
+                    super::engine_config::EngineStatement::Inert(reason) => Verdict::Inert(reason),
+                }
             } else {
                 Verdict::Unconsumed
             }

@@ -184,6 +184,37 @@ pub(super) fn ingest_on_load_reopens(source: &[u8], file: &str, app: &mut App) {
     }
 }
 
+/// Whether every statement of `body` is an `ActiveSupport.on_load(:hook)`
+/// whose block holds only what this file carries: `include M` for a hook
+/// with a class, and `Const.extend M`, each of literal constants.
+pub(super) fn carries_all(body: Node<'_>) -> bool {
+    let statements = flatten_statements(body);
+    !statements.is_empty()
+        && statements.iter().all(|stmt| {
+            let Some(call) = stmt.as_call_node() else { return false };
+            if constant_id_str(&call.name()) != "on_load"
+                || call.receiver().and_then(|r| constant_path_of(&r)).is_none_or(|p| p != ["ActiveSupport"])
+            {
+                return false;
+            }
+            let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            let [hook] = args.as_slice() else { return false };
+            let Some(hook) = hook.as_symbol_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned()) else { return false };
+            let Some(inner) = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body()) else { return false };
+            flatten_statements(inner).iter().all(|stmt| {
+                let Some(call) = stmt.as_call_node() else { return false };
+                let literal_args = call.arguments().is_some_and(|a| {
+                    a.arguments().iter().next().is_some() && a.arguments().iter().all(|arg| constant_path_of(&arg).is_some())
+                });
+                let verb = constant_id_str(&call.name());
+                match call.receiver() {
+                    None => verb == "include" && hook_class(&hook).is_some() && literal_args,
+                    Some(r) => verb == "extend" && constant_path_of(&r).is_some() && literal_args,
+                }
+            })
+        })
+}
+
 /// `ActiveJob.extend Root` in a load hook's block: an extend of that
 /// constant, as a reopen of it would write it. (`Const.include M` is
 /// `external_include`'s.)
