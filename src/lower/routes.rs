@@ -641,10 +641,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     && short.iter().zip(long.iter()).all(|(a, b)| a == b)
             };
             let required_count = {
-                let mut p = base_params.clone();
                 let shortest = if trailing_optionals { variants.last() } else { variants.first() };
-                extract_path_params(shortest.unwrap(), &mut p);
-                p.len()
+                path_ordered_params(shortest.unwrap(), &base_params).len()
             };
             // Only the canonical variant carries the helper name; the
             // shorter alternates would otherwise register a duplicate
@@ -669,8 +667,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 .map(|(name, rx)| (name.as_str().to_string(), rx.clone()))
                 .collect();
             for (i, vpath) in variants.into_iter().enumerate() {
-                let mut params = base_params.clone();
-                extract_path_params(&vpath, &mut params);
+                let params = path_ordered_params(&vpath, &base_params);
                 let required_params = if i == 0 { required_count } else { params.len() };
                 // A shorter optional-group variant may not carry every
                 // constrained param — keep only the ones it captures.
@@ -896,13 +893,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 // nesting's params, so read the scope's off `ns_path` —
                 // they sit in FRONT, which is where `prefix_path` just
                 // put them.
-                let mut params: Vec<String> = Vec::new();
-                extract_path_params(&ctx.ns_path, &mut params);
-                params.retain(|p| !nested_params.iter().any(|q| q == p));
-                params.extend(nested_params);
-                if suffix.contains(":id") && !params.iter().any(|p| p == id_param) {
-                    params.push(id_param.to_string());
-                }
+                let params = path_ordered_params(&full_path, &nested_params);
                 // Inherited block-level `constraints(id: /.../) do …
                 // end` (propagated onto this `Resources` node at
                 // ingest) applies only to the actions whose path
@@ -1264,6 +1255,22 @@ fn expand_optional_paths(path: &str) -> Vec<String> {
     }
     out.extend(expand_optional_paths(&without));
     out
+}
+
+/// A route's helper parameters in the order its path reads them: Rails
+/// binds positional helper arguments to the path's dynamic segments left
+/// to right, so a scope's `:version_handle` in front of a nested
+/// `:fulfillment_order_id` is the FIRST argument. `known` are params the
+/// nesting contributed; any the path text does not show still count.
+fn path_ordered_params(path: &str, known: &[String]) -> Vec<String> {
+    let mut params = Vec::new();
+    extract_path_params(path, &mut params);
+    for k in known {
+        if !params.contains(k) {
+            params.push(k.clone());
+        }
+    }
+    params
 }
 
 /// Walk a Rails-shape path (`/posts/:id/edit`,
