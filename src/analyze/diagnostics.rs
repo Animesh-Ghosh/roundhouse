@@ -161,7 +161,10 @@ fn helper_stylesheet_link_tags(app: &App) -> Vec<Diagnostic> {
         expr.node.for_each_child(&mut |child| visit(child, out));
     }
     let mut out = Vec::new();
-    for lc in app.library_classes.iter().filter(|lc| app.helper_modules.contains(&lc.name)) {
+    // A helper including an app module with its own `stylesheet_link_tag`
+    // calls that one, which the lowering leaves as written.
+    let own = crate::lower::tag_builder::helpers_including(app, "stylesheet_link_tag");
+    for lc in app.library_classes.iter().filter(|lc| app.helper_modules.contains(&lc.name) && !own.contains(&lc.name)) {
         for method in &lc.methods {
             for default in method.params.iter().filter_map(|p| p.default.as_ref()) {
                 visit(default, &mut out);

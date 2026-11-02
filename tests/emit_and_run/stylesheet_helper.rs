@@ -166,3 +166,16 @@ fn a_helper_including_a_module_with_its_own_stylesheet_link_tag_keeps_the_call()
     let helper = std::fs::read_to_string(emitted.join("app/models/theme_helper.rb")).unwrap();
     assert!(helper.contains("stylesheet_link_tag(name") && !helper.contains("ViewHelpers.stylesheet_link_tag"), "{helper}");
 }
+
+/// The same helper is not refused for a shape the app's method takes
+/// (a Symbol name): the call is the app's (review, tag_builder.rs:164).
+#[test]
+fn a_helper_including_a_module_with_its_own_stylesheet_link_tag_is_not_refused() {
+    let errors = app("module ThemeHelper\n  include StylesheetOverride\n\n  def theme_stylesheet(name)\n    stylesheet_link_tag(:app)\n  end\nend\n")
+        .write(
+            "app/models/stylesheet_override.rb",
+            "module StylesheetOverride\n  def stylesheet_link_tag(name, opts = {})\n    \"own:\" + name.to_s\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(!errors.iter().any(|e| e.contains("stylesheet_link_tag")), "{errors:?}");
+}

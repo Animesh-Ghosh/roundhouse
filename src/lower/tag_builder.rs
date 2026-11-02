@@ -187,7 +187,7 @@ pub(crate) fn app_defines_stylesheet_link_tag(app: &App) -> bool {
 /// that one ahead of ActionView's. Read from the app's own declarations
 /// (the registry gives a helper module the view surface), instance
 /// methods only, not the helpers themselves.
-fn helpers_including(app: &App, method: &str) -> HashSet<ClassId> {
+pub(crate) fn helpers_including(app: &App, method: &str) -> HashSet<ClassId> {
     let name = Symbol::from(method);
     let by_name: HashMap<&ClassId, &crate::dialect::LibraryClass> =
         app.library_classes.iter().map(|lc| (&lc.name, lc)).collect();
