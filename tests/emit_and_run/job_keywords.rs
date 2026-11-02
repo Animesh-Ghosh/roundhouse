@@ -5,7 +5,8 @@
 //! does, in one trailing Hash marked `_aj_ruby2_keywords` (activejob
 //! 8.1.3). An optional keyword the caller leaves at its default is not
 //! written, as Rails doesn't write a keyword the caller omits, and reads
-//! back as that default.
+//! back as that default; one no caller passes (`tag:`, whose default
+//! `'#{tag}'` must stay text) is never written.
 
 use super::emit_and_run;
 
@@ -20,8 +21,8 @@ end
 
 const NAMESPACED_JOB: &str = r#"module Gadgets
   class SyncJob < ApplicationJob
-    def perform(article_id:, note: nil)
-      puts "sync #{Article.find(article_id).title} #{note.inspect}"
+    def perform(article_id:, note: nil, tag: '#{tag}')
+      puts "sync #{Article.find(article_id).title} #{note.inspect} #{tag}"
     end
   end
 end
@@ -65,7 +66,7 @@ raise "arguments #{args.inspect}" unless args == expected
 # An omitted optional keyword is not written.
 args = JSON.parse(JobRegistry.payload_gadget_job(article, 3, "touched"))["arguments"]
 raise "default arguments #{args.inspect}" unless args[1] == { "count" => 3, "_aj_ruby2_keywords" => ["count"] }
-args = JSON.parse(JobRegistry.payload_gadgets__sync_job(article.id, nil))["arguments"]
+args = JSON.parse(JobRegistry.payload_gadgets__sync_job(article.id, nil, "ignored"))["arguments"]
 raise "sync arguments #{args.inspect}" unless args == [{ "article_id" => article.id, "_aj_ruby2_keywords" => ["article_id"] }]
 
 article.enqueue_gadget
@@ -96,8 +97,8 @@ fn a_keyword_job_round_trips_through_the_drain() {
         "gadget Keyword title 2 custom",
         "gadget Keyword title 3 touched",
         "gadget Keyword title 4 touched",
-        "sync Keyword title \"synced\"",
-        "sync Keyword title nil",
+        "sync Keyword title \"synced\" #{tag}",
+        "sync Keyword title nil #{tag}",
         "keyword jobs passed",
     ] {
         assert!(run.stdout.contains(line), "missing `{line}`:\n{}", run.stdout);

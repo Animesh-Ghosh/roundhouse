@@ -71,6 +71,10 @@ pub struct JobParam {
     /// reads back as it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
+    /// An optional keyword no call site passes: always its default, so
+    /// never written and read back as `default`; `codec` is unused.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub never_passed: bool,
 }
 
 /// Why a job keeps its Proc.
@@ -421,7 +425,7 @@ fn plan_params(
         if p.rest && matches!(codec, Codec::NullableRecord { .. }) {
             return Err(gap(Some(&p.name), "a rest parameter of nullable records".to_string()));
         }
-        out.push(JobParam { name: p.name.clone(), rest: p.rest, codec, keyword: false, default: None });
+        out.push(JobParam { name: p.name.clone(), rest: p.rest, codec, keyword: false, default: None, never_passed: false });
     }
     for p in keywords {
         let default = match &p.default {
@@ -453,10 +457,12 @@ fn plan_params(
                 },
             };
         }
-        let Some(codec) = codec else {
-            return Err(gap(Some(&p.name), "no call site passes it".to_string()));
-        };
-        out.push(JobParam { name: p.name.clone(), rest: false, codec, keyword: true, default });
+        // An optional keyword no call site passes is always its
+        // default: never written, and read back as the default. The
+        // codec is then unused.
+        let never_passed = codec.is_none();
+        let codec = codec.unwrap_or(Codec::Str);
+        out.push(JobParam { name: p.name.clone(), rest: false, codec, keyword: true, default, never_passed });
     }
     Ok(out)
 }
@@ -1282,7 +1288,7 @@ fn arguments_list(plan: &JobPlan) -> String {
         .filter(|p| !p.rest && !p.keyword)
         .map(|p| write_expr(&p.codec, p.name.as_str()))
         .collect();
-    let keywords: Vec<&JobParam> = plan.params.iter().filter(|p| p.keyword).collect();
+    let keywords: Vec<&JobParam> = plan.params.iter().filter(|p| p.keyword && !p.never_passed).collect();
     if !keywords.is_empty() {
         fixed.push(keywords_expr(&keywords));
     }
@@ -1406,7 +1412,12 @@ pub fn registry_source_with_broadcasts(
             }
             // The keywords, from the Hash after the positional
             // arguments, each passed back by name.
-            let keywords: Vec<&JobParam> = plan.params.iter().filter(|p| p.keyword).collect();
+            // A keyword no call site passes is never written: its
+            // default goes straight in.
+            for p in plan.params.iter().filter(|p| p.keyword && p.never_passed) {
+                call_args.push(format!("{}: {}", p.name.as_str(), p.default.as_deref().unwrap_or("nil")));
+            }
+            let keywords: Vec<&JobParam> = plan.params.iter().filter(|p| p.keyword && !p.never_passed).collect();
             if !keywords.is_empty() {
                 let names: Vec<String> = keywords.iter().map(|p| ruby_str(p.name.as_str())).collect();
                 // All optional: a call that passed none has no Hash.
@@ -1612,8 +1623,11 @@ pub(crate) fn fresh_name(base: &str, taken: &[&str]) -> String {
     name
 }
 
+/// A double-quoted Ruby String literal reading as `s`: `\`, `"` and
+/// `#` escaped, so a `#{`, `#@` or `#$` in it stays text and is never
+/// interpolated.
 fn ruby_str(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('#', "\\#"))
 }
 
 fn write_expr(codec: &Codec, v: &str) -> String {
