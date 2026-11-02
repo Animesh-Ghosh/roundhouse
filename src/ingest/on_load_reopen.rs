@@ -178,7 +178,84 @@ pub(super) fn ingest_on_load_reopens(source: &[u8], file: &str, app: &mut App) {
             }
         }
         carry_hook_includes(body, &hook, file, app);
+        if let Some(body) = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body()) {
+            carry_receiver_mixins(body, file, app);
+        }
     }
+}
+
+/// `ActiveJob.extend Root` in a load hook's block: an extend of that
+/// constant, as a reopen of it would write it. (`Const.include M` is
+/// `external_include`'s.)
+fn carry_receiver_mixins(body: Node<'_>, file: &str, app: &mut App) {
+    for stmt in flatten_statements(body) {
+        let Some(call) = stmt.as_call_node() else { continue };
+        let verb = constant_id_str(&call.name()).to_string();
+        if verb != "extend" {
+            continue;
+        }
+        let Some(target) = call.receiver().and_then(|r| constant_path_of(&r)) else { continue };
+        let mixins: Option<Vec<Vec<String>>> =
+            call.arguments().map(|args| args.arguments().iter().map(|a| constant_path_of(&a)).collect()).flatten();
+        let Some(mixins) = mixins.filter(|m| !m.is_empty()) else {
+            survey::record(&IngestError::Unsupported {
+                file: file.into(),
+                message: format!(
+                    "`{}` in a load hook is not carried: only literal modules mixed into a literal constant are",
+                    String::from_utf8_lossy(call.location().as_slice())
+                ),
+            });
+            continue;
+        };
+        let name = ClassId(Symbol::from(target.join("::").as_str()));
+        let at = call.location();
+        let span = crate::span::Span {
+            file: super::sources::file_id(file),
+            start: at.start_offset() as u32,
+            end: at.end_offset() as u32,
+        };
+        // Not a parsed reopen: a module body holding only `extend` ingests as no class at all.
+        let index = match app.library_classes.iter().position(|lc| lc.name == name) {
+            Some(i) => i,
+            None => {
+                let is_module = !(name.0.as_str().ends_with("::Base") || hook_classes().contains(&name.0.as_str()));
+                app.library_classes.push(crate::dialect::LibraryClass {
+                    name: name.clone(),
+                    is_module,
+                    parent: None,
+                    parent_span: span,
+                    includes: Vec::new(),
+                    include_spans: Vec::new(),
+                    methods: Vec::new(),
+                    nullable_columns: Vec::new(),
+                    origin: None,
+                    constants: Vec::new(),
+                    conditional_definitions: Vec::new(),
+                    unknown_calls: Vec::new(),
+                    class_ivar_initializers: Vec::new(),
+                });
+                app.library_classes.len() - 1
+            }
+        };
+        let lc = &mut app.library_classes[index];
+        for path in mixins {
+            let module = crate::expr::Expr::new(
+                span,
+                crate::expr::ExprNode::Const { path: path.iter().map(|p| Symbol::from(p.as_str())).collect() },
+            );
+            lc.unknown_calls.push(crate::expr::Expr::new(
+                span,
+                crate::expr::ExprNode::Send { recv: None, method: Symbol::from("extend"), args: vec![module], block: None, parenthesized: false },
+            ));
+        }
+    }
+}
+
+fn hook_classes() -> Vec<&'static str> {
+    ["action_dispatch_request", "action_dispatch_integration_test", "action_controller", "action_controller_test_case", "action_view", "action_mailer", "active_job", "active_record"]
+        .into_iter()
+        .filter_map(hook_class)
+        .collect()
 }
 
 /// The framework class a load hook hands its block, for the hooks whose
