@@ -159,6 +159,7 @@ pub(super) fn ingest_routes_with_engines(
         mount_scope_depth: Cell::new(0),
         mounted_engines: RefCell::new(HashSet::default()),
         mounted_rack_apps: RefCell::new(HashSet::default()),
+        strict: false,
     };
 
     // Every `Rails.application.routes.draw do … end` in the file: Rails
@@ -270,6 +271,8 @@ struct Ctx<'a> {
     /// in this supported slice: Rails route helper proxies are mount-specific.
     mounted_engines: RefCell<HashSet<String>>,
     mounted_rack_apps: RefCell<HashSet<String>>,
+    /// A mounted engine's route set: a statement the host walk drops quietly fails it instead.
+    strict: bool,
 }
 
 impl Ctx<'_> {
@@ -514,13 +517,8 @@ fn ingest_literal_mount(
             route_mount_gap(&draw, &engine.file, cx, "engine `direct` URL helpers and mounted helper proxies are not composed");
             return None;
         }
-        if !engine_route_body_is_plain(&body) {
-            route_mount_gap(
-                &draw,
-                &engine.file,
-                cx,
-                "engine routes support only literal root and HTTP shortcut declarations; dynamic targets, resource DSL and unmodeled wrappers are not composed",
-            );
+        if has_mount_block_call(&body, &["redirect"]) {
+            route_mount_gap(&draw, &engine.file, cx, "engine `redirect` targets are not composed");
             return None;
         }
         let engine_cx = Ctx {
@@ -537,8 +535,19 @@ fn ingest_literal_mount(
             mount_scope_depth: Cell::new(1),
             mounted_engines: RefCell::new(HashSet::default()),
             mounted_rack_apps: RefCell::new(HashSet::default()),
+            strict: true,
         };
-        match ingest_route_body(body, &engine.file, None, &engine_cx) {
+        // Not the survey's recovery: a route it records and skips would leave the engine's table short.
+        let mark = super::survey::mark();
+        let walked = ingest_route_body(body, &engine.file, None, &engine_cx);
+        let recorded = super::survey::first_since(mark);
+        super::survey::rewind(mark);
+        match walked {
+            Ok(_) if recorded.is_some() => {
+                let detail = format!("engine route set contains unsupported routing DSL ({})", recorded.unwrap_or_default());
+                route_mount_gap(&draw, &engine.file, cx, &detail);
+                return None;
+            }
             Ok(mut inner) => {
                 if !engine_cx.diagnostics.borrow().is_empty() {
                     route_mount_gap(&draw, &engine.file, cx, "engine route set contains nested or unsupported mounts");
@@ -546,8 +555,8 @@ fn ingest_literal_mount(
                 }
                 entries.append(&mut inner);
             }
-            Err(_) => {
-                route_mount_gap(&draw, &engine.file, cx, "engine route set contains unsupported routing DSL");
+            Err(err) => {
+                route_mount_gap(&draw, &engine.file, cx, &format!("engine route set contains unsupported routing DSL ({err})"));
                 return None;
             }
         }
@@ -831,153 +840,6 @@ fn unsupported_engine_route_guard(node: &Node<'_>) -> Option<&'static str> {
     finder.detail
 }
 
-/// The host route walker intentionally ignores some Ruby statement kinds
-/// and receiver-qualified calls while continuing through the route table.
-/// A mounted engine cannot use that recovery path: a skipped branch or a
-/// dynamic target such as `root to: redirect(root_path)` would change the
-/// engine's exported route set. This first slice admits only literal root
-/// and HTTP shortcut entries with path/controller targets the shared route
-/// parser preserves exactly.
-fn engine_route_body_is_plain(node: &Node<'_>) -> bool {
-    let Some(statements) = node.as_statements_node() else { return false };
-    statements.body().iter().all(|statement| {
-        let Some(call) = statement.as_call_node() else { return false };
-        if call.receiver().is_some() {
-            return false;
-        }
-        if call.block().is_some() {
-            return false;
-        }
-        let method = constant_id_str(&call.name());
-        if method == "root" {
-            return engine_root_call_is_literal(&call);
-        }
-        if http_method_from(method).is_some() {
-            return engine_explicit_call_is_literal(&call, method);
-        }
-        false
-    })
-}
-
-/// Accept a root route only when it has one literal controller/action target
-/// and, optionally, a literal helper alias.
-fn engine_root_call_is_literal(call: &ruby_prism::CallNode<'_>) -> bool {
-    let Some(arguments) = call.arguments() else { return false };
-    let mut target = None;
-    let mut as_seen = false;
-    for argument in arguments.arguments().iter() {
-        if let Some(value) = string_value(&argument) {
-            if target.replace(value).is_some() {
-                return false;
-            }
-            continue;
-        }
-        let Some(hash) = argument.as_keyword_hash_node() else { return false };
-        for element in hash.elements().iter() {
-            let Some(assoc) = element.as_assoc_node() else { return false };
-            let Some(key) = symbol_value(&assoc.key()) else { return false };
-            match key.as_str() {
-                "to" => {
-                    let Some(value) = string_value(&assoc.value()) else { return false };
-                    if target.replace(value).is_some() {
-                        return false;
-                    }
-                }
-                "as" => {
-                    if as_seen || symbol_or_string_value(&assoc.value()).is_none_or(|name| name.is_empty()) {
-                        return false;
-                    }
-                    as_seen = true;
-                }
-                _ => return false,
-            }
-        }
-    }
-    target.is_some_and(|value| valid_controller_action(&value))
-}
-
-/// Validate the literal path and target option shapes supported for HTTP
-/// shortcuts and `match`; dynamic values and unrecognized options fail closed.
-fn engine_explicit_call_is_literal(call: &ruby_prism::CallNode<'_>, method: &str) -> bool {
-    let Some(arguments) = call.arguments() else { return false };
-    let mut path_seen = false;
-    let mut target = false;
-    let mut controller = false;
-    let mut action = false;
-    let mut as_seen = false;
-    let mut via_seen = false;
-    for argument in arguments.arguments().iter() {
-        if string_value(&argument).is_some() || symbol_value(&argument).is_some() {
-            if path_seen {
-                return false;
-            }
-            path_seen = true;
-            continue;
-        }
-        let Some(hash) = argument.as_keyword_hash_node() else { return false };
-        for element in hash.elements().iter() {
-            let Some(assoc) = element.as_assoc_node() else { return false };
-            let key_node = assoc.key();
-            if string_value(&key_node).is_some() {
-                let Some(value) = string_value(&assoc.value()) else { return false };
-                if path_seen || !valid_controller_action(&value) {
-                    return false;
-                }
-                path_seen = true;
-                target = true;
-                continue;
-            }
-            let Some(key) = symbol_value(&key_node) else { return false };
-            match key.as_str() {
-                "to" => {
-                    let Some(value) = string_value(&assoc.value()) else { return false };
-                    if !valid_controller_action(&value) || target {
-                        return false;
-                    }
-                    target = true;
-                }
-                "controller" => {
-                    if controller || symbol_or_string_value(&assoc.value()).is_none_or(|name| name.is_empty()) {
-                        return false;
-                    }
-                    controller = true;
-                }
-                "action" => {
-                    if action || symbol_or_string_value(&assoc.value()).is_none_or(|name| name.is_empty()) {
-                        return false;
-                    }
-                    action = true;
-                }
-                "as" => {
-                    if as_seen || symbol_or_string_value(&assoc.value()).is_none_or(|name| name.is_empty()) {
-                        return false;
-                    }
-                    as_seen = true;
-                }
-                "via" if method == "match" => {
-                    if via_seen {
-                        return false;
-                    }
-                    via_seen = true;
-                }
-                _ => return false,
-            }
-        }
-    }
-    path_seen
-        && ((target && !controller && !action)
-            || (!target && controller && action))
-        && (method != "match" || match_via_names(call).is_ok())
-}
-
-/// Check the plain nonempty `controller#action` target shape consumed by the
-/// shared route parser.
-fn valid_controller_action(value: &str) -> bool {
-    value
-        .split_once('#')
-        .is_some_and(|(controller, action)| !controller.is_empty() && !action.is_empty())
-}
-
 struct Concern {
     /// The block parameter the options hash is bound to (`|options|`).
     param: Option<String>,
@@ -1214,6 +1076,9 @@ fn ingest_route_stmts<'pr>(
                     "receiver-qualified mount targets are not composed",
                 );
             }
+            if cx.strict {
+                return Err(receiver_block_route_stmt(&call, file));
+            }
             // `Rails.application.routes.draw` gets re-found as a nested
             // call when we walk a weird input; skip anything with an
             // explicit receiver here.
@@ -1315,6 +1180,9 @@ fn ingest_route_stmts<'pr>(
                 Err(err) => return Err(err),
             },
             Ok(Some(spec)) => entries.push(spec),
+            Ok(None) if cx.strict && (method == "root" || http_method_from(&method).is_some()) => {
+                return Err(IngestError::Unsupported { file: file.into(), message: format!("`{method}` route dropped from an engine's route set") });
+            }
             Ok(None) => {}
             Err(err) if super::survey::is_active() => super::survey::record(&err),
             Err(err) => return Err(err),
@@ -3726,16 +3594,13 @@ fn ingest_resources_route(
                             ),
                         });
                     };
-                    // A dynamic segment (`"categories/:category_id/parts"`),
-                    // a glob or an optional group adds route params the
-                    // flattener does not carry yet; refuse rather than
-                    // serve a path whose `:category_id` never reaches
-                    // `params`.
-                    if raw.contains([':', '*', '(']) {
+                    // A glob or an optional group adds a variant the flattener does not
+                    // expand for a resource; a plain `:name` segment is a param of each route.
+                    if raw.contains(['*', '(']) {
                         return Err(IngestError::Unsupported {
                             file: file.into(),
                             message: format!(
-                                "resources :{name_str} `path: {raw:?}` has a dynamic segment"
+                                "resources :{name_str} `path: {raw:?}` has a glob or optional segment"
                             ),
                         });
                     }

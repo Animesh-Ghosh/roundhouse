@@ -93,6 +93,46 @@ fn strict_transpile_composes_a_literal_isolated_engine_mount() {
     }
 }
 
+/// An engine's resource DSL composes as the host's does, including a
+/// `path:` with a dynamic segment; a statement the host walk would skip
+/// quietly fails the mount instead of shortening the engine's table.
+#[test]
+fn strict_transpile_composes_an_engine_resource_table_and_refuses_a_skipped_statement() {
+    let fixture = Fixture::new("resources");
+    let app = fixture.write_app(true);
+    std::fs::write(
+        app.join("vendor/catalog/config/routes.rb"),
+        "Catalog::Engine.routes.draw do\n  resources :products, only: [:index, :show] do\n    collection do\n      get :search\n    end\n  end\n  resources :products, only: :index, path: \":status/products\", as: :status_products\n  root to: \"products#index\"\nend\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("vendor/catalog/app/controllers/catalog/products_controller.rb"),
+        "module Catalog\n  class ProductsController < ActionController::Base\n    def index\n      render plain: \"products\"\n    end\n\n    def show\n      render plain: params[:id]\n    end\n\n    def search\n      render plain: \"search\"\n    end\n  end\nend\n",
+    )
+    .unwrap();
+    let out = fixture.0.join("ruby");
+    let result = transpile(&app, "ruby", &out, &[]);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
+    assert!(!stderr.contains("route mount"), "{stderr}");
+    let routes = std::fs::read_to_string(out.join("config/routes.rb")).unwrap();
+    for expected in ["/catalog/products/search", "/catalog/products/:id", "/catalog/:status/products"] {
+        assert!(routes.contains(expected), "{expected} missing: {routes}");
+    }
+
+    std::fs::write(
+        app.join("vendor/catalog/config/routes.rb"),
+        "Catalog::Engine.routes.draw do\n  get \"/products\", to: \"products#index\"\n  Catalog.extra_routes\nend\n",
+    )
+    .unwrap();
+    let out = fixture.0.join("ruby-skipped");
+    let result = transpile(&app, "ruby", &out, &[]);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!result.status.success(), "{stderr}");
+    assert!(stderr.contains("error[unsupported]: route mount"), "{stderr}");
+    assert!(!out.exists(), "strict mode wrote partial output");
+}
+
 /// A proven Rack endpoint has a serving adapter on the Ruby-shaped outputs.
 /// Other outputs must refuse it instead of dropping its route.
 #[test]

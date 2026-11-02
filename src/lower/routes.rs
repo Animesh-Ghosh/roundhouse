@@ -903,6 +903,11 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 if suffix.contains(":id") && !params.iter().any(|p| p == id_param) {
                     params.push(id_param.to_string());
                 }
+                // Not only the nesting's and the scope's: a resource's own `path: ":status/jobs"` binds one too, in path order as Rails' helper takes them.
+                let mut ordered: Vec<String> = Vec::new();
+                extract_path_params(&full_path, &mut ordered);
+                ordered.extend(params.into_iter().filter(|p| !ordered.contains(p)).collect::<Vec<_>>());
+                let params = ordered;
                 // Inherited block-level `constraints(id: /.../) do …
                 // end` (propagated onto this `Resources` node at
                 // ingest) applies only to the actions whose path

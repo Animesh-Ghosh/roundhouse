@@ -20587,6 +20587,8 @@ mod on_load_extend;
 mod engine_config;
 #[path = "emit_and_run/engine_boot_branches.rs"]
 mod engine_boot_branches;
+#[path = "emit_and_run/resource_dynamic_path.rs"]
+mod resource_dynamic_path;
 #[path = "emit_and_run/route_helper_segment_escape.rs"]
 mod route_helper_segment_escape;
 #[path = "emit_and_run/solid_queue_clear.rs"]
