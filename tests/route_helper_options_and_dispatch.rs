@@ -57,6 +57,11 @@ const COLLECTOR: &str = r#"class CsvOutputCollector
         UrlHelpers.export_download_url(**options)
       end
     end
+
+    def plain_download_url(token:, filename:, host:)
+      options = { token: token, filename: filename, host: host }
+      UrlHelpers.export_download_url(**options)
+    end
   end
 end
 "#;
@@ -92,6 +97,7 @@ Order = Struct.new(:token, :secret_token)
 puts RefundThing.new.go(Order.new("tok", "sec"))
 puts CsvOutputCollector.download_url(token: "t1", filename: "a.csv", host: "x.test")
 puts CsvOutputCollector.download_url(token: "t1", filename: "f.csv", host: "x.test", origin: "o9")
+puts CsvOutputCollector.plain_download_url(token: "t2", filename: "b.csv", host: "x.test")
 class Probe
   include CheckoutUrlHelpers
 end
@@ -110,6 +116,8 @@ fn library_module_route_helper_options_and_splat_render_as_rails_does() {
             "/7/orders/tok/authenticate?key=sec",
             "https://x.test/files/t1/a.csv/download",
             "https://x.test/files/t1/o9/f.csv/download",
+            // No `protocol:` in the hash: the scheme is the default one.
+            "http://x.test/files/t2/b.csv/download",
             "/7/checkouts/tk/processing?a=1&b=2",
             "/7/checkouts/tk/processing#top",
         ],

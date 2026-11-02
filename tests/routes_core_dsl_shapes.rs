@@ -93,9 +93,8 @@ fn a_scope_in_a_collection_goes_after_the_resource_segment() {
 
 #[test]
 fn an_endpoint_the_router_cannot_run_keeps_its_helper_and_is_not_dispatched() {
-    let app = app_with(
-        "  get \"/b\", to: redirect { |_p, req| req.original_url }, as: :blk\n  get \"/c\", to: ->(env) { [200, {}, []] }, as: :lam\n  get \"/ok\", to: \"c#ok\", as: :ok\n",
-    );
+    const BODY: &str = "  get \"/b\", to: redirect { |_p, req| req.original_url }, as: :blk\n  get \"/c\", to: ->(env) { [200, {}, []] }, as: :lam\n  get \"/ok\", to: \"c#ok\", as: :ok\n";
+    let app = app_with(BODY);
     let helpers = named(&app);
     for name in ["blk", "lam", "ok"] {
         helper(&helpers, name);
@@ -106,6 +105,21 @@ fn an_endpoint_the_router_cannot_run_keeps_its_helper_and_is_not_dispatched() {
     );
     let routes = dispatched(&app);
     assert_eq!(routes.len(), 1, "only `/ok` is served: {routes:?}");
+    // One error per refused route, located at the route call itself.
+    let src = format!("Rails.application.routes.draw do\n{BODY}\nend\n");
+    let located: Vec<&str> = app
+        .routes
+        .diagnostics
+        .iter()
+        .map(|d| &src[d.span.start as usize..d.span.end as usize])
+        .collect();
+    assert_eq!(
+        located,
+        [
+            "get \"/b\", to: redirect { |_p, req| req.original_url }, as: :blk",
+            "get \"/c\", to: ->(env) { [200, {}, []] }, as: :lam",
+        ]
+    );
 }
 
 #[test]

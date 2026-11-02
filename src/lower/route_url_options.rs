@@ -512,8 +512,26 @@ pub(crate) fn rewrite_node(expr: &mut Expr, helpers: &crate::det::HashSet<String
     // we accept only the first.
     // Without one, the scheme is the request's, as Rails' `url_for`
     // takes it — `Rails.application.protocol` carries its own `://`.
+    // A value read off a `**` hash (`options[:protocol]`) is nil where
+    // the hash lacks the key, which Ruby's `**` would not have passed at
+    // all: it then falls back as an omitted keyword does.
     let mut parts: Vec<InterpPart> = Vec::new();
     match protocol {
+        Some(p) if hash_read(&p) => parts.push(InterpPart::Expr {
+            expr: nil_or(
+                p.clone(),
+                crate::lower::view_to_library::rails_application_call("protocol"),
+                Expr::new(
+                    span,
+                    ExprNode::StringInterp {
+                        parts: vec![
+                            InterpPart::Expr { expr: p },
+                            InterpPart::Text { value: "://".to_string() },
+                        ],
+                    },
+                ),
+            ),
+        }),
         Some(p) => {
             parts.push(InterpPart::Expr { expr: p });
             parts.push(InterpPart::Text { value: "://".to_string() });
@@ -522,10 +540,34 @@ pub(crate) fn rewrite_node(expr: &mut Expr, helpers: &crate::det::HashSet<String
             expr: crate::lower::view_to_library::rails_application_call("protocol"),
         }),
     }
+    let host = if hash_read(&host) {
+        nil_or(host.clone(), crate::lower::view_to_library::rails_application_call("domain"), host)
+    } else {
+        host
+    };
     parts.push(InterpPart::Expr { expr: host });
     parts.push(InterpPart::Expr { expr: path_call });
     *expr.node = ExprNode::StringInterp { parts };
     expr.ty = Some(crate::ty::Ty::Str);
+}
+
+/// `h[:key]`: a read that is nil where the hash lacks the key.
+fn hash_read(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Send { recv: Some(_), method, args, block: None, .. }
+        if method.as_str() == "[]"
+            && matches!(args.as_slice(), [k] if matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { .. } })))
+}
+
+/// `value.nil? ? fallback : present`.
+fn nil_or(value: Expr, fallback: Expr, present: Expr) -> Expr {
+    let span = value.span;
+    let cond = Expr::new(
+        span,
+        ExprNode::Send { recv: Some(value), method: Symbol::from("nil?"), args: vec![], block: None, parenthesized: false },
+    );
+    let mut out = Expr::new(span, ExprNode::If { cond, then_branch: fallback, else_branch: present });
+    out.ty = Some(crate::ty::Ty::Str);
+    out
 }
 
 /// `x_path(size: :small)` → `x_path(size: "small")`. A query value

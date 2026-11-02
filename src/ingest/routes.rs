@@ -437,18 +437,9 @@ fn refused_route_diagnostics(entries: &[RouteSpec], source: &[u8], file: &str) -
         if !seen.insert((verb.clone(), route.path.clone())) {
             continue;
         }
+        // An endpoint written in Ruby is refused at its call
+        // (`refuse_unmodeled_endpoint`), where ingest has its location.
         if param == crate::lower::routes::ENDPOINT_REFUSAL {
-            // An endpoint written in Ruby: `rx` is its kind.
-            out.push(Diagnostic::unsupported(
-                Span { file: super::sources::file_id(file), start: 0, end: 0 },
-                None,
-                "route endpoint",
-                format!(
-                    "{verb} {} is not dispatched: its endpoint is a {rx}, which the router cannot \
-                     run; its URL helper is still generated",
-                    route.path
-                ),
-            ));
             continue;
         }
         let needle = format!("/{rx}/");
@@ -507,6 +498,34 @@ fn note_required_format(
         file: file.into(),
         message: format!("route scope option: {detail}"),
     });
+}
+
+/// A route whose endpoint is Ruby the router cannot run (a lambda, a proc,
+/// a `redirect { … }` block): located at the route call. The route keeps
+/// its URL helper; a request for it is not served.
+fn refuse_unmodeled_endpoint(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    cx: &Ctx<'_>,
+    method: &HttpMethod,
+    path: &str,
+    kind: &str,
+) {
+    let verb = format!("{method:?}").to_uppercase();
+    let location = call.location();
+    cx.diagnostics.borrow_mut().push(Diagnostic::unsupported(
+        Span {
+            file: super::sources::file_id(file),
+            start: location.start_offset() as u32,
+            end: location.end_offset() as u32,
+        },
+        None,
+        "route endpoint",
+        format!(
+            "{verb} {path} is not dispatched: its endpoint is a {kind}, which the router cannot \
+             run; its URL helper is still generated"
+        ),
+    ));
 }
 
 /// Attach a located unsupported-mount diagnostic and the matching survey
@@ -3759,9 +3778,8 @@ fn ingest_explicit_route(
         // gap by name (a drop nobody can see is how #82's `root to:
         // redirect(...)` went unnoticed). A route without a path has no
         // helper to keep and stays dropped, with the same ledger line.
-        // The located diagnostic comes from `refused_route_diagnostics`,
-        // once per verb and path; only a path-less route has no helper to
-        // keep and is recorded here.
+        // The located diagnostic is the route call's; a path-less route
+        // has no helper to keep and is only recorded.
         if path.is_none() {
             super::survey::record(&IngestError::Unsupported {
                 file: file.into(),
@@ -3769,6 +3787,7 @@ fn ingest_explicit_route(
             });
         }
         let Some(path) = path else { return Ok(None) };
+        refuse_unmodeled_endpoint(call, file, cx, &method, &path, kind);
         return Ok(Some(RouteSpec::Explicit {
             method,
             path,
@@ -3980,6 +3999,7 @@ fn ingest_root_route(
         // `root to: ->(env) { … }`: no controller action to dispatch, but
         // Rails still names it `root`, so the helper is kept (see
         // [`UNMODELED_ENDPOINT_CONTROLLER`]).
+        refuse_unmodeled_endpoint(call, file, cx, &HttpMethod::Get, "/", kind);
         return Ok(Some(RouteSpec::Explicit {
             method: HttpMethod::Get,
             path: "/".to_string(),

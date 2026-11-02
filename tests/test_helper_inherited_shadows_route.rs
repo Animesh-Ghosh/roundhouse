@@ -68,3 +68,54 @@ fn a_test_calls_an_included_modules_url_helper() {
         .run_test("test/models/included_helper_test.rb");
     run.assert_passes();
 }
+
+const INHERITED_INCLUDE: &str = r##"require "test_helper"
+require "support/helpers/link_helper"
+
+class IncludingParentTest < ActiveSupport::TestCase
+  include LinkHelper
+end
+
+class IncludingChildTest < IncludingParentTest
+  test "a parent's included module answers the subclass, not the route" do
+    assert_equal "module-helper:4", article_url(4)
+  end
+end
+"##;
+
+/// The parent's helper can come from a module the parent includes.
+#[test]
+fn a_subclass_calls_a_url_helper_its_parent_includes() {
+    let run = emit_and_run::real_blog()
+        .write("roundhouse.yml", "test_paths:\n  - test/support/helpers\n  - test/models\n")
+        .write("test/support/helpers/link_helper.rb", HELPER)
+        .write("test/models/including_test.rb", INHERITED_INCLUDE)
+        .run_test("test/models/including_child_test.rb");
+    run.assert_passes();
+}
+
+const CLASS_METHOD_PARENT: &str = r##"require "test_helper"
+
+class ClassUrlParentTest < ActionDispatch::IntegrationTest
+  def self.article_url(id)
+    "class-method:#{id}"
+  end
+end
+
+class ClassUrlChildTest < ClassUrlParentTest
+  test "a parent's class method does not answer a bare instance call" do
+    assert_equal "http://www.example.com/articles/5", article_url(5)
+  end
+end
+"##;
+
+/// A parent's `def self.article_url` cannot answer the subclass's bare
+/// instance call, so that call stays the route helper.
+#[test]
+fn a_parents_class_method_does_not_shadow_the_route_helper() {
+    let run = emit_and_run::real_blog()
+        .write("roundhouse.yml", "test_paths:\n  - test/models\n")
+        .write("test/models/class_url_test.rb", CLASS_METHOD_PARENT)
+        .run_test("test/models/class_url_child_test.rb");
+    run.assert_passes();
+}

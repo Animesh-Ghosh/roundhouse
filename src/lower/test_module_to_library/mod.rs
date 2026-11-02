@@ -795,8 +795,8 @@ fn collect_self_setter_ivars(body: &Expr, out: &mut HashMap<Symbol, Ty>) {
     }
 }
 
-/// The helper methods the test modules above `tm` define. A test class
-/// inherits its parent's `foo_url` helper, so a call to it in a subclass
+/// The instance methods the test modules above `tm` define or include.
+/// A test class inherits its parent's `foo_url` helper, so a call to it in a subclass
 /// is that helper, not the route helper of the same name.
 fn ancestor_helper_names(tm: &TestModule, modules: &[TestModule]) -> Vec<Symbol> {
     let mut names = Vec::new();
@@ -808,7 +808,16 @@ fn ancestor_helper_names(tm: &TestModule, modules: &[TestModule]) -> Vec<Symbol>
         }
         seen.push(parent);
         let Some(found) = modules.iter().find(|m| &m.name == parent) else { break };
-        names.extend(found.helpers.iter().map(|h| h.name.clone()));
+        // Instance methods only, its own and its included modules', as
+        // `TestModule::defines_instance_method` reads them.
+        names.extend(
+            found
+                .helpers
+                .iter()
+                .filter(|h| h.receiver == MethodReceiver::Instance)
+                .map(|h| h.name.clone())
+                .chain(found.included_module_methods().cloned()),
+        );
         next = found.parent.as_ref();
     }
     names

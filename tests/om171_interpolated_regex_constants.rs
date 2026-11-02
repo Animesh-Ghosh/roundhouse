@@ -43,7 +43,8 @@ fn an_interpolated_regex_constant_with_the_u_flag_works_as_in_ruby() {
     std::fs::write(dir.join("handle.rb"), HANDLE).unwrap();
     let native = emit_and_run::ruby()
         .arg("-e")
-        .arg(format!("require {:?}\n{SCRIPT}", dir.join("handle.rb").display().to_string()))
+        // `ruby -e` reads its script in the locale's encoding, as `run_ruby` notes.
+        .arg(format!("# encoding: utf-8\nrequire {:?}\n{SCRIPT}", dir.join("handle.rb").display().to_string()))
         .output()
         .expect("ruby");
     let _ = std::fs::remove_dir_all(&dir);
