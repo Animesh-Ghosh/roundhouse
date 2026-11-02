@@ -795,7 +795,9 @@ fn emit_v2_test_compat(app: &App) -> EmittedFile {
     let mut seen = crate::det::HashSet::default();
     for route in &flat {
         let as_name = route.as_name.as_str();
-        if as_name.is_empty() {
+        // An unnamed route's `as_name` is an action-name fallback (an
+        // unmodeled endpoint's is `lambda endpoint`): no helper to shim.
+        if !route.named || as_name.is_empty() {
             continue;
         }
         // Path helper (no _path suffix on as_name; legacy adds Path).
@@ -808,7 +810,7 @@ fn emit_v2_test_compat(app: &App) -> EmittedFile {
         // Param signature follows the v2 helper's signature; recover
         // by counting path params via the route's dynamic segments.
         let dyn_count = route.path_params.len();
-        let (params, args) = match dyn_count {
+        let (mut params, mut args) = match dyn_count {
             0 => (String::new(), String::new()),
             1 => ("id int64".to_string(), "id".to_string()),
             2 => (
@@ -817,6 +819,13 @@ fn emit_v2_test_compat(app: &App) -> EmittedFile {
             ),
             _ => continue, // skip unusual arities
         };
+        // `scope format: true` makes the helper's format a required last
+        // param, outside `path_params`.
+        if route.format_required {
+            let sep = if params.is_empty() { "" } else { ", " };
+            params.push_str(&format!("{sep}format string"));
+            args.push_str(&format!("{sep}format"));
+        }
         s.push_str(&format!(
             "func {legacy}({params}) string {{ return {v2_name}({args}) }}\n"
         ));
