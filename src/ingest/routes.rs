@@ -3537,6 +3537,8 @@ fn ingest_explicit_route(
     let mut on_scope: Option<ResourceScope> = None;
     let mut constraints: IndexMap<Symbol, String> = IndexMap::new();
     let mut action_symbol = false;
+    // `get :token, path: "auth-token"`: the URL segment of a symbol verb.
+    let mut path_kwarg: Option<String> = None;
 
     for arg in args_node.arguments().iter() {
         if let Some(s) = rstring(&arg) {
@@ -3627,6 +3629,7 @@ fn ingest_explicit_route(
                     // `post "suggest", :action => "submit_suggestions"` —
                     // the action override for a resource-scoped shortcut.
                     "action" => action_kwarg = rname(value),
+                    "path" => path_kwarg = rstring(value),
                     // `match :graphql, controller: "one/graphql", action:
                     // :query, via: :post` — the target spelled as two
                     // options where `to: "one/graphql#query"` is one.
@@ -3704,6 +3707,17 @@ fn ingest_explicit_route(
     if let Some(format) = defaults_format {
         constraints.insert(Symbol::from("format"), format);
     }
+
+    // A symbol verb with `path:` keeps the symbol as its action and name
+    // (`post :render_x, path: "x"` is `render_x`) and takes the option as
+    // its URL segment; a string verb ignores the option, as Rails does.
+    if let (true, Some(segment), Some(symbol)) = (action_symbol, path_kwarg, path.clone()) {
+        action_kwarg = action_kwarg.or_else(|| Some(symbol.replace('-', "_")));
+        as_name = as_name.or_else(|| Some(Symbol::from(symbol.replace('-', "_").as_str())));
+        path = Some(format!("/{}", segment.trim_start_matches('/')));
+        action_symbol = false;
+    }
+
     // `scope controller: :x do get :y end` — the scope's controller is the
     // default for a verb that names no target of its own.
     if to.is_none() && controller_kwarg.is_none() {
