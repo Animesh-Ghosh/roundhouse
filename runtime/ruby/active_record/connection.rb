@@ -2413,8 +2413,7 @@ module ActiveRecord
     def clear_attribute_change(name)
       baseline = @__last_saved_attributes
       baseline = baseline.nil? ? {} : baseline.dup
-      value = attributes[name]
-      baseline[name] = value.is_a?(Array) ? value.dup : value
+      baseline[name] = _attributes_snapshot[name]
       @__last_saved_attributes = baseline
       @__touched_updated_at = nil if name == "updated_at"
       nil

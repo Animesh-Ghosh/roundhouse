@@ -1293,7 +1293,11 @@ fn every_runtime_method_body_concretely_typed() {
     // yield result in active_record/connection.rb. Its row is a typed
     // Hash[String, untyped]; the generic block result has no caller in
     // this probe. Existing methods have unchanged per-method counts.
-    const CEILING: usize = 920;
+    // MEASURED 922 on 2026-11-02 (on 920): partial writes' Dirty baseline
+    // copies each Array value of the untyped `attributes` Hash
+    // (`_attributes_snapshot`), so an in-place append reads as pending
+    // (+2 in active_record/connection.rb).
+    const CEILING: usize = 922;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

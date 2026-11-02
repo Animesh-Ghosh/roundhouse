@@ -543,7 +543,13 @@ fn untyped_subexpressions_baseline() {
     // parses a temporal column's stored text into the Time its reader
     // answers, reading the untyped `[]` value a second time (+1 in
     // active_record/connection.rb), as `_as_json_only` does.
-    const CEILING: usize = 1210;
+    // MEASURED 1215 on 2026-11-02 (on 1210): partial writes enlist a
+    // callback-free write (`update_column`, `update_columns`,
+    // `touch_written`) for rollback only. `_enlist_direct_write` reads the
+    // RBS-less `Db._txn_depth` / `_txn_records` as `_enlist_or_run` does
+    // (+3), and the COMMIT walk skips that kind and clears its rollback
+    // state (+2).
+    const CEILING: usize = 1215;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \
