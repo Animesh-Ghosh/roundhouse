@@ -404,6 +404,16 @@ pub(crate) fn field_ty(spec: &ParamsSpec, field: &Symbol) -> Ty {
     }
 }
 
+/// A scalar field's declared type when a merge or a `[]=` writes it a
+/// value other than a String; `None` for a field that holds only the
+/// request's String.
+pub(crate) fn written_scalar_ty(spec: &ParamsSpec, field: &Symbol) -> Option<Ty> {
+    if spec.nested_fields.contains_key(field) || spec.file_fields.contains(field) {
+        return None;
+    }
+    Some(field_ty(spec, field)).filter(|ty| *ty != Ty::Str)
+}
+
 /// A merged-only key's type on the Ruby family: what the merges write, or
 /// nil before one runs.
 fn merged_only_ty(spec: &ParamsSpec, field: &Symbol) -> Option<Ty> {
@@ -2442,7 +2452,7 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
                     ExprNode::Send {
                         recv: Some(Expr::new(
                             Span::synthetic(),
-                            ExprNode::Const { path: vec![owner.0.clone()] },
+                            ExprNode::Const { path: owner.const_path() },
                         )),
                         method: Symbol::from("new"),
                         args: Vec::new(),
@@ -2478,7 +2488,7 @@ fn synth_from_raw(spec: &ParamsSpec) -> MethodDef {
                 params_hash_ty())
         } else {
             with_ty(Expr::new(Span::synthetic(), ExprNode::Send {
-                recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![owner.0.clone()] })),
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: owner.const_path() })),
                 method: Symbol::from("__rh_scalar_values"),
                 args: vec![var(&sub, hash_ty.clone()), names],
                 block: None, parenthesized: true,
@@ -3380,7 +3390,7 @@ fn expect_present_args(params_ivar: Expr, resource: Expr, keys: &ExpectKeys) -> 
 fn build_from_raw_call(class_id: &ClassId, span: Span, arg: Expr) -> Expr {
     let class_const = Expr::new(
         span,
-        ExprNode::Const { path: vec![class_id.0.clone()] },
+        ExprNode::Const { path: class_id.const_path() },
     );
     // `@params` directly — the synthesized `from_raw` dives into the
     // nested resource key itself (`sub = params.fetch("<resource>", {})`),
