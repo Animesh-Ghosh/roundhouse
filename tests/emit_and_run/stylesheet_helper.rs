@@ -127,3 +127,24 @@ fn a_helper_included_by_a_class_owning_stylesheet_link_tag_is_still_rewritten() 
     let helper = std::fs::read_to_string(emitted.join("app/models/theme_helper.rb")).unwrap();
     assert!(helper.contains("ViewHelpers.stylesheet_link_tag"), "{helper}");
 }
+
+/// A helper module's own CLASS method named `stylesheet_link_tag` isn't
+/// what its instance methods' bare call reaches (review, tag_builder.rs:158),
+/// and a model's class-side `stylesheet_link_tag` is what its class
+/// methods' bare call reaches (review, tag_builder.rs:162).
+#[test]
+fn class_side_stylesheet_link_tags_answer_only_class_side_calls() {
+    let (emitted, errors) = app(
+        "module ThemeHelper\n  def self.stylesheet_link_tag(name)\n    name\n  end\n\n  def theme_stylesheet(name)\n    stylesheet_link_tag(name, data: { turbo_track: \"reload\" })\n  end\nend\n",
+    )
+    .write(
+        "app/models/badge.rb",
+        "class Badge\n  def self.stylesheet_link_tag(name)\n    \"own:\" + name\n  end\n\n  def self.styled\n    stylesheet_link_tag(\"theme\")\n  end\nend\n",
+    )
+    .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let helper = std::fs::read_to_string(emitted.join("app/models/theme_helper.rb")).unwrap();
+    assert!(helper.contains("ViewHelpers.stylesheet_link_tag(name"), "{helper}");
+    let badge = std::fs::read_to_string(emitted.join("app/models/badge.rb")).unwrap();
+    assert!(badge.contains("stylesheet_link_tag(\"theme\")") && !badge.contains("ViewHelpers.stylesheet_link_tag"), "{badge}");
+}

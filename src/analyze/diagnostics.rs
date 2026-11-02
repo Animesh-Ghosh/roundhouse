@@ -121,8 +121,7 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
 /// literal options hash. Nothing answers the bare call in a helper module.
 /// An app's own `stylesheet_link_tag` is a call like any other.
 fn helper_stylesheet_link_tags(app: &App) -> Vec<Diagnostic> {
-    let name = Symbol::from("stylesheet_link_tag");
-    if app.helper_method_index.contains_key(&name) || app.view_visible_controller_methods.contains(&name) {
+    if crate::lower::tag_builder::app_defines_stylesheet_link_tag(app) {
         return Vec::new();
     }
     fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {

@@ -149,16 +149,15 @@ pub fn apply_tag_builder_lowering(
     // answers it. A class with its own `tag` — `belongs_to :tag`, a
     // `tag` column, `attr_reader :tag`, a `def tag` — calls ITS reader
     // (`tag.title`), and rewriting that compiled to `"<title></title>"`.
-    let owns_tag = classes_owning(app, registry, "tag");
+    let owns_tag = classes_owning(app, registry, "tag", false);
     // An app's own `stylesheet_link_tag` (an app/helpers method or a
     // `helper_method`) is what Rails calls; it is left to the app. So is
     // a class's own, which its bare call reaches, found as `tag`'s is.
-    let stylesheet = Symbol::from("stylesheet_link_tag");
-    let app_stylesheet =
-        app.helper_method_index.contains_key(&stylesheet) || app.view_visible_controller_methods.contains(&stylesheet);
+    let app_stylesheet = app_defines_stylesheet_link_tag(app);
     // Not a helper module a class includes: in a view, Rails' helper
     // answers the helper's call (one defining it is `app_stylesheet`).
-    let mut owns_stylesheet = classes_owning(app, registry, "stylesheet_link_tag");
+    // A class method counts: a class body's bare call reaches it.
+    let mut owns_stylesheet = classes_owning(app, registry, "stylesheet_link_tag", true);
     owns_stylesheet.retain(|c| !app.helper_modules.contains(c));
     super::for_each_owned_hook_body(app, &mut |owner, body| {
         let own_tag = owner.is_some_and(|c| owns_tag.contains(c));
@@ -166,6 +165,18 @@ pub fn apply_tag_builder_lowering(
         rewrite(body, own_tag, own_stylesheet, &models, &helpers, &sti_stems, &mut diags)
     });
     diags
+}
+
+/// An app's own `stylesheet_link_tag` that a view's or helper's bare call
+/// reaches: an instance method of an `app/helpers` module, or a
+/// controller's `helper_method`. A helper's `def self.stylesheet_link_tag`
+/// is not one (`helper_method_index` holds both kinds).
+pub(crate) fn app_defines_stylesheet_link_tag(app: &App) -> bool {
+    let name = Symbol::from("stylesheet_link_tag");
+    let in_helper = app.library_classes.iter().filter(|lc| app.helper_modules.contains(&lc.name)).any(|lc| {
+        lc.methods.iter().any(|m| m.name == name && matches!(m.receiver, crate::dialect::MethodReceiver::Instance))
+    });
+    in_helper || app.view_visible_controller_methods.contains(&name)
 }
 
 /// Classes whose bodies read a bare `method` (`tag`) as their own: APP
@@ -183,7 +194,12 @@ pub fn apply_tag_builder_lowering(
 /// `include ActionView::Helpers::TagHelper` is dropped by the analyzer
 /// as a view-helper marker, so a model that really uses the builder
 /// keeps the rewrite.
-fn classes_owning(app: &App, registry: &HashMap<ClassId, ClassInfo>, method: &str) -> HashSet<ClassId> {
+fn classes_owning(
+    app: &App,
+    registry: &HashMap<ClassId, ClassInfo>,
+    method: &str,
+    class_side: bool,
+) -> HashSet<ClassId> {
     let app_classes: HashSet<&ClassId> = app
         .models
         .iter()
@@ -201,7 +217,7 @@ fn classes_owning(app: &App, registry: &HashMap<ClassId, ClassInfo>, method: &st
                 continue;
             }
             let Some(info) = registry.get(c) else { continue };
-            if info.instance_methods.contains_key(&tag) {
+            if info.instance_methods.contains_key(&tag) || (class_side && info.class_methods.contains_key(&tag)) {
                 return true;
             }
             stack.extend(info.includes.iter().chain(info.parent.iter()));
