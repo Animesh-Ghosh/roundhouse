@@ -106,14 +106,14 @@ module Faye
     end
 
     def opened(event)
-      @send_lock.synchronize { @opening = true }
+      close_before_open = false
+      @send_lock.synchronize { @opening = true; close_before_open = @close_requested }
       done = false
       until done
         batch = []
         @send_lock.synchronize do
           if @pending.empty?
             @opened = true
-            @opening = false
             done = true
           else
             batch = @pending
@@ -125,7 +125,8 @@ module Faye
           @send_lock.synchronize { @pending_bytes -= data.bytesize }
         end
       end
-      if @close_requested
+      if close_before_open
+        @send_lock.synchronize { @opening = false }
         @driver.close(@close_code, @close_reason)
         return 0
       end
@@ -140,6 +141,8 @@ module Faye
         @ping_threads.push(timer)
       end
       @on_open.handle_event(event)
+      @send_lock.synchronize { @opening = false }
+      @driver.close(@close_code, @close_reason) if @close_requested
       0
     end
 
@@ -160,7 +163,7 @@ module Faye
       result = false
       send_now = false
       @send_lock.synchronize do
-        unless @driver.closing? || @close_requested
+        unless @driver.closing? || (@close_requested && !@opening)
           if @opened
             send_now = true
           else
@@ -186,7 +189,7 @@ module Faye
           @close_requested = true
           @close_code = code
           @close_reason = reason
-          close_now = @opened || @opening
+          close_now = @opened && !@opening
         end
       end
       @driver.close(code, reason) if close_now

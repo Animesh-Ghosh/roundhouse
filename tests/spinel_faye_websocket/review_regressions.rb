@@ -30,6 +30,23 @@ failures = []
       raise "buffer ordering" unless [review_frame(peer), review_frame(peer)] == [[1, "before"], [1, "ready"]]
     end
   },
+  "close_during_flush" => -> {
+    review_pair do |ws, owner, peer|
+      ws.send("before")
+      ws.send("tail")
+      original = ws.driver.method(:text)
+      ws.driver.define_singleton_method(:text) do |data|
+        result = original.call(data)
+        ws.close(1000, "done") if data == "before"
+        result
+      end
+      ws.on(:open) { |_| ws.send("ready") }
+      ws.driver.set_fd(owner.fileno)
+      Tep::WebSocket::Connection.dispatch_open(ws.driver)
+      expected = [[1, "before"], [1, "tail"], [1, "ready"], [8, [1000].pack("n") + "done"]]
+      raise "close during flush discarded accepted text or changed Faye order" unless expected.map { review_frame(peer) } == expected
+    end
+  },
   "before_open_close" => -> {
     review_pair do |ws, owner, peer|
       ws.send("before")
