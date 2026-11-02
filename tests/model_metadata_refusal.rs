@@ -82,3 +82,28 @@ fn source_readers_keep_concern_dispatch() {
     )).write("app/models/widget.rb", "class Widget < ApplicationRecord\n include MetadataValues\nend\n")
         .run_ruby(SCRIPT).assert_passes();
 }
+
+#[test]
+fn extended_reader_keeps_main_json_response_path() {
+    app("Widget.columns_hash")
+        .write("config/application.rb", r#"require "rails"
+require "active_record/railtie"
+require "action_controller/railtie"
+class MetadataApplication < Rails::Application
+  config.load_defaults 8.1
+end
+"#)
+        .write("app/models/concerns/html_metadata.rb", r#"module HtmlMetadata
+  def columns_hash
+    {"custom" => "<>&"}
+  end
+end
+"#)
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n extend HtmlMetadata\nend\n")
+        .run_ruby(r#"
+require File.expand_path("app/controllers/widgets_controller", Dir.pwd)
+controller = WidgetsController.new
+controller.index
+raise "JSON response changed: #{controller.response_body}" unless controller.response_body == '{"custom":"<>&"}'
+"#).assert_passes();
+}
