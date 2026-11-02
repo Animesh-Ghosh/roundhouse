@@ -7,6 +7,8 @@
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "emit_and_run/controller_content_type_writer.rs"]
+mod controller_content_type_writer;
 #[path = "support/time_change_usec.rs"]
 mod time_change_usec_contract;
 #[path = "emit_and_run/time_change_usec.rs"]
@@ -28,6 +30,10 @@ mod session_cookie_key;
 mod inertia_runtime_props;
 #[path = "emit_and_run/form_builder_fields.rs"]
 mod form_builder_fields;
+#[path = "emit_and_run/stylesheet_source.rs"]
+mod stylesheet_source;
+#[path = "emit_and_run/time_tag.rs"]
+mod time_tag;
 #[path = "emit_and_run/multiparameter_params.rs"]
 mod multiparameter_params;
 #[path = "emit_and_run/session_options_key.rs"]
@@ -261,6 +267,10 @@ mod instance_extend;
 
 #[path = "support/class_configuration.rs"]
 mod class_configuration;
+#[path = "support/class_body_calls.rs"]
+mod class_body_calls_contract;
+#[path = "emit_and_run/class_body_calls.rs"]
+mod class_body_calls;
 #[path = "support/dry_initializer.rs"]
 mod dry_initializer;
 #[path = "support/runtime_block_signature.rs"]
@@ -415,6 +425,8 @@ mod defined_const_fold;
 mod job_payload;
 #[path = "emit_and_run/sidekiq_push.rs"]
 mod sidekiq_adapter;
+#[path = "emit_and_run/sidekiq_retry_on.rs"]
+mod sidekiq_retry_on;
 #[path = "emit_and_run/silent_lowerings.rs"]
 mod silent_lowerings;
 #[path = "emit_and_run/validates_options.rs"]
@@ -9091,12 +9103,12 @@ fn an_app_without_jobs_runs_its_tests() {
 fn the_job_queue_keeps_its_thread_safe_methods() {
     emit_and_run::real_blog()
         .run_ruby(
-            r#"%i[drain pending_count performed enqueue_locked record_performed_for_tests].each do |m|
+            r#"%i[drain pending_count performed enqueue_locked clear_queue record_performed_for_tests].each do |m|
   file = ActiveJob.method(m).source_location[0]
   raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/thread_state.rb")
 end
 # The serving drain wraps these two, and calls the locked ones above.
-%i[enqueue record_performed].each do |m|
+%i[enqueue_on record_performed].each do |m|
   file = ActiveJob.method(m).source_location[0]
   raise "ActiveJob.#{m} comes from #{file}" unless file.end_with?("runtime/active_job_cruby.rb")
 end
@@ -9402,7 +9414,7 @@ ActiveSupport.use_zone("Pacific/Auckland") do
   controller.process_action(:show)
   expected = '{"due_on":"2024-01-31","observed_at":"2024-02-01T12:47:19.123+13:00"}'
   raise controller.body.inspect unless controller.body == expected
-  raise controller.content_type.inspect unless controller.content_type == "application/json"
+  raise controller.content_type.inspect unless controller.content_type == "application/json; charset=utf-8"
   actual = ActionController::JsonRender.encode(entry.as_json)
   raise actual.inspect unless actual == expected
   entry.update!(due_on: nil)
@@ -20575,6 +20587,10 @@ mod page_caching;
 mod route_requirement_span;
 #[path = "emit_and_run/boot_program.rs"]
 mod boot_program;
+#[path = "emit_and_run/route_helper_segment_escape.rs"]
+mod route_helper_segment_escape;
+#[path = "emit_and_run/solid_queue_clear.rs"]
+mod solid_queue_clear;
 
 #[path = "emit_and_run/route_dot_span.rs"]
 mod route_dot_span;
@@ -20594,3 +20610,21 @@ mod record_slice;
 
 #[path = "emit_and_run/csrf_meta_tag_alias.rs"]
 mod csrf_meta_tag_alias;
+
+#[path = "emit_and_run/namespaced_class_consts.rs"]
+mod namespaced_class_consts;
+
+#[path = "emit_and_run/boolop_precedence.rs"]
+mod boolop_precedence;
+
+#[path = "support/full_forwarding.rs"]
+mod full_forwarding;
+
+#[test]
+fn full_forwarding_keeps_the_native_argument_contract() {
+    let run = emit_and_run::real_blog()
+        .write("app/services/packet_relay.rb", full_forwarding::SOURCE)
+        .run_ruby(full_forwarding::ASSERTIONS);
+    run.assert_passes();
+    assert_eq!(run.stdout, "full forwarding contract passed\n");
+}
