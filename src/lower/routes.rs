@@ -1073,7 +1073,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // scope and wrong for a `nested` one — campfire's bot API
             // is `/rooms/:room_id/:bot_key/messages`, not
             // `/:bot_key/rooms/:room_id/messages`.
-            if *nest && !child.parents.is_empty() {
+            if *nest && child.within.is_nested() && !child.parents.is_empty() {
                 let (nested_prefix, _) =
                     nest_path("", &child.parents, ResourceScope::Nested);
                 // `nest_path` slash-prefixes a bare path, so the empty
@@ -1108,7 +1108,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             if let Some(p) = path {
                 let segment = format!("/{}", p.trim_matches('/'));
                 if child.within.is_nested() {
-                    child.ns_path = prefix_path(&ctx.ns_path, &segment);
+                    child.ns_path = prefix_path(&child.ns_path, &segment);
                 } else {
                     child.inner_path = prefix_path(&ctx.inner_path, &segment);
                 }
