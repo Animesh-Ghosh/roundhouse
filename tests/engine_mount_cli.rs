@@ -538,6 +538,46 @@ fn an_accounted_engine_boot_admits_the_mount_and_an_unaccounted_one_is_named() {
     assert!(!out.exists(), "strict mode wrote partial output");
 }
 
+/// An engine library written the way gems are — a Zeitwerk loader, gem
+/// requires, `mattr_accessor`, concerns, error classes, a `Struct`, and a
+/// module named for its file outside the engine's namespace — runs nothing
+/// at load beyond declarations, so its mount composes. A reopen of a
+/// constant its file is not named for, or a railtie, keeps it refused.
+#[test]
+fn a_gem_shaped_engine_library_admits_the_mount_and_a_patch_or_railtie_does_not() {
+    let fixture = Fixture::new("gem-library");
+    let app = fixture.write_app(true);
+    let lock = std::fs::read_to_string(app.join("Gemfile.lock")).unwrap();
+    std::fs::write(app.join("Gemfile.lock"), lock.replace("DEPENDENCIES\n", "GEM\n  specs:\n    turbo-rails (2.0.0)\n\nDEPENDENCIES\n")).unwrap();
+    for (path, source) in [
+        ("vendor/catalog/lib/catalog.rb", "require \"zeitwerk\"\nrequire \"turbo-rails\"\nrequire \"catalog/engine\"\n\nloader = Zeitwerk::Loader.new\nloader.push_dir(__dir__)\nloader.ignore(\"#{__dir__}/catalog/engine.rb\")\nloader.setup\n\nmodule Catalog\n  mattr_accessor :adapters, default: Set.new\n  mattr_accessor :page_size, default: 25\nend\n"),
+        ("vendor/catalog/lib/catalog/errors.rb", "module Catalog\n  class Errors < StandardError; end\nend\n"),
+        ("vendor/catalog/lib/catalog/listing.rb", "module Catalog::Listing\n  extend ActiveSupport::Concern\n\n  included do\n    class_attribute :per_page, default: 10\n  end\n\n  class_methods do\n    def listed\n      []\n    end\n  end\nend\n"),
+        ("vendor/catalog/lib/catalog/entry.rb", "Catalog::Entry = Struct.new(:name, :price, keyword_init: true) do\n  def to_s\n    name\n  end\nend\n"),
+        ("vendor/catalog/lib/active_job/catalog_queries.rb", "module ActiveJob::CatalogQueries\n  include Enumerable\n  STATUSES = %i[ pending done ]\n  delegate :each, to: :to_a\n\n  STATUSES.each do |status|\n    define_method \"#{status}?\" do\n      true\n    end\n  end\nend\n"),
+    ] {
+        let file = app.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, source).unwrap();
+    }
+    let out = fixture.0.join("admitted");
+    let result = transpile(&app, "ruby", &out, &["--allow-unsupported"]);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!stderr.contains("route mount"), "{stderr}");
+
+    for (label, path, source) in [
+        ("patch", "vendor/catalog/lib/catalog/string_ext.rb", "class String\n  def shout\n    upcase\n  end\nend\n"),
+        ("railtie", "vendor/catalog/lib/catalog/railtie.rb", "module Catalog\n  class Railtie < Rails::Railtie\n  end\nend\n"),
+    ] {
+        std::fs::write(app.join(path), source).unwrap();
+        let out = fixture.0.join(label);
+        let result = transpile(&app, "ruby", &out, &[]);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("its lib/ runs code at load this mount does not check"), "{label}: {stderr}");
+        std::fs::remove_file(app.join(path)).unwrap();
+    }
+}
+
 /// The gem entrypoint executes before mounting. It may load only checked
 /// in-tree Ruby sources (and the Rails engine bootstrap); arbitrary top-level
 /// calls or alias-based initializer registration keep the mount unsupported.

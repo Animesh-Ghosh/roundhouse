@@ -62,7 +62,7 @@ pub(super) fn file_program(
 /// file-level branch's).
 /// `require "zeitwerk"`, `loader = Zeitwerk::Loader.new` (or `.for_gem`)
 /// and a call on such a local; `loaders` collects the locals.
-fn is_zeitwerk(stmt: &ruby_prism::Node<'_>, loaders: &mut Vec<String>) -> bool {
+pub(super) fn is_zeitwerk(stmt: &ruby_prism::Node<'_>, loaders: &mut Vec<String>) -> bool {
     // Not a callback (`on_setup`, `on_load`, `eager_load`): those run code the gem wrote, and stay its program's.
     const SETUP: &[&str] = &[
         "push_dir", "ignore", "collapse", "setup", "inflector=", "inflector", "inflect", "tag=", "enable_reloading",

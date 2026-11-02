@@ -640,7 +640,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     // Before the mounts are admitted: the ledger that admits one reads what this settles.
     super::engine_config::prepare(vfs, dir, &engine_config_libs);
     super::on_load_reopen::reset();
-    let (engine_routes, engine_refusals) = engine_route_sources(vfs, dir, &path_gems);
+    let (engine_routes, engine_refusals) = engine_route_sources(vfs, dir, &path_gems, lock.as_ref());
     let additional_test_paths = additional_test_paths(dir, &config)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
     let roots = app_roots(vfs, dir, &path_gems);
@@ -8991,6 +8991,7 @@ fn engine_route_sources<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
     path_gems: &[PathBuf],
+    lock: Option<&crate::gems::Lockfile>,
 ) -> (HashMap<String, EngineRouteSource>, HashMap<String, String>) {
     struct Declaration {
         engine_dir: PathBuf,
@@ -9070,7 +9071,7 @@ fn engine_route_sources<V: Vfs + ?Sized>(
         // engine. Admit only in-tree literal requires and declarations in
         // lib/; executable file/class-body calls can register initializers,
         // middleware, or route mutations outside the Engine class file.
-        if let Some(at) = first_unplain_library_statement(vfs, &engine_dir, &class_name) {
+        if let Some(at) = first_unplain_library_statement(vfs, &engine_dir, &class_name, lock) {
             refusals.insert(class_name, format!("its lib/ runs code at load this mount does not check: {at}"));
             continue;
         }
@@ -9293,36 +9294,296 @@ fn literal_isolated_namespace(class: &ruby_prism::ClassNode<'_>) -> Option<Strin
     Some(namespace)
 }
 
-/// The engine library's source-level loading surface must be plain before a
-/// route-only mount is admitted. Literal requires may target another Ruby
-/// file under this same `lib/` tree (which is checked in this walk), plus the
-/// Rails engine bootstrap that supplies `Rails::Engine`. At file level, only
-/// those requires are allowed. Inside the engine's namespace, files may
-/// define modules, classes without custom superclasses, instance methods,
-/// ordinary `self` methods, and scalar constants. Ruby load-hook methods,
-/// aliases, other calls, conditionals, and computed constants remain an
-/// explicit mount gap.
-/// The first statement of the engine's lib/ that [`plain_engine_library_sources`]
-/// does not admit, as `` `head` (path:line) ``; None when every one is.
-fn first_unplain_library_statement<V: Vfs + ?Sized>(vfs: &V, engine_dir: &Path, engine_name: &str) -> Option<String> {
-    if plain_engine_library_sources(vfs, engine_dir, engine_name) {
-        return None;
+/// What one engine's lib/ grammar needs beyond the statement at hand.
+struct LibGrammar<'a> {
+    lib_dir: &'a Path,
+    lib_files: &'a HashSet<PathBuf>,
+    engine_name: &'a str,
+    lock: Option<&'a crate::gems::Lockfile>,
+    /// Every class and module the lib/ declares, qualified.
+    declared: HashSet<String>,
+    /// The constant the file being checked is named for (Zeitwerk's
+    /// convention: `lib/active_job/jobs_relation.rb` is `ActiveJob::JobsRelation`).
+    owned: Option<String>,
+    /// Inside a class whose superclass is a framework class: a literal-argument
+    /// call in its body is that framework's class-level DSL.
+    framework_body: std::cell::Cell<bool>,
+}
+
+impl LibGrammar<'_> {
+    /// At or below the engine's owner, or the constant the file is named for.
+    fn belongs(&self, scope: &[String]) -> bool {
+        engine_library_scope_belongs_to_owner(scope, self.engine_name)
+            || self.owned.as_deref().is_some_and(|owned| {
+                let name = scope.join("::");
+                name == owned || name.strip_prefix(owned).is_some_and(|rest| rest.starts_with("::"))
+            })
     }
+
+    /// A namespace module on the way to [`Self::belongs`].
+    fn leads(&self, scope: &[String]) -> bool {
+        if engine_library_module_scope_is_admitted(scope, self.engine_name) || self.belongs(scope) {
+            return true;
+        }
+        let name = scope.join("::");
+        !name.is_empty()
+            && self.owned.as_deref().is_some_and(|owned| owned.strip_prefix(&name).is_some_and(|rest| rest.starts_with("::")))
+    }
+
+    /// A module whose inclusion runs no hook this check has not read: a
+    /// core mixin, `ActiveSupport::Concern`, or one the lib/ declares.
+    fn mixin(&self, node: &Node<'_>, scope: &[String]) -> bool {
+        let Some(path) = super::util::constant_path_of(node) else { return false };
+        let name = path.join("::");
+        if matches!(name.as_str(), "Enumerable" | "Comparable" | "ActiveSupport::Concern") {
+            return true;
+        }
+        (0..=scope.len()).rev().any(|depth| {
+            let candidate: Vec<String> = scope[..depth].iter().chain(path.iter()).cloned().collect();
+            self.declared.contains(&candidate.join("::"))
+        })
+    }
+
+    /// A superclass whose `inherited` hook is Ruby's or Rails' own, or one
+    /// the lib/ declares (whose own hooks this grammar refuses).
+    fn superclass(&self, node: &Node<'_>, scope: &[String]) -> bool {
+        let Some(path) = super::util::constant_path_of(node) else { return false };
+        if self.mixin(node, scope) {
+            return true;
+        }
+        let root = path.first().map(String::as_str).unwrap_or_default();
+        let name = path.join("::");
+        // Not a railtie, an engine or an application: their class bodies register boot (`initializer`).
+        if matches!(name.as_str(), "Rails::Railtie" | "Rails::Engine" | "Rails::Application") {
+            return false;
+        }
+        (path.len() == 1 && (name == "StandardError" || name == "Struct" || (name.ends_with("Error") && name != "Error")))
+            || matches!(
+                root,
+                "ActiveJob" | "ActiveRecord" | "ActiveModel" | "ActiveSupport" | "ActionController" | "ActionView"
+                    | "ActionMailer" | "ActionDispatch" | "ActionCable" | "Rails" | "I18n" | "IRB"
+            )
+    }
+}
+
+/// A declaration in a class or module body that defines methods and runs
+/// nothing else: `attr_*`, `mattr_*`/`cattr_*`/`thread_mattr_*` (with a
+/// literal, a literal-argument constructor or a duration default), a bare
+/// visibility change, and `include`/`extend` of a module [`LibGrammar::mixin`]
+/// admits.
+fn engine_library_macro(grammar: &LibGrammar<'_>, scope: &[String], call: &ruby_prism::CallNode<'_>) -> bool {
+    if call.receiver().is_some() || call.block().is_some() {
+        return false;
+    }
+    let name = super::util::constant_id_str(&call.name());
+    let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    let symbols = |args: &[Node<'_>]| !args.is_empty() && args.iter().all(|a| a.as_symbol_node().is_some());
+    match &*name {
+        "private" | "protected" | "public" | "module_function" => args.is_empty() || symbols(&args),
+        "attr_reader" | "attr_writer" | "attr_accessor" => {
+            !args.is_empty()
+                && args.iter().all(|a| {
+                    a.as_symbol_node().is_some()
+                        || a.as_splat_node().and_then(|s| s.expression()).is_some_and(|e| super::util::constant_path_of(&e).is_some())
+                })
+        }
+        "include" | "extend" => !args.is_empty() && args.iter().all(|a| grammar.mixin(a, scope)),
+        "alias_method" => args.len() == 2 && args.iter().all(|a| a.as_symbol_node().is_some() || a.as_string_node().is_some()),
+        "delegate" => {
+            let (keywords, names): (Vec<&Node<'_>>, Vec<&Node<'_>>) = args.iter().partition(|a| a.as_keyword_hash_node().is_some());
+            !names.is_empty()
+                && names.iter().all(|a| a.as_symbol_node().is_some())
+                && keywords.iter().all(|k| {
+                    k.as_keyword_hash_node().is_some_and(|hash| {
+                        hash.elements().iter().all(|e| {
+                            e.as_assoc_node().is_some_and(|pair| {
+                                matches!(super::util::symbol_value(&pair.key()).as_deref(), Some("to" | "prefix" | "allow_nil" | "private"))
+                                    && (engine_library_literal(&pair.value()) || super::util::constant_path_of(&pair.value()).is_some())
+                            })
+                        })
+                    })
+                })
+        }
+        "mattr_accessor" | "mattr_reader" | "mattr_writer" | "cattr_accessor" | "cattr_reader" | "cattr_writer"
+        | "thread_mattr_accessor" | "thread_mattr_reader" | "thread_cattr_accessor" | "class_attribute" => {
+            let (keywords, names): (Vec<&Node<'_>>, Vec<&Node<'_>>) = args.iter().partition(|a| a.as_keyword_hash_node().is_some());
+            names.iter().all(|a| a.as_symbol_node().is_some())
+                && !names.is_empty()
+                && keywords.iter().all(|k| {
+                    k.as_keyword_hash_node().is_some_and(|hash| {
+                        hash.elements().iter().all(|element| {
+                            element.as_assoc_node().is_some_and(|pair| {
+                                matches!(super::util::symbol_value(&pair.key()).as_deref(), Some("default" | "instance_accessor" | "instance_reader" | "instance_writer" | "instance_predicate"))
+                                    && engine_library_default(&pair.value())
+                            })
+                        })
+                    })
+                })
+        }
+        _ => false,
+    }
+}
+
+/// A value computed at load with no effect beyond the object: a literal, a
+/// constant's `new` of literal arguments, or a duration (`1.minute`).
+fn engine_library_default(node: &Node<'_>) -> bool {
+    let literal = |n: &Node<'_>| {
+        n.as_string_node().is_some()
+            || n.as_symbol_node().is_some()
+            || n.as_integer_node().is_some()
+            || n.as_float_node().is_some()
+            || n.as_true_node().is_some()
+            || n.as_false_node().is_some()
+            || n.as_nil_node().is_some()
+    };
+    if literal(node) {
+        return true;
+    }
+    let Some(call) = node.as_call_node() else { return false };
+    if call.block().is_some() {
+        return false;
+    }
+    let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    let name = super::util::constant_id_str(&call.name());
+    match call.receiver() {
+        Some(r) if &*name == "new" => super::util::constant_path_of(&r).is_some() && args.iter().all(|a| literal(a)),
+        Some(r) => {
+            r.as_integer_node().is_some()
+                && args.is_empty()
+                && matches!(&*name, "second" | "seconds" | "minute" | "minutes" | "hour" | "hours" | "day" | "days")
+        }
+        None => false,
+    }
+}
+
+/// A literal, or an Array or Hash of them (`%i[pending failed]`,
+/// `{ pending: :ready }`): a value that runs nothing.
+fn engine_library_literal(node: &Node<'_>) -> bool {
+    if let Some(array) = node.as_array_node() {
+        return array.elements().iter().all(|e| engine_library_literal(&e));
+    }
+    if let Some(hash) = node.as_hash_node() {
+        return hash.elements().iter().all(|e| {
+            e.as_assoc_node().is_some_and(|pair| engine_library_literal(&pair.key()) && engine_library_literal(&pair.value()))
+        });
+    }
+    node.as_string_node().is_some()
+        || node.as_symbol_node().is_some()
+        || node.as_integer_node().is_some()
+        || node.as_float_node().is_some()
+        || node.as_true_node().is_some()
+        || node.as_false_node().is_some()
+        || node.as_nil_node().is_some()
+}
+
+/// `Name = Struct.new(:a, :b, keyword_init: true) do … end`: a class built
+/// from literal member names, whose block is a class body this grammar
+/// reads like any other.
+fn engine_library_struct<V: Vfs + ?Sized>(
+    vfs: &V,
+    file: &Path,
+    grammar: &LibGrammar<'_>,
+    scope: &mut Vec<String>,
+    node: &Node<'_>,
+) -> bool {
+    let Some(call) = node.as_call_node() else { return false };
+    if super::util::constant_id_str(&call.name()) != "new"
+        || call.receiver().and_then(|r| super::util::constant_path_of(&r)).is_none_or(|p| p != ["Struct"])
+    {
+        return false;
+    }
+    let members = call.arguments().is_some_and(|a| {
+        a.arguments().iter().all(|arg| {
+            arg.as_symbol_node().is_some()
+                || arg.as_keyword_hash_node().is_some_and(|hash| {
+                    hash.elements().iter().all(|e| {
+                        e.as_assoc_node().is_some_and(|pair| {
+                            super::util::symbol_value(&pair.key()).as_deref() == Some("keyword_init")
+                                && (pair.value().as_true_node().is_some() || pair.value().as_false_node().is_some())
+                        })
+                    })
+                })
+        })
+    });
+    let body = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body());
+    members
+        && body.is_none_or(|body| {
+            super::util::flatten_statements(body)
+                .iter()
+                .all(|inner| plain_engine_library_statement(vfs, file, grammar, scope, inner, false, &mut Vec::new()))
+        })
+}
+
+/// `Const::LIST.each do |status| define_method … end`: a loop over a
+/// constant this lib/ declares, or a literal list, whose block only
+/// defines methods.
+fn engine_library_define_loop(grammar: &LibGrammar<'_>, scope: &[String], call: &ruby_prism::CallNode<'_>) -> bool {
+    if super::util::constant_id_str(&call.name()) != "each" || call.arguments().is_some() {
+        return false;
+    }
+    let over = call.receiver().is_some_and(|r| {
+        engine_library_literal(&r)
+            || super::util::constant_path_of(&r).is_some_and(|path| {
+                let owner: Vec<String> = path[..path.len().saturating_sub(1)].to_vec();
+                // A bare name is the lexical scope's own constant (`STATUSES` in the class that sets it).
+                owner.is_empty() || (0..=scope.len()).rev().any(|depth| {
+                    let candidate: Vec<String> = scope[..depth].iter().chain(owner.iter()).cloned().collect();
+                    grammar.declared.contains(&candidate.join("::"))
+                })
+            })
+    });
+    let body = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body());
+    over && body.is_some_and(|body| {
+        super::util::flatten_statements(body).iter().all(|inner| {
+            inner.as_call_node().is_some_and(|c| {
+                c.receiver().is_none() && super::util::constant_id_str(&c.name()) == "define_method" && c.block().is_some()
+            })
+        })
+    })
+}
+
+/// The first statement of the engine's lib/ that [`plain_engine_library_statement`]
+/// does not admit, as `` `head` (path:line) ``; None when every one is.
+fn first_unplain_library_statement<V: Vfs + ?Sized>(
+    vfs: &V,
+    engine_dir: &Path,
+    engine_name: &str,
+    lock: Option<&crate::gems::Lockfile>,
+) -> Option<String> {
     let lib_dir = engine_dir.join("lib");
-    let files = read_rb_files(vfs, &lib_dir).ok()?;
+    let Ok(files) = read_rb_files(vfs, &lib_dir) else { return Some("an unreadable lib/".to_string()) };
     let lib_files: HashSet<PathBuf> = files.iter().cloned().collect();
+    let mut declared = HashSet::default();
+    for file in &files {
+        let Ok(source) = vfs.read(file) else { continue };
+        let parsed = super::prism::parse_silent(&source);
+        for (scope, class) in super::util::find_all_classes_with_scope(&parsed.node()) {
+            declared.insert(scope.into_iter().chain(super::util::class_name_path(&class).unwrap_or_default()).collect::<Vec<_>>().join("::"));
+        }
+        for (scope, module) in super::util::find_all_modules_with_scope(&parsed.node()) {
+            declared.insert(scope.into_iter().chain(super::util::module_name_path(&module).unwrap_or_default()).collect::<Vec<_>>().join("::"));
+        }
+    }
+    let mut grammar = LibGrammar {
+        lib_dir: &lib_dir,
+        lib_files: &lib_files,
+        engine_name,
+        lock,
+        declared,
+        owned: None,
+        framework_body: std::cell::Cell::new(false),
+    };
     #[allow(clippy::too_many_arguments)]
     fn rejected<V: Vfs + ?Sized>(
         vfs: &V,
-        lib_dir: &Path,
         file: &Path,
-        lib_files: &HashSet<PathBuf>,
-        engine_name: &str,
+        grammar: &LibGrammar<'_>,
         scope: &mut Vec<String>,
         statement: &Node<'_>,
         top_level: bool,
+        loaders: &mut Vec<String>,
     ) -> Option<usize> {
-        if plain_engine_library_statement(vfs, lib_dir, file, lib_files, engine_name, scope, statement, top_level) {
+        if plain_engine_library_statement(vfs, file, grammar, scope, statement, top_level, loaders) {
             return None;
         }
         let here = statement.location().start_offset();
@@ -9331,7 +9592,7 @@ fn first_unplain_library_statement<V: Vfs + ?Sized>(vfs: &V, engine_dir: &Path, 
         } else if let Some(class) = statement.as_class_node() {
             let mut qualified = scope.clone();
             qualified.extend(super::util::class_name_path(&class).unwrap_or_default());
-            if qualified.join("::") == engine_name || class.superclass().is_some() {
+            if qualified.join("::") == grammar.engine_name {
                 return Some(here);
             }
             (super::util::class_name_path(&class), class.body())
@@ -9342,24 +9603,36 @@ fn first_unplain_library_statement<V: Vfs + ?Sized>(vfs: &V, engine_dir: &Path, 
         let depth = scope.len();
         scope.extend(name);
         let inner = body.and_then(|b| {
-            super::util::flatten_statements(b)
-                .iter()
-                .find_map(|s| rejected(vfs, lib_dir, file, lib_files, engine_name, scope, s, false))
+            super::util::flatten_statements(b).iter().find_map(|s| rejected(vfs, file, grammar, scope, s, false, &mut Vec::new()))
         });
         scope.truncate(depth);
         Some(inner.unwrap_or(here))
     }
+    let unloaded = never_loaded(vfs, &lib_dir, &files);
     for file in &files {
         let relative = file.strip_prefix(engine_dir).unwrap_or(file).display().to_string();
         if path_has_symlink_component(vfs, &lib_dir, file) {
             return Some(format!("a linked file ({relative})"));
         }
-        let source = vfs.read(file).ok()?;
+        if unloaded.contains(file) {
+            continue;
+        }
+        let Ok(source) = vfs.read(file) else { return Some(format!("an unreadable file ({relative})")) };
         let parsed = super::prism::parse_silent(&source);
+        if parsed.errors().next().is_some() {
+            return Some(format!("a file that does not parse ({relative})"));
+        }
         let Some(program) = parsed.node().as_program_node() else { continue };
+        grammar.owned = file
+            .strip_prefix(&lib_dir)
+            .ok()
+            .and_then(|r| r.to_str())
+            .and_then(|r| r.strip_suffix(".rb"))
+            .map(crate::naming::camelize_path);
         let mut scope = Vec::new();
+        let mut loaders = Vec::new();
         for statement in program.statements().body().iter() {
-            if let Some(at) = rejected(vfs, &lib_dir, file, &lib_files, engine_name, &mut scope, &statement, true) {
+            if let Some(at) = rejected(vfs, file, &grammar, &mut scope, &statement, true, &mut loaders) {
                 let line = source[..at.min(source.len())].iter().filter(|b| **b == b'\n').count() + 1;
                 let text = String::from_utf8_lossy(&source[at.min(source.len())..]);
                 let head: String = text.lines().next().unwrap_or("").trim().chars().take(60).collect();
@@ -9367,57 +9640,60 @@ fn first_unplain_library_statement<V: Vfs + ?Sized>(vfs: &V, engine_dir: &Path, 
             }
         }
     }
-    Some("an unreadable file".to_string())
+    None
 }
 
-fn plain_engine_library_sources<V: Vfs + ?Sized>(
-    vfs: &V,
-    engine_dir: &Path,
-    engine_name: &str,
-) -> bool {
-    let lib_dir = engine_dir.join("lib");
-    let Ok(files) = read_rb_files(vfs, &lib_dir) else { return false };
-    let lib_files: HashSet<PathBuf> = files.iter().cloned().collect();
-    files.iter().all(|file| {
-        if path_has_symlink_component(vfs, &lib_dir, file) {
-            return false;
-        }
-        let Ok(source) = vfs.read(file) else { return false };
-        let parsed = super::prism::parse_silent(&source);
-        if parsed.errors().next().is_some() {
-            return false;
-        }
-        let Some(program) = parsed.node().as_program_node() else { return false };
-        let mut scope = Vec::new();
-        program.statements().body().iter().all(|statement| {
-            plain_engine_library_statement(
-                vfs,
-                &lib_dir,
-                file,
-                &lib_files,
-                engine_name,
-                &mut scope,
-                &statement,
-                true,
-            )
+/// The lib/ files Ruby never loads: under a Zeitwerk loader's ignore, and
+/// required by no lib/ file outside a branch boot does not take
+/// (`engine_config::dead_spans`), as mission_control-jobs requires
+/// `resque/thread_safe_redis` only for an app on Resque.
+fn never_loaded<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path, files: &[PathBuf]) -> HashSet<PathBuf> {
+    let ignored = super::source_gems::zeitwerk_ignored(vfs, lib_dir);
+    if ignored.is_empty() {
+        return HashSet::default();
+    }
+    let dead = super::engine_config::dead_spans();
+    let live: Vec<String> = files
+        .iter()
+        .filter_map(|file| {
+            let mut text = vfs.read(file).ok()?;
+            let path = file.display().to_string();
+            for (_, start, end) in dead.iter().filter(|(p, ..)| *p == path) {
+                let end = (*end as usize).min(text.len());
+                for b in &mut text[(*start as usize).min(end)..end] {
+                    *b = b' ';
+                }
+            }
+            Some(String::from_utf8_lossy(&text).into_owned())
         })
-    })
+        .collect();
+    files
+        .iter()
+        .filter(|file| ignored.iter().any(|i| file.starts_with(i)))
+        .filter(|file| {
+            let feature = file.strip_prefix(lib_dir).ok().and_then(|r| r.to_str()).and_then(|r| r.strip_suffix(".rb")).unwrap_or_default();
+            let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            !live.iter().any(|text| text.contains(&format!("\"{feature}\"")) || text.contains(&format!("{stem}\"")))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Admit one statement from the engine library's narrow load-time grammar.
-/// Namespace modules may lead to the engine owner; executable definitions,
-/// constants, and the Engine declaration itself are checked at their exact
-/// namespace. Unknown AST shapes fail closed so boot effects are not skipped.
+/// Namespace modules may lead to the engine owner or to the constant the
+/// file is named for; executable definitions, constants, and the Engine
+/// declaration itself are checked at their exact namespace. Unknown AST
+/// shapes fail closed so boot effects are not skipped.
 fn plain_engine_library_statement<V: Vfs + ?Sized>(
     vfs: &V,
-    lib_dir: &Path,
     file: &Path,
-    lib_files: &HashSet<PathBuf>,
-    engine_name: &str,
+    grammar: &LibGrammar<'_>,
     scope: &mut Vec<String>,
     statement: &Node<'_>,
     top_level: bool,
+    loaders: &mut Vec<String>,
 ) -> bool {
+    let engine_name = grammar.engine_name;
     if let Some(module) = statement.as_module_node() {
         if module.constant_path().as_constant_path_node()
             .is_some_and(|path| super::util::constant_path_is_rooted(&path))
@@ -9431,12 +9707,10 @@ fn plain_engine_library_statement<V: Vfs + ?Sized>(
         // modules (for example `Catalog::Admin::Engine`). Admit only the
         // exact ancestor modules needed to reach its owner; executable
         // declarations inside those ancestors remain rejected below.
-        let valid = engine_library_module_scope_is_admitted(scope, engine_name)
+        let valid = grammar.leads(scope)
             && module.body().is_none_or(|body| {
                 super::util::flatten_statements(body).iter().all(|inner| {
-                    plain_engine_library_statement(
-                        vfs, lib_dir, file, lib_files, engine_name, scope, inner, false,
-                    )
+                    plain_engine_library_statement(vfs, file, grammar, scope, inner, false, &mut Vec::new())
                 })
             });
         scope.truncate(old_len);
@@ -9462,28 +9736,32 @@ fn plain_engine_library_statement<V: Vfs + ?Sized>(
                     literal_isolated_namespace(&class).as_deref() == Some(expected)
                 });
         }
-        if !engine_library_scope_belongs_to_owner(&qualified, engine_name) {
+        if !grammar.belongs(&qualified) {
             return false;
         }
-        // A superclass can run its `inherited` hook as this class is loaded.
-        // The first slice keeps library declarations to classes without one.
-        if class.superclass().is_some() {
+        // A superclass can run its `inherited` hook as this class is loaded:
+        // only Ruby's, Rails', or one this lib/ declares (whose own hooks are refused below).
+        if class.superclass().is_some_and(|parent| !grammar.superclass(&parent, scope)) {
             return false;
         }
+        let framework = class.superclass().is_some_and(|parent| !grammar.mixin(&parent, scope));
+        let was = grammar.framework_body.replace(framework);
         let old_len = scope.len();
         scope.extend(name);
         let valid = class.body().is_none_or(|body| {
             super::util::flatten_statements(body).iter().all(|inner| {
-                plain_engine_library_statement(
-                    vfs, lib_dir, file, lib_files, engine_name, scope, inner, false,
-                )
+                plain_engine_library_statement(vfs, file, grammar, scope, inner, false, &mut Vec::new())
             })
         });
         scope.truncate(old_len);
+        grammar.framework_body.set(was);
         return valid;
     }
+    if statement.as_alias_method_node().is_some() {
+        return !top_level && grammar.belongs(scope);
+    }
     if let Some(def) = statement.as_def_node() {
-        if top_level || !engine_library_scope_belongs_to_owner(scope, engine_name) {
+        if top_level || !grammar.belongs(scope) {
             return false;
         }
         if def.receiver().is_none() {
@@ -9496,7 +9774,7 @@ fn plain_engine_library_statement<V: Vfs + ?Sized>(
             && !engine_library_load_hook(method);
     }
     if let Some(write) = statement.as_constant_write_node() {
-        if !engine_library_scope_belongs_to_owner(scope, engine_name) {
+        if !grammar.belongs(scope) {
             return false;
         }
         let value = write.value();
@@ -9506,11 +9784,47 @@ fn plain_engine_library_statement<V: Vfs + ?Sized>(
             || value.as_float_node().is_some()
             || value.as_true_node().is_some()
             || value.as_false_node().is_some()
-            || value.as_nil_node().is_some();
+            || value.as_nil_node().is_some()
+            || engine_library_literal(&value)
+            || engine_library_struct(vfs, file, grammar, scope, &value);
+    }
+    if let Some(write) = statement.as_constant_path_write_node() {
+        let mut target = scope.clone();
+        target.extend(super::util::constant_path_of(&write.target().as_node()).unwrap_or_default());
+        return top_level && grammar.belongs(&target) && engine_library_struct(vfs, file, grammar, &mut target.clone(), &write.value());
+    }
+    if let Some(call) = statement.as_call_node() {
+        if !top_level && grammar.belongs(scope) {
+            if engine_library_macro(grammar, scope, &call) {
+                return true;
+            }
+            // ActiveSupport::Concern: what `included` runs in the includer and what `class_methods` defines, each read as a body here.
+            let name = super::util::constant_id_str(&call.name());
+            if call.receiver().is_none() && call.arguments().is_none() && matches!(name, "included" | "class_methods") {
+                let body = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body());
+                return body.is_none_or(|body| {
+                    super::util::flatten_statements(body)
+                        .iter()
+                        .all(|inner| plain_engine_library_statement(vfs, file, grammar, scope, inner, false, &mut Vec::new()))
+                });
+            }
+            if engine_library_define_loop(grammar, scope, &call) {
+                return true;
+            }
+            // A framework superclass's class-level DSL (`category "Jobs"`): literal arguments, no block.
+            let literal_args = call.arguments().is_some_and(|a| a.arguments().iter().all(|arg| engine_library_literal(&arg)));
+            if grammar.framework_body.get() && call.receiver().is_none() && call.block().is_none() && literal_args {
+                return true;
+            }
+        }
     }
     if top_level {
+        // The loader's setup: the tree loads the files under its roots itself (`file_program`).
+        if super::file_program::is_zeitwerk(statement, loaders) {
+            return true;
+        }
         if let Some(call) = statement.as_call_node() {
-            return engine_library_require_is_admitted(vfs, lib_dir, file, lib_files, &call);
+            return engine_library_require_is_admitted(vfs, grammar, file, &call);
         }
     }
     false
@@ -9563,9 +9877,8 @@ fn engine_library_load_hook(method: &str) -> bool {
 /// files under this engine's `lib/`, plus the Rails engine bootstrap require.
 fn engine_library_require_is_admitted<V: Vfs + ?Sized>(
     vfs: &V,
-    lib_dir: &Path,
+    grammar: &LibGrammar<'_>,
     file: &Path,
-    lib_files: &HashSet<PathBuf>,
     call: &ruby_prism::CallNode<'_>,
 ) -> bool {
     if call.receiver().is_some() || call.block().is_some() {
@@ -9588,21 +9901,39 @@ fn engine_library_require_is_admitted<V: Vfs + ?Sized>(
     if !require_relative && matches!(request.as_str(), "rails/engine" | "rails/engine.rb") {
         return true;
     }
+    let lib_dir = grammar.lib_dir;
     let base = if require_relative {
         let Some(parent) = file.parent() else { return false };
         parent
     } else {
         lib_dir
     };
-    let Some(mut target) = normalize_engine_library_require(lib_dir, base, &request) else {
-        return false;
-    };
-    if target.extension().is_none() {
-        target.set_extension("rb");
-    }
-    lib_files.contains(&target)
-        && !path_has_symlink_component(vfs, lib_dir, &target)
-        && vfs.exists(&target)
+    let in_lib = normalize_engine_library_require(lib_dir, base, &request).is_some_and(|mut target| {
+        if target.extension().is_none() {
+            target.set_extension("rb");
+        }
+        grammar.lib_files.contains(&target) && !path_has_symlink_component(vfs, lib_dir, &target) && vfs.exists(&target)
+    });
+    // Not this lib/'s file: Bundler or Rails loads that one anyway, and what it does at load is its own gem's boot.
+    in_lib || (!require_relative && !grammar.lib_files.iter().any(|f| f.ends_with(format!("{request}.rb"))) && external_feature(&request, grammar.lock))
+}
+
+/// A feature of a gem the lockfile resolves (by its name, or its dashed
+/// path), of Rails' own frameworks, or of Ruby's standard library.
+fn external_feature(request: &str, lock: Option<&crate::gems::Lockfile>) -> bool {
+    let root = request.split('/').next().unwrap_or(request);
+    const FRAMEWORKS: &[&str] = &[
+        "active_job", "active_record", "active_model", "active_support", "active_storage", "action_controller",
+        "action_view", "action_mailer", "action_dispatch", "action_cable", "action_text", "action_mailbox", "rails",
+    ];
+    const STDLIB: &[&str] = &["irb", "set", "json", "securerandom", "digest", "time", "date", "uri", "erb", "logger", "forwardable", "singleton"];
+    FRAMEWORKS.contains(&root)
+        || STDLIB.contains(&root)
+        || lock.is_some_and(|lock| {
+            [root.to_string(), request.replace('/', "-"), root.replace('_', "")]
+                .iter()
+                .any(|name| lock.version_of(name).is_some())
+        })
 }
 
 /// Normalize a literal require path while keeping every intermediate step

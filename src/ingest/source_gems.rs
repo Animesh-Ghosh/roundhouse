@@ -142,6 +142,19 @@ fn required_files<V: Vfs + ?Sized>(
     Ok(seen)
 }
 
+/// The paths the Zeitwerk loaders of the gem at `lib` ignore: Ruby loads
+/// nothing under them unless something requires it.
+pub(super) fn zeitwerk_ignored<V: Vfs + ?Sized>(vfs: &V, lib: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for file in super::app::read_rb_files(vfs, lib).unwrap_or_default() {
+        let Ok(text) = vfs.read_to_string(&file) else { continue };
+        if let Some((_, ignored)) = zeitwerk_dirs(&text, file.parent().unwrap_or(lib), lib) {
+            out.extend(ignored);
+        }
+    }
+    out
+}
+
 // `None` for a root or an ignore this cannot read as a path, or a root outside lib/: mounting what it leaves out would ingest code the gem never loads.
 fn zeitwerk_dirs(text: &str, dir: &Path, lib: &Path) -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
     let for_gem = text.contains("Zeitwerk::Loader.for_gem");
