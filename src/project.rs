@@ -4441,7 +4441,7 @@ fn ruby_family_runtime_files(
     let _body_names = crate::lower::model_to_library::schema::share_model_body_names(&app.models, &Default::default());
     let (mut files, test_stems) = spinel_files(app, fixture, param_binds)?;
 
-    files.retain(|(p, _)| p != "runtime/db.rb");
+    files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/faye_websocket.rb");
     // The spinel SQL-functions file is FFI; CRuby writes its own below
     // (the sqlite3 gem's `create_function`), JRuby has none yet.
     files.retain(|(p, _)| p != "runtime/sql_functions.rb");

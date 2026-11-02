@@ -260,3 +260,12 @@ on, jemalloc, and Puma's default configuration — on the same machine:
 Read that page rather than a number quoted here; it changes with
 every Spinel release and the methodology is written beside the
 charts.
+
+### Raw Faye WebSockets
+
+The threaded server carries a bounded `faye-websocket` adapter over Tep: upgrade detection, text `send`,
+`rack_response`, and one callback each for `open`, `message` and `close`. Callbacks obtain a `Db` lease.
+The `ping:` interval is in seconds; zero disables it. `EventMachine.schedule` runs on the calling thread.
+Subprotocols, additional constructor options, duplicate callbacks, other events and non-String sends raise.
+Other EventMachine APIs are unavailable. This adapter does not provide reactor scheduling or Faye error events.
+Ruby and JRuby use the real gems. Tep's close-handshake deadline remains five seconds.
