@@ -696,6 +696,28 @@ end
     );
 }
 
+/// A Hash's `[]` takes exactly one key and `[]=` a key and a value, so
+/// over an ivar `initialize` sets to a Hash the forwarders take those
+/// (mission_control-jobs' `IdentifiedElements`).
+#[test]
+fn index_operators_over_a_hash_ivar_forward_their_key() {
+    let out = run_emitted(
+        r#"class Filter
+  delegate :[], :[]=, :empty?, to: :items
+
+  def initialize
+    @items = {}
+  end
+
+  private
+    attr_reader :items
+end
+"#,
+        "f = Filter.new\nputs f.empty?\nf[\"a\"] = 1\nputs f[\"a\"]\nputs f.empty?\n",
+    );
+    assert_eq!(out, "true\n1\nfalse\n");
+}
+
 fn run_emitted(source: &str, exercise: &str) -> String {
     let emitted = emit(source);
     let script = format!("{emitted}\n{exercise}");

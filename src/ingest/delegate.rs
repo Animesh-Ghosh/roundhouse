@@ -322,10 +322,10 @@ fn receiver(target: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// The forwarder for a fixed-one-argument binary operator, or `None` for
-/// an ordinary name. Indexing operators are declined because Ruby methods
-/// `[]` and `[]=` may take variable positional arities that this expander
-/// cannot forward safely.
+/// The forwarder for a fixed-arity operator, or `None` for an ordinary
+/// name: a binary operator takes one operand, `[]` one key and `[]=` a key
+/// and a value. Every call site must pass that many
+/// (`delegate_declarations`), since `[]` may take other arities.
 fn operator_forwarder(t: &str, m: &str) -> Option<(&'static str, String)> {
     const BINARY: &[&str] = &[
         "==", "!=", "<", ">", "<=", ">=", "<=>", "===", "=~", "!~", "+", "-", "*", "/", "%", "**",
@@ -333,6 +333,8 @@ fn operator_forwarder(t: &str, m: &str) -> Option<(&'static str, String)> {
     ];
     match m {
         op if BINARY.contains(&op) => Some(("other", format!("{t} {op} other"))),
+        "[]" => Some(("key", format!("{t}[key]"))),
+        "[]=" => Some(("key, value", format!("{t}[key] = value"))),
         _ => None,
     }
 }

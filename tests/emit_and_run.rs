@@ -20488,6 +20488,8 @@ mod helper_render_partial;
 mod interpolated_partial;
 #[path = "emit_and_run/indifferent_ivar.rs"]
 mod indifferent_ivar;
+#[path = "emit_and_run/library_class_state.rs"]
+mod library_class_state;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;

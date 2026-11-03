@@ -161,6 +161,9 @@ impl<'a> DelegateEligibility<'a> {
             {
                 return None;
             }
+            if matches!(method.as_str(), "[]" | "[]=") && !self.hash_backed(declaration.target.as_str()) {
+                return None;
+            }
             let mut block = false;
             if !method.as_str().ends_with('=') {
                 if let Some(calls) = self.called_with_args.get(&name) {
@@ -408,6 +411,51 @@ fn valid_prefixed_method_name(name: &str) -> bool {
     let mut chars = base.chars();
     matches!(chars.next(), Some('_' | 'a'..='z' | 'A'..='Z'))
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+impl DelegateEligibility<'_> {
+    /// Whether `target` reads an ivar `initialize` sets to a Hash: its `[]`
+    /// takes one key and its `[]=` a key and a value, the arities the
+    /// forwarders take. Any other receiver's `[]` may take more.
+    fn hash_backed(&self, target: &str) -> bool {
+        let ivar = match target.strip_prefix('@') {
+            Some(name) => name.to_string(),
+            None => {
+                let reads_ivar = self.methods.iter().any(|m| {
+                    m.receiver == MethodReceiver::Instance
+                        && m.name.as_str() == target
+                        && matches!(&*m.body.node, ExprNode::Ivar { name } if name.as_str().trim_start_matches('@') == target)
+                });
+                if !reads_ivar {
+                    return false;
+                }
+                target.to_string()
+            }
+        };
+        fn assigns_hash(e: &Expr, ivar: &str) -> bool {
+            if let ExprNode::Assign { target: crate::expr::LValue::Ivar { name }, value } = &*e.node
+                && name.as_str().trim_start_matches('@') == ivar
+            {
+                let path_is = |path: &[Symbol]| {
+                    let p: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                    matches!(p.as_slice(), ["Hash"] | ["HashWithIndifferentAccess"] | ["ActiveSupport", "HashWithIndifferentAccess"])
+                };
+                return match &*value.node {
+                    ExprNode::Hash { entries, .. } => entries.is_empty(),
+                    ExprNode::Send { recv: Some(r), method, args, block: None, .. } => {
+                        method.as_str() == "new" && args.is_empty() && matches!(&*r.node, ExprNode::Const { path } if path_is(path))
+                    }
+                    _ => false,
+                };
+            }
+            let mut found = false;
+            e.node.for_each_child(&mut |c| found = found || assigns_hash(c, ivar));
+            found
+        }
+        self.methods.iter().any(|m| {
+            m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize" && assigns_hash(&m.body, &ivar)
+        })
+    }
 }
 
 fn valid_delegate_target(target: &str) -> bool {

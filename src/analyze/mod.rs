@@ -4339,6 +4339,7 @@ impl Analyzer {
             start = end;
         }
         drop(_typing_library);
+        self.library_class_vars(app);
 
         // Not the assigning actions' types alone: only UsersController sets lobsters' `@title_class`, and every other page rendered its nil as a `Symbol` (`class="x"`).
         for (layout, (rendering, assigning)) in &layout_presence {
@@ -4816,6 +4817,43 @@ impl Analyzer {
     /// `dsl_macro_host`: model and library-class concern hosts may declare
     /// first-class DSL macros (`has_markdown` on `ActionText::HasMarkdown`).
     /// Controllers and test modules do not — keep their diagnostics.
+    /// A library class's `@@x` (`mattr_accessor :x, default: v`'s storage):
+    /// what its class-body seed and its own methods write, as the next
+    /// round's reads of it answer. A write of a value with no type yet adds
+    /// nothing, as a pending `Var` arm does in an ivar slot.
+    fn library_class_vars(&mut self, app: &App) {
+        fn writes(e: &Expr, out: &mut HashMap<Symbol, Ty>) {
+            if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } = &*e.node
+                && let Some(cvar) = name.as_str().strip_prefix("@@")
+                && let Some(ty) = value.ty.clone().filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))
+            {
+                let key = Symbol::from(cvar);
+                let joined = match out.remove(&key) {
+                    Some(old) => union_of(old, ty),
+                    None => ty,
+                };
+                out.insert(key, joined);
+            }
+            e.node.for_each_child(&mut |c| writes(c, out));
+        }
+        for lc in &app.library_classes {
+            let mut vars: HashMap<Symbol, Ty> = HashMap::default();
+            for init in &lc.class_ivar_initializers {
+                writes(init, &mut vars);
+            }
+            for method in lc.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Class) {
+                writes(&method.body, &mut vars);
+            }
+            if vars.is_empty() {
+                continue;
+            }
+            let cls = self.classes.entry(lc.name.clone()).or_default();
+            for (name, ty) in vars {
+                cls.class_vars.insert(name, ty);
+            }
+        }
+    }
+
     fn seed_method_params(
         &self,
         base: &Ctx,

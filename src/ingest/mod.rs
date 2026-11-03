@@ -59,6 +59,7 @@ mod boot_program;
 mod engine_config;
 mod engine_helpers;
 mod interpolated_renders;
+mod library_concern_items;
 mod unreached_gem_modules;
 pub mod allow_browser;
 pub mod app;
