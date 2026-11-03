@@ -1353,6 +1353,19 @@ pub(super) fn emit_send_base(
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_keyword_forward_arg).collect();
     let m = method.as_str();
+    // `...` is a send argument packet, never an index or infix operand.
+    // Preserve explicit call syntax even for operator/setter method names
+    // and `self`, before any surface-syntax prettification below.
+    if args.iter().any(|a| a.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0 || matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. } | ExprNode::KeywordSplat { .. })) {
+        return match recv {
+            Some(r) => {
+                let receiver = emit_expr(r);
+                let receiver = if recv_needs_parens(r) { format!("({receiver})") } else { receiver };
+                format!("{receiver}.{method}({})", args_s.join(", "))
+            }
+            None => format!("{method}({})", args_s.join(", ")),
+        };
+    }
     // A receiverless call, or one the typer folded onto `self`, is the
     // backtick literal. An override of `` ` `` still runs through that
     // syntax. An explicit other receiver stays a normal send.
@@ -1385,19 +1398,6 @@ pub(super) fn emit_send_base(
                 return format!("{}.now.utc", emit_expr(r));
             }
         }
-    }
-    // `...` is a send argument packet, never an index or infix operand.
-    // Preserve explicit call syntax even for operator/setter method names
-    // and `self`, before any surface-syntax prettification below.
-    if args.iter().any(|a| matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. } | ExprNode::KeywordSplat { .. })) {
-        return match recv {
-            Some(r) => {
-                let receiver = emit_expr(r);
-                let receiver = if recv_needs_parens(r) { format!("({receiver})") } else { receiver };
-                format!("{receiver}.{method}({})", args_s.join(", "))
-            }
-            None => format!("{method}({})", args_s.join(", ")),
-        };
     }
     // Indexing a statically string-keyed hash (`Hash[String, _]`, e.g.
     // request `params`) with a Ruby symbol/dynamic key: coerce the key to

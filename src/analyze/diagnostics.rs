@@ -114,6 +114,135 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+/// A `render … do … end` in a view. The view lowering captures the block
+/// into a String and passes it as the partial's yielded body
+/// (`render "x" do`, `render layout: "x" do`), which is Rails' answer only
+/// when the partial yields once, at its top level: Rails runs the block at
+/// each `yield` (a partial yielding twice renders `1|2`). The body rides
+/// the partial's record slot, so a partial with strict locals, or one
+/// reading (or passed) its dir-convention record local, would see the
+/// body there. Those are refused, as is any other block-form render
+/// (`render partial: "x", locals: … do` raises in Rails).
+fn unmodeled_block_renders(app: &App) -> Vec<Diagnostic> {
+    use crate::lower::view::{classify_render_partial, RenderPartial};
+    // Bare `yield`s, and whether any sits inside a loop: a `while`, or the
+    // block of a method that runs it per element. A block run once
+    // (`form_with … do |form|`, `content_tag … do`) yields once.
+    fn yields(e: &Expr, nested: bool, count: &mut usize, in_block: &mut bool) {
+        if let ExprNode::Yield { args } = &*e.node
+            && args.is_empty()
+        {
+            *count += 1;
+            *in_block |= nested;
+        }
+        let iterates = match &*e.node {
+            ExprNode::While { .. } => true,
+            ExprNode::Send { method, block: Some(_), .. } => matches!(
+                method.as_str(),
+                "each" | "each_with_index" | "each_with_object" | "each_slice" | "each_cons" | "each_pair"
+                    | "each_key" | "each_value" | "map" | "collect" | "flat_map" | "filter_map" | "select"
+                    | "filter" | "reject" | "times" | "upto" | "downto" | "step" | "loop" | "sum" | "inject"
+                    | "reduce" | "group_by" | "partition" | "sort_by" | "min_by" | "max_by" | "find_each"
+                    | "find_in_batches" | "in_batches" | "cycle" | "zip"
+            ),
+            _ => false,
+        };
+        let nested = nested || iterates;
+        e.node.for_each_child(&mut |c| yields(c, nested, count, in_block));
+    }
+    let carrying = crate::lower::view_to_library::yield_carrying_partials(app);
+    let reason = |e: &Expr, caller_dir: &str| -> Option<&'static str> {
+        let ExprNode::Send { recv, method, args, block: Some(block), .. } = &*e.node else { return None };
+        if method.as_str() != "render" || recv.is_some() {
+            return None;
+        }
+        let Some(RenderPartial::LayoutBlock { layout, locals, block }) =
+            classify_render_partial(recv.as_ref(), method.as_str(), args, Some(block), &|_| true, &|_| false)
+        else {
+            return Some("only `render \"partial\"[, locals] do … end` and `render layout: \"partial\" do … end` are modeled (Rails raises for `render partial: …, locals: … do`)");
+        };
+        if let ExprNode::Lambda { params, rest_param, extra_params, block_param, .. } = &*block.node
+            && (!params.is_empty() || rest_param.is_some() || !extra_params.is_empty() || block_param.is_some())
+        {
+            return Some("a block with parameters is not modeled; the partial's `yield` passes it none");
+        }
+        let (dir, base) = match layout.rsplit_once('/') {
+            Some((d, b)) => (d.to_string(), b.to_string()),
+            None => (caller_dir.to_string(), layout.to_string()),
+        };
+        let full = format!("{dir}/_{base}");
+        let partial = app.views.iter().find(|v| v.name.as_str() == full)?;
+        if partial.strict_locals.is_some() {
+            return Some("the partial declares strict locals, and the yielded body would take its first local's slot");
+        }
+        let (mut count, mut in_block) = (0, false);
+        yields(&partial.body, false, &mut count, &mut in_block);
+        if count != 1 || in_block {
+            return Some("the partial does not yield exactly once at its top level; Rails runs the block at each `yield`, which a captured string doesn't");
+        }
+        // The lowering's own answer (its effective record local, every
+        // format of the partial): a partial outside it reads that local.
+        let Some(record) = carrying.get(partial.name.as_str()) else {
+            return Some("the partial's yielded body rides its record local, which this partial (or another format of it) also reads");
+        };
+        let passed = locals.is_some_and(|ls| {
+            ls.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == record.as_str()))
+        });
+        if passed {
+            return Some("the partial's yielded body rides its record local, which this render also passes");
+        }
+        None
+    };
+    fn visit(e: &Expr, caller_dir: &str, reason: &dyn Fn(&Expr, &str) -> Option<&'static str>, out: &mut Vec<Diagnostic>) {
+        if !e.span.is_synthetic()
+            && let Some(why) = reason(e, caller_dir)
+        {
+            out.push(Diagnostic::unsupported(e.span, None, "render with a block", why));
+        }
+        e.node.for_each_child(&mut |c| visit(c, caller_dir, reason, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        let dir = view.name.as_str().rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        visit(&view.body, dir, &reason, &mut out);
+    }
+    out
+}
+
+/// A `current_page?` that `ingest::current_page` left as written: Rails
+/// answers it through `url_for(options)` (an options hash, or
+/// `check_parameters:`/`method:`), which the runtime does not model.
+fn unlowered_current_page(app: &App) -> Vec<Diagnostic> {
+    // The app's own `current_page?` is a call like any other: a body it
+    // answers is left out of `for_each_view_context_body`.
+    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        if let ExprNode::Send { recv: None, method, .. } = &*expr.node
+            && method.as_str() == "current_page?"
+            && !expr.span.is_synthetic()
+        {
+            let reason = "only a path or URL argument is modeled (not an options hash, a splat, `check_parameters:` or `method:`)";
+            out.push(Diagnostic::unsupported(expr.span, None, "current_page?", reason));
+        }
+        // `ingest::current_page` rewrites before types: a path analysis
+        // can't type as a String (a record, which Rails passes to
+        // `url_for`; a Hash; a value that may be nil) would reach the
+        // runtime's `path.bytes`.
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
+            && method.as_str() == "current_page_match?"
+            && matches!(&*r.node, ExprNode::Const { path } if path.len() == 2 && path[0].as_str() == "ActionView" && path[1].as_str() == "ViewHelpers")
+            && args.get(4).is_some_and(|path| !matches!(path.ty, Some(crate::ty::Ty::Str)))
+            && !expr.span.is_synthetic()
+        {
+            let reason = "its argument is not known to be a String path or URL; a record or an options hash goes through Rails' `url_for`, which is not modeled";
+            out.push(Diagnostic::unsupported(expr.span, None, "current_page?", reason));
+        }
+        expr.node.for_each_child(&mut |child| visit(child, out));
+    }
+    let mut out = Vec::new();
+    crate::ingest::current_page::for_each_view_context_body(app, &mut |body| visit(body, &mut out));
+    out
+}
+
 /// `stylesheet_link_tag` in an `app/helpers` method that
 /// `tag_builder::rewrite_stylesheet_link_tag` leaves as written: a Symbol
 /// name (a stylesheet group a view expands from its stylesheet list, which
@@ -435,6 +564,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // Only validated synthesized Alba serializers, with per-constructor
     // evidence; this does not widen the general library diagnostic policy.
     out.extend(super::alba::diagnose(app));
+    out.extend(unmodeled_block_renders(app));
     out.extend(crate::gems::extension_gem_refusals(app, None));
     // graphql-ruby object types: their bodies, and each `null: false`
     // field's resolved value.
@@ -531,6 +661,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     }
     out.extend(attribute_macro_refusals(app));
     out.extend(unlowered_form_builder_calls(app));
+    out.extend(unlowered_current_page(app));
     out.extend(helper_stylesheet_link_tags(app));
     out.extend(unlowered_time_tags(app));
     out.extend(devise_refusals(app));

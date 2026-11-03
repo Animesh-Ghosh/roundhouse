@@ -1489,6 +1489,13 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             })?;
             methods.append(&mut synth);
         }
+        // JSON response configuration shares the environment/initializer replay.
+        if let Some(json) = super::json_response_config::synthesize(vfs, dir)? {
+            let mut synth = crate::runtime_src::parse_methods(&json).map_err(|message| IngestError::Unsupported {
+                file: "config/ (JSON escaping settings)".to_string(), message,
+            })?;
+            methods.append(&mut synth);
+        }
         // The headers `ActionDispatch::Static` puts on every `public/`
         // file (`config.public_file_server.headers`; see
         // `public_file_server_config`). Spliced like the cable settings,
@@ -1905,30 +1912,36 @@ end
                 class_ivar_initializers: Vec::new(),
             });
         }
-    } else if let Some(cookie) = super::session_config::synthesize(vfs, dir)? {
+    } else {
         // No `config/application.rb`: still lift a key from initializers /
         // env files onto a reopen, same method body the branch above uses.
-        let methods = crate::runtime_src::parse_methods(&cookie).map_err(|message| {
-            IngestError::Unsupported {
-                file: "config/ (config.session_store)".to_string(),
-                message,
-            }
-        })?;
-        app.rails_application = Some(crate::dialect::LibraryClass {
-            name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
-            is_module: false,
-            parent: None,
-            parent_span: Default::default(),
-            includes: Vec::new(),
-            include_spans: Vec::new(),
-            methods,
-            nullable_columns: Vec::new(),
-            origin: None,
-            constants: Vec::new(),
-            conditional_definitions: Vec::new(),
-            unknown_calls: Vec::new(),
-            class_ivar_initializers: Vec::new(),
-        });
+        let mut source = super::session_config::synthesize(vfs, dir)?.unwrap_or_default();
+        if let Some(json) = super::json_response_config::synthesize(vfs, dir)? {
+            source.push_str(&json);
+        }
+        if !source.is_empty() {
+            let methods = crate::runtime_src::parse_methods(&source).map_err(|message| {
+                IngestError::Unsupported {
+                    file: "config/ (session or JSON escaping settings)".to_string(),
+                    message,
+                }
+            })?;
+            app.rails_application = Some(crate::dialect::LibraryClass {
+                name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
+                is_module: false,
+                parent: None,
+                parent_span: Default::default(),
+                includes: Vec::new(),
+                include_spans: Vec::new(),
+                methods,
+                nullable_columns: Vec::new(),
+                origin: None,
+                constants: Vec::new(),
+                conditional_definitions: Vec::new(),
+                unknown_calls: Vec::new(),
+                class_ivar_initializers: Vec::new(),
+            });
+        }
     }
 
     // Top-level constants an initializer defines that are not mixins —
@@ -3076,6 +3089,7 @@ end
     super::impersonates::lower_impersonates(&mut app);
     super::inertia::lower_inertia(&mut app);
     super::vite::lower_vite_tags(&mut app);
+    super::current_page::lower_current_page(&mut app);
     super::time_tag::lower_time_tags(&mut app);
     // The real drain, now that every pass re-ingesting synthesized
     // Ruby has run. A synthesized `"<label>"` re-ingest never takes a
