@@ -20500,6 +20500,8 @@ mod controller_concern_delegate;
 mod backtrace_cleaner;
 #[path = "emit_and_run/method_lookup_order.rs"]
 mod method_lookup_order;
+#[path = "emit_and_run/inquiry_safe_nav.rs"]
+mod inquiry_safe_nav;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;
