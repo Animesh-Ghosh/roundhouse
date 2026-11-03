@@ -1417,6 +1417,30 @@ fn report_datetime_local_reads(app: &App, target: BuildTarget) {
     }
 }
 
+/// `ActiveSupport::TimeZone` (with `tzinfo`'s `TimeZoneInfo`) is a class
+/// of the ruby family's runtime (`runtime/ruby/active_support_ext.rb`).
+/// Crystal's build of a picker that reads it stops at `undefined constant
+/// ::ActiveSupport::TimeZone` and Go's at `undefined:
+/// ActiveSupportTimeZone_all`, so off the ruby family a `tzinfo` read is
+/// refused rather than emitted. Roda too: it keeps the view's line as
+/// written, and its app loads no ActiveSupport.
+fn report_tzinfo_reads(app: &App, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura
+    ) {
+        return;
+    }
+    for span in crate::lower::time_calendar::tzinfo_reads(app) {
+        emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+            span,
+            Some(crate::ident::Symbol::from(target.as_str())),
+            "tzinfo",
+            "`ActiveSupport::TimeZone` and its `tzinfo` are ruby-family runtime classes; this target's runtime has no time-zone class",
+        ));
+    }
+}
+
 /// `render "x" do … end` and `render layout: "x" do … end`: the view
 /// lowering captures the block into a String and passes it as the
 /// partial's yielded body. Measured through each target's own test
@@ -3235,6 +3259,7 @@ fn target_files_inner(
     report_unsupported_keys(app, target);
     report_datetime_local_reads(app, target);
     report_roda_form_fields(app, target);
+    report_tzinfo_reads(app, target);
     report_block_render_partials(app, target);
     report_current_page_calls(app, target);
     report_time_tag_calls(app, target);
