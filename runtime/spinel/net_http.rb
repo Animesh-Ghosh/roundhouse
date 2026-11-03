@@ -182,6 +182,10 @@ module Net
       res.body
       res
     ensure
+      @tls.sysclose unless @tls.nil?
+      @tls = nil
+      @socket.close unless @socket.nil?
+      @socket = nil
       finish if !started && started?
     end
 

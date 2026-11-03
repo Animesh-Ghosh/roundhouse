@@ -259,3 +259,104 @@ fn the_request_block_reads_before_the_server_finishes_sending() {
     assert!(server.join().unwrap(), "read_body buffered before calling the consumer");
     std::fs::remove_dir_all(scratch).unwrap();
 }
+
+/// Check EOF before allowing a following request to trigger reconnection.
+#[test]
+#[ignore]
+fn a_raising_response_block_closes_the_connection_before_the_next_request() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scratch = scratch_dir().with_file_name("roundhouse-spinel-net-http-raise");
+    std::fs::create_dir_all(&scratch).unwrap();
+    for name in ["net_http.rb", "http_stub.rb", "tcp_socket_stub.rb"] {
+        std::fs::copy(root.join("runtime/spinel").join(name), scratch.join(name)).unwrap();
+    }
+    let source = std::fs::read_to_string(root.join("tests/spinel_net_http_raise.rb")).unwrap();
+    std::fs::write(
+        scratch.join("driver.rb"),
+        format!("require_relative \"net_http\"\n{source}"),
+    )
+    .unwrap();
+    let build = Command::new("spinel")
+        .args(["driver.rb", "-o", "driver"])
+        .current_dir(&scratch)
+        .output()
+        .expect("spinel on PATH");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    for mode in ["request", "reader"] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let control = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let control_port = control.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            fn headers(stream: std::net::TcpStream) -> std::net::TcpStream {
+                let mut reader = BufReader::new(stream);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                reader.into_inner()
+            }
+            let (stream, _) = listener.accept().unwrap();
+            let mut first = headers(stream);
+            let prefix = if mode == "reader" {
+                vec![b'a'; 16384]
+            } else {
+                b"part".to_vec()
+            };
+            write!(
+                first,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                prefix.len() + 4
+            )
+            .unwrap();
+            let _ = first.write_all(&prefix);
+            let (mut ack, _) = control.accept().unwrap();
+            first
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let eof = match first.read(&mut [0u8; 1]) {
+                Ok(0) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => true,
+                _ => false,
+            };
+            ack.write_all(if eof { b"1" } else { b"0" }).unwrap();
+            drop(ack);
+            drop(first);
+            let (stream, _) = listener.accept().unwrap();
+            let mut second = headers(stream);
+            second
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnext")
+                .unwrap();
+            eof
+        });
+        let run = Command::new(scratch.join("driver"))
+            .args([port.to_string(), control_port.to_string(), mode.to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let eof = server.join().unwrap();
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert_eq!(
+            stdout, "raised=caller stopped\neof=1\nstarted=true\nnext=next\nfinished=true\n",
+            "{mode}"
+        );
+        assert!(
+            eof,
+            "{mode}: response socket remains open after the caller raises"
+        );
+    }
+    std::fs::remove_dir_all(scratch).unwrap();
+}
