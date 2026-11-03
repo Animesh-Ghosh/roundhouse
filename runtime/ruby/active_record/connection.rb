@@ -588,10 +588,14 @@ module ActiveRecord
       {}
     end
 
-    # Rails' `type_for_attribute(name).type`: the column's type name, nil
-    # for a name that is no column.
+    def self.schema_json_coder_columns
+      []
+    end
+
+    # Rails' `type_for_attribute(name)`: the column's type name, nil for a
+    # name that is no column, and its `serialize …, coder: JSON` coder.
     def self.type_for_attribute(name)
-      ActiveRecord::Type::Value.new(schema_column_types[name.to_sym])
+      ActiveRecord::Type::Value.new(schema_column_types[name.to_sym], schema_json_coder_columns.include?(name.to_sym))
     end
 
     # Rails' `default_scoped`: `all` with the model's `default_scope`,

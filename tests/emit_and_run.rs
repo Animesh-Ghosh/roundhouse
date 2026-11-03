@@ -20538,6 +20538,8 @@ mod job_class_safe_constantize;
 mod load_time_definer;
 #[path = "emit_and_run/gem_source_shapes.rs"]
 mod gem_source_shapes;
+#[path = "emit_and_run/serialized_size_truncate_bytes.rs"]
+mod serialized_size_truncate_bytes;
 #[path = "emit_and_run/settled_builtin_probe.rs"]
 mod settled_builtin_probe;
 

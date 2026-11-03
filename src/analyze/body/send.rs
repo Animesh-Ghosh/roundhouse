@@ -4028,7 +4028,7 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // `index`/`rindex` → the substring position or nil.
         "index" | "rindex" => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         "bytes" => Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
-        "chars" | "lines" | "split" | "scan" | "each_char" => Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+        "chars" | "lines" | "split" | "scan" | "each_char" | "grapheme_clusters" => Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         // `String#count(chars)` — how many of the given characters occur.
         "count" => Ty::Int,
         // `String#ascii_only?`, `valid_encoding?` and
@@ -4086,7 +4086,7 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "pluralize" | "singularize" | "camelize" | "camelcase"
         | "underscore" | "dasherize" | "titleize" | "titlecase"
         | "humanize" | "demodulize" | "deconstantize" | "classify"
-        | "foreign_key" | "parameterize" | "truncate" | "truncate_words"
+        | "foreign_key" | "parameterize" | "truncate" | "truncate_words" | "truncate_bytes"
         | "squish" | "remove" | "indent"
         | "html_safe" | "to_query" | "to_param" => Ty::Str,
         "constantize" | "safe_constantize" => unknown(),

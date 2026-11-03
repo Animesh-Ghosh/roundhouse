@@ -1117,8 +1117,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("deserialize", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
     ]);
     // What `Model.type_for_attribute(name)` answers on the ruby family: the column's type name, nil for no column.
+    // Not a String for `serialize`: a column without a JSON coder answers the value it was given.
     register_stdlib_class(classes, "ActiveRecord::Type::Value", &[], &[
         ("type", Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() }),
+        ("serialize", Ty::Untyped),
     ]);
     register_stdlib_class(classes, "ActiveRecord::Type::Integer", &[], &[
         ("cast", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),

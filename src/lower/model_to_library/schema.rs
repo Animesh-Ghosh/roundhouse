@@ -562,6 +562,10 @@ pub(super) fn push_schema_methods(
     // apply ISO8601-with-offset vs calendar-only without sniffing values.
     push_schema_symbol_list(methods, owner, "schema_columns", table, |_| true);
     push_schema_column_types(methods, owner, table);
+    let json_coder = crate::lower::serialize::json_serialize_columns(model);
+    if table.columns.iter().any(|c| json_coder.contains(&c.name)) {
+        push_schema_symbol_list(methods, owner, "schema_json_coder_columns", table, |c| json_coder.contains(&c.name));
+    }
     push_decode_plucked(methods, owner, table);
     push_schema_symbol_list(methods, owner, "schema_time_columns", table, |c| {
         matches!(c.col_type, crate::schema::ColumnType::DateTime | crate::schema::ColumnType::Time)
