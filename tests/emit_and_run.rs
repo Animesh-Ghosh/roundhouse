@@ -20484,6 +20484,10 @@ mod stub_facade_source_gem;
 
 #[path = "emit_and_run/helper_render_partial.rs"]
 mod helper_render_partial;
+#[path = "emit_and_run/interpolated_partial.rs"]
+mod interpolated_partial;
+#[path = "emit_and_run/indifferent_ivar.rs"]
+mod indifferent_ivar;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;

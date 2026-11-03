@@ -9836,6 +9836,13 @@ fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, written_k
         Ty::Union { variants } => variants,
         other => std::slice::from_ref(other),
     };
+    if let [arm] = arms
+        && let Some(value) = crate::analyze::indifferent::value_of(arm)
+    {
+        let value = crate::analyze::body::join_ivar_slot(value.clone(), incoming);
+        out.insert(name.clone(), crate::analyze::indifferent::of(value));
+        return;
+    }
     let key = match arms.iter().find(|v| matches!(v, Ty::Hash { .. })) {
         Some(Ty::Hash { key, .. }) if !matches!(**key, Ty::Var { .. }) => match &written_key {
             Some(w) => std::sync::Arc::new(crate::analyze::body::union_of((**key).clone(), w.clone())),

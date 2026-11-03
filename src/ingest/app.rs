@@ -3203,6 +3203,7 @@ end
     super::body_statements::mark(&mut app);
     report_unmodelled_records(&app);
     super::unreached_gem_modules::drop(&mut app, dir);
+    super::interpolated_renders::expand(&mut app);
     super::unreachable_views::mark(&mut app);
     // After every pass that changes a controller's methods, the concern
     // splice and the class-body macros above all: the lowering clones
