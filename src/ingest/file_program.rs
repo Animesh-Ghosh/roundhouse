@@ -77,7 +77,42 @@ pub(super) fn is_zeitwerk(stmt: &ruby_prism::Node<'_>, loaders: &mut Vec<String>
         let built = matches!(name.as_ref(), "new" | "for_gem")
             && call.block().is_none()
             && call.receiver().and_then(|r| super::util::constant_path_of(&r)).is_some_and(|p| p == ["Zeitwerk", "Loader"]);
-        built || (SETUP.contains(&name.as_ref()) && call.block().is_none() && call.receiver().is_some_and(|r| is_loader(&r, loaders)))
+        built
+            || (SETUP.contains(&name.as_ref())
+                && call.block().is_none()
+                && call.arguments().is_none_or(|a| a.arguments().iter().all(|arg| inert_arg(&arg)))
+                && call.receiver().is_some_and(|r| is_loader(&r, loaders)))
+    }
+    // Not any argument: one that calls code (`push_dir(setup_dir!)`) runs it at load, which no reader of this setup sees.
+    fn inert_arg(node: &ruby_prism::Node<'_>) -> bool {
+        if node.as_string_node().is_some()
+            || node.as_symbol_node().is_some()
+            || node.as_integer_node().is_some()
+            || node.as_true_node().is_some()
+            || node.as_false_node().is_some()
+            || node.as_nil_node().is_some()
+            || super::source_gems::path_of(node, std::path::Path::new("/")).is_some()
+        {
+            return true;
+        }
+        if let Some(hash) = node.as_keyword_hash_node() {
+            return hash.elements().iter().all(|e| e.as_assoc_node().is_some_and(|a| inert_arg(&a.key()) && inert_arg(&a.value())));
+        }
+        if let Some(hash) = node.as_hash_node() {
+            return hash.elements().iter().all(|e| e.as_assoc_node().is_some_and(|a| inert_arg(&a.key()) && inert_arg(&a.value())));
+        }
+        if let Some(array) = node.as_array_node() {
+            return array.elements().iter().all(|e| inert_arg(&e));
+        }
+        // `Zeitwerk::GemInflector.new(__FILE__)`, the inflector a gem's loader takes.
+        node.as_call_node().is_some_and(|c| {
+            constant_id_str(&c.name()) == "new"
+                && c.receiver().and_then(|r| super::util::constant_path_of(&r)).is_some_and(|p| p == ["Zeitwerk", "GemInflector"])
+                && c.arguments().is_some_and(|a| {
+                    let args: Vec<_> = a.arguments().iter().collect();
+                    matches!(args.as_slice(), [one] if one.as_source_file_node().is_some())
+                })
+        })
     }
     if let Some(write) = stmt.as_local_variable_write_node() {
         if is_loader(&write.value(), loaders) {
@@ -781,4 +816,31 @@ pub(super) fn literal_requires(source: &[u8], file: &str) -> Vec<String> {
     let mut out = Vec::new();
     walk(&statements, &mut out);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_zeitwerk;
+
+    fn setup_statements(source: &str) -> Vec<bool> {
+        let parsed = super::super::prism::parse_silent(source.as_bytes());
+        let program = parsed.node();
+        let mut loaders = Vec::new();
+        program
+            .as_program_node()
+            .unwrap()
+            .statements()
+            .body()
+            .iter()
+            .map(|stmt| is_zeitwerk(&stmt, &mut loaders))
+            .collect()
+    }
+
+    #[test]
+    fn a_setup_call_whose_argument_runs_code_is_the_gems_program() {
+        let read = setup_statements(
+            "loader = Zeitwerk::Loader.new\nloader.inflector = Zeitwerk::GemInflector.new(__FILE__)\nloader.push_dir(File.expand_path(\"..\", __dir__))\nloader.ignore(\"#{__dir__}/tasks\")\nloader.push_dir(setup_dir!)\nloader.inflector = Custom.new(compute_at_load)\nloader.setup\n",
+        );
+        assert_eq!(read, vec![true, true, true, true, false, false, true]);
+    }
 }

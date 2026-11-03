@@ -195,7 +195,7 @@ pub const FINDER_IMPLEMENTATION_UNKNOWN: u64 = 1 << 50;
 /// A bare constant read in a `class << self` body: Ruby looks it up from the singleton class, not the class.
 pub const SINGLETON_CREF_CONST_REF: u64 = 1 << 51;
 /// A `raise NameError` standing for such a read Ruby itself cannot resolve.
-pub const SINGLETON_NAME_ERROR: u64 = 1 << 52;
+pub const SINGLETON_NAME_ERROR: u64 = 1 << 53;
 
 /// On a route-helper call `lower::route_format_suffix` renamed for its
 /// literal `format:` (`widget_url(w, format: :json)` to

@@ -4340,6 +4340,12 @@ impl Analyzer {
         }
         drop(_typing_library);
         self.library_class_vars(app);
+        // The initializers' top-level statements: top-level Ruby at boot, whose calls type the library methods they reach.
+        for stmt in app.boot_program.iter_mut() {
+            let mut ctx = Ctx::default();
+            ctx.constants = global_constants.clone();
+            self.body_typer().analyze_expr(stmt, &ctx);
+        }
 
         // Not the assigning actions' types alone: only UsersController sets lobsters' `@title_class`, and every other page rendered its nil as a `Symbol` (`class="x"`).
         for (layout, (rendering, assigning)) in &layout_presence {
@@ -4718,12 +4724,6 @@ impl Analyzer {
             ctx.constants = global_constants.clone();
             self.body_typer().analyze_expr(expr, &ctx);
         }
-        // The initializers' top-level statements, typed the same way: top-level Ruby at boot.
-        for stmt in app.boot_program.iter_mut() {
-            let mut ctx = Ctx::default();
-            ctx.constants = global_constants.clone();
-            self.body_typer().analyze_expr(stmt, &ctx);
-        }
         drop(_typing_tests);
     }
 
@@ -4818,38 +4818,43 @@ impl Analyzer {
     /// first-class DSL macros (`has_markdown` on `ActionText::HasMarkdown`).
     /// Controllers and test modules do not — keep their diagnostics.
     /// A library class's `@@x` (`mattr_accessor :x, default: v`'s storage):
-    /// what its class-body seed and its own methods write, as the next
-    /// round's reads of it answer. A write of a value with no type yet adds
-    /// nothing, as a pending `Var` arm does in an ivar slot.
+    /// what its class-body seed and its own class methods write, as the
+    /// next round's reads of it answer. Only when every write has a type:
+    /// a writer whose value no call types yet may store anything.
     fn library_class_vars(&mut self, app: &App) {
-        fn writes(e: &Expr, out: &mut HashMap<Symbol, Ty>) {
+        fn writes(e: &Expr, out: &mut HashMap<Symbol, Option<Ty>>) {
             if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } = &*e.node
                 && let Some(cvar) = name.as_str().strip_prefix("@@")
-                && let Some(ty) = value.ty.clone().filter(|t| !matches!(t, Ty::Var { .. } | Ty::Untyped))
             {
+                let ty = value.ty.clone().filter(|t| !t.is_open() && !matches!(t, Ty::Untyped));
                 let key = Symbol::from(cvar);
-                let joined = match out.remove(&key) {
-                    Some(old) => union_of(old, ty),
-                    None => ty,
+                let joined = match (out.remove(&key), ty) {
+                    (Some(Some(old)), Some(ty)) => Some(union_of(old, ty)),
+                    (None, ty) => ty,
+                    _ => None,
                 };
                 out.insert(key, joined);
             }
             e.node.for_each_child(&mut |c| writes(c, out));
         }
-        for lc in &app.library_classes {
-            let mut vars: HashMap<Symbol, Ty> = HashMap::default();
+        for lc in app.library_classes.iter().filter(|lc| !app.models.iter().any(|m| m.name == lc.name)) {
+            let mut vars: HashMap<Symbol, Option<Ty>> = HashMap::default();
             for init in &lc.class_ivar_initializers {
                 writes(init, &mut vars);
             }
             for method in lc.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Class) {
                 writes(&method.body, &mut vars);
             }
-            if vars.is_empty() {
-                continue;
-            }
             let cls = self.classes.entry(lc.name.clone()).or_default();
             for (name, ty) in vars {
-                cls.class_vars.insert(name, ty);
+                match ty {
+                    Some(ty) => {
+                        cls.class_vars.insert(name, ty);
+                    }
+                    None => {
+                        cls.class_vars.remove(&name);
+                    }
+                }
             }
         }
     }
@@ -6070,9 +6075,9 @@ impl Analyzer {
             if let Some(seeds) = &app.seeds {
                 work.push(Work { owner: None, roots: vec![(seeds, false)] });
             }
-            for stmt in &app.boot_program {
-                work.push(Work { owner: None, roots: vec![(stmt, false)] });
-            }
+        }
+        for stmt in &app.boot_program {
+            work.push(Work { owner: None, roots: vec![(stmt, false)] });
         }
 
         // Walk immutable trees concurrently; replay caller boundaries and sites in order.
@@ -9670,7 +9675,12 @@ fn walk_ivar_assignments(
 ) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            if let Some(ty) = value.ty.clone() {
+            // An empty indifferent hash in a slot is `{}`'s pending value: its `[]=` writes type it (`widen_hash_ivar_value`).
+            let empty_indifferent = matches!(&*value.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                if method.as_str() == "new" && args.is_empty() && matches!(&*r.node, ExprNode::Const { path }
+                    if matches!(path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().as_slice(), ["HashWithIndifferentAccess"] | ["ActiveSupport", "HashWithIndifferentAccess"])));
+            let ty = if empty_indifferent { Some(crate::analyze::indifferent::of(crate::analyze::body::unknown())) } else { value.ty.clone() };
+            if let Some(ty) = ty {
                 // Union with existing entry so repeated assignments to
                 // the same ivar accumulate (rather than the last write
                 // winning). Mirrors the simple flow-sensitive join.

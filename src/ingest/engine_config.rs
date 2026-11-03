@@ -243,8 +243,9 @@ pub(super) fn carry(app: &mut App, dir: &Path) -> super::boot_program::Taken {
         let mut recv = Expr::new(span, ExprNode::Const { path: setting.module.split("::").map(Symbol::from).collect() });
         // Not resolved from the source at its span: that span is the host's `config.…` write, which never names the module.
         recv.decisions |= crate::expr::GENERATED_CONST_REF;
-        let target = LValue::Attr { recv, name: Symbol::from(setting.attr.as_str()) };
-        statements.push(Expr::new(span, ExprNode::Assign { target, value: setting.value }));
+        // Not an `Assign` to an attribute: ingest spells `M.x = v` as the call of `x=`, which is what types the writer's parameter.
+        let write = ExprNode::Send { recv: Some(recv), method: Symbol::from(format!("{}=", setting.attr)), args: vec![setting.value], block: None, parenthesized: false };
+        statements.push(Expr::new(span, write));
         taken.insert((APPLICATION.to_string(), setting.start));
     }
     // Rails' order: the host's config, then every engine's `before_initialize`, the initializers, and `after_initialize` last.
@@ -1441,7 +1442,7 @@ impl Replayer<'_> {
         let mut recv = Expr::new(span, ExprNode::Const { path: module.split("::").map(Symbol::from).collect() });
         // Not resolved from the source at its span: that span is the engine's `config.…` write, which never names the module.
         recv.decisions |= crate::expr::GENERATED_CONST_REF;
-        Expr::new(span, ExprNode::Assign { target: LValue::Attr { recv, name: attr.clone() }, value })
+        Expr::new(span, ExprNode::Send { recv: Some(recv), method: Symbol::from(format!("{}=", attr.as_str())), args: vec![value], block: None, parenthesized: false })
     }
 
     /// `None` when the statement cannot be replayed; `Some(None)` when boot runs nothing for it.

@@ -9857,7 +9857,11 @@ fn never_loaded<V: Vfs + ?Sized>(vfs: &V, lib_dir: &Path, files: &[PathBuf]) -> 
         .filter(|file| {
             let feature = file.strip_prefix(lib_dir).ok().and_then(|r| r.to_str()).and_then(|r| r.strip_suffix(".rb")).unwrap_or_default();
             let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-            !live.iter().any(|text| text.contains(&format!("\"{feature}\"")) || text.contains(&format!("{stem}\"")))
+            !live.iter().any(|text| {
+                [format!("\"{feature}\""), format!("\"{feature}.rb\""), format!("{stem}\""), format!("{stem}.rb\"")]
+                    .iter()
+                    .any(|spelling| text.contains(spelling.as_str()))
+            })
         })
         .cloned()
         .collect()
@@ -9997,7 +10001,14 @@ fn plain_engine_library_statement<V: Vfs + ?Sized>(
             }
             // A framework superclass's class-level DSL (`category "Jobs"`): literal arguments, no block.
             let literal_args = call.arguments().is_some_and(|a| a.arguments().iter().all(|arg| engine_library_literal(&arg)));
-            if grammar.framework_body.get() && call.receiver().is_none() && call.block().is_none() && literal_args {
+            // Not a Kernel call: these load or run code this check never reads.
+            let kernel = matches!(
+                name,
+                "require" | "require_relative" | "load" | "autoload" | "eval" | "instance_eval" | "class_eval" | "module_eval"
+                    | "system" | "exec" | "spawn" | "`" | "fork" | "exit" | "exit!" | "abort" | "at_exit" | "trap" | "send"
+                    | "public_send" | "__send__"
+            );
+            if grammar.framework_body.get() && call.receiver().is_none() && call.block().is_none() && literal_args && !kernel {
                 return true;
             }
         }

@@ -555,7 +555,10 @@ fn a_gem_shaped_engine_library_admits_the_mount_and_a_patch_or_railtie_does_not(
     let out = fixture.0.join("admitted");
     let result = transpile(&app, "ruby", &out, &["--allow-unsupported"]);
     let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(result.status.success(), "{stderr}");
     assert!(!stderr.contains("route mount"), "{stderr}");
+    let routes = std::fs::read_to_string(out.join("config/routes.rb")).expect("routes emitted");
+    assert!(routes.contains("/catalog/products"), "the admitted mount is drawn:\n{routes}");
 
     for (label, path, source) in [
         ("patch", "vendor/catalog/lib/catalog/string_ext.rb", "class String\n  def shout\n    upcase\n  end\nend\n"),

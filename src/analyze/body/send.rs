@@ -1934,7 +1934,7 @@ impl<'a> BodyTyper<'a> {
                         })
                     } else {
                         match (method.as_str(), call_args) {
-                            ("new", []) => Some(crate::analyze::indifferent::of(unknown())),
+                            ("new", []) => Some(crate::analyze::indifferent::of(Ty::Untyped)),
                             ("new", [hash]) if block_ret.is_none() && crate::analyze::indifferent::constructor_args(call_args) => hash.ty.as_ref().and_then(crate::analyze::indifferent::from),
                             _ => None,
                         }

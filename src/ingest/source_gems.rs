@@ -210,10 +210,13 @@ fn zeitwerk_dirs(text: &str, dir: &Path, lib: &Path) -> Option<(Vec<PathBuf>, Ve
             let name = name.as_slice();
             if (name == b"push_dir" || name == b"ignore") && node.receiver().is_some() {
                 let arg = node.arguments().and_then(|a| a.arguments().iter().next());
-                // Not a glob as the path it spells: Zeitwerk expands it, and a literal `*` would ignore nothing here.
+                // Not a glob as the path an `ignore` spells: Zeitwerk expands it, and a literal `*` would ignore nothing here. A root is no glob, nor the gem's own directory.
                 let path = arg
                     .and_then(|a| path_of(&a, self.dir))
-                    .filter(|p| !p.to_string_lossy().contains(['*', '?', '[', '{']))
+                    .filter(|p| {
+                        name == b"push_dir"
+                            || !p.strip_prefix(self.dir).unwrap_or(p).to_string_lossy().contains(['*', '?', '[', '{'])
+                    })
                     .map(|p| normalize(&p));
                 if name == b"push_dir" { self.roots.push(path) } else { self.ignores.push(path) }
             }
@@ -234,7 +237,7 @@ fn zeitwerk_dirs(text: &str, dir: &Path, lib: &Path) -> Option<(Vec<PathBuf>, Ve
     Some((roots, ignores))
 }
 
-fn path_of(node: &ruby_prism::Node<'_>, dir: &Path) -> Option<PathBuf> {
+pub(super) fn path_of(node: &ruby_prism::Node<'_>, dir: &Path) -> Option<PathBuf> {
     let text = |n: &ruby_prism::Node<'_>| n.as_string_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned());
     if let Some(call) = node.as_call_node() {
         let name = call.name();
@@ -531,6 +534,15 @@ mod tests {
         let lib = Path::new("/gem/lib");
         let text = "loader = Zeitwerk::Loader.new\nloader.push_dir(__dir__)\nloader.ignore(File.join(__dir__, \"widgets\", \"*_test.rb\"))\nloader.setup\n";
         assert!(zeitwerk_dirs(text, lib, lib).is_none());
+    }
+
+    #[test]
+    fn a_gem_installed_under_a_bracketed_directory_keeps_its_loader() {
+        let lib = Path::new("/gems[client]/lib");
+        let text = "loader = Zeitwerk::Loader.new\nloader.push_dir(__dir__)\nloader.ignore(File.join(__dir__, \"widgets\", \"tasks.rb\"))\nloader.setup\n";
+        let (roots, ignores) = zeitwerk_dirs(text, lib, lib).expect("a literal root and ignore");
+        assert_eq!(roots, vec![lib.to_path_buf()]);
+        assert_eq!(ignores, vec![lib.join("widgets/tasks.rb")]);
     }
 
     #[test]
