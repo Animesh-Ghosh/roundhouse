@@ -685,7 +685,7 @@ module I18n
   end
 
   def self.config_named(name, locale_name)
-    Config.new(locale_name)
+    I18n::Config.new(locale_name)
   end
 
   def self.config_name_of(config)

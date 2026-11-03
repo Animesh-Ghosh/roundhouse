@@ -5864,11 +5864,11 @@ fn i18n_config_classes(app: &App) -> Vec<String> {
 
 fn i18n_config_source(classes: &[String]) -> String {
     if classes.is_empty() {
-        return "  def self.config_named(name, locale_name)\n    Config.new(locale_name)\n  end\n\n  def self.config_name_of(config)\n    \"\"\n  end\n\n  def self.config_default_locale\n    app_default_locale\n  end\n\n  def self.config_available_locales\n    app_available_locales\n  end\n".to_string();
+        return "  def self.config_named(name, locale_name)\n    I18n::Config.new(locale_name)\n  end\n\n  def self.config_name_of(config)\n    \"\"\n  end\n\n  def self.config_default_locale\n    app_default_locale\n  end\n\n  def self.config_available_locales\n    app_available_locales\n  end\n".to_string();
     }
     let arms = |each: &dyn Fn(&str) -> String| classes.iter().map(|c| each(c)).collect::<String>();
     format!(
-        "  def self.config_named(name, locale_name)\n    case name\n{}    else\n      Config.new(locale_name)\n    end\n  end\n\n\
+        "  def self.config_named(name, locale_name)\n    case name\n{}    else\n      I18n::Config.new(locale_name)\n    end\n  end\n\n\
          \x20 def self.config_name_of(config)\n    case config\n{}    else\n      \"\"\n    end\n  end\n\n\
          \x20 def self.config_default_locale\n    case I18nHost.config_name\n{}    else\n      app_default_locale\n    end\n  end\n\n\
          \x20 def self.config_available_locales\n    case I18nHost.config_name\n{}    else\n      app_available_locales\n    end\n  end\n",
