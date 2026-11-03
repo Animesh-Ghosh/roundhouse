@@ -20613,6 +20613,9 @@ mod record_slice;
 #[path = "emit_and_run/csrf_meta_tag_alias.rs"]
 mod csrf_meta_tag_alias;
 
+#[path = "emit_and_run/python_route_format.rs"]
+mod python_route_format;
+
 #[path = "emit_and_run/python_nested_modifier_if.rs"]
 mod python_nested_modifier_if;
 
