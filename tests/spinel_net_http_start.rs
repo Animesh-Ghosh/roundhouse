@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const CHECKS: usize = 27;
+const CHECKS: usize = 34;
 
 fn scratch_dir() -> PathBuf {
     let base = option_env!("CARGO_TARGET_TMPDIR")
@@ -139,7 +139,7 @@ fn a_request_no_stub_answers_reads_the_response_and_decodes_gzip() {
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
         let mut accept_encodings = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..8 {
             let Ok((stream, _)) = listener.accept() else { break };
             let mut reader = BufReader::new(stream);
             let mut request_line = String::new();
@@ -190,15 +190,68 @@ fn a_request_no_stub_answers_reads_the_response_and_decodes_gzip() {
     assert!(failed.is_empty(), "{}\n=== stdout ===\n{stdout}", failed.join("\n"));
     assert_eq!(
         stdout.lines().filter(|l| l.starts_with("ok ")).count(),
-        4,
+        13,
         "fewer checks ran than the driver makes\n=== stdout ===\n{stdout}"
     );
     // CRuby's header, which is what makes a server send gzip at all.
     let accept_encodings = server.join().expect("server thread");
     assert_eq!(
         accept_encodings,
-        vec!["gzip;q=1.0,deflate;q=0.6,identity;q=0.3"; 2],
+        vec!["gzip;q=1.0,deflate;q=0.6,identity;q=0.3"; 8],
         "=== stdout ===\n{stdout}"
     );
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// The callback must run before the peer has sent the entire response.
+#[test]
+#[ignore]
+fn the_request_block_reads_before_the_server_finishes_sending() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scratch = scratch_dir().with_file_name("roundhouse-spinel-net-http-stream");
+    std::fs::create_dir_all(&scratch).unwrap();
+    for (from, to) in [
+        ("runtime/spinel/net_http.rb", "net_http.rb"),
+        ("runtime/spinel/http_stub.rb", "http_stub.rb"),
+        ("runtime/spinel/tcp_socket_stub.rb", "tcp_socket_stub.rb"),
+        ("tests/spinel_net_http_stream.rb", "driver.rb"),
+    ] {
+        std::fs::copy(root.join(from), scratch.join(to)).unwrap();
+    }
+    let build = Command::new("spinel").args(["driver.rb", "-o", "driver"])
+        .current_dir(&scratch).output().expect("spinel on PATH");
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let acknowledgement = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let ack_port = acknowledgement.local_addr().unwrap().port();
+    acknowledgement.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" || line.is_empty() { break; }
+        }
+        let mut stream = reader.into_inner();
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsam").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut early = false;
+        while Instant::now() < deadline {
+            if acknowledgement.accept().is_ok() { early = true; break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = stream.write_all(b"ple");
+        early
+    });
+    let run = Command::new(scratch.join("driver"))
+        .args([port.to_string(), ack_port.to_string()]).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "streamed sample\n");
+    assert!(server.join().unwrap(), "read_body buffered before calling the consumer");
+    std::fs::remove_dir_all(scratch).unwrap();
 }

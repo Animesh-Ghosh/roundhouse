@@ -17,44 +17,14 @@
 # Webhook delivery works on the spinel binary today through this
 # class; a double that replaced it would have taken that away.
 #
-# WHAT IS REDEFINED, AND WHAT DELIBERATELY IS NOT.
+# The stub table and socket seam stay above the package's real transport.
+# Instance #start remains lazy, including its block/ensure lifecycle, and
+# self.start keeps the positional options form used by the emitted app.
 #
-# `#request` carries the stub lookup. It does NOT (yet) gain the block
-# form the package lacks (matz/spinel#4420; measured 2026-09-10:
-# `http.request(req) { |res| }` compiled and the block never ran — no
-# error, no warning — so campfire's unfurl spun through MAX_REDIRECTS
-# and raised TooManyRedirectsError): see the note on the method for
-# what a yielding `request` cost the block-less callers.
-#
-# `#start` (the INSTANCE method) becomes lazy: it marks the client
-# started and opens nothing. The package's `self.start` connects
-# eagerly — it hands its block to `http.start`, which connects BEFORE
-# yielding — which would put a real TLS connect to www.example.com
-# ahead of any stub. Deferring the connect to the first request that no
-# stub answers is what puts the double above the transport. The lazy
-# `start` keeps CRuby's block form (yield, then finish in an ensure):
-# since matz/spinel#8048 that is the only way the package's
-# `self.start`, `get_response` and `post_form` reach their block.
-#
-# `self.start` is NOT redefined, and `ipaddr:` — the keyword campfire's
-# DNS-rebinding pin is written on — is the PACKAGE's to honour: since
-# matz/spinel#4420 closed (2026-09-10) `Net::HTTP.start` declares it and
-# its connect connects to it while `Host:` and the TLS name stay
-# `address`. Probed 2026-09-17: `Net::HTTP.start("example.com", 80,
-# ipaddr: "127.0.0.1")` from a spinel binary fails with ECONNREFUSED on
-# 127.0.0.1, exactly as CRuby does, so the pin holds on this lane. The
-# TEST's proof of it — `TCPSocket.expects(:open).with { … }.throws` —
-# is served by `connect_with_timeout` below asking `TcpSocketStub` about
-# the address it is about to connect to, which is where CRuby's mocha
-# would have intercepted `TCPSocket.open`. (#4416 and #4419, the
-# reopened-yielding-class-method and dropped-keyword bugs this comment
-# used to describe, closed the same day.)
-#
-# Last definition wins under spinel, and a redefined method sees the
-# class's other methods and ivars — `transport_request` below is the
-# package's `#request` body re-stated over `connect`/`begin_transport`
-# (also defined below) and `write_request`/`read_response`, which this
-# file leaves alone.
+# matz/spinel#10778 makes HTTPResponse read from the live socket inside
+# the request block. Keep that reader: only split callback chunks for
+# in-memory stubs, and finish an implicit session after the reader drains.
+# Explicit &blk parameters preserve dispatch for boxed callers too.
 require "net/http"
 require_relative "http_stub"
 require_relative "tcp_socket_stub"
@@ -68,24 +38,24 @@ module Net
     # path and silently break all three.
     READ_BODY_CHUNK = 16384
 
-    # `response.read_body { |chunk| ... }` — CRuby streams the body from
-    # the socket here; this package has already read it whole, so the
-    # stream is the String, sliced. A declared `&blk`, not `yield`, for
-    # the reason `HTTP#request` below gives: the response reaches
-    # `Opengraph::Fetch#size_restricted_body` boxed, and a yielding
-    # method has no dispatch entry for a boxed receiver — the call
-    # landed on nothing and raised `no block given (yield)`.
-    def read_body(&blk)
-      unless blk.nil?
-        offset = 0
-        total = @body.bytesize
-        while offset < total
-          blk.call(@body.byteslice(offset, READ_BODY_CHUNK).to_s)
-          offset += READ_BODY_CHUNK
+    # Keep the package's reader, read-once checks and destination argument.
+    # A stub already has a String body; bound its callback chunks as before.
+    alias read_body_from_package read_body
+
+    def read_body(dest = nil, &blk)
+      if blk.nil?
+        read_body_from_package(dest)
+      else
+        read_body_from_package(dest) do |chunk|
+          offset = 0
+          while offset < chunk.bytesize
+            blk.call(chunk.byteslice(offset, READ_BODY_CHUNK).to_s)
+            offset += READ_BODY_CHUNK
+          end
         end
       end
-      @body
     end
+    private :read_body_from_package
 
     # Integer or nil, as CRuby answers it — `Opengraph::Fetch` applies
     # `.to_i` and compares, so nil has to survive the read.
@@ -196,10 +166,11 @@ module Net
     # four delivery tests. A `&blk` parameter keeps the standalone
     # entry, so the block-less webhook call and `Opengraph::Fetch`'s
     # `request(req) { |res| … }` dispatch to the same method. The
-    # response is complete before the block sees it, as the package
-    # documents; `read_body` above is what slices it for a streaming
-    # reader.
+    # response keeps its live reader through the block and is drained
+    # before an implicit session closes.
     def request(req, &blk)
+      started = @started
+      start unless started
       i = HttpStub.find_for(req.method, stub_url(req.path), req.body)
       res =
         if i < 0
@@ -208,7 +179,10 @@ module Net
           build_response("1.1", HttpStub::STUB_STATUSES[i].to_s, "", HttpStub.headers_at(i), HttpStub::STUB_BODIES[i])
         end
       blk.call(res) unless blk.nil?
+      res.body
       res
+    ensure
+      finish if !started && started?
     end
 
     # The package's `connect_with_timeout`, re-stated over one question
@@ -248,10 +222,8 @@ module Net
       s
     end
 
-    # The package's `#request`, re-stated: a request on an unstarted
-    # client opens and closes around itself; a started one opens its
-    # socket on first use (the lazy `start` above) and reconnects after
-    # the `Connection: close` every response carries.
+    # Read the response headers, leaving its body reader live for #request.
+    # The lazy session opens its socket on the first unstubbed request.
     #
     # Through CRuby's two private transport hooks, `connect` and
     # `begin_transport(req)`, so a subclass that overrides them sees them
@@ -262,14 +234,6 @@ module Net
     # signatures). Both are defined here rather than relied on from the
     # package, which names them only from matz/spinel#8361 on.
     def transport_request(req)
-      unless @started
-        begin
-          @started = true
-          return transport_request(req)
-        ensure
-          finish
-        end
-      end
       connect if @socket.nil?
       begin_transport(req)
       write_request(req)
@@ -311,16 +275,11 @@ module Net
       nil
     end
 
-    # Connects again unless the socket was opened for this request: every
-    # response carries `Connection: close`.
+    # The package sends Connection: close and cannot reuse a connection.
+    # Refuse a second real request within a session before returning bytes
+    # from a different connection as if keep-alive had succeeded.
     def begin_transport(req)
-      unless @fresh
-        @tls.sysclose unless @tls.nil?
-        @socket.close unless @socket.nil?
-        @tls = nil
-        @socket = nil
-        connect
-      end
+      raise NotImplementedError, "net/http: keep-alive reuse is not supported" unless @fresh
       @fresh = false
       nil
     end
