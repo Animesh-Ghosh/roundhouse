@@ -382,19 +382,26 @@ shortcut declarations whose paths, `to:` targets, controller/action options,
 and supported `as:`/`match via:` options are literal. Nonliteral targets
 and all `redirect(...)` route targets, `resources`/`resource`,
 `namespace`/`scope`, and other routing wrappers remain explicit errors; they
-are not flattened into public routes. The engine's route helpers and the
-host's named mount proxy helpers are not composed. Calls that could otherwise
-fall through to a same-named host helper receive a located `route mount`
-error. Rack applications and all other engine mount forms remain explicit
+are not flattened into public routes. The engine's route helpers resolve as
+Rails resolves them: inside the engine's own code (its `app/`, `lib/` and
+views) a bare `products_path` is the engine's route under the mount
+(`/catalog/products`), `main_app.products_path` is the host's, and host code
+reaches the engine's through the proxy, `catalog.products_path`. The routes
+are drawn under the proxy's name as a helper prefix (`catalog_products_path`)
+and each such call is rewritten to it as it is ingested
+(`src/ingest/engine_helpers.rs`); the engine's root keeps the trailing slash
+Rails joins to the mount (`/catalog/`). A host route already named like one of
+those prefixed helpers keeps its name, the engine's helpers are left out, and
+each call that reached them is a located `route mount` error. The host's
+named mount helper (`catalog_path`) is not composed. Rack applications and all other engine mount forms remain explicit
 errors, including dynamic or patterned prefixes, `as:` aliases,
 nested or repeated mounts, custom engine initializers and middleware, route
 constraints or conditional branches, route prepends, Devise visibility
 wrappers, and engine `direct` helpers. Strict emission refuses these errors;
 `--allow-unsupported` can write an incomplete project, and survey mode records
-the gap without clearing the diagnostic. Direct and literal reflective
-(`send`, `public_send`, or `__send__`) uses of engine route helpers or the
-mounted proxy are also located errors; engine helper proxies are not resolved
-to the host route table.
+the gap without clearing the diagnostic. Literal reflective (`send`, `public_send`,
+or `__send__`) uses of engine route helpers or the mounted proxy are located
+errors.
 The generic CRuby dispatch contract is exercised by
 `tests/emit_and_run.rs`; `tests/spinel_toolchain.rs` carries the ignored native
 Spinel HTTP witness.

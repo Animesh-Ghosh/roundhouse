@@ -675,6 +675,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     super::engine_config::prepare(vfs, dir, &engine_config_libs);
     super::on_load_reopen::reset();
     let (engine_routes, engine_refusals) = engine_route_sources(vfs, dir, &path_gems, lock.as_ref());
+    super::engine_helpers::prepare(&engine_routes);
     let additional_test_paths = additional_test_paths(dir, &config)?;
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
     let mut roots = app_roots(vfs, dir, &path_gems);
@@ -3208,6 +3209,8 @@ end
     // from the controller they leave.
     reconcile_controller_helper_methods(&mut app);
     super::uncalled_helper_copies::mark(&mut app);
+    // Not beside the route merge: views are ingested, and their calls rewritten, after it.
+    super::engine_helpers::settle(&mut app.routes);
     let (rake_tasks_source, rake_task_gaps) = super::rake_tasks::ingest(vfs, dir);
     app.rake_tasks_source = rake_tasks_source;
     app.rake_task_gaps = rake_task_gaps;

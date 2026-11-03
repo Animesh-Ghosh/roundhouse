@@ -57,6 +57,7 @@ mod active_job_config;
 mod caches_page;
 mod boot_program;
 mod engine_config;
+mod engine_helpers;
 mod unreached_gem_modules;
 pub mod allow_browser;
 pub mod app;

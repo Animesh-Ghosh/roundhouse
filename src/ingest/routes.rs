@@ -667,13 +667,6 @@ fn ingest_literal_mount(
         return unsupported("engine route source must contain exactly one top-level matching `<Engine>.routes.draw` block and no other top-level code");
     }
     let mut entries = Vec::new();
-    let empty_draws = HashMap::default();
-    let empty_wrappers = HashSet::default();
-    let empty_engine_routes = HashMap::default();
-    let empty_engine_refusals = HashMap::default();
-    let empty_rack_apps = RackAppTargets::default();
-    let empty_helper_sources = OnceCell::new();
-    let empty_helper_loader = || Vec::new();
     for draw in draws {
         let Some(block) = draw.block().and_then(|node| node.as_block_node()) else { continue };
         let Some(body) = block.body() else { continue };
@@ -707,42 +700,17 @@ fn ingest_literal_mount(
             route_mount_gap(&draw, &engine.file, cx, "engine `redirect` targets are not composed");
             return None;
         }
-        let engine_cx = Ctx {
-            draws: &empty_draws,
-            wrappers: &empty_wrappers,
-            engine_routes: &empty_engine_routes,
-            engine_refusals: &empty_engine_refusals,
-            rack_apps: &empty_rack_apps,
-            helper_sources: &empty_helper_sources,
-            load_helper_sources: &empty_helper_loader,
-            concerns: RefCell::new(HashMap::default()),
-            active: RefCell::new(Vec::new()),
-            hoisted: RefCell::new(Vec::new()),
-            diagnostics: RefCell::new(Vec::new()),
-            mount_scope_depth: Cell::new(1),
-            scope_controller: RefCell::new(None),
-            mounted_engines: RefCell::new(HashSet::default()),
-            mounted_rack_apps: RefCell::new(HashSet::default()),
-            strict: true,
-        };
-        // Not the survey's recovery: a route it records and skips would leave the engine's table short.
-        let mark = super::survey::mark();
-        let walked = ingest_route_body(body, &engine.file, None, &engine_cx);
-        let recorded = super::survey::first_since(mark);
-        super::survey::rewind(mark);
-        match walked {
-            Ok(_) if recorded.is_some() => {
-                let detail = format!("engine route set contains unsupported routing DSL ({})", recorded.unwrap_or_default());
+        match walk_engine_body(body, &engine.file) {
+            Ok(EngineWalk { recorded: Some(recorded), .. }) => {
+                let detail = format!("engine route set contains unsupported routing DSL ({recorded})");
                 route_mount_gap(&draw, &engine.file, cx, &detail);
                 return None;
             }
-            Ok(mut inner) => {
-                if !engine_cx.diagnostics.borrow().is_empty() {
-                    route_mount_gap(&draw, &engine.file, cx, "engine route set contains nested or unsupported mounts");
-                    return None;
-                }
-                entries.append(&mut inner);
+            Ok(EngineWalk { diagnosed: true, .. }) => {
+                route_mount_gap(&draw, &engine.file, cx, "engine route set contains nested or unsupported mounts");
+                return None;
             }
+            Ok(EngineWalk { entries: mut inner, .. }) => entries.append(&mut inner),
             Err(err) => {
                 route_mount_gap(&draw, &engine.file, cx, &format!("engine route set contains unsupported routing DSL ({err})"));
                 return None;
@@ -751,17 +719,80 @@ fn ingest_literal_mount(
     }
     diagnose_engine_helper_uses(&engine_name, &engine.namespace, &entries, cx);
 
-    Some(RouteSpec::Scope {
+    let scope = RouteSpec::Scope {
         path: Some(path),
         module: Some(engine.namespace.clone()),
-        as_prefix: None,
+        // Not on a proxy object as Rails keeps them: `engine_helpers` rewrites each call to the prefixed name.
+        as_prefix: Some(engine_proxy_name(&engine.namespace)),
         defaults: IndexMap::new(),
         nest: false,
-        // Route dispatch shares the host table. Engine helper names do not:
-        // Rails keeps them on a per-mount proxy, which remains unsupported.
-        suppress_helpers: true, within: ResourceScope::Nested,
+        suppress_helpers: false, mount: true, within: ResourceScope::Nested,
         entries,
-    })
+    };
+    super::engine_helpers::mounted(&engine.namespace, &scope);
+    Some(scope)
+}
+
+struct EngineWalk {
+    entries: Vec<RouteSpec>,
+    recorded: Option<String>,
+    diagnosed: bool,
+}
+
+/// One engine draw body walked on its own: no host draws, wrappers or mounts.
+fn walk_engine_body(body: Node<'_>, file: &str) -> IngestResult<EngineWalk> {
+    let empty_draws = HashMap::default();
+    let empty_wrappers = HashSet::default();
+    let empty_engine_routes = HashMap::default();
+    let empty_engine_refusals = HashMap::default();
+    let empty_rack_apps = RackAppTargets::default();
+    let empty_helper_sources = OnceCell::new();
+    let empty_helper_loader = || Vec::new();
+    let engine_cx = Ctx {
+        draws: &empty_draws,
+        wrappers: &empty_wrappers,
+        engine_routes: &empty_engine_routes,
+        engine_refusals: &empty_engine_refusals,
+        rack_apps: &empty_rack_apps,
+        helper_sources: &empty_helper_sources,
+        load_helper_sources: &empty_helper_loader,
+        concerns: RefCell::new(HashMap::default()),
+        active: RefCell::new(Vec::new()),
+        hoisted: RefCell::new(Vec::new()),
+        diagnostics: RefCell::new(Vec::new()),
+        mount_scope_depth: Cell::new(1),
+        scope_controller: RefCell::new(None),
+        mounted_engines: RefCell::new(HashSet::default()),
+        mounted_rack_apps: RefCell::new(HashSet::default()),
+        strict: true,
+    };
+    // Not the survey's recovery: a route it records and skips would leave the engine's table short.
+    let mark = super::survey::mark();
+    let walked = ingest_route_body(body, file, None, &engine_cx);
+    let recorded = super::survey::first_since(mark);
+    super::survey::rewind(mark);
+    let diagnosed = !engine_cx.diagnostics.borrow().is_empty();
+    walked.map(|entries| EngineWalk { entries, recorded, diagnosed })
+}
+
+/// The name Rails gives an isolated engine's route proxy: `MissionControl::Jobs` → `mission_control_jobs`.
+pub(super) fn engine_proxy_name(namespace: &str) -> String {
+    let proxy = namespace.split("::").map(crate::naming::snake_case).collect::<Vec<_>>().join("_");
+    if proxy.is_empty() { "engine".to_string() } else { proxy }
+}
+
+/// The helper names an engine's own code calls bare, read from its route file
+/// alone so the code that calls them can be rewritten as it is ingested.
+pub(super) fn engine_helper_names(engine_name: &str, engine: &EngineRouteSource) -> HashSet<String> {
+    let parsed = super::prism::parse_silent(&engine.source);
+    let mut names = HashSet::default();
+    for draw in top_level_engine_draws(parsed.node(), engine_name) {
+        let Some(body) = draw.block().and_then(|node| node.as_block_node()).and_then(|block| block.body()) else { continue };
+        if let Ok(walk) = walk_engine_body(body, &engine.file) {
+            names.extend(engine_route_helper_methods(&walk.entries));
+        }
+    }
+    names
 }
 
 /// Reject helper calls that would require Rails' engine-specific route helper
@@ -774,8 +805,7 @@ fn diagnose_engine_helper_uses(
     cx: &Ctx<'_>,
 ) {
     let engine_helpers = engine_route_helper_methods(entries);
-    let proxy = namespace.split("::").map(crate::naming::snake_case).collect::<Vec<_>>().join("_");
-    let proxy = if proxy.is_empty() { "engine".to_string() } else { proxy };
+    let proxy = engine_proxy_name(namespace);
     let mounted_helpers = HashSet::from_iter([
         format!("{proxy}_path"),
         format!("{proxy}_url"),
@@ -836,7 +866,7 @@ fn engine_route_helper_methods(entries: &[RouteSpec]) -> HashSet<String> {
         as_prefix: None,
         defaults: IndexMap::new(),
         nest: false,
-        suppress_helpers: false, within: ResourceScope::Nested,
+        suppress_helpers: false, mount: false, within: ResourceScope::Nested,
         entries: entries.to_vec(),
     });
     let mut methods = HashSet::default();
@@ -883,7 +913,19 @@ impl<'h, 'pr> ruby_prism::Visit<'pr> for HelperUseFinder<'h, 'pr> {
                                     || receiver_chain_has(recv, "main_app")
                             })))
             };
-            if matched {
+            // `ingest::engine_helpers` rewrites a literal call it can see; a reflective one stays a gap.
+            let rewritten = constant_id_str(&call.name()) == helper.as_str()
+                && engine_helper
+                && if self.engine_origin {
+                    receiver.as_ref().is_none_or(|recv| recv.as_self_node().is_some())
+                } else {
+                    receiver.as_ref().and_then(|recv| recv.as_call_node()).is_some_and(|recv| {
+                        constant_id_str(&recv.name()) == self.proxy
+                            && recv.arguments().is_none()
+                            && recv.receiver().is_none_or(|r| r.as_self_node().is_some())
+                    })
+                };
+            if matched && !rewritten {
                 self.matches.push((call.location(), helper));
             }
         }
@@ -1654,7 +1696,7 @@ fn retag_scope(entries: &mut Vec<RouteSpec>, scope: ResourceScope) {
                     as_prefix: None,
                     defaults: IndexMap::new(),
                     nest: false,
-                    suppress_helpers: false,
+                    suppress_helpers: false, mount: false,
                     within: scope,
                     entries: vec![resource],
                 };
@@ -2319,9 +2361,9 @@ fn ingest_route_call(
         return Ok(Some(entries.into_iter().reduce(|left, right| match (left, right) {
             (RouteSpec::Scope { mut entries, .. }, route) => {
                 entries.push(route);
-                RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, suppress_helpers: false, within: ResourceScope::Nested, entries }
+                RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, suppress_helpers: false, mount: false, within: ResourceScope::Nested, entries }
             }
-            (left, right) => RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, suppress_helpers: false, within: ResourceScope::Nested, entries: vec![left, right] },
+            (left, right) => RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, suppress_helpers: false, mount: false, within: ResourceScope::Nested, entries: vec![left, right] },
         }).expect("via produced a route")));
     }
     match method {
@@ -2343,7 +2385,7 @@ fn ingest_route_call(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: true,
-            suppress_helpers: false, within: ResourceScope::Nested,
+            suppress_helpers: false, mount: false, within: ResourceScope::Nested,
             entries: block_entries(call, file, None, cx)?,
         })),
         // `controller :domains do get "x", action: :y end` — the block
@@ -2363,7 +2405,7 @@ fn ingest_route_call(
                 as_prefix: None,
                 defaults: IndexMap::new(),
                 nest: false,
-                suppress_helpers: false, within: ResourceScope::Nested,
+                suppress_helpers: false, mount: false, within: ResourceScope::Nested,
                 entries,
             }))
         }
@@ -2416,7 +2458,7 @@ fn ingest_route_call(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: false,
-            suppress_helpers: false, within: ResourceScope::Nested,
+            suppress_helpers: false, mount: false, within: ResourceScope::Nested,
             entries: block_entries(call, file, parent, cx)?,
         })),
         // Unknown DSL — `concern`, `use_doorkeeper`, and Devise's
@@ -2647,7 +2689,7 @@ fn ingest_namespace_route(
         // the parent's `/shops/:shop_id` (and `shop_` name) lands BEFORE the
         // namespace's own segment, unlike a plain `scope`.
         nest: true,
-        suppress_helpers: false, within: ResourceScope::Nested,
+        suppress_helpers: false, mount: false, within: ResourceScope::Nested,
         entries,
     })
 }
@@ -2715,7 +2757,7 @@ fn ingest_scope_route(
         }
         None => block_entries(call, file, None, cx)?,
     };
-    Ok(RouteSpec::Scope { path, module, as_prefix, defaults, nest: false, suppress_helpers: false, within: ResourceScope::Nested, entries })
+    Ok(RouteSpec::Scope { path, module, as_prefix, defaults, nest: false, suppress_helpers: false, mount: false, within: ResourceScope::Nested, entries })
 }
 
 /// `draw(:admin)` / `load(root.join("config", "routes", "admin.rb"))` /
@@ -2809,7 +2851,7 @@ fn ingest_route_file_include(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: false,
-            suppress_helpers: false, within: ResourceScope::Nested,
+            suppress_helpers: false, mount: false, within: ResourceScope::Nested,
             entries,
         }))
     })();
@@ -2931,7 +2973,7 @@ fn ingest_concerns(
         as_prefix: None,
         defaults: IndexMap::new(),
         nest: false,
-        suppress_helpers: false, within: ResourceScope::Nested,
+        suppress_helpers: false, mount: false, within: ResourceScope::Nested,
         entries,
     }))
 }
@@ -3330,7 +3372,7 @@ fn ingest_glob_draw_each(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: false,
-            suppress_helpers: false, within: ResourceScope::Nested,
+            suppress_helpers: false, mount: false, within: ResourceScope::Nested,
             entries: ingest_routes_file_entries(source, path, cx)?,
         });
     }
@@ -4150,7 +4192,7 @@ fn ingest_resources_route(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: false,
-            suppress_helpers: false,
+            suppress_helpers: false, mount: false,
             within: ResourceScope::Nested,
             entries: vec![resource],
         },
@@ -4308,8 +4350,8 @@ mod lazy_helper_source_tests {
         assert!(helper_sources.get().is_some());
         assert_eq!(
             routes.diagnostics.len(),
-            4,
-            "engine and mounted-proxy helper uses remain diagnosed"
+            2,
+            "the host's mounted helpers stay diagnosed; its proxy calls are rewritten"
         );
         let helper_file_id = super::super::sources::file_id("app/controllers/route_helpers.rb");
         assert_ne!(helper_file_id.0, 0, "diagnostic source must be registered");
@@ -4329,6 +4371,6 @@ mod lazy_helper_source_tests {
             })
             .collect();
         diagnostic_lines.sort_unstable();
-        assert_eq!(diagnostic_lines, vec![1, 2, 3, 4]);
+        assert_eq!(diagnostic_lines, vec![2, 4]);
     }
 }
