@@ -3067,7 +3067,7 @@ fn target_files_inner(
             {
                 continue;
             }
-            if !matches!(policy, crate::analyze::forwarding::KeywordPolicy::Legacy | crate::analyze::forwarding::KeywordPolicy::NativeLibrary) {
+            if !matches!(policy, crate::analyze::forwarding::KeywordPolicy::Legacy | crate::analyze::forwarding::KeywordPolicy::LegacyRubySplat | crate::analyze::forwarding::KeywordPolicy::NativeLibrary) {
                 let (construct, detail) = if policy == crate::analyze::forwarding::KeywordPolicy::RefuseOrdinarySuper {
                     ("keyword splat in ordinary super",
                      "super destination's native or lowered argument ABI cannot be verified")
