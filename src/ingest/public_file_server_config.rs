@@ -424,13 +424,6 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting) -> Ingest
         // load_defaults step must never hide an unread setter, alias or key.
         struct Mentions<'a> { key: &'a str, count: usize }
         impl Mentions<'_> {
-            fn possible_receiver(&self, receiver: Option<Node<'_>>) -> bool {
-                receiver.is_some_and(|r| r.as_self_node().is_none()
-                    && (r.as_constant_read_node().is_none() && r.as_constant_path_node().is_none()
-                        || r.as_constant_read_node().is_some_and(|n| constant_id_str(&n.name()) == "ActiveSupport")
-                        || r.as_constant_path_node().is_some_and(|n| n.parent().is_none()
-                            && n.name().is_some_and(|name| constant_id_str(&name) == "ActiveSupport"))))
-            }
             fn keyed(&self, args: Option<ruby_prism::ArgumentsNode<'_>>) -> bool {
                 args.and_then(|a| a.arguments().iter().next()).is_some_and(|key|
                     key.as_symbol_node().is_some_and(|s| s.unescaped() == self.key.as_bytes())
@@ -439,22 +432,21 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting) -> Ingest
         }
         impl<'pr> ruby_prism::Visit<'pr> for Mentions<'_> {
             fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-                if self.possible_receiver(node.receiver())
-                    && (constant_id_str(&node.name()).strip_suffix('=') == Some(self.key)
-                        || constant_id_str(&node.name()) == "[]=" && self.keyed(node.arguments()))
+                if constant_id_str(&node.name()).strip_suffix('=') == Some(self.key)
+                    || constant_id_str(&node.name()) == "[]=" && self.keyed(node.arguments())
                 { self.count += 1; }
                 ruby_prism::visit_call_node(self, node);
             }
             fn visit_index_or_write_node(&mut self, node: &ruby_prism::IndexOrWriteNode<'pr>) {
-                if self.possible_receiver(node.receiver()) && self.keyed(node.arguments()) { self.count += 1; }
+                if self.keyed(node.arguments()) { self.count += 1; }
                 ruby_prism::visit_index_or_write_node(self, node);
             }
             fn visit_index_and_write_node(&mut self, node: &ruby_prism::IndexAndWriteNode<'pr>) {
-                if self.possible_receiver(node.receiver()) && self.keyed(node.arguments()) { self.count += 1; }
+                if self.keyed(node.arguments()) { self.count += 1; }
                 ruby_prism::visit_index_and_write_node(self, node);
             }
             fn visit_index_operator_write_node(&mut self, node: &ruby_prism::IndexOperatorWriteNode<'pr>) {
-                if self.possible_receiver(node.receiver()) && self.keyed(node.arguments()) { self.count += 1; }
+                if self.keyed(node.arguments()) { self.count += 1; }
                 ruby_prism::visit_index_operator_write_node(self, node);
             }
         }
@@ -468,8 +460,8 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting) -> Ingest
         .sum() };
     let refused = if mentioned > count(&found) {
         Some(format!(
-            "a `config.{path_text}` setting that is not an assignment at the top level of a config \
-             body or of an `if`/`unless` inside one (this lift reads only `config.{path_text} = <value>`)"
+            "an assignment named `{}` whose receiver or statement placement is not modelled \
+             (this lift reads only `config.{path_text} = <value>`)", setting.key
         ))
     } else {
         replay(&found, "").err()

@@ -207,7 +207,7 @@ fn controller_owned_policy_and_configuration_execution_match_rails() {
         if output.status.code() == Some(77) { continue; }
         assert!(output.status.success(), "{name}: {}", String::from_utf8_lossy(&output.stderr));
         let expected: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        if matches!(name, "parent_getter_false_child_true" | "reopened_application") {
+        if matches!(name, "parent_getter_false_child_true" | "reopened_application" | "unrelated_setter") {
             assert_eq!(expected["body"], r#"{"text":"<"}"#);
             assert_eq!(expected["status"], 200);
             continue;
@@ -223,4 +223,6 @@ fn controller_owned_policy_and_configuration_execution_match_rails() {
     }
     let error = roundhouse::ingest::ingest_app(&root.join("reopened_application")).unwrap_err().to_string();
     assert!(error.contains("load_defaults"), "{error}");
+    let error = roundhouse::ingest::ingest_app(&root.join("unrelated_setter")).unwrap_err().to_string();
+    assert!(error.contains("escape_json_responses"), "{error}");
 }

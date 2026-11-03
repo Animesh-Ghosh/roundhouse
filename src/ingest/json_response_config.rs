@@ -99,6 +99,9 @@ mod tests {
         for assignment in [
             "1.times { config.action_controller.escape_json_responses = true }",
             "settings = config; settings.action_controller.escape_json_responses = true",
+            "settings = config.action_controller; settings.escape_json_responses = true",
+            "SETTINGS = config.action_controller; SETTINGS.escape_json_responses = true",
+            "config.action_controller.instance_eval { self.escape_json_responses = true }",
             "config.action_controller[:escape_json_responses] = true",
             "config.action_controller[\"escape_json_responses\"] = true",
             "if ENV['ESCAPE']; config.action_controller.escape_json_responses = true; end",
