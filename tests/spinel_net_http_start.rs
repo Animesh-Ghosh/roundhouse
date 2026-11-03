@@ -139,7 +139,7 @@ fn a_request_no_stub_answers_reads_the_response_and_decodes_gzip() {
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
         let mut accept_encodings = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..10 {
             let Ok((stream, _)) = listener.accept() else { break };
             let mut reader = BufReader::new(stream);
             let mut request_line = String::new();
@@ -158,6 +158,10 @@ fn a_request_no_stub_answers_reads_the_response_and_decodes_gzip() {
             let mut stream = reader.into_inner();
             let (encoding, body): (&str, &[u8]) = if request_line.starts_with("GET /gzip ") {
                 ("Content-Encoding: gzip\r\n", &GZIP_BODY)
+            } else if request_line.starts_with("GET /two ") {
+                ("", b"second widget")
+            } else if request_line.starts_with("GET /three ") {
+                ("", b"third widget")
             } else {
                 ("", b"plain widget")
             };
@@ -190,14 +194,14 @@ fn a_request_no_stub_answers_reads_the_response_and_decodes_gzip() {
     assert!(failed.is_empty(), "{}\n=== stdout ===\n{stdout}", failed.join("\n"));
     assert_eq!(
         stdout.lines().filter(|l| l.starts_with("ok ")).count(),
-        13,
+        15,
         "fewer checks ran than the driver makes\n=== stdout ===\n{stdout}"
     );
     // CRuby's header, which is what makes a server send gzip at all.
     let accept_encodings = server.join().expect("server thread");
     assert_eq!(
         accept_encodings,
-        vec!["gzip;q=1.0,deflate;q=0.6,identity;q=0.3"; 8],
+        vec!["gzip;q=1.0,deflate;q=0.6,identity;q=0.3"; 10],
         "=== stdout ===\n{stdout}"
     );
     let _ = std::fs::remove_dir_all(&scratch);

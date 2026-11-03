@@ -43,18 +43,23 @@ check "a streaming request closes its implicit session", !http.started?
 body = ""
 Net::HTTP.new(uri.host, uri.port).request(Net::HTTP::Get.new("/plain")) { |res| body = res.read_body }
 check "read_body without a block reads the socket", body == "plain widget"
-refused = false
+second = ""
+third = ""
 value = Net::HTTP.start(uri.host, uri.port) do |session|
   first = session.get("/plain").body
-  begin
-    session.get("/plain")
-  rescue NotImplementedError => e
-    refused = e.message.include?("keep-alive")
-  end
+  second = session.get("/two").body
+  third = session.get("/three").body
   first
 end
 check "start keeps the socket open through the body read", value == "plain widget"
-
-check "unsupported connection reuse raises explicitly", refused
+check "a second request reconnects after close and reads its own body", second == "second widget"
+check "a third request reconnects after close and reads its own body", third == "third widget"
+refused = false
+begin
+  Net::HTTP.new(uri.host, uri.port).get("/plain", { "Connection" => "keep-alive" })
+rescue NotImplementedError => e
+  refused = e.message.include?("keep-alive")
+end
+check "an explicit unsupported keep-alive request raises", refused
 check "content_length remains available on the reopened response", plain.content_length == 12
 puts "done"

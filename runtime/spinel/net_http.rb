@@ -234,6 +234,9 @@ module Net
     # signatures). Both are defined here rather than relied on from the
     # package, which names them only from matz/spinel#8361 on.
     def transport_request(req)
+      if req["connection"].to_s.downcase.split(",").any? { |token| token.strip == "keep-alive" }
+        raise NotImplementedError, "net/http: keep-alive connections are not supported"
+      end
       connect if @socket.nil?
       begin_transport(req)
       write_request(req)
@@ -275,11 +278,16 @@ module Net
       nil
     end
 
-    # The package sends Connection: close and cannot reuse a connection.
-    # Refuse a second real request within a session before returning bytes
-    # from a different connection as if keep-alive had succeeded.
+    # Each request sends Connection: close. A later request in the same
+    # session reconnects, as CRuby does when the previous connection closed.
     def begin_transport(req)
-      raise NotImplementedError, "net/http: keep-alive reuse is not supported" unless @fresh
+      unless @fresh
+        @tls.sysclose unless @tls.nil?
+        @socket.close unless @socket.nil?
+        @tls = nil
+        @socket = nil
+        connect
+      end
       @fresh = false
       nil
     end
