@@ -1134,6 +1134,16 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
                         if settled.quiet.iter().any(|(f, at, _)| *f == boot.file && *at == start) {
                             continue;
                         }
+                        // Not replayed: `on_load_reopen` carries its mixins onto the hooked classes, as the hook runs them.
+                        if stmt
+                            .as_call_node()
+                            .and_then(|c| c.block())
+                            .and_then(|b| b.as_block_node())
+                            .and_then(|b| b.body())
+                            .is_some_and(|b| super::on_load_reopen::carries_all(b, &boot.file))
+                        {
+                            continue;
+                        }
                         if let Some(root) = lib.parent()
                             && let Some((module, file)) = importmap_initializer(&hook, app.as_deref(), &sweeps)
                         {
