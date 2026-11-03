@@ -1015,6 +1015,15 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
             "a bare constant in `class << self` that only the class's ancestors define: Ruby raises NameError there, and so does this".to_string(),
         ));
     }
+    if expr.decisions & crate::expr::GUARDED_NAME_ERROR != 0 {
+        out.push(crate::lower::residue_diagnostic(
+            "guarded_constant",
+            "constant",
+            expr.span,
+            "ruby_name_error",
+            "a constant no gem of the app, Ruby or the app defines, read where the code rescues or tests for its absence: Ruby raises NameError there, and so does this".to_string(),
+        ));
+    }
     match &*expr.node {
         ExprNode::Ivar { name } => {
             if is_unknown_ty(expr.ty.as_ref()) {

@@ -853,6 +853,11 @@ const FAMILIES: &[(&str, GemFate)] = &[
 ];
 
 /// Classify a gem by name.
+/// Whether a standard-library gem's namespace is `root` (Ruby ships it whether or not the lockfile lists it).
+pub(crate) fn is_stdlib_namespace(root: &str) -> bool {
+    FATES.iter().any(|(gem, fate)| matches!(fate, GemFate::Stdlib) && namespace_of(gem).eq_ignore_ascii_case(root))
+}
+
 pub fn fate_of(name: &str) -> GemFate {
     if let Some((_, fate)) = FATES.iter().find(|(n, _)| *n == name) {
         return *fate;

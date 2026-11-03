@@ -1510,6 +1510,36 @@ impl<'a> BodyTyper<'a> {
                         return self.compute(expr, ctx);
                     }
                 }
+                // Ruby's own NameError, where the code rescues it or tests for the constant first (et-orbi's `Chronic::VERSION rescue nil`).
+                if indexed_source && matches!(ty, Ty::Var { .. }) && expr.decisions & crate::expr::ABSENCE_GUARDED != 0
+                {
+                    let span = expr.span;
+                    // Not the whole path: Ruby names the first segment it could not find, in the lexical scope it looked from.
+                    let root = path.iter().map(|p| p.as_str()).find(|p| !p.is_empty()).unwrap_or_default().to_string();
+                    let scope = match ctx.lexical_self.as_ref().or(ctx.self_ty.as_ref()) {
+                        _ if path.first().is_some_and(|p| p.as_str().is_empty()) => None,
+                        Some(Ty::Class { id, args }) if id.0.as_str() == "Class" => match args.first() {
+                            Some(Ty::Class { id, .. }) => Some(id.0.as_str().to_string()),
+                            _ => None,
+                        },
+                        Some(Ty::Class { id, .. }) => Some(id.0.as_str().to_string()),
+                        _ => None,
+                    };
+                    let written = match scope {
+                        Some(scope) => format!("{scope}::{root}"),
+                        None => root,
+                    };
+                    let mut name_error = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("NameError")] });
+                    name_error.decisions |= crate::expr::GENERATED_CONST_REF;
+                    let text = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Str { value: format!("uninitialized constant {written}") } });
+                    let error = Expr::new(
+                        span,
+                        ExprNode::Send { recv: Some(name_error), method: Symbol::from("new"), args: vec![text], block: None, parenthesized: true },
+                    );
+                    *expr.node = ExprNode::Raise { value: error };
+                    expr.decisions |= crate::expr::GUARDED_NAME_ERROR;
+                    return self.compute(expr, ctx);
+                }
                 if indexed_source && matches!(ty, Ty::Var { .. }) {
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(crate::diagnostic::DiagnosticKind::Unsupported {
                         target: None,

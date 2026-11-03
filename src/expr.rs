@@ -196,6 +196,11 @@ pub const FINDER_IMPLEMENTATION_UNKNOWN: u64 = 1 << 50;
 pub const SINGLETON_CREF_CONST_REF: u64 = 1 << 51;
 /// A `raise NameError` standing for such a read Ruby itself cannot resolve.
 pub const SINGLETON_NAME_ERROR: u64 = 1 << 53;
+/// A constant read the code expects may be absent: under a rescue of
+/// StandardError, or after a `return … unless defined?(…)` of its root.
+pub const ABSENCE_GUARDED: u64 = 1 << 54;
+/// A `raise NameError` standing for such a read of a constant nothing defines.
+pub const GUARDED_NAME_ERROR: u64 = 1 << 55;
 
 /// On a route-helper call `lower::route_format_suffix` renamed for its
 /// literal `format:` (`widget_url(w, format: :json)` to
