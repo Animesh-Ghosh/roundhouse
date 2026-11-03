@@ -3033,7 +3033,8 @@ impl<'a> BodyTyper<'a> {
                         // could not type, is `ActiveSupport.to_query` (lower::symbolize_keys).
                         // A list inference cannot prove is an Array[String], or a
                         // `to_query(key)` (the Object/Array/nil form), still refuse.
-                        _ if method.as_str() == "presence_in" && args.len() == 1 && block.is_none() && is_string_array(args[0].ty.as_ref()) => None,
+                        _ if method.as_str() == "presence_in" && args.len() == 1 && block.is_none()
+                            && (is_string_array(args[0].ty.as_ref()) || is_symbol_array(args[0].ty.as_ref())) => None,
                         _ if method.as_str() == "to_query" && args.is_empty() && block.is_none()
                             && matches!(recv_ty, None | Some(Ty::Var { .. } | Ty::Untyped | Ty::Hash { .. })) => None,
                         _ if matches!(method.as_str(), "to_query" | "instance_values" | "acts_like?" | "presence_in" | "as_json" | "with_options" | "pretty_inspect") => Some("Object extension"),
@@ -7458,6 +7459,11 @@ pub(super) const RUBY_TOP_LEVEL: &[&str] = &[
 /// `Array[String]` — what `ActiveSupport.presence_in(value, list)` declares for its list.
 fn is_string_array(ty: Option<&Ty>) -> bool {
     matches!(ty, Some(Ty::Array { elem }) if **elem == Ty::Str)
+}
+
+/// `Array[Symbol]` — what `ActiveSupport.symbol_presence_in(value, list)` declares for its list.
+fn is_symbol_array(ty: Option<&Ty>) -> bool {
+    matches!(ty, Some(Ty::Array { elem }) if **elem == Ty::Sym)
 }
 
 /// A value the program drops: the expression itself and, through an `if`'s

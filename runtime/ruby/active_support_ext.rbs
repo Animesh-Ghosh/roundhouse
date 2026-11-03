@@ -26,6 +26,7 @@ module ActiveSupport
   def self.query_value: (String name, Roundhouse::ParamValue item) -> String
   def self.presence: (untyped value) -> untyped
   def self.presence_in: (untyped value, Array[String] list) -> untyped
+  def self.symbol_presence_in: (untyped value, Array[Symbol] list) -> untyped
 
   # `errors[:field]` -> the messages added on that attribute, prefix stripped.
 

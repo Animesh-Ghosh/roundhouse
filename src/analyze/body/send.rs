@@ -4119,6 +4119,8 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
         "match?" => Ty::Bool,
         "=~" => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         "<=>" | "<" | ">" | "<=" | ">=" => Ty::Bool,
+        // ActiveSupport `Object#presence_in(list)`: the receiver when the list holds it, else nil.
+        "presence_in" => Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() },
         _ => unknown(),
     }
 }

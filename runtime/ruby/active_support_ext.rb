@@ -309,6 +309,10 @@ module ActiveSupport
     value.is_a?(String) && list.include?(value) ? value : nil
   end
 
+  def self.symbol_presence_in(value, list)
+    value.is_a?(Symbol) && list.include?(value) ? value : nil
+  end
+
   # Rails' `ActiveModel::Errors#to_hash`: each attribute with errors, in
   # the order of its first error, to its messages
   # (`{ title: ["can't be blank"] }`). Reached from
