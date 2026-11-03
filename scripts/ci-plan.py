@@ -74,6 +74,9 @@ JRUBY_BIND_INPUTS = {
 }
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
+    "spinel_faye_websocket",
+    "spinel_websocket_lifecycle",
+    "select_alias_index",
     "date_columns_spinel",
     "temporal_initialize_spinel",
     "framework_tests_spinel",
@@ -493,6 +496,7 @@ def native_coverage(path):
         or (path.startswith("tests/spinel") and path.endswith((".rs", ".rb")))
         or path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
         or path == "tests/support/db_concurrency_spinel.rb"
+        or path == "tests/support/full_forwarding.rs"
     ) and not interpreter_only
     suites = set()
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
@@ -507,11 +511,19 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
+    if path.startswith("tests/spinel_faye_websocket/") or path == "runtime/spinel/faye_websocket.rb":
+        suites.add("spinel_faye_websocket")
+    if path.startswith(("tests/spinel_websocket_lifecycle", "runtime/spinel/tep/websocket")) or path in {
+        "runtime/spinel/tep/net.rb", "runtime/spinel/tep/server_threaded.rb",
+    }:
+        suites.add("spinel_websocket_lifecycle")
     if path == "tests/support/db_concurrency_spinel.rb":
         suites.add("db_sqlite_concurrency")
     # The fixture app beside its harness selects the same suite.
     if path.startswith("tests/find_or_create_bang_records/"):
         suites.add("find_or_create_bang_records")
+    if path.startswith("tests/select_alias_index/"):
+        suites.add("select_alias_index")
     if (
         path in GENERATED_COLUMNS_SPINEL_INPUTS
         or path.startswith("tests/support/generated_columns_")
@@ -731,6 +743,12 @@ def select(
     wasm = site = spinel = False
     reasons = []
     for path in paths:
+        if path in {"tests/emit_and_run/class_body_calls.rs", "tests/support/class_body_calls.rs"}:
+            reasons.append(f"{path}: unit (emit_and_run), spinel-toolchain (ordinary class-body calls)")
+            spinel = True
+            jobs_selected.update(CORE)
+        if path.startswith("tests/support/controller_content_type_writer/"):
+            reasons.append(f"{path}: unit (controller_content_type_writer)")
         if path == "src/project.rs" and project_scope in PROJECT_BUILDERS.values():
             targets.update(("ruby", "jruby"))
             smoke.update(("ruby", "jruby"))
@@ -1402,7 +1420,10 @@ def main():
             "compare": plan["compare"],
             "spinel-tests": plan["spinel_tests"],
             "spinel-framework-shards": plan["spinel_framework_shards"],
-            "spinel-timings": {"toolchain": timings.get("toolchain", {})},
+            "spinel-timings": {
+                "framework": timings.get("framework", {}),
+                "toolchain": timings.get("toolchain", {}),
+            },
             "smoke": plan["smoke"],
             "smoke-extra": plan["smoke_extra"],
             "extras-advisory": plan["extras_advisory"],

@@ -582,6 +582,42 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("busy_timeout=", Ty::Int),
         ("busy_handler_timeout=", Ty::Int),
     ]);
+    // `ActionDispatch::Integration::Session`, a request the app answers in
+    // process (runtime/spinel/integration_session.rb and its ruby-tree
+    // twin): only the GET/HEAD surface those implement.
+    let test_response = Ty::Class { id: ClassId(Symbol::from("ActionDispatch::TestResponse")), args: vec![].into() };
+    register_stdlib_class(classes, "ActionDispatch::TestResponse", &[], &[
+        ("status", Ty::Int),
+        ("body", Ty::Str),
+        ("headers", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) }),
+    ]);
+    let session = Ty::Class { id: ClassId(Symbol::from("ActionDispatch::Integration::Session")), args: vec![].into() };
+    register_stdlib_class(classes, "ActionDispatch::Integration::Session", &[
+        ("new", session),
+    ], &[
+        ("host", Ty::Str),
+        ("host!", Ty::Str),
+        ("https!", Ty::Bool),
+        ("https?", Ty::Bool),
+        ("get", Ty::Int),
+        ("head", Ty::Int),
+        ("response", Ty::Union { variants: vec![test_response, Ty::Nil].into() }),
+    ]);
+    // solid_queue's queue API over the in-process queue (runtime/spinel/solid_queue.rb).
+    let sq_queue = Ty::Class { id: ClassId(Symbol::from("SolidQueue::Queue")), args: vec![].into() };
+    register_stdlib_class(classes, "SolidQueue::Queue", &[
+        ("find_by_name", sq_queue.clone()),
+        ("new", sq_queue),
+    ], &[
+        ("name", Ty::Str),
+        ("clear", Ty::Int),
+    ]);
+    let sq_relation = Ty::Class { id: ClassId(Symbol::from("SolidQueue::Semaphore::Relation")), args: vec![].into() };
+    register_stdlib_class(classes, "SolidQueue::Semaphore", &[("where", sq_relation)], &[]);
+    register_stdlib_class(classes, "SolidQueue::Semaphore::Relation", &[], &[
+        ("delete_all", Ty::Int),
+        ("count", Ty::Int),
+    ]);
     // `ActiveSupport::Cache` — `expand_cache_key` and the bounded
     // `MemoryStore`, in runtime/spinel/active_support_cache.rb (the ruby
     // family and spinel). A cached value is whatever was written.
@@ -880,6 +916,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // of the base catches their subclasses.
     for (exc, parent) in [
         ("Date::Error", "ArgumentError"),
+        ("Zlib::Error", "StandardError"),
         ("Psych::Exception", "RuntimeError"),
         ("Psych::SyntaxError", "Psych::Exception"),
         ("Psych::DisallowedClass", "Psych::Exception"),
@@ -1179,6 +1216,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // Not `finish`: spinel's package has `close` only.
         ("close", Ty::Untyped),
     ]);
+    // The body typer admits only the explicit whole-message FINISH form.
+    register_stdlib_class(classes, "Zlib::Deflate", &[("new", Ty::SelfInstance)], &[
+        ("deflate", Ty::Str), ("close", Ty::Nil),
+    ]);
+    register_stdlib_class(classes, "Zlib::GzipReader", &[("new", Ty::SelfInstance)], &[
+        // Only argument-free reads are admitted by the body typer.
+        ("read", Ty::Str),
+    ]);
     // `IO` / `Process` / `Timeout` — Campfire tip names these as Consts
     // in indexed app source (`time_limited_video_previewer`, web-push
     // connection pool, unfurl deadline). They were listed in
@@ -1253,12 +1298,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
     register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
     // `OpenSSL::HMAC.digest(OpenSSL::Digest.new("sha1"), key, data)`: rotp's one-time codes.
-    let openssl_digest = Ty::Class { id: ClassId(Symbol::from("OpenSSL::Digest")), args: vec![].into() };
-    register_stdlib_class(classes, "OpenSSL::Digest", &[("new", openssl_digest)], &[
-        ("name", Ty::Str),
-        ("digest", Ty::Str),
-        ("hexdigest", Ty::Str),
-    ]);
+    for name in ["OpenSSL::Digest", "OpenSSL::Digest::SHA1", "OpenSSL::Digest::SHA256"] {
+        let digest = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() };
+        register_stdlib_class(classes, name, &[("new", digest)], &[
+            ("name", Ty::Str), ("digest", Ty::Str), ("hexdigest", Ty::Str),
+        ]);
+        if name != "OpenSSL::Digest" {
+            register_stdlib_class(classes, name, &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
+            classes.get_mut(&ClassId(Symbol::from(name))).unwrap().parent = Some(ClassId(Symbol::from("OpenSSL::Digest")));
+        }
+    }
     let product = Ty::Class { id: ClassId(Symbol::from("Enumerator::Product")), args: vec![].into() };
     let lazy = Ty::Class { id: ClassId(Symbol::from("Enumerator::Lazy")), args: vec![].into() };
     register_stdlib_class(classes, "Enumerator::Product", &[("new", product)], &[

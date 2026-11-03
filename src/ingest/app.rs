@@ -32,7 +32,7 @@ use super::library_class::{
     ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model_with_enum_constants;
-use super::routes::{EngineRouteSource, RouteHelperSource, ingest_routes_with_engines};
+use super::routes::{EngineRouteSource, RouteHelperSource, ingest_route_file, merge_route_files};
 use super::schema::{ingest_migration, ingest_schema};
 use super::structure_sql::ingest_structure_sql;
 use super::test::{ingest_test_bases, ingest_test_files};
@@ -319,7 +319,11 @@ fn keep_initializer_defined(
 /// Admission is based on the callable retained from app source, not a target's
 /// spelling. Inherited, reopened, macro-defined and instance-only endpoints
 /// cannot establish that the mounted constant itself implements Rack's call.
-fn literal_rack_apps(app: &App, dir: &Path, boot_and_routes: &[Vec<u8>]) -> super::routes::RackAppTargets {
+///
+/// The candidates and the app and boot sources' writes are the same for
+/// every route file, so they are read once; `RackAppScan::targets` adds
+/// each route file's own writes.
+fn literal_rack_apps(app: &App, dir: &Path, boot_sources: impl FnOnce() -> Vec<Vec<u8>>) -> RackAppScan {
     use crate::dialect::{MethodReceiver, MethodVisibility};
     let mut counts: HashMap<ClassId, usize> = HashMap::default();
     for class in &app.library_classes {
@@ -364,7 +368,7 @@ fn literal_rack_apps(app: &App, dir: &Path, boot_and_routes: &[Vec<u8>]) -> supe
         Some(class.name.0.as_str().to_string())
     }).collect();
     if candidates.is_empty() {
-        return super::routes::RackAppTargets::default();
+        return RackAppScan::default();
     }
     // Method ownership is not binding ownership: file-level and qualified
     // writes can replace the constant after its class declaration. Inspect
@@ -376,24 +380,44 @@ fn literal_rack_apps(app: &App, dir: &Path, boot_and_routes: &[Vec<u8>]) -> supe
             writes.read(file.text.as_bytes());
         }
     }
-    for source in boot_and_routes {
-        writes.read(source);
+    for source in boot_sources() {
+        writes.read(&source);
     }
-    let mut rebound = HashSet::default();
-    candidates.retain(|name| {
-        let binding = super::routes::RackAppTargets::binding_name(name);
-        let reassigned = writes.names.iter().any(|written| {
-            [name.as_str(), binding].iter().any(|name| {
-                *name == written.as_str() || name.strip_prefix(written.as_str()).is_some_and(|rest| rest.starts_with("::"))
-            })
-        });
-        if reassigned { rebound.insert(binding.to_string()); }
-        !writes.unknown && !reassigned
-    });
-    super::routes::RackAppTargets { callable: candidates, rebound }
+    RackAppScan { candidates, writes }
 }
 
 #[derive(Default)]
+struct RackAppScan {
+    candidates: HashSet<String>,
+    writes: RackBindingWrites,
+}
+
+impl RackAppScan {
+    fn targets(&self, route_sources: &[Vec<u8>]) -> super::routes::RackAppTargets {
+        if self.candidates.is_empty() {
+            return super::routes::RackAppTargets::default();
+        }
+        let mut writes = self.writes.clone();
+        for source in route_sources {
+            writes.read(source);
+        }
+        let mut candidates = self.candidates.clone();
+        let mut rebound = HashSet::default();
+        candidates.retain(|name| {
+            let binding = super::routes::RackAppTargets::binding_name(name);
+            let reassigned = writes.names.iter().any(|written| {
+                [name.as_str(), binding].iter().any(|name| {
+                    *name == written.as_str() || name.strip_prefix(written.as_str()).is_some_and(|rest| rest.starts_with("::"))
+                })
+            });
+            if reassigned { rebound.insert(binding.to_string()); }
+            !writes.unknown && !reassigned
+        });
+        super::routes::RackAppTargets { callable: candidates, rebound }
+    }
+}
+
+#[derive(Default, Clone)]
 struct RackBindingWrites {
     namespace: Vec<String>,
     names: HashSet<String>,
@@ -865,6 +889,8 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             }
         }
     }
+    app.isolated_namespaces = isolated_prefixes.keys().cloned().collect();
+    app.isolated_namespaces.sort();
     for (module, prefix) in isolated_prefixes {
         table_prefixes.entry(module).or_insert(prefix);
     }
@@ -1318,6 +1344,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     // not abort ingest.
     // Rails' ParamsWrapper default (see `App::wrap_parameters_by_default`).
     app.wrap_parameters_by_default = read_wrap_parameters_by_default(vfs, dir);
+    app.active_job_retry_jitter = read_active_job_retry_jitter(vfs, dir);
     // The ActiveJob queue adapter (see `App::queue_adapter`).
     app.queue_adapter = read_queue_adapter(vfs, dir);
     // Where Sidekiq pushes (see `App::sidekiq_redis`).
@@ -1440,6 +1467,30 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
             let mut synth = crate::runtime_src::parse_methods(&headers).map_err(|message| IngestError::Unsupported {
                 file: "config/ (config.public_file_server.headers)".to_string(),
                 message: format!("the app's public file server headers do not parse once synthesized: {message}"),
+            })?;
+            methods.append(&mut synth);
+        }
+        // `config.action_controller.perform_caching` and
+        // `page_cache_directory` (see `action_controller_caching_config`),
+        // spliced and refused the same way.
+        if let Some(caching) = super::action_controller_caching_config::synthesize(vfs, dir)? {
+            let mut synth = crate::runtime_src::parse_methods(&caching).map_err(|message| IngestError::Unsupported {
+                file: "config/ (config.action_controller caching settings)".to_string(),
+                message: format!("the app's controller caching settings do not parse once synthesized: {message}"),
+            })?;
+            methods.append(&mut synth);
+        }
+        // Not refused when the replay can't read it (a comparison, say): only SolidQueue's clear reads it, and the adapter ingest already read stands in.
+        let adapter = super::active_job_config::synthesize(vfs, dir).unwrap_or_else(|_| {
+            Some(format!(
+                "def active_job_queue_adapter\n  {:?}\nend\n",
+                app.queue_adapter.as_deref().unwrap_or("async")
+            ))
+        });
+        if let Some(adapter) = adapter {
+            let mut synth = crate::runtime_src::parse_methods(&adapter).map_err(|message| IngestError::Unsupported {
+                file: "config/ (config.active_job.queue_adapter)".to_string(),
+                message: format!("the app's queue adapter setting does not parse once synthesized: {message}"),
             })?;
             methods.append(&mut synth);
         }
@@ -2040,9 +2091,75 @@ end
     app.generated_helper_methods =
         super::generated_helpers::ingest_generated_helpers(&app, vfs, dir, &model_files);
 
-    let routes_path = dir.join("config/routes.rb");
-    if vfs.exists(&routes_path) {
-        if let Some(source) = read_or_ledger(vfs, &routes_path)? {
+    // The route files Rails loads into the application's route set: the
+    // app's `config/routes.rb`, then each in-repo engine's own. An engine
+    // draws into the app (`Rails.application.routes.draw`), so its named
+    // routes are the app's helpers: an app can keep none in its own
+    // `config/routes.rb` and draw every route from its components'.
+    // Rails unshifts each engine's file onto the reloader's paths in
+    // initializer order and the app's last, so the app's file leads and
+    // the engines follow in reverse load order.
+    //
+    // UNMEASURED: the engines' load order. Rails defines them in the
+    // order `config/application.rb`'s requires reach them; that walk is
+    // not modeled here, so the engines are taken sorted by directory.
+    let mut engine_dirs: Vec<PathBuf> = path_gems
+        .iter()
+        .filter(|gem| !source_gems.iter().any(|source| source.mount == **gem))
+        .filter(|gem| declares_rails_engine(vfs, &gem.join("lib")))
+        .cloned()
+        .collect();
+    engine_dirs.sort();
+    let mut route_roots: Vec<PathBuf> = Vec::new();
+    if vfs.exists(&dir.join("config/routes.rb")) {
+        route_roots.push(dir.to_path_buf());
+    }
+    route_roots.extend(
+        engine_dirs
+            .iter()
+            .rev()
+            .filter(|engine| vfs.exists(&engine.join("config/routes.rb")))
+            .cloned(),
+    );
+    if !route_roots.is_empty() {
+        let block_wrappers = mapper_extension_block_methods(&app, vfs, dir, &engine_dirs);
+        // The constants the route files read, folded from their owners
+        // as a model body's are, for `constraints:` values. A route
+        // names a controller's constant as often as a model's, so its
+        // table also takes the controllers, which the enum inputs above
+        // leave out on purpose (a controller is not a model's input).
+        let mut route_inputs = super::model::EnumConstants::default();
+        let mut route_files: Vec<PathBuf> = enum_input_files.iter().cloned().collect();
+        for root in &roots {
+            let controllers_dir = dir.join(root).join("controllers");
+            if vfs.is_dir(&controllers_dir) {
+                route_files.extend(read_rb_files(vfs, &controllers_dir)?);
+            }
+        }
+        // A controller can also be an autoload input (an app that adds
+        // `app/controllers/concerns` to its autoload paths); recorded
+        // twice, its constants would count as written twice and fold
+        // nowhere.
+        route_files.sort();
+        route_files.dedup();
+        for file in &route_files {
+            if let Ok(text) = vfs.read(file) {
+                route_inputs.record_again(&text, &file.display().to_string());
+            }
+        }
+        for file in &boot_files {
+            if let Some(text) = read_or_ledger(vfs, file)? {
+                route_inputs.record_boot(&text, &file.display().to_string());
+            }
+        }
+        route_inputs.finish();
+        let mut drawn = Vec::new();
+        let rack_scan = literal_rack_apps(&app, dir, || {
+            boot_files.iter().filter_map(|file| vfs.read(file).ok()).collect()
+        });
+        for root in &route_roots {
+            let routes_path = root.join("config/routes.rb");
+            let Some(source) = read_or_ledger(vfs, &routes_path)? else { continue };
             // `draw(:name)` split files — Rails loads
             // `config/routes/<name>.rb` into the same DSL context, and
             // Mastodon-class apps keep most of their route table there.
@@ -2055,7 +2172,7 @@ end
             // the bare stem when it is unambiguous, for `draw(:name)` calls
             // written against a flat `config/routes/` layout.
             let mut draw_files: HashMap<String, (Vec<u8>, String)> = HashMap::default();
-            let routes_dir = dir.join("config/routes");
+            let routes_dir = root.join("config/routes");
             if vfs.is_dir(&routes_dir) {
                 for entry in read_rb_files(vfs, &routes_dir)? {
                     let Some(rel) = entry.strip_prefix(&routes_dir).ok().and_then(|p| p.to_str())
@@ -2067,37 +2184,6 @@ end
                     draw_files.insert(key, (split_source, entry.display().to_string()));
                 }
             }
-            let block_wrappers = mapper_extension_block_methods(&app, vfs, dir);
-            // The constants the route files read, folded from their owners
-            // as a model body's are, for `constraints:` values. A route
-            // names a controller's constant as often as a model's, so its
-            // table also takes the controllers, which the enum inputs above
-            // leave out on purpose (a controller is not a model's input).
-            let mut route_inputs = super::model::EnumConstants::default();
-            let mut route_files: Vec<PathBuf> = enum_input_files.iter().cloned().collect();
-            for root in &roots {
-                let controllers_dir = dir.join(root).join("controllers");
-                if vfs.is_dir(&controllers_dir) {
-                    route_files.extend(read_rb_files(vfs, &controllers_dir)?);
-                }
-            }
-            // A controller can also be an autoload input (an app that adds
-            // `app/controllers/concerns` to its autoload paths); recorded
-            // twice, its constants would count as written twice and fold
-            // nowhere.
-            route_files.sort();
-            route_files.dedup();
-            for file in &route_files {
-                if let Ok(text) = vfs.read(file) {
-                    route_inputs.record_again(&text, &file.display().to_string());
-                }
-            }
-            for file in &boot_files {
-                if let Some(text) = read_or_ledger(vfs, file)? {
-                    route_inputs.record_boot(&text, &file.display().to_string());
-                }
-            }
-            route_inputs.finish();
             let mut route_consts = super::model::ClassConsts::default();
             for text in std::iter::once(&source).chain(draw_files.values().map(|(s, _)| s)) {
                 let parsed = ruby_prism::parse(text);
@@ -2110,13 +2196,13 @@ end
                     .unwrap_or_default();
                 route_consts.merge(super::model::ClassConsts::collect(&top, &routes_path.display().to_string()));
             }
-            let routes = super::routes::with_route_constants(route_consts, || {
-                let rack_sources: Vec<_> = std::iter::once(source.clone())
+            let file_routes = super::routes::with_route_constants(route_consts, || {
+                let route_sources: Vec<_> = std::iter::once(source.clone())
                     .chain(draw_files.values().map(|(text, _)| text.clone()))
-                    .chain(boot_files.iter().filter_map(|file| vfs.read(file).ok()))
                     .collect();
-                let rack_apps = literal_rack_apps(&app, dir, &rack_sources);
-                ingest_routes_with_engines(
+                let rack_apps = rack_scan.targets(&route_sources);
+                ingest_route_file(
+                    root == dir,
                     &source,
                     &routes_path.display().to_string(),
                     &draw_files,
@@ -2127,25 +2213,29 @@ end
                     &load_helper_sources,
                 )
             });
-            if let Some(routes) = unwrap_or_record(routes)? {
-                // `to: redirect("/x")` routes point at actions nobody
-                // wrote, so write them: one controller, one action per
-                // redirect, each a `redirect_to <literal>, status: …`. It
-                // is the shape an app uses by hand for the same thing, and
-                // it keeps the redirect out of every emitter's route kind.
-                if !routes.redirects.is_empty() {
-                    app.controllers.push(synthesize_redirect_controller(&routes.redirects));
-                    // The inherited runtime calls this helper, outside app call-site inference.
-                    let signatures = crate::rbs::parse_app_signatures(
-                        "class RoundhouseRedirectsController\n  def same_host_location: (String location) -> String\n  def absolute_redirect_location: (String location) -> String\nend\n",
-                    ).expect("routing redirect policy signature parses");
-                    for (owner, methods) in signatures {
-                        app.rbs_signatures.entry(owner).or_default().extend(methods);
-                    }
-                }
-                app.routes = routes;
-                synthesize_rails_health_controller(&mut app);
+            if let Some(file_routes) = unwrap_or_record(file_routes)? {
+                drawn.push(file_routes);
             }
+        }
+        if !drawn.is_empty() {
+            let routes = merge_route_files(drawn);
+            // `to: redirect("/x")` routes point at actions nobody
+            // wrote, so write them: one controller, one action per
+            // redirect, each a `redirect_to <literal>, status: …`. It
+            // is the shape an app uses by hand for the same thing, and
+            // it keeps the redirect out of every emitter's route kind.
+            if !routes.redirects.is_empty() {
+                app.controllers.push(synthesize_redirect_controller(&routes.redirects));
+                // The inherited runtime calls this helper, outside app call-site inference.
+                let signatures = crate::rbs::parse_app_signatures(
+                    "class RoundhouseRedirectsController\n  def same_host_location: (String location) -> String\n  def absolute_redirect_location: (String location) -> String\nend\n",
+                ).expect("routing redirect policy signature parses");
+                for (owner, methods) in signatures {
+                    app.rbs_signatures.entry(owner).or_default().extend(methods);
+                }
+            }
+            app.routes = routes;
+            synthesize_rails_health_controller(&mut app);
         }
     }
 
@@ -2702,6 +2792,7 @@ end
     let (rate_limit_stores, rate_limit_store_values) = super::rate_limit::install_boot_stores(&mut app, rate_limit_stores, &const_resolver.for_sources(&sources));
     if app.queue_adapter.as_deref() == Some("sidekiq") {
         sidekiq_warnings.into_iter().for_each(warn_sidekiq);
+        require_sidekiq_redis_url(&app);
     }
     if app.queue_adapter.as_deref() == Some("sidekiq") && app.cable_redis.is_none() {
         warn_sidekiq(format!(
@@ -2720,6 +2811,9 @@ end
         .chain(app.controllers.iter().map(|c| c.name.0.as_str()))
         .map(|n| n.split("::").next().unwrap_or(n).to_string())
         .collect();
+    let gem_lock = app.gem_lock.clone();
+    let boot_taken = super::boot_program::build(vfs, dir, &mut app, gem_lock.as_ref(), &app_namespaces, &rate_limit_store_values)?;
+    super::boot_program::apply_call_sites(&mut app);
     super::initializer_ledger::record(
         vfs,
         dir,
@@ -2728,6 +2822,7 @@ end
         app.gem_lock.as_ref(),
         &app_namespaces,
         &rate_limit_store_values,
+        &boot_taken,
     );
     // Carrier provenance must not depend on where a module lives:
     // models, services, helpers and lib all use the same splice.
@@ -2914,7 +3009,7 @@ end
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
-    qualify_model_class_method_ar_calls(&mut app);
+    qualify_model_class_method_ar_calls(&mut app, &const_resolver.for_sources(&sources));
     // After the splice too: the inverse `has_many …, as: :owner` may be
     // declared in a concern's `included do`.
     resolve_polymorphic_targets(&mut app);
@@ -2932,6 +3027,7 @@ end
     super::impersonates::lower_impersonates(&mut app);
     super::inertia::lower_inertia(&mut app);
     super::vite::lower_vite_tags(&mut app);
+    super::time_tag::lower_time_tags(&mut app);
     // The real drain, now that every pass re-ingesting synthesized
     // Ruby has run. A synthesized `"<label>"` re-ingest never takes a
     // slot (`sources::register` refuses a label starting with `<`), so
@@ -2950,6 +3046,8 @@ end
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
     super::class_attribute::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes);
     expand_class_body_macros(&mut app)?;
+    // After the splice: a guard constant may live on an ancestor or arrive with a concern.
+    super::caches_page::expand(&mut app);
     // After the splice and the macros: a concern's action, or one a macro synthesizes, gates its permit too.
     super::conditional_permit::apply(&mut app);
     // The same idea one base over: `const` / `prop` under a class
@@ -4953,7 +5051,7 @@ fn qualify_lexical_consts(
 /// (`scope_chain::AssocClassMethods`), reading the model constant back
 /// as the implicit self it stands for; the strict targets, which have
 /// no relation to thread, keep the class-level reading.
-fn qualify_model_class_method_ar_calls(app: &mut App) {
+fn qualify_model_class_method_ar_calls(app: &mut App, resolver: &crate::analyze::ConstResolver) {
     use crate::dialect::{MethodReceiver, ModelBodyItem};
     use crate::expr::{Expr, ExprNode};
 
@@ -4963,11 +5061,10 @@ fn qualify_model_class_method_ar_calls(app: &mut App) {
     /// the runtime.
     const AR_CLASS_METHODS: &[&str] = &["all", "count", "where", "find_by", "exists?"];
 
+    // Concerns have already been spliced. Preserve class-side ownership
+    // across the complete source ancestry, including tableless parents.
+    let classes = crate::analyze::source_finder_classes(app, resolver);
     for model in &mut app.models {
-        let own: crate::det::HashSet<String> = model
-            .methods()
-            .map(|m| m.name.as_str().to_string())
-            .collect();
         let recv = Expr::new(
             crate::span::Span::synthetic(),
             ExprNode::Const { path: vec![model.name.0.clone()] },
@@ -4976,19 +5073,60 @@ fn qualify_model_class_method_ar_calls(app: &mut App) {
             fn walk(
                 expr: &mut Expr,
                 recv: &Expr,
-                own: &crate::det::HashSet<String>,
-                ar: &[&str],
+                owner: &crate::ident::ClassId,
+                classes: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+                resolver: &crate::analyze::ConstResolver,
             ) {
-                expr.node.for_each_child_mut(&mut |c| walk(c, recv, own, ar));
+                expr.node.for_each_child_mut(&mut |c| walk(c, recv, owner, classes, resolver));
+                // Do this before query classification: a dynamic finder
+                // must consume the caller's threaded relation too.
+                // Only class-object syntax is proven at ingest. Chained
+                // receivers wait for the analyzer's relation type.
+                let finder_send = matches!(&*expr.node, ExprNode::Send { method, args, .. }
+                    if method.as_str().starts_with("find_by_") || matches!(method.as_str(), "find_by" | "find_by!")
+                        || (matches!(method.as_str(), "send" | "public_send" | "__send__")
+                            && match args.first().map(|a| &*a.node) {
+                                Some(ExprNode::Lit { value: crate::expr::Literal::Sym { value } }) => value.as_str().starts_with("find_by_"),
+                                Some(ExprNode::Lit { value: crate::expr::Literal::Str { value } }) => value.starts_with("find_by_"),
+                                _ => false,
+                            }));
+                let class_receiver = finder_send && match &mut *expr.node {
+                    ExprNode::Send { recv: None, .. } => true,
+                    ExprNode::Send { recv: Some(r), .. } => match &*r.node {
+                        ExprNode::SelfRef => true,
+                        ExprNode::Const { path } => {
+                            // Constant spelling alone is not ownership:
+                            // Category inside Forum can name Forum::Category.
+                            if let Some(id) = resolver.namespace(r.span, path).filter(|id| classes.contains_key(*id)) {
+                                r.ty = Some(crate::ty::Ty::Class { id: id.clone(), args: vec![].into() });
+                                true
+                            } else {
+                                path.first().is_some_and(|head| head.as_str().is_empty())
+                            }
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if class_receiver {
+                    crate::lower::arel::normalize_dynamic_finder_send(expr, classes, Some(owner), true);
+                }
                 let ExprNode::Send { recv: r @ None, method, .. } = &mut *expr.node else {
                     return;
                 };
-                if !ar.contains(&method.as_str()) || own.contains(method.as_str()) {
+                if !AR_CLASS_METHODS.contains(&method.as_str())
+                    || crate::analyze::ClassInfo::source_class_method(classes, owner, method)
+                    || crate::analyze::ClassInfo::class_method_ownership_unknown(classes, owner, method)
+                {
                     return;
                 }
-                *r = Some(recv.clone());
+                let mut qualified = recv.clone();
+                if method.as_str() == "find_by" {
+                    qualified.decisions |= crate::expr::IMPLICIT_MODEL_FINDER_RECEIVER;
+                }
+                *r = Some(qualified);
             }
-            walk(expr, &recv, &own, AR_CLASS_METHODS);
+            walk(expr, &recv, &model.name, &classes, resolver);
         };
         for item in &mut model.body {
             let ModelBodyItem::Method { method, .. } = item else { continue };
@@ -6379,7 +6517,7 @@ fn filter_from_send(
         return None;
     };
     let kind = match method.as_str() {
-        "before_action" => FilterKind::Before,
+        "before_action" | "prepend_before_action" => FilterKind::Before,
         "around_action" => FilterKind::Around,
         "after_action" => FilterKind::After,
         "skip_before_action" => FilterKind::Skip,
@@ -6410,6 +6548,8 @@ fn filter_from_send(
     let mut targets: Vec<(crate::ident::Symbol, crate::span::Span)> = Vec::new();
     let mut only: Vec<crate::ident::Symbol> = Vec::new();
     let mut except: Vec<crate::ident::Symbol> = Vec::new();
+    let mut only_present = false;
+    let mut prepend = method.as_str() == "prepend_before_action";
     for arg in args {
         if let Some(sym) = sym_of(arg) {
             targets.push((sym, arg.span));
@@ -6429,8 +6569,16 @@ fn filter_from_send(
         };
         for (key, value) in entries {
             match sym_of(key).as_ref().map(|k| k.as_str().to_string()).as_deref() {
-                Some("only") => only = sym_list(value)?,
+                Some("only") => {
+                    only_present = true;
+                    only = sym_list(value)?;
+                }
                 Some("except") => except = sym_list(value)?,
+                Some("prepend") => match &*value.node {
+                    ExprNode::Lit { value: Literal::Bool { value: true } } => prepend = true,
+                    ExprNode::Lit { value: Literal::Bool { value: false } | Literal::Nil } => {}
+                    _ => return None,
+                },
                 // if:/unless: guards on a macro-expanded filter would
                 // need the predicate to resolve in the INCLUDER; not
                 // modeled, and silently dropping a guard changes when a
@@ -6463,8 +6611,11 @@ fn filter_from_send(
                 unless_cond: None,
                 if_cond_expr: None,
                 unless_cond_expr: None,
+                unread_guard: false,
+                unread_options: false,
+                only_present,
                 block: None,
-                prepend: false,
+                prepend,
             })
             .collect(),
     )
@@ -12027,8 +12178,9 @@ fn read_sidekiq_redis<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::app::Sidek
 /// such assignment. Only those two keys are read, each as a String
 /// literal, `ENV["NAME"]` or `ENV.fetch("NAME"[, "default"])`. Any other
 /// key, a value in another form, or a `config.redis =` that isn't a Hash
-/// literal is a warning: the push then takes that setting from the
-/// environment fallbacks, or not at all.
+/// literal is a warning, and the setting is not read. A tree on
+/// `:sidekiq` whose blocks leave it no `url:` is an error
+/// (`require_sidekiq_redis_url`): there is no environment fallback.
 pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<crate::app::SidekiqRedisConfig> {
     let src = String::from_utf8_lossy(source);
     // Cheap skip before parsing, as `kaminari_default_per_page` does.
@@ -12082,7 +12234,7 @@ pub(super) fn sidekiq_client_redis(source: &[u8], file: &str) -> Option<crate::a
             let mut config = crate::app::SidekiqRedisConfig::default();
             let Some(hash) = value.as_hash_node() else {
                 warn_sidekiq(format!(
-                    "`{param}.redis = {}` in {file} is not a Hash literal, so it is not read; jobs are pushed to REDIS_PROVIDER, REDIS_URL or localhost",
+                    "`{param}.redis = {}` in {file} is not a Hash literal, so it is not read",
                     text(value)
                 ));
                 found = Some(config);
@@ -12150,11 +12302,88 @@ fn redis_setting(node: &Node<'_>, src: &str) -> Option<crate::app::RedisSetting>
     }
 }
 
+/// An app on `:sidekiq` names its Redis in `Sidekiq.configure_client`.
+/// Without a `url:` ingest reads, the push would have nowhere to go:
+/// that is an error, not a fallback to `REDIS_PROVIDER`, `REDIS_URL` or
+/// localhost, so the app's own config stays the only source of where
+/// jobs land.
+fn require_sidekiq_redis_url(app: &App) {
+    // `url: ""` names nothing: the push would raise at run time, so it
+    // is refused here with the rest.
+    let empty = matches!(&app.sidekiq_redis.url, Some(crate::app::RedisSetting::Literal(url)) if url.is_empty());
+    if app.sidekiq_redis.url.is_some() && !empty {
+        return;
+    }
+    let detail = "an app on `queue_adapter :sidekiq` must name its Redis in config/initializers: \
+                  `Sidekiq.configure_client do |config| config.redis = { url: ... } end`, the URL a String \
+                  literal, ENV[\"NAME\"] or ENV.fetch(\"NAME\"[, \"default\"]); there is no fallback to \
+                  REDIS_PROVIDER, REDIS_URL or localhost";
+    super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+        crate::span::Span::synthetic(),
+        None,
+        "Sidekiq",
+        detail,
+    ));
+}
+
 /// A warning about what ingest reads from the app's Sidekiq settings.
 fn warn_sidekiq(detail: String) {
     let mut d = crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "Sidekiq", detail);
     d.severity = crate::diagnostic::Severity::Warning;
     super::prism::push(d);
+}
+
+/// `ActiveJob::Base.retry_jitter` app-wide (`App::active_job_retry_jitter`),
+/// read by line scan in Rails' precedence: `config.load_defaults` 6.1+
+/// sets 0.15 (Rails' `new_framework_defaults_6_1`), and an explicit
+/// `config.active_job.retry_jitter = <number>` (or
+/// `ActiveJob::Base.retry_jitter = <number>`) in config/application.rb,
+/// config/environments/production.rb or an initializer wins over that.
+fn read_active_job_retry_jitter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> f64 {
+    let code_lines = |bytes: &[u8]| -> Vec<String> {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.starts_with('#'))
+            .collect()
+    };
+    let mut jitter = 0.0;
+    let mut files: Vec<Vec<String>> = Vec::new();
+    if let Ok(source) = vfs.read(&dir.join("config/application.rb")) {
+        let lines = code_lines(&source);
+        for line in &lines {
+            if let Some(v) = load_defaults_version(line) {
+                jitter = if v >= 6.1 { 0.15 } else { 0.0 };
+            }
+        }
+        files.push(lines);
+    }
+    for sub in ["config/environments/production.rb", "config/initializers"] {
+        let path = dir.join(sub);
+        let paths = if vfs.is_dir(&path) { read_rb_files(vfs, &path).unwrap_or_default() } else { vec![path] };
+        for p in paths {
+            if let Ok(source) = vfs.read(&p) {
+                files.push(code_lines(&source));
+            }
+        }
+    }
+    for line in files.iter().flatten() {
+        let Some(i) = line.find("active_job.retry_jitter").or_else(|| line.find("ActiveJob::Base.retry_jitter")) else {
+            continue;
+        };
+        let Some((_, v)) = line[i..].split_once('=') else { continue };
+        // The whole numeric literal: `0.15`, `1e-2`, `1_0.0`.
+        let v: String = v
+            .trim()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '-' | '+' | '_'))
+            .filter(|c| *c != '_')
+            .collect();
+        if let Ok(v) = v.parse::<f64>() {
+            jitter = v;
+        }
+    }
+    jitter
 }
 
 /// What a trimmed, non-comment config line sets the app-wide
@@ -12694,11 +12923,16 @@ fn mapper_extension_block_methods<V: Vfs + ?Sized>(
     app: &App,
     vfs: &V,
     dir: &Path,
+    engine_dirs: &[PathBuf],
 ) -> crate::det::HashSet<String> {
     const TARGET: &str = "Routing::Mapper";
     let mut modules: Vec<String> = Vec::new();
-    for sub in ["config/initializers", "lib"] {
-        let d = dir.join(sub);
+    // The app's own, then each in-repo engine's: an engine's `lib` can
+    // carry the Mapper extension its own route file draws with.
+    let scanned = [dir].into_iter().chain(engine_dirs.iter().map(PathBuf::as_path)).flat_map(|root| {
+        ["config/initializers", "lib"].into_iter().map(move |sub| root.join(sub))
+    });
+    for d in scanned {
         if !vfs.is_dir(&d) {
             continue;
         }

@@ -82,6 +82,7 @@ require_relative "runtime/active_support_cache"
 # formatter subclasses (a LOAD-time reference, so this must precede
 # app/models.rb below).
 require_relative "runtime/logger"
+require_relative "runtime/logger_spinel"
 # `GlobalID::Locator` — the READ side of the gid `runtime/rails.rb` mints
 # one line up. A channel authorizing a subscribe turns the stream name
 # back into a record through it; the two halves live apart because only
@@ -198,6 +199,7 @@ require_relative "runtime/tep/tep"
 # Gem packages (runtime/gems/<gem>/) load right after this line, which
 # `project::apply_gem_packages` finds: they register their hooks here.
 require_relative "runtime/request_hooks"
+require_relative "runtime/faye_websocket"
 # Spinel-only CGI reopen: `require "cgi"` reaches spinel's bundled package
 # and this adds `parse`, which upstream moved to `cgi/core`. CRuby/JRuby use
 # the stdlib. No longer needs to follow tep — the escapes were routed to
@@ -290,9 +292,14 @@ require_relative "config/routes"
 # `ActionView::ViewHelpers.fragment_read/_write`, so after every file that
 # defines them.
 require_relative "runtime/action_controller_fragment_caching"
+require_relative "runtime/public_files"
+require_relative "runtime/action_controller_page_caching"
+require_relative "runtime/solid_queue"
+require_relative "runtime/integration_session"
 # Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
 # feature; strict non-Ruby targets keep the bounded shared implementation.
 require_relative "runtime/action_controller_head"
+require_relative "runtime/action_controller_render"
 # Rails' FlashHash keeps any key; the shared Flash keeps notice/alert, which every target can type.
 require_relative "runtime/flash_any_key"
 # Rails 8.1.4 `send_data(filename:)`: the Content-Disposition escaping

@@ -331,9 +331,14 @@ ActiveSupport.set_default_zone(tz_name)
 # `ActionView::ViewHelpers.fragment_read/_write`, so after every file that
 # defines them.
 require_relative "runtime/action_controller_fragment_caching"
+require_relative "runtime/public_files"
+require_relative "runtime/action_controller_page_caching"
+require_relative "runtime/solid_queue"
+require_relative "runtime/integration_session_cruby"
 # Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
 # feature; strict non-Ruby targets keep the bounded shared implementation.
 require_relative "runtime/action_controller_head"
+require_relative "runtime/action_controller_render"
 # Rails' FlashHash keeps any key; the shared Flash keeps notice/alert, which every target can type.
 require_relative "runtime/flash_any_key"
 # Rails 8.1.4 `send_data(filename:)`: the Content-Disposition escaping

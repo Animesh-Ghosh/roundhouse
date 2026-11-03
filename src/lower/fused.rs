@@ -55,8 +55,9 @@ pub fn apply_fused_independent_rewrites(app: &mut App) {
 /// `kwsplat`-expanded) argument lists, and `capture_inline` which
 /// must see `tag_builder`'s synthesized `capture` blocks.
 pub fn apply_fused_late_rewrites(app: &mut App) {
+    let skip_cache = super::rails_cache::app_binds_cache_store(app);
     super::for_each_hook_body(app, &mut |body| {
-        walk_postorder(body, &mut rewrite_late_hook_node);
+        walk_postorder(body, &mut |e| rewrite_late_hook_node(e, skip_cache));
     });
     for view in &mut app.views {
         walk_postorder(&mut view.body, &mut super::attachables_grep::rewrite_node);
@@ -143,11 +144,8 @@ pub fn apply_fused_context_rewrites(app: &mut App) {
 /// `sum_symbol` is model methods/unknown last so its new `to_a`/`sum`
 /// children are not fed to the other fused rewrites.
 pub fn apply_fused_pre_tag_rewrites(app: &mut App) {
-    let models: HashSet<String> = app
-        .models
-        .iter()
-        .map(|m| m.name.0.as_str().to_string())
-        .collect();
+    super::attribute_aliases::receiver::prove(app);
+    let models = super::attribute_aliases::Models::of(app);
     let sti_names = super::sti_is_a::subclass_type_names(app);
     let contracts = super::controller_class_render::call_contracts(app);
     let none = HashSet::default();
@@ -325,6 +323,7 @@ pub fn apply_fused_mid_rewrites(app: &mut App) {
     let path_params = if helpers.is_empty() {
         Default::default()
     } else {
+        super::route_url_options::bare_url_helper_receivers(app, &helpers);
         super::route_url_options::helper_path_params(app)
     };
     let enum_map = super::enum_symbols::enum_columns(app);
@@ -556,8 +555,10 @@ fn rewrite_test_node(e: &mut Expr, full_messages: &super::errors_full_messages::
     super::errors_full_messages::rewrite_node(e, full_messages);
 }
 
-fn rewrite_late_hook_node(e: &mut Expr) {
-    super::rails_cache::rewrite_node(e);
+fn rewrite_late_hook_node(e: &mut Expr, skip_cache: bool) {
+    if !skip_cache {
+        super::rails_cache::rewrite_node(e);
+    }
     super::capture_inline::rewrite_node(e);
     super::and_return::rewrite_node(e);
     super::case_lambda::rewrite_node(e);
