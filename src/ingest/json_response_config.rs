@@ -112,4 +112,26 @@ mod tests {
             assert!(error.contains("escape_json_responses"), "{error}");
         }
     }
+
+    #[test]
+    fn compound_json_setting_assignments_are_refused() {
+        let mut accepted = Vec::new();
+        for (section, key) in [
+            ("action_controller", "escape_json_responses"),
+            ("active_support", "escape_js_separators_in_json"),
+        ] {
+            for operator in ["||=", "&&=", "+="] {
+                let initializer = format!("config = Rails.application.config.{section}\nconfig.{key} {operator} true\n");
+                let tree: FileTree = [
+                    (PathBuf::from("/app/config/application.rb"), b"module App\nclass Application < Rails::Application\nconfig.load_defaults 8.1\nend\nend\n".to_vec()),
+                    (PathBuf::from("/app/config/initializers/escaping.rb"), initializer.into_bytes()),
+                ].into_iter().collect();
+                match synthesize(&MapVfs::new(tree), Path::new("/app")) {
+                    Err(error) => assert!(error.to_string().contains(key), "{error}"),
+                    Ok(_) => accepted.push(format!("{section}.{key} {operator}")),
+                }
+            }
+        }
+        assert!(accepted.is_empty(), "unread compound assignments accepted: {accepted:?}");
+    }
 }

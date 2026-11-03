@@ -437,6 +437,18 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting) -> Ingest
                 { self.count += 1; }
                 ruby_prism::visit_call_node(self, node);
             }
+            fn visit_call_or_write_node(&mut self, node: &ruby_prism::CallOrWriteNode<'pr>) {
+                if constant_id_str(&node.read_name()) == self.key { self.count += 1; }
+                ruby_prism::visit_call_or_write_node(self, node);
+            }
+            fn visit_call_and_write_node(&mut self, node: &ruby_prism::CallAndWriteNode<'pr>) {
+                if constant_id_str(&node.read_name()) == self.key { self.count += 1; }
+                ruby_prism::visit_call_and_write_node(self, node);
+            }
+            fn visit_call_operator_write_node(&mut self, node: &ruby_prism::CallOperatorWriteNode<'pr>) {
+                if constant_id_str(&node.read_name()) == self.key { self.count += 1; }
+                ruby_prism::visit_call_operator_write_node(self, node);
+            }
             fn visit_index_or_write_node(&mut self, node: &ruby_prism::IndexOrWriteNode<'pr>) {
                 if self.keyed(node.arguments()) { self.count += 1; }
                 ruby_prism::visit_index_or_write_node(self, node);
