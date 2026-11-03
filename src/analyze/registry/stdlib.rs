@@ -160,6 +160,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         id: ClassId(Symbol::from("Time")),
         args: vec![].into(),
     });
+    // `Time.zone.tzinfo`, flattened like `Time.zone.now`; `lower::time_calendar` grounds it.
+    time_cls.class_methods.insert(Symbol::from("tzinfo"), Ty::Class {
+        id: ClassId(Symbol::from("ActiveSupport::TimeZoneInfo")),
+        args: vec![].into(),
+    });
     time_cls.class_methods.insert(Symbol::from("find_zone"), Ty::Union {
         variants: vec![
             Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() },
@@ -916,6 +921,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // of the base catches their subclasses.
     for (exc, parent) in [
         ("Date::Error", "ArgumentError"),
+        ("Zlib::Error", "StandardError"),
         ("Psych::Exception", "RuntimeError"),
         ("Psych::SyntaxError", "Psych::Exception"),
         ("Psych::DisallowedClass", "Psych::Exception"),
@@ -1032,12 +1038,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `ActiveSupport::TimeZone` is `runtime/ruby/active_support_ext.rb`'s port; `[]` is typed in dispatch, by its argument.
     {
         let zone = || Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() };
+        let tzinfo = || Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZoneInfo")), args: vec![].into() };
         register_stdlib_class(classes, "ActiveSupport::TimeZone", &[
             ("all", Ty::Array { elem: std::sync::Arc::new(zone()) }),
             ("lookup", Ty::Union { variants: vec![zone(), Ty::Nil].into() }),
         ], &[
             ("name", Ty::Str), ("utc_offset", Ty::Int), ("formatted_offset", Ty::Str),
-            ("to_s", Ty::Str), ("now", Ty::Time),
+            ("to_s", Ty::Str), ("now", Ty::Time), ("tzinfo", tzinfo()),
+        ]);
+        // Only `name`/`identifier` of TZInfo::Timezone: the runtime's
+        // `ActiveSupport::TimeZoneInfo` answers nothing else.
+        register_stdlib_class(classes, "ActiveSupport::TimeZoneInfo", &[], &[
+            ("name", Ty::Str), ("identifier", Ty::Str),
         ]);
     }
     register_stdlib_class(classes, crate::analyze::indifferent::CLASS, &[], &[]);
@@ -1215,6 +1227,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // Not `finish`: spinel's package has `close` only.
         ("close", Ty::Untyped),
     ]);
+    // The body typer admits only the explicit whole-message FINISH form.
+    register_stdlib_class(classes, "Zlib::Deflate", &[("new", Ty::SelfInstance)], &[
+        ("deflate", Ty::Str), ("close", Ty::Nil),
+    ]);
+    register_stdlib_class(classes, "Zlib::GzipReader", &[("new", Ty::SelfInstance)], &[
+        // Only argument-free reads are admitted by the body typer.
+        ("read", Ty::Str),
+    ]);
     // `IO` / `Process` / `Timeout` — Campfire tip names these as Consts
     // in indexed app source (`time_limited_video_previewer`, web-push
     // connection pool, unfurl deadline). They were listed in
@@ -1289,12 +1309,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
     register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
     // `OpenSSL::HMAC.digest(OpenSSL::Digest.new("sha1"), key, data)`: rotp's one-time codes.
-    let openssl_digest = Ty::Class { id: ClassId(Symbol::from("OpenSSL::Digest")), args: vec![].into() };
-    register_stdlib_class(classes, "OpenSSL::Digest", &[("new", openssl_digest)], &[
-        ("name", Ty::Str),
-        ("digest", Ty::Str),
-        ("hexdigest", Ty::Str),
-    ]);
+    for name in ["OpenSSL::Digest", "OpenSSL::Digest::SHA1", "OpenSSL::Digest::SHA256"] {
+        let digest = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() };
+        register_stdlib_class(classes, name, &[("new", digest)], &[
+            ("name", Ty::Str), ("digest", Ty::Str), ("hexdigest", Ty::Str),
+        ]);
+        if name != "OpenSSL::Digest" {
+            register_stdlib_class(classes, name, &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
+            classes.get_mut(&ClassId(Symbol::from(name))).unwrap().parent = Some(ClassId(Symbol::from("OpenSSL::Digest")));
+        }
+    }
     let product = Ty::Class { id: ClassId(Symbol::from("Enumerator::Product")), args: vec![].into() };
     let lazy = Ty::Class { id: ClassId(Symbol::from("Enumerator::Lazy")), args: vec![].into() };
     register_stdlib_class(classes, "Enumerator::Product", &[("new", product)], &[
