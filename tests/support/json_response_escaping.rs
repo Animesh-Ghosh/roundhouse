@@ -46,6 +46,11 @@ pub fn app(defaults: &str) -> emit_and_run::Overlay {
         ("jsonp_uppercase", "Application/JSON"),
         ("jsonp_vendor", "application/vnd.api+json"),
         ("jsonp_js_charset", "text/javascript; charset=iso-8859-1"),
+        ("jsonp_no_space", "application/json;charset=utf-8"),
+        ("jsonp_extra_spaces", "application/json;   charset=utf-8"),
+        ("jsonp_other_parameter", "application/json;profile=example"),
+        ("jsonp_other_then_charset", "application/json;profile=example;charset=utf-8"),
+        ("jsonp_charset_then_other", "application/json;charset=utf-8;profile=example"),
     ] {
         controller.push_str(&format!("  def {name}\n    render json: {{text: \"<\"}}, callback: \"receive\", content_type: {mime:?}\n  end\n"));
         routes.push_str(&format!("  get '/{name}', to: 'payloads#{name}'\n"));
@@ -111,6 +116,11 @@ pub fn program(defaults: &str) -> String {
         ("jsonp_uppercase", "Application/JSON; charset=utf-8"),
         ("jsonp_vendor", "application/vnd.api+json; charset=utf-8"),
         ("jsonp_js_charset", "text/javascript; charset=iso-8859-1"),
+        ("jsonp_no_space", "text/javascript; charset=utf-8"),
+        ("jsonp_extra_spaces", "text/javascript; charset=utf-8"),
+        ("jsonp_other_parameter", "application/json;profile=example; charset=utf-8"),
+        ("jsonp_other_then_charset", "application/json;profile=example; charset=utf-8"),
+        ("jsonp_charset_then_other", "text/javascript; charset=utf-8"),
     ] {
         program.push_str(&format!("c = PayloadsController.new\nc.process_action(:{action})\nraise 'JSONP bytes' unless c.body == '/**/receive({{\"text\":\"\\u003c\"}})'\nraise 'JSONP header' unless c.content_type == {mime:?}\n"));
     }

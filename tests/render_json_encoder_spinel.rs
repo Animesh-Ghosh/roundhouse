@@ -226,3 +226,47 @@ fn controller_owned_policy_and_configuration_execution_match_rails() {
     let error = roundhouse::ingest::ingest_app(&root.join("unrelated_setter")).unwrap_err().to_string();
     assert!(error.contains("escape_json_responses"), "{error}");
 }
+
+#[test]
+fn jsonp_parameter_spacing_matches_initialized_rails() {
+    use std::{fs, path::Path};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/json_response_escaping");
+    let fixture = root.join("cases/jsonp_parameters");
+    let actions = ["bare", "no_space", "one_space", "extra_spaces", "uppercase", "other_parameter", "other_then_charset", "charset_then_other"];
+    let output = emit_and_run::ruby().arg(root.join("case_oracle.rb")).arg(&fixture).args(actions).output().unwrap();
+    if output.status.code() == Some(77) { return; }
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let expected: Vec<serde_json::Value> = String::from_utf8(output.stdout).unwrap().lines()
+        .map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(expected.len(), actions.len());
+    let app = || {
+        let mut app = emit_and_run::empty_app();
+        for name in ["config/application.rb", "config/routes.rb", "db/schema.rb", "app/controllers/payloads_controller.rb"] {
+            app = app.write(name, &fs::read_to_string(fixture.join(name)).unwrap());
+        }
+        app
+    };
+    let mut program = String::from("require_relative 'app/controllers/payloads_controller'\n");
+    for row in expected {
+        let action = row["action"].as_str().unwrap();
+        program.push_str(&format!("c = PayloadsController.new\nc.process_action(:{action})\nraise '{action} body' unless c.body.bytes == ({}).bytes\nraise '{action} header' unless c.content_type == {}\nraise '{action} status' unless c.status == {}\n",
+            serde_json::to_string(&row["body"]).unwrap(), serde_json::to_string(&row["content_type"]).unwrap(), row["status"]));
+    }
+    app().run_ruby(&program).assert_passes();
+    let (emitted, errors) = app().emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:?}");
+    let source = fs::read_to_string(emitted.join("app/controllers/payloads_controller.rb")).unwrap();
+    for suffix in [";charset=utf-8", ";   charset=utf-8", ";charset=utf-8;profile=example"] {
+        assert!(source.contains(&format!("text/javascript{suffix}")), "parameter text changed: {suffix}");
+    }
+}
+
+#[test]
+fn json_response_case_oracle_skips_an_unavailable_checkout() {
+    use std::path::Path;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/json_response_escaping");
+    let fixture = root.join("cases/jsonp_charset");
+    let output = emit_and_run::ruby().env("RH_RAILS_ORACLE", &fixture)
+        .arg(root.join("case_oracle.rb")).arg(&fixture).arg("index").output().unwrap();
+    assert_eq!(output.status.code(), Some(77), "{}", String::from_utf8_lossy(&output.stderr));
+}

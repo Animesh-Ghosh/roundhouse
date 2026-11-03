@@ -488,9 +488,11 @@ pub(super) fn rewrite_render_to_views(
                                 if matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "content_type") {
                                     match &*value.node {
                                         ExprNode::Lit { value: Literal::Str { value: mime } }
-                                            if mime == "application/json" || mime.starts_with("application/json; charset=") => {
+                                            if mime == "application/json" || mime.strip_prefix("application/json;")
+                                                .is_some_and(|parameters| parameters.trim_start().starts_with("charset=")) => {
                                             // Rails replaces the exact JSON media type, preserving
-                                            // its existing charset. Other spellings pass through.
+                                            // its existing charset. Non-charset parameters remain
+                                            // part of Rails' media type and pass through unchanged.
                                             let suffix = &mime["application/json".len()..];
                                             *value = str_lit(value.span, &format!("text/javascript{suffix}"));
                                         }

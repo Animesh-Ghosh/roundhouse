@@ -1,12 +1,9 @@
-begin
+require_relative "../rails_oracle"
+exit 77 unless RailsOracle.available?("railties", "actionpack")
+RailsOracle.activate("railties", "actionpack")
 # Run one fixture in a fresh, initialized Rails 8.1.4 application.
-gem "railties", ENV.fetch("RH_RAILS_ORACLE", "8.1.4")
-gem "actionpack", ENV.fetch("RH_RAILS_ORACLE", "8.1.4")
 require "rails"
 require "action_controller/railtie"
-rescue Gem::LoadError, LoadError
-  exit 77
-end
 require "rack/mock"
 require "json"
 fixture = File.expand_path(ARGV.fetch(0))
