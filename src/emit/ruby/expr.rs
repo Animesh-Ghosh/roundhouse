@@ -1098,7 +1098,9 @@ fn emit_arg(e: &Expr) -> String {
     // A `Let` emits as two lines, its binding and its body; as an argument
     // the parens keep them one value.
     let binding = matches!(&*e.node, ExprNode::Let { .. });
-    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) || multi_assign || binding {
+    // A `raise` takes every argument after it as its own: `raise raise E.new(m), "x"` raises E with "x".
+    let raise = matches!(&*e.node, ExprNode::Raise { .. });
+    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) || is_multi_seq(e) || multi_assign || binding || raise {
         format!("({})", emit_expr(e))
     } else {
         emit_expr(e)
@@ -1202,6 +1204,8 @@ fn recv_needs_parens(r: &Expr) -> bool {
     match &*r.node {
         ExprNode::Seq { exprs } if exprs.len() > 1 => true,
         ExprNode::BoolOp { .. } | ExprNode::Range { .. } | ExprNode::RescueModifier { .. } => true,
+        // `raise E.new(m).f` raises `E.new(m).f`: the call would bind inside the raise's argument.
+        ExprNode::Raise { .. } | ExprNode::Return { .. } => true,
         // An assignment as receiver (`(rd = session[:k]).present?`,
         // lobsters login) MUST keep its parens: rendered bare, Ruby
         // re-parses `rd = session[:k].present?` — the local becomes the

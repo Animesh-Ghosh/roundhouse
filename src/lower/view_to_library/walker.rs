@@ -468,6 +468,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // genuinely a statement (the prior TODO-append swallowed the
         // side effect and broke stack-walking templates).
         ExprNode::Send { recv: Some(_), block: None, .. } => vec![stmt.clone()],
+        ExprNode::Raise { .. } => vec![stmt.clone()],
         // A bare literal — most often the synthesized `nil` arm `<% unless
         // %>` lowers to — renders nothing and does nothing: nothing is
         // dropped, so no residue line.

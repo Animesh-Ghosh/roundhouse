@@ -13,6 +13,12 @@ module Rails
   def self.event: () -> ActiveSupport::EventReporter
   def self.application: () -> Application
 
+  class BacktraceCleaner
+    APP_DIRS_PATTERN: Regexp
+    RENDER_TEMPLATE_PATTERN: Regexp
+    def clean: (Array[String] backtrace, ?Symbol kind) -> Array[String]
+  end
+
   class AppPath
     @base: String
 

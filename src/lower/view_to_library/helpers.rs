@@ -331,6 +331,19 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             );
             Some(view_helpers_call("javascript_importmap_tags", vec![pins, (*entry).clone()]))
         }
+        EngineImportmapTags { entry, module } => {
+            let pins = super::send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("Importmap")] },
+                )),
+                &crate::lower::importmap_to_library::engine_pins_name(module),
+                vec![],
+                None,
+                true,
+            );
+            Some(view_helpers_call("javascript_importmap_tags", vec![pins, (*entry).clone()]))
+        }
         JavascriptImportmapTags { entry: None } => {
             let pins = super::send(
                 Some(Expr::new(

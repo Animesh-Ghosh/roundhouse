@@ -709,7 +709,11 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
             if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic()
                 && construct.as_str() != crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
             {
-                out.push(Diagnostic::unsupported(expr.span, target.clone(), construct.as_str(), detail.clone()));
+                let mut d = Diagnostic::unsupported(expr.span, target.clone(), construct.as_str(), detail.clone());
+                if expr.decisions & crate::expr::UNCALLED_DEFINER != 0 {
+                    d.severity = crate::diagnostic::Severity::Warning;
+                }
+                out.push(d);
             }
         }
         // Not dropped with the policy's other misses: the typer stamps it only in place of an Object-extension refusal.
@@ -1195,6 +1199,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                 {
                     crate::diagnostic::Severity::Warning
                 }
+                DiagnosticKind::Unsupported { .. } if expr.decisions & crate::expr::UNCALLED_DEFINER != 0 => crate::diagnostic::Severity::Warning,
                 _ => Diagnostic::default_severity(kind),
             };
             out.push(Diagnostic { span: expr.span, kind: kind.clone(), severity, message });
@@ -1231,6 +1236,24 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         });
     }
 
+    if expr.decisions & crate::expr::SINGLETON_NAME_ERROR != 0 {
+        out.push(crate::lower::residue_diagnostic(
+            "singleton_constant",
+            "constant",
+            expr.span,
+            "ruby_name_error",
+            "a bare constant in `class << self` that only the class's ancestors define: Ruby raises NameError there, and so does this".to_string(),
+        ));
+    }
+    if expr.decisions & crate::expr::GUARDED_NAME_ERROR != 0 {
+        out.push(crate::lower::residue_diagnostic(
+            "guarded_constant",
+            "constant",
+            expr.span,
+            "ruby_name_error",
+            "a constant no gem of the app, Ruby or the app defines, read where the code rescues or tests for its absence: Ruby raises NameError there, and so does this".to_string(),
+        ));
+    }
     match &*expr.node {
         ExprNode::Ivar { name } => {
             if is_unknown_ty(expr.ty.as_ref()) {
