@@ -1684,6 +1684,7 @@ mod tests {
             app_config: HashMap::default(),
             app: None,
             dead: Vec::new(),
+            live: Vec::new(),
             effects: 0,
             config_opaque: false,
         };

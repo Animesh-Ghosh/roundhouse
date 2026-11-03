@@ -6070,6 +6070,9 @@ impl Analyzer {
             if let Some(seeds) = &app.seeds {
                 work.push(Work { owner: None, roots: vec![(seeds, false)] });
             }
+            for stmt in &app.boot_program {
+                work.push(Work { owner: None, roots: vec![(stmt, false)] });
+            }
         }
 
         // Walk immutable trees concurrently; replay caller boundaries and sites in order.

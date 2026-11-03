@@ -3258,15 +3258,15 @@ fn literal_isolated_engine_mount_runs_over_cruby_http() {
 /// proxy. The engine's root keeps the slash Rails joins to the mount.
 #[test]
 fn engine_route_helpers_resolve_as_rails_does() {
-    let home = r#"module Catalog
+    let home = r##"module Catalog
   class HomeController < ActionController::Base
     def index
       render plain: "#{root_path} #{products_path} #{main_app.products_path} #{self.items_url}"
     end
   end
 end
-"#;
-    let host = r#"class HostController < ApplicationController
+"##;
+    let host = r##"class HostController < ApplicationController
   def index
     render plain: "host root"
   end
@@ -3275,7 +3275,7 @@ end
     render plain: "#{catalog.products_path} #{self.catalog.items_path} #{catalog.root_path} #{root_path}"
   end
 end
-"#;
+"##;
     let run = engine_mount::overlay()
         .write("vendor/catalog/app/controllers/catalog/home_controller.rb", home)
         .write("app/controllers/host_controller.rb", host)
@@ -3284,7 +3284,7 @@ end
             "Rails.application.routes.draw do\n  root \"host#index\"\n  get \"/engine-proxy\", to: \"host#engine_proxy\"\n  get \"/products\", to: \"products#index\", as: :products\n  mount Catalog::Engine, at: \"/catalog\"\nend\n",
         )
         .run_ruby(
-            r#"require "rack"
+            r##"require "rack"
 require "rack/mock"
 builder = Rack::Builder.new
 builder.instance_eval(File.read("config.ru"), "config.ru")
@@ -3297,7 +3297,7 @@ client = Rack::MockRequest.new(builder.to_app)
   raise "GET #{path}: #{response.status} #{response.body.inspect}" unless [response.status, response.body] == [200, body]
 end
 puts "engine route helpers passed"
-"#,
+"##,
         );
     run.assert_passes();
     assert!(run.stdout.contains("engine route helpers passed"), "{}", run.stdout);
