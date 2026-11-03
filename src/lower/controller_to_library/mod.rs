@@ -1537,7 +1537,7 @@ fn build_methods(
         Err(span) => {
             let mut d = crate::lower::residue_diagnostic("controller_render", "escape_json_responses", span,
                 "controller_json_escape_not_modelled",
-                "controller escape_json_responses override or its execution is not statically established".into());
+                "controller escape_json_responses override, inheritance interaction or statement placement is not modelled".into());
             d.severity = crate::diagnostic::Severity::Error;
             crate::emit::diagnostics::push(d);
         }
@@ -1616,7 +1616,8 @@ fn controller_json_escape(controller: &Controller, all: &[Controller]) -> Result
         }
     }
     if predicate.is_none() && (assigned.is_some() || getter.is_some())
-        && ancestor_chain(controller, all).iter().any(|parent| parent.class_methods().any(|m| m.name.as_str() == "escape_json_responses?"))
+        && ancestor_chain(controller, all).iter().any(|parent| parent.class_methods().any(|m|
+            matches!(m.name.as_str(), "escape_json_responses" | "escape_json_responses?")))
     {
         return Err(controller_provenance_span(controller).unwrap_or_default());
     }

@@ -41,10 +41,19 @@ pub fn app(defaults: &str) -> emit_and_run::Overlay {
             routes.push_str(&format!("  get '/{name}', to: 'payloads#{name}'\n"));
         }
     }
+    for (name, mime) in [
+        ("jsonp_charset", "application/json; charset=iso-8859-1"),
+        ("jsonp_uppercase", "Application/JSON"),
+        ("jsonp_vendor", "application/vnd.api+json"),
+        ("jsonp_js_charset", "text/javascript; charset=iso-8859-1"),
+    ] {
+        controller.push_str(&format!("  def {name}\n    render json: {{text: \"<\"}}, callback: \"receive\", content_type: {mime:?}\n  end\n"));
+        routes.push_str(&format!("  get '/{name}', to: 'payloads#{name}'\n"));
+    }
     controller.push_str("end\n");
     routes.push_str("  get '/escaping', to: 'escaping#index'\n  get '/inherited', to: 'inherited#index'\n  get '/unescaped', to: 'unescaped#index'\nend\n");
     emit_and_run::empty_app()
-        .write("config/application.rb", &format!("module EscapingApplication\n  class Application < Rails::Application\n{defaults}  end\nend\n"))
+        .write("config/application.rb", &format!("module EscapingApplication\n  class Application < Rails::Application\n{defaults}    config.x.label = 'escape_json_responses'\n  end\nend\n"))
         .write("config/environments/force_true.rb", "Rails.application.configure do\n  config.action_controller.escape_json_responses = true\nend\n")
         .write("config/environments/force_false.rb", "Rails.application.configure do\n  config.action_controller.escape_json_responses = false\nend\n")
         .write("config/environments/self_defaults.rb", "Rails.application.configure do\n  self.config.load_defaults 8.1\nend\n")
@@ -96,6 +105,14 @@ pub fn program(defaults: &str) -> String {
                 program.push_str("raise 'JSONP type' unless c.content_type == 'text/javascript; charset=utf-8'\n");
             }
         }
+    }
+    for (action, mime) in [
+        ("jsonp_charset", "text/javascript; charset=iso-8859-1"),
+        ("jsonp_uppercase", "Application/JSON; charset=utf-8"),
+        ("jsonp_vendor", "application/vnd.api+json; charset=utf-8"),
+        ("jsonp_js_charset", "text/javascript; charset=iso-8859-1"),
+    ] {
+        program.push_str(&format!("c = PayloadsController.new\nc.process_action(:{action})\nraise 'JSONP bytes' unless c.body == '/**/receive({{\"text\":\"\\u003c\"}})'\nraise 'JSONP header' unless c.content_type == {mime:?}\n"));
     }
     program.push_str("require_relative 'app/controllers/escaping_controller'\nrequire_relative 'app/controllers/inherited_controller'\nrequire_relative 'app/controllers/unescaped_controller'\nRails.env_name = 'test'\na = EscapingController.new\na.process_action(:index)\nraise 'own policy' unless a.body == '{\"text\":\"\\u003c\"}'\nb = InheritedController.new\nb.process_action(:index)\nraise 'inherited policy' unless b.body == a.body\nc = UnescapedController.new\nc.process_action(:index)\nraise 'false policy' unless c.body == '{\"text\":\"<\"}'\nRails.env_name = 'disable_html'\nd = EscapingController.new\nd.process_action(:index)\nraise 'HTML setting' unless d.body == '{\"text\":\"<\"}'\nputs 'escaping responses passed'\n");
     program

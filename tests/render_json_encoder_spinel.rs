@@ -200,4 +200,27 @@ fn controller_owned_policy_and_configuration_execution_match_rails() {
     }
     let error = roundhouse::ingest::ingest_app(&root.join("nested_assignment")).unwrap_err().to_string();
     assert!(error.contains("escape_json_responses"), "{error}");
+
+    let oracle = root.parent().unwrap().join("case_oracle.rb");
+    for name in ["jsonp_charset", "jsonp_uppercase", "benign_string", "unrelated_setter", "parent_getter_false_child_true", "reopened_application"] {
+        let output = emit_and_run::ruby().arg(&oracle).arg(root.join(name)).arg("index").output().unwrap();
+        if output.status.code() == Some(77) { continue; }
+        assert!(output.status.success(), "{name}: {}", String::from_utf8_lossy(&output.stderr));
+        let expected: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        if matches!(name, "parent_getter_false_child_true" | "reopened_application") {
+            assert_eq!(expected["body"], r#"{"text":"<"}"#);
+            assert_eq!(expected["status"], 200);
+            continue;
+        }
+        let program = format!("require_relative 'app/controllers/payloads_controller'\nRails.env_name = 'test'\nc = PayloadsController.new\nc.process_action(:index)\nraise 'body' unless c.body.bytes == ({}).bytes\nraise 'type' unless c.content_type == {}\nraise 'status' unless c.status == {}\n",
+            serde_json::to_string(&expected["body"]).unwrap(),
+            serde_json::to_string(&expected["content_type"]).unwrap(), expected["status"]);
+        overlay(&root.join(name)).run_ruby(&program).assert_passes();
+    }
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let (_, errors) = overlay(&root.join("parent_getter_false_child_true")).emit(target);
+        assert!(errors.iter().any(|s| s.contains("escape_json_responses")), "inherited getter must be refused: {errors:?}");
+    }
+    let error = roundhouse::ingest::ingest_app(&root.join("reopened_application")).unwrap_err().to_string();
+    assert!(error.contains("load_defaults"), "{error}");
 }

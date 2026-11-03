@@ -377,6 +377,41 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting) -> Ingest
     let file = path.display().to_string();
     let result = super::prism::parse(&source, &file);
     let src = String::from_utf8_lossy(&source).into_owned();
+    if json_setting(setting) {
+        // This reader does not resolve reopened class identities. Refuse a
+        // possible application reopening rather than silently losing defaults.
+        struct Defaults(bool);
+        impl<'pr> ruby_prism::Visit<'pr> for Defaults {
+            fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+                if constant_id_str(&node.name()) == "load_defaults"
+                    && node.receiver().is_some_and(|r| json_config_receiver(&r)
+                        && r.as_call_node().is_some_and(|c| c.receiver().is_none_or(|r| r.as_self_node().is_some())))
+                { self.0 = true; }
+                ruby_prism::visit_call_node(self, node);
+            }
+        }
+        struct Classes<'a> { src: &'a str, applications: Vec<String>, reopens: Vec<String> }
+        impl<'pr> ruby_prism::Visit<'pr> for Classes<'_> {
+            fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+                let name = text(&node.constant_path(), self.src).rsplit("::").next().unwrap_or("").to_owned();
+                if node.superclass().is_some_and(|s| text(&s, self.src).trim_start_matches("::") == "Rails::Application") {
+                    self.applications.push(name);
+                } else if node.superclass().is_none() {
+                    let mut defaults = Defaults(false);
+                    if let Some(body) = node.body() { ruby_prism::Visit::visit(&mut defaults, &body); }
+                    if defaults.0 { self.reopens.push(name); }
+                }
+                ruby_prism::visit_class_node(self, node);
+            }
+        }
+        let mut classes = Classes { src: &src, applications: vec![], reopens: vec![] };
+        ruby_prism::Visit::visit(&mut classes, &result.node());
+        if classes.reopens.iter().any(|name| classes.applications.contains(name)) {
+            survey::continue_or_fail(IngestError::Unsupported { file: file.clone(),
+                message: "config.load_defaults in a possible application class reopening is not modelled; use the declaration with an explicit Rails::Application superclass".into() })?;
+            return Ok(Vec::new());
+        }
+    }
     let stmts = result
         .node()
         .as_program_node()
@@ -388,16 +423,39 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting) -> Ingest
         // Count actual syntax independently of recognized replay steps. A
         // load_defaults step must never hide an unread setter, alias or key.
         struct Mentions<'a> { key: &'a str, count: usize }
+        impl Mentions<'_> {
+            fn possible_receiver(&self, receiver: Option<Node<'_>>) -> bool {
+                receiver.is_some_and(|r| r.as_self_node().is_none()
+                    && (r.as_constant_read_node().is_none() && r.as_constant_path_node().is_none()
+                        || r.as_constant_read_node().is_some_and(|n| constant_id_str(&n.name()) == "ActiveSupport")
+                        || r.as_constant_path_node().is_some_and(|n| n.parent().is_none()
+                            && n.name().is_some_and(|name| constant_id_str(&name) == "ActiveSupport"))))
+            }
+            fn keyed(&self, args: Option<ruby_prism::ArgumentsNode<'_>>) -> bool {
+                args.and_then(|a| a.arguments().iter().next()).is_some_and(|key|
+                    key.as_symbol_node().is_some_and(|s| s.unescaped() == self.key.as_bytes())
+                        || key.as_string_node().is_some_and(|s| s.unescaped() == self.key.as_bytes()))
+            }
+        }
         impl<'pr> ruby_prism::Visit<'pr> for Mentions<'_> {
             fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-                if constant_id_str(&node.name()).strip_suffix('=') == Some(self.key) { self.count += 1; }
+                if self.possible_receiver(node.receiver())
+                    && (constant_id_str(&node.name()).strip_suffix('=') == Some(self.key)
+                        || constant_id_str(&node.name()) == "[]=" && self.keyed(node.arguments()))
+                { self.count += 1; }
                 ruby_prism::visit_call_node(self, node);
             }
-            fn visit_symbol_node(&mut self, node: &ruby_prism::SymbolNode<'pr>) {
-                if node.unescaped() == self.key.as_bytes() { self.count += 1; }
+            fn visit_index_or_write_node(&mut self, node: &ruby_prism::IndexOrWriteNode<'pr>) {
+                if self.possible_receiver(node.receiver()) && self.keyed(node.arguments()) { self.count += 1; }
+                ruby_prism::visit_index_or_write_node(self, node);
             }
-            fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
-                if node.unescaped() == self.key.as_bytes() { self.count += 1; }
+            fn visit_index_and_write_node(&mut self, node: &ruby_prism::IndexAndWriteNode<'pr>) {
+                if self.possible_receiver(node.receiver()) && self.keyed(node.arguments()) { self.count += 1; }
+                ruby_prism::visit_index_and_write_node(self, node);
+            }
+            fn visit_index_operator_write_node(&mut self, node: &ruby_prism::IndexOperatorWriteNode<'pr>) {
+                if self.possible_receiver(node.receiver()) && self.keyed(node.arguments()) { self.count += 1; }
+                ruby_prism::visit_index_operator_write_node(self, node);
             }
         }
         let mut mentions = Mentions { key: setting.key, count: 0 };
