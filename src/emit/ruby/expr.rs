@@ -1204,6 +1204,8 @@ fn recv_needs_parens(r: &Expr) -> bool {
     match &*r.node {
         ExprNode::Seq { exprs } if exprs.len() > 1 => true,
         ExprNode::BoolOp { .. } | ExprNode::Range { .. } | ExprNode::RescueModifier { .. } => true,
+        // `raise E.new(m).f` raises `E.new(m).f`: the call would bind inside the raise's argument.
+        ExprNode::Raise { .. } | ExprNode::Return { .. } => true,
         // An assignment as receiver (`(rd = session[:k]).present?`,
         // lobsters login) MUST keep its parens: rendered bare, Ruby
         // re-parses `rd = session[:k].present?` — the local becomes the

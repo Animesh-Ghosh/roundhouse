@@ -6,6 +6,7 @@ use crate::ident::Symbol;
 pub(super) fn mark(app: &mut App) {
     let Some(lock) = app.gem_lock.clone() else { return };
     let index = crate::gems::LockGemIndex::new(&lock);
+    let absent_namespaces = crate::gems::AbsentGemNamespaces::new(&lock);
     let own: Vec<String> = app
         .models
         .iter()
@@ -41,7 +42,7 @@ pub(super) fn mark(app: &mut App) {
         let scopes: Vec<&str> = owner.split("::").filter(|s| !s.is_empty()).collect();
         (0..=scopes.len()).rev().find_map(|k| {
             let full: Vec<&str> = scopes[..k].iter().copied().chain(tail.iter().copied()).collect();
-            let (_, depth) = crate::gems::absent_gem_owner(&full.join("::"), &lock)?;
+            let (_, depth) = absent_namespaces.owner(&full.join("::"))?;
             // Ruby names the first segment it could not find: the absent gem's namespace.
             Some(full[..depth].join("::"))
         })

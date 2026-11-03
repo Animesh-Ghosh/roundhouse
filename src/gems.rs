@@ -854,27 +854,42 @@ const FAMILIES: &[(&str, GemFate)] = &[
 
 /// Classify a gem by name.
 /// Whether a standard-library gem's namespace is `root` (Ruby ships it whether or not the lockfile lists it).
-/// The known gem the lockfile lacks whose own nested namespace holds `path`,
+/// The known gems the lockfile lacks whose own nested namespace sits
 /// below every locked gem's (tzinfo-data's `TZInfo::Data` under tzinfo's
-/// `TZInfo`): Ruby has nothing there to find.
-pub(crate) fn absent_gem_owner(path: &str, lock: &Lockfile) -> Option<(&'static str, usize)> {
-    let segs: Vec<&str> = path.trim_start_matches("::").split("::").filter(|s| !s.is_empty()).collect();
-    let depth = |ns: &str| {
-        let parts: Vec<&str> = ns.split("::").collect();
-        (parts.len() <= segs.len() && parts.iter().zip(&segs).all(|(a, b)| a.eq_ignore_ascii_case(b))).then_some(parts.len())
-    };
-    let nested = |gem: &str| gem.split('-').map(camelize).collect::<Vec<_>>().join("::");
-    let locked = lock
-        .specs
-        .iter()
-        .flat_map(|(name, _)| std::iter::once(nested(name)).chain(namespace_candidates(name)).filter_map(|ns| depth(&ns)).collect::<Vec<_>>())
-        .max()
-        .unwrap_or(0);
-    // Not a standard-library gem: Ruby ships it whether or not the lockfile lists it (net-http's `Net::HTTP`).
-    FATES.iter().filter(|(_, fate)| !matches!(fate, GemFate::Stdlib)).map(|(gem, _)| *gem).find_map(|gem| {
-        let d = depth(&nested(gem))?;
-        (lock.version_of(gem).is_none() && d >= 2 && d > locked).then_some((gem, d))
-    })
+/// `TZInfo`): Ruby has nothing under such a namespace to find. Built once
+/// per lockfile; [`AbsentGemNamespaces::owner`] asks it per constant.
+pub(crate) struct AbsentGemNamespaces {
+    locked: Vec<Vec<String>>,
+    absent: Vec<(&'static str, Vec<String>)>,
+}
+
+impl AbsentGemNamespaces {
+    pub(crate) fn new(lock: &Lockfile) -> Self {
+        let split = |ns: &str| ns.split("::").map(|s| s.to_ascii_lowercase()).collect::<Vec<_>>();
+        let nested = |gem: &str| gem.split('-').map(camelize).collect::<Vec<_>>().join("::");
+        let locked = lock
+            .specs
+            .iter()
+            .flat_map(|(name, _)| std::iter::once(nested(name)).chain(namespace_candidates(name)).map(|ns| split(&ns)).collect::<Vec<_>>())
+            .collect();
+        // Not a standard-library gem, which Ruby ships whether or not the lockfile lists it (net-http's `Net::HTTP`), nor one roundhouse models, which the emitted Gemfile declares when the app uses it (faraday-multipart).
+        let absent = FATES
+            .iter()
+            .filter(|(gem, fate)| matches!(fate, GemFate::Infrastructure | GemFate::Unknown) && lock.version_of(gem).is_none())
+            .map(|(gem, _)| (*gem, split(&nested(gem))))
+            .filter(|(_, ns)| ns.len() >= 2)
+            .collect();
+        Self { locked, absent }
+    }
+
+    /// The absent gem and its namespace's depth, for a constant under it.
+    pub(crate) fn owner(&self, path: &str) -> Option<(&'static str, usize)> {
+        let segs: Vec<String> = path.trim_start_matches("::").split("::").filter(|s| !s.is_empty()).map(|s| s.to_ascii_lowercase()).collect();
+        let under = |ns: &[String]| ns.len() <= segs.len() && ns.iter().zip(&segs).all(|(a, b)| a == b);
+        let (gem, ns) = self.absent.iter().find(|(_, ns)| under(ns))?;
+        let locked = self.locked.iter().filter(|ns| under(ns)).map(|ns| ns.len()).max().unwrap_or(0);
+        (ns.len() > locked).then_some((*gem, ns.len()))
+    }
 }
 
 pub(crate) fn is_stdlib_namespace(root: &str) -> bool {
