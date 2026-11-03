@@ -20614,8 +20614,23 @@ mod csrf_meta_tag_alias;
 #[path = "emit_and_run/python_route_format.rs"]
 mod python_route_format;
 
+#[path = "emit_and_run/python_nested_modifier_if.rs"]
+mod python_nested_modifier_if;
+
 #[path = "emit_and_run/namespaced_class_consts.rs"]
 mod namespaced_class_consts;
 
 #[path = "emit_and_run/boolop_precedence.rs"]
 mod boolop_precedence;
+
+#[path = "support/full_forwarding.rs"]
+mod full_forwarding;
+
+#[test]
+fn full_forwarding_keeps_the_native_argument_contract() {
+    let run = emit_and_run::real_blog()
+        .write("app/services/packet_relay.rb", full_forwarding::SOURCE)
+        .run_ruby(full_forwarding::ASSERTIONS);
+    run.assert_passes();
+    assert_eq!(run.stdout, "full forwarding contract passed\n");
+}
