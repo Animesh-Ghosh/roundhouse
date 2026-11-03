@@ -3210,6 +3210,7 @@ end
     super::queue_adapter_reader::synthesize(&mut app);
     super::container_specialize::specialize(&mut app);
     super::unreachable_views::mark(&mut app);
+    super::settled_conditionals::settle(&mut app);
     super::absence_guards::mark(&mut app);
     // After every pass that changes a controller's methods, the concern
     // splice and the class-body macros above all: the lowering clones

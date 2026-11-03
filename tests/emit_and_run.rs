@@ -20516,6 +20516,8 @@ mod i18n_config;
 mod computed_class_constants;
 #[path = "emit_and_run/guarded_absent_constant.rs"]
 mod guarded_absent_constant;
+#[path = "emit_and_run/settled_conditional_definition.rs"]
+mod settled_conditional_definition;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;
