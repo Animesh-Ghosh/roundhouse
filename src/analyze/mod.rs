@@ -44,6 +44,13 @@ pub mod preload;
 pub mod block_refine;
 pub mod mutates_self;
 mod registry;
+
+/// A job's fields and hooks only the ruby family's runtime defines (runtime/spinel/active_job_serialization.rb).
+pub const ACTIVE_JOB_RUBY_FIELDS: &[&str] = &[
+    "job_id", "queue_name", "priority", "scheduled_at", "enqueued_at", "executions",
+    "provider_job_id", "successfully_enqueued?", "serialize", "run_callbacks",
+    "enqueue_error", "set", "enqueue", "concurrency_key",
+];
 mod test_module;
 mod render;
 mod ivar_set;

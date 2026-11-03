@@ -10,13 +10,13 @@ pub(super) fn synthesize(app: &mut App) {
     }
     // Not SolidQueueAdapter without solid_queue's models: only the runtime that runs them defines it (`project::drop_solid_queue_standin`).
     let solid_queue = app.models.iter().any(|m| m.name.0.as_str() == "SolidQueue::Job");
-    let adapter = match app.queue_adapter.as_deref() {
-        None | Some("async") => "AsyncAdapter",
-        Some("solid_queue") if solid_queue => "SolidQueueAdapter",
+    let (adapter, name) = match app.queue_adapter.as_deref() {
+        None | Some("async") => ("AsyncAdapter", "async"),
+        Some("solid_queue") if solid_queue => ("SolidQueueAdapter", "solid_queue"),
         Some(_) => return,
     };
     let source = format!(
-        "module ActiveJob::QueueAdapter::ClassMethods\n  def queue_adapter\n    @queue_adapter ||= ActiveJob::QueueAdapters::{adapter}.new\n  end\nend\n"
+        "module ActiveJob::QueueAdapter::ClassMethods\n  def queue_adapter\n    @queue_adapter ||= ActiveJob::QueueAdapters::{adapter}.new\n  end\n\n  def queue_adapter_name\n    case queue_adapter\n    when ActiveJob::QueueAdapters::{adapter} then \"{name}\"\n    end\n  end\nend\n"
     );
     let Ok(classes) = super::library_class::ingest_library_classes(source.as_bytes(), "<queue_adapter>") else { return };
     app.library_classes.extend(classes);

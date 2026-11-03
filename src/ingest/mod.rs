@@ -42,6 +42,7 @@ mod oj;
 pub(crate) mod source_gems;
 mod auto_source_gems;
 mod absence_guards;
+mod job_class_lookup;
 mod settled_conditionals;
 mod dry_monads;
 mod dry_validation;

@@ -641,6 +641,24 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     }
     // `ActiveJob::Base.execute(job_data)`, the job a claimed solid_queue execution runs (runtime/spinel/solid_queue_runner.rb).
     classes.entry(ClassId(Symbol::from("ActiveJob::Base"))).or_default().class_methods.entry(Symbol::from("execute")).or_insert(Ty::Nil);
+    // A job's fields and hooks (runtime/spinel/active_job_serialization.rb); `project::report_ruby_only_sends` refuses them off the ruby family.
+    {
+        let base = classes.entry(ClassId(Symbol::from("ActiveJob::Base"))).or_default();
+        let opt = |t: Ty| Ty::Union { variants: vec![t, Ty::Nil].into() };
+        let time = || Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![].into() };
+        for (name, ty) in [
+            ("job_id", opt(Ty::Str)), ("queue_name", opt(Ty::Str)), ("priority", opt(Ty::Int)),
+            ("scheduled_at", opt(time())), ("enqueued_at", opt(time())), ("executions", opt(Ty::Int)),
+            ("provider_job_id", Ty::Untyped), ("successfully_enqueued?", Ty::Bool),
+            ("serialize", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) }),
+            ("run_callbacks", Ty::Untyped),
+            ("enqueue_error", opt(Ty::Class { id: ClassId(Symbol::from("ActiveJob::EnqueueError")), args: vec![].into() })),
+            ("concurrency_key", Ty::Nil),
+            ("enqueue", Ty::Union { variants: vec![Ty::Class { id: ClassId(Symbol::from("ActiveJob::Base")), args: vec![].into() }, Ty::Bool].into() }),
+        ] {
+            base.instance_methods.entry(Symbol::from(name)).or_insert(ty);
+        }
+    }
     {
         let ar = classes.entry(ClassId(Symbol::from("ActiveRecord"))).or_default();
         ar.is_module = true;

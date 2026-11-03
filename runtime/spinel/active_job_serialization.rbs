@@ -68,7 +68,11 @@ module ActiveJob
     attr_accessor arguments_json: String?
     attr_accessor provider_job_id: untyped
     attr_accessor successfully_enqueued: bool?
+    attr_accessor enqueue_error: ActiveJob::EnqueueError?
     def successfully_enqueued?: () -> bool
+    def set: (?Hash[Symbol, untyped] options) -> self
+    def enqueue: (?Hash[Symbol, untyped] options) -> (self | false)
+    def concurrency_key: () -> nil
     def serialize: () -> Hash[String, untyped]
     def deserialize: (Hash[String, untyped] job_data) -> ActiveJob::Base
     def serialize_extras: () -> String

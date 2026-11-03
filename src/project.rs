@@ -2190,7 +2190,37 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
             _ => false,
         }
     }
-    fn visit(expr: &crate::expr::Expr, target: BuildTarget, kernel: &[&str]) {
+    // A job's own fields and hooks are runtime/spinel/active_job_serialization.rb's, which only the ruby family loads.
+    let parents: crate::det::HashMap<&str, &str> = app
+        .library_classes
+        .iter()
+        .filter_map(|lc| lc.parent.as_ref().map(|p| (lc.name.0.as_str(), p.0.as_str().trim_start_matches("::"))))
+        .collect();
+    let jobs: crate::det::HashSet<String> = app
+        .library_classes
+        .iter()
+        .filter(|lc| {
+            let mut at = lc.name.0.as_str();
+            (0..32).any(|_| match parents.get(at) {
+                Some(&"ActiveJob::Base") => true,
+                Some(p) => {
+                    at = p;
+                    false
+                }
+                None => false,
+            })
+        })
+        .map(|lc| lc.name.0.as_str().to_string())
+        .chain(std::iter::once("ActiveJob::Base".to_string()))
+        .collect();
+    fn names_job(ty: &crate::ty::Ty, jobs: &crate::det::HashSet<String>) -> bool {
+        match ty {
+            crate::ty::Ty::Class { id, .. } => jobs.contains(id.0.as_str()),
+            crate::ty::Ty::Union { variants } => variants.iter().any(|v| names_job(v, jobs)),
+            _ => false,
+        }
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget, kernel: &[&str], jobs: &crate::det::HashSet<String>) {
         use crate::expr::ExprNode;
         use crate::ty::Ty;
         if let ExprNode::Send { recv, method, .. } = &*expr.node {
@@ -2246,6 +2276,8 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 // whichever arm of the receiver it is (`Rails::AppPath?`, `Rails::AppPath | Pathname`).
                 (Some(_), "expand_path") if recv_ty.is_some_and(names_app_path) => Some("Rails::AppPath#expand_path"),
                 (Some(_), "to_session_value") if recv_ty.is_some_and(names_flash) => Some("ActionDispatch::Flash#to_session_value"),
+                (Some(_), name) if crate::analyze::ACTIVE_JOB_RUBY_FIELDS.contains(&name)
+                    && recv_ty.is_some_and(|t| names_job(t, jobs)) => Some("ActiveJob::Base job fields"),
                 _ => None,
             };
             if let Some(construct) = construct {
@@ -2255,9 +2287,9 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 );
             }
         }
-        expr.node.for_each_child(&mut |child| visit(child, target, kernel));
+        expr.node.for_each_child(&mut |child| visit(child, target, kernel, jobs));
     }
-    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel));
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel, &jobs));
 }
 
 /// An ancestor controller's method reading an ivar only a descendant

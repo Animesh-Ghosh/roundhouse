@@ -400,10 +400,46 @@ module ActiveJob
   # fields, read back by `deserialize`. The arguments stay the payload's
   # JSON text, as Rails keeps them serialized until `perform` reads them.
   class Base
-    attr_accessor :job_id, :queue_name, :priority, :scheduled_at, :enqueued_at, :executions, :arguments_json, :provider_job_id, :successfully_enqueued
+    attr_accessor :job_id, :queue_name, :priority, :scheduled_at, :enqueued_at, :executions, :arguments_json, :provider_job_id, :successfully_enqueued, :enqueue_error
 
     def successfully_enqueued?
       @successfully_enqueued == true
+    end
+
+    # Rails' `set`: where and when this job is to run.
+    def set(options = {})
+      wait = options[:wait]
+      wait_until = options[:wait_until]
+      @scheduled_at = Time.now + wait.to_f unless wait.nil?
+      @scheduled_at = wait_until unless wait_until.nil?
+      queue = options[:queue]
+      @queue_name = queue.to_s unless queue.nil?
+      priority = options[:priority]
+      @priority = priority.to_i unless priority.nil?
+      self
+    end
+
+    # Rails' `enqueue`: handed to the class's adapter, now or at its time; an EnqueueError is kept, and the answer is false.
+    def enqueue(options = {})
+      set(options)
+      @successfully_enqueued = false
+      run_callbacks(:enqueue) do
+        scheduled = @scheduled_at
+        if scheduled.nil?
+          self.class.queue_adapter.enqueue(self)
+        else
+          self.class.queue_adapter.enqueue_at(self, scheduled.to_f)
+        end
+        @successfully_enqueued = true
+      rescue ActiveJob::EnqueueError => e
+        @enqueue_error = e
+      end
+      successfully_enqueued? ? self : false
+    end
+
+    # Not solid_queue's `limits_concurrency` key: no job here declares a limit, so none has one.
+    def concurrency_key
+      nil
     end
 
     def serialize
