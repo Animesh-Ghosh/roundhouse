@@ -157,6 +157,7 @@ code { font: 0.88em var(--mono); color: var(--rh-text); background: var(--rh-sur
 .copy-btn .icon { width: 15px; height: 15px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .copy-btn.is-copied { color: var(--rh-teal); border-color: color-mix(in srgb, var(--rh-teal) 45%, transparent); }
+.copy-btn.is-failed { color: var(--rh-accent); border-color: color-mix(in srgb, var(--rh-accent) 45%, transparent); }
 .terminal .dim { color: var(--rh-text-dim); }
 .terminal .key { color: var(--rh-teal); }
 .terminal-foot { padding: 16px 25px; border-top: 1px solid var(--rh-line); font: 11px/1.8 var(--mono); color: var(--rh-text-soft); }
