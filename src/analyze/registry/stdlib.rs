@@ -1409,6 +1409,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("release", version()), ("bump", version()),
         ]);
     }
+    {
+        let gem = classes.entry(ClassId(Symbol::from("Gem"))).or_default();
+        gem.is_module = true;
+        gem.class_methods.entry(Symbol::from("win_platform?")).or_insert(Ty::Bool);
+        gem.class_methods.entry(Symbol::from("java_platform?")).or_insert(Ty::Bool);
+        // Not a spec type: the specs are RubyGems' objects, and a compiled program activates none.
+        gem.class_methods
+            .entry(Symbol::from("loaded_specs"))
+            .or_insert(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) });
+    }
     register_stdlib_class(classes, "Mutex", &[], &[]);
     // The queue constructors, Thread's core aliases, and the standard
     // mixins likewise need exact entries for source constant resolution.

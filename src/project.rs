@@ -8566,13 +8566,13 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         }
         if !matches!(target, "jruby" | "spinel")
             && let crate::expr::ExprNode::Const { path } = &*expr.node
-            && matches!(path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..], ["RUBY_VERSION"] | ["Object", "RUBY_VERSION"])
+            && matches!(path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).collect::<Vec<_>>()[..], ["RUBY_VERSION" | "RUBY_PLATFORM"] | ["Object", "RUBY_VERSION" | "RUBY_PLATFORM"])
         {
             emit::diagnostics::report_unsupported(
                 expr.span,
                 target,
                 "bundled_constant",
-                format!("`RUBY_VERSION` is the running Ruby's, which the {target} emit has none of"),
+                format!("`{}` is the running Ruby's, which the {target} emit has none of", path.last().map(|s| s.as_str()).unwrap_or_default()),
             );
         }
         // A strict emit spelled these as methods its class objects do not have.
