@@ -17,11 +17,18 @@ fn boolean(value: &Node<'_>, source: &str) -> Result<String, String> {
     }
 }
 
-const SETTINGS: [Setting; 2] = [
+const SETTINGS: [Setting; 3] = [
     Setting {
         section: "action_controller",
         key: "escape_json_responses",
         method: "action_controller_escape_json_responses",
+        default: "true",
+        read: boolean,
+    },
+    Setting {
+        section: "active_support",
+        key: "escape_html_entities_in_json",
+        method: "active_support_escape_html_entities_in_json",
         default: "true",
         read: boolean,
     },
@@ -48,7 +55,7 @@ pub(super) fn synthesize<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<O
             section: setting.section,
             key: setting.key,
             method: setting.method,
-            default: if application_file { "true" } else { "false" },
+            default: if application_file || setting.key == "escape_html_entities_in_json" { "true" } else { "false" },
             read: setting.read,
         };
         if let Some(method) = synthesize_setting(vfs, dir, &effective)? {
@@ -84,6 +91,22 @@ mod tests {
                 error.to_string().contains("unsupported construct"),
                 "{error}"
             );
+        }
+    }
+
+    #[test]
+    fn unproven_assignments_are_not_hidden_by_framework_defaults() {
+        for assignment in [
+            "1.times { config.action_controller.escape_json_responses = true }",
+            "settings = config; settings.action_controller.escape_json_responses = true",
+            "config.action_controller[:escape_json_responses] = true",
+            "config.action_controller[\"escape_json_responses\"] = true",
+            "if ENV['ESCAPE']; config.action_controller.escape_json_responses = true; end",
+        ] {
+            let source = format!("module App\nclass Application < Rails::Application\nconfig.load_defaults 8.1\n{assignment}\nend\nend\n");
+            let tree: FileTree = [(PathBuf::from("/app/config/application.rb"), source.into_bytes())].into_iter().collect();
+            let error = synthesize(&MapVfs::new(tree), Path::new("/app")).unwrap_err().to_string();
+            assert!(error.contains("escape_json_responses"), "{error}");
         }
     }
 }

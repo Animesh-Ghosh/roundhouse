@@ -56,6 +56,8 @@ enum Step {
     /// `config.public_file_server.headers = <Hash>`: the Hash's source,
     /// or why it cannot be typed.
     Set(Result<String, String>),
+    /// A framework default is not a source assignment to this setting.
+    Default(Result<String, String>),
     /// An `if`/`unless` whose branches assign: the condition as written
     /// (negated for `unless`), the steps of each branch.
     If { cond: String, then: Vec<Step>, other: Vec<Step> },
@@ -82,6 +84,7 @@ fn json_setting(setting: &Setting) -> bool {
     matches!((setting.section, setting.key),
         ("action_controller", "escape_json_responses") |
         ("active_support", "escape_js_separators_in_json"))
+        || (setting.section == "active_support" && setting.key == "escape_html_entities_in_json")
 }
 
 // Read config receivers structurally so self, whitespace and rooted Rails
@@ -228,15 +231,18 @@ fn fold_durations(text: &str) -> String {
 /// The steps among `stmts`, recursing into the containers Rails' config
 /// lines live in (class and module bodies, `configure do ... end`) and
 /// into `if`/`unless` branches.
-fn steps(stmts: Vec<Node<'_>>, src: &str, setting: &Setting) -> Vec<Step> {
+fn steps(stmts: Vec<Node<'_>>, src: &str, setting: &Setting, config_context: bool) -> Vec<Step> {
     let mut out = Vec::new();
     for stmt in stmts {
         if let Some(class) = stmt.as_class_node() {
-            out.extend(steps(class.body().map(flatten_statements).unwrap_or_default(), src, setting));
+            let owns_config = !json_setting(setting) || class.superclass().is_some_and(|parent| {
+                text(&parent, src).trim_start_matches("::") == "Rails::Application"
+            });
+            out.extend(steps(class.body().map(flatten_statements).unwrap_or_default(), src, setting, owns_config));
             continue;
         }
         if let Some(module) = stmt.as_module_node() {
-            out.extend(steps(module.body().map(flatten_statements).unwrap_or_default(), src, setting));
+            out.extend(steps(module.body().map(flatten_statements).unwrap_or_default(), src, setting, config_context));
             continue;
         }
         if let Some(call) = stmt.as_call_node() {
@@ -245,6 +251,7 @@ fn steps(stmts: Vec<Node<'_>>, src: &str, setting: &Setting) -> Vec<Step> {
             if json_setting(setting)
                 && constant_id_str(&call.name()) == "load_defaults"
                 && call.receiver().is_some_and(|r| json_config_receiver(&r))
+                && (config_context || call.receiver().is_some_and(|r| text(&r, src).split_whitespace().collect::<String>().trim_start_matches("::").starts_with("Rails.application.config")))
             {
                 let version = call.arguments().and_then(|args| {
                     let values: Vec<_> = args.arguments().iter().collect();
@@ -256,27 +263,35 @@ fn steps(stmts: Vec<Node<'_>>, src: &str, setting: &Setting) -> Vec<Step> {
                         .replace('_', "").parse::<f64>().ok().filter(|v| v.is_finite())
                 });
                 match version {
+                    Some(_) if setting.key == "escape_html_entities_in_json" => {}
                     // Older defaults do not assign these flags, so retain any
                     // earlier explicit value rather than resetting it to true.
                     Some(version) if version < 8.1 => {}
-                    Some(_) => out.push(Step::Set(Ok("false".into()))),
-                    None => out.push(Step::Set(Err("config.load_defaults must name a literal version to determine JSON escaping".into()))),
+                    Some(_) => out.push(Step::Default(Ok("false".into()))),
+                    None => out.push(Step::Default(Err("config.load_defaults must name a literal version to determine JSON escaping".into()))),
                 }
                 continue;
             }
             if constant_id_str(&call.name()) == "configure" {
+                let rails_configure = !json_setting(setting) || call.receiver().is_some_and(|r| {
+                    text(&r, src).split_whitespace().collect::<String>().trim_start_matches("::") == "Rails.application"
+                }) || (config_context && call.receiver().is_none());
+                if !rails_configure { continue; }
                 if let Some(body) = call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body()) {
-                    out.extend(steps(flatten_statements(body), src, setting));
+                    out.extend(steps(flatten_statements(body), src, setting, true));
                     continue;
                 }
             }
         }
-        if let Some(step) = conditional(&stmt, src, setting) {
+        if let Some(step) = conditional(&stmt, src, setting, config_context) {
             out.push(step);
             continue;
         }
         if let Some(value) = assignment(&stmt, setting) {
+            if json_setting(setting) && !config_context && !text(&stmt, src).split_whitespace().collect::<String>().trim_start_matches("::").starts_with("Rails.application.config") { continue; }
             out.push(Step::Set((setting.read)(&value, src)));
+        } else if json_setting(setting) && config_context && text(&stmt, src).contains("load_defaults") {
+            out.push(Step::Default(Err("config.load_defaults execution is not statically established".into())));
         }
     }
     out
@@ -284,9 +299,9 @@ fn steps(stmts: Vec<Node<'_>>, src: &str, setting: &Setting) -> Vec<Step> {
 
 /// An `if`/`elsif`/`else` or `unless`/`else` statement whose branches
 /// assign the setting; None when no branch does.
-fn conditional(stmt: &Node<'_>, src: &str, setting: &Setting) -> Option<Step> {
+fn conditional(stmt: &Node<'_>, src: &str, setting: &Setting, config_context: bool) -> Option<Step> {
     let body = |n: Option<ruby_prism::StatementsNode<'_>>| -> Vec<Step> {
-        n.map(|s| steps(s.body().iter().collect(), src, setting)).unwrap_or_default()
+        n.map(|s| steps(s.body().iter().collect(), src, setting, config_context)).unwrap_or_default()
     };
     let (cond, then, other) = if let Some(node) = stmt.as_if_node() {
         let other = match node.subsequent() {
@@ -294,7 +309,7 @@ fn conditional(stmt: &Node<'_>, src: &str, setting: &Setting) -> Option<Step> {
             Some(next) => match next.as_else_node() {
                 Some(e) => body(e.statements()),
                 // `elsif`: a nested if, as Ruby reads it.
-                None => conditional(&next, src, setting).into_iter().collect(),
+                None => conditional(&next, src, setting, config_context).into_iter().collect(),
             },
         };
         (format!("({})", text(&node.predicate(), src)), body(node.statements()), other)
@@ -304,6 +319,11 @@ fn conditional(stmt: &Node<'_>, src: &str, setting: &Setting) -> Option<Step> {
     } else {
         return None;
     };
+    if json_setting(setting) && (!then.is_empty() || !other.is_empty())
+        && !matches!(cond.as_str(), "(true)" | "(false)" | "!(true)" | "!(false)")
+    {
+        return Some(Step::Default(Err(format!("config.{} condition is not statically established", setting.path()))));
+    }
     (!then.is_empty() || !other.is_empty()).then_some(Step::If { cond, then, other })
 }
 
@@ -313,6 +333,7 @@ fn count(steps: &[Step]) -> usize {
         .iter()
         .map(|s| match s {
             Step::Set(_) => 1,
+            Step::Default(_) => 0,
             Step::If { then, other, .. } => count(then) + count(other),
         })
         .sum()
@@ -327,11 +348,11 @@ fn replay(steps: &[Step], indent: &str) -> Result<(String, bool), String> {
     let mut out = String::new();
     for step in steps.iter().rev() {
         match step {
-            Step::Set(Ok(expr)) => {
+            Step::Set(Ok(expr)) | Step::Default(Ok(expr)) => {
                 out.push_str(&format!("{indent}return ({expr})\n"));
                 return Ok((out, true));
             }
-            Step::Set(Err(why)) => return Err(why.clone()),
+            Step::Set(Err(why)) | Step::Default(Err(why)) => return Err(why.clone()),
             Step::If { cond, then, other } => {
                 let inner = format!("{indent}  ");
                 let (then_code, then_done) = replay(then, &inner)?;
@@ -361,13 +382,32 @@ fn read_file<V: Vfs + ?Sized>(vfs: &V, path: &Path, setting: &Setting) -> Ingest
         .as_program_node()
         .map(|p| p.statements().body().iter().collect::<Vec<_>>())
         .unwrap_or_default();
-    let found = steps(stmts, &src, setting);
+    let found = steps(stmts, &src, setting, false);
     let path_text = setting.path();
-    let mentioned: usize = src
+    let mentioned: usize = if json_setting(setting) {
+        // Count actual syntax independently of recognized replay steps. A
+        // load_defaults step must never hide an unread setter, alias or key.
+        struct Mentions<'a> { key: &'a str, count: usize }
+        impl<'pr> ruby_prism::Visit<'pr> for Mentions<'_> {
+            fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+                if constant_id_str(&node.name()).strip_suffix('=') == Some(self.key) { self.count += 1; }
+                ruby_prism::visit_call_node(self, node);
+            }
+            fn visit_symbol_node(&mut self, node: &ruby_prism::SymbolNode<'pr>) {
+                if node.unescaped() == self.key.as_bytes() { self.count += 1; }
+            }
+            fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
+                if node.unescaped() == self.key.as_bytes() { self.count += 1; }
+            }
+        }
+        let mut mentions = Mentions { key: setting.key, count: 0 };
+        ruby_prism::Visit::visit(&mut mentions, &result.node());
+        mentions.count
+    } else { src
         .lines()
         .map(|line| line.split('#').next().unwrap_or(""))
         .map(|code| code.matches(path_text.as_str()).count())
-        .sum();
+        .sum() };
     let refused = if mentioned > count(&found) {
         Some(format!(
             "a `config.{path_text}` setting that is not an assignment at the top level of a config \
@@ -422,7 +462,14 @@ pub(super) fn synthesize_setting<V: Vfs + ?Sized>(
     let mut initializers = Vec::new();
     if vfs.is_dir(&init_dir) {
         for path in super::app::read_rb_files(vfs, &init_dir)? {
-            initializers.extend(read_file(vfs, &path, setting)?);
+            let found = read_file(vfs, &path, setting)?;
+            // ActiveSupport copies config before these initializers execute.
+            // The controller hook is lazy; its load order is not established here.
+            if json_setting(setting) && setting.section == "action_controller" && !found.is_empty() {
+                survey::continue_or_fail(IngestError::Unsupported { file: path.display().to_string(), message: format!("config.{} initializer timing is not statically established", setting.path()) })?;
+            } else if !(json_setting(setting) && setting.section == "active_support") {
+                initializers.extend(found);
+            }
         }
     }
     if application.is_empty() && initializers.is_empty() && environments.is_empty() {

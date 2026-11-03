@@ -534,6 +534,10 @@ module Rails
       false
     end
 
+    def active_support_escape_html_entities_in_json
+      true
+    end
+
     # `config.action_controller.perform_caching` (AbstractController::
     # Caching's default) and actionpack-page_caching's
     # `page_cache_directory` (its Railtie's `||=` with the app's

@@ -27,8 +27,8 @@
 # writer covers it.
 module ActionController
   module JsonRender
-    def self.encode(value)
-      JsonBuilder.escape_json_response(emit_json(jsonify(value)))
+    def self.encode(value, escape = Rails.application.action_controller_escape_json_responses)
+      JsonBuilder.escape_json_response(emit_json(jsonify(value)), escape)
     end
 
     def self.encode_for_callback(value)
@@ -42,8 +42,8 @@ module ActionController
     end
 
     # Not in `encode`: Inertia's props encode a String, and only the json renderer sends one as it is.
-    def self.body(value)
-      value.is_a?(String) ? value : encode(value)
+    def self.body(value, escape = Rails.application.action_controller_escape_json_responses)
+      value.is_a?(String) ? value : encode(value, escape)
     end
 
     def self.body_for_callback(value)
@@ -117,9 +117,11 @@ end
 module JsonBuilder
   # Rails' renderer can disable all extra escaping. JSONP retains the
   # encoder's escaping, including its separate JS separator setting.
-  def self.escape_json_response(json, jsonp = false)
-    return json unless jsonp || Rails.application.action_controller_escape_json_responses
-    json = escape_html_entities(json)
+  def self.escape_json_response(json, escape = Rails.application.action_controller_escape_json_responses)
+    return json unless escape
+    if Rails.application.active_support_escape_html_entities_in_json
+      json = escape_html_entities(json)
+    end
     if Rails.application.active_support_escape_js_separators_in_json
       json = json.gsub("\u2028", "\\u2028").gsub("\u2029", "\\u2029")
     end

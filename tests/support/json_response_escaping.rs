@@ -31,7 +31,7 @@ pub fn app(defaults: &str) -> emit_and_run::Overlay {
         for callback in [false, true] {
             let name = format!("{form}{}", if callback { "_callback" } else { "" });
             let option = if callback {
-                ", callback: \"receive\""
+                ", callback: \"receive\", content_type: \"application/json\""
             } else {
                 ""
             };
@@ -42,13 +42,18 @@ pub fn app(defaults: &str) -> emit_and_run::Overlay {
         }
     }
     controller.push_str("end\n");
-    routes.push_str("end\n");
+    routes.push_str("  get '/escaping', to: 'escaping#index'\n  get '/inherited', to: 'inherited#index'\n  get '/unescaped', to: 'unescaped#index'\nend\n");
     emit_and_run::empty_app()
         .write("config/application.rb", &format!("module EscapingApplication\n  class Application < Rails::Application\n{defaults}  end\nend\n"))
         .write("config/environments/force_true.rb", "Rails.application.configure do\n  config.action_controller.escape_json_responses = true\nend\n")
         .write("config/environments/force_false.rb", "Rails.application.configure do\n  config.action_controller.escape_json_responses = false\nend\n")
         .write("config/environments/self_defaults.rb", "Rails.application.configure do\n  self.config.load_defaults 8.1\nend\n")
         .write("config/environments/false_then_older.rb", "Rails.application.configure do\n  self.config.action_controller.escape_json_responses = false\n  self.config.active_support.escape_js_separators_in_json = false\n  self.config.load_defaults 8.0\nend\n")
+        .write("config/environments/disable_html.rb", "Rails.application.configure do\n  config.action_controller.escape_json_responses = true\n  config.active_support.escape_html_entities_in_json = false\nend\n")
+        .write("config/initializers/separators.rb", "Rails.application.config.active_support.escape_js_separators_in_json = true\n")
+        .write("app/controllers/escaping_controller.rb", "class EscapingController < ActionController::API\n  self.escape_json_responses = true\n  def index\n    render json: JSON.parse('{\"text\":\"<\"}')\n  end\nend\n")
+        .write("app/controllers/inherited_controller.rb", "class InheritedController < EscapingController\nend\n")
+        .write("app/controllers/unescaped_controller.rb", "class UnescapedController < EscapingController\n  self.escape_json_responses = false\nend\n")
         .write("config/routes.rb", &routes)
         .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
         .write("app/controllers/payloads_controller.rb", &controller)
@@ -87,9 +92,12 @@ pub fn program(defaults: &str) -> String {
                 if primitive { "_primitive" } else { "" }
             );
             program.push_str(&format!("Rails.env_name = {env:?}\nc = PayloadsController.new\nc.process_action(:{action})\nraise {action:?} unless c.body.bytes == ({body}).bytes\nraise \"status\" unless c.status == 200\n"));
+            if row["callback"] == true {
+                program.push_str("raise 'JSONP type' unless c.content_type == 'text/javascript; charset=utf-8'\n");
+            }
         }
     }
-    program.push_str("puts 'escaping responses passed'\n");
+    program.push_str("require_relative 'app/controllers/escaping_controller'\nrequire_relative 'app/controllers/inherited_controller'\nrequire_relative 'app/controllers/unescaped_controller'\nRails.env_name = 'test'\na = EscapingController.new\na.process_action(:index)\nraise 'own policy' unless a.body == '{\"text\":\"\\u003c\"}'\nb = InheritedController.new\nb.process_action(:index)\nraise 'inherited policy' unless b.body == a.body\nc = UnescapedController.new\nc.process_action(:index)\nraise 'false policy' unless c.body == '{\"text\":\"<\"}'\nRails.env_name = 'disable_html'\nd = EscapingController.new\nd.process_action(:index)\nraise 'HTML setting' unless d.body == '{\"text\":\"<\"}'\nputs 'escaping responses passed'\n");
     program
 }
 

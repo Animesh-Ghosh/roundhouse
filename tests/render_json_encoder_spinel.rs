@@ -135,7 +135,7 @@ fn the_spinel_tree_loads_the_encoder_its_controllers_call() {
     assert!(boot.contains("require_relative \"runtime/action_controller_json_render\""), "{boot}");
     let encoder = std::fs::read_to_string(emitted.join("runtime/action_controller_json_render.rb"))
         .expect("emitted encoder");
-    assert!(encoder.contains("def self.encode(value)"), "{encoder}");
+    assert!(encoder.contains("def self.encode(value, escape ="), "{encoder}");
 }
 
 const ASSERTIONS: &str = r#"
@@ -170,4 +170,34 @@ fn values_outside_the_primitive_path_run_on_cruby() {
 #[ignore = "requires the Spinel toolchain"]
 fn values_outside_the_primitive_path_render_as_rails_does() {
     app().run_spinel(ASSERTIONS).assert_passes();
+}
+
+#[test]
+fn controller_owned_policy_and_configuration_execution_match_rails() {
+    use std::{fs, path::Path};
+    fn overlay(root: &Path) -> emit_and_run::Overlay {
+        fn copy(root: &Path, dir: &Path, mut app: emit_and_run::Overlay) -> emit_and_run::Overlay {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() { app = copy(root, &path, app); }
+                else { app = app.write(path.strip_prefix(root).unwrap().to_str().unwrap(), &fs::read_to_string(&path).unwrap()); }
+            }
+            app
+        }
+        copy(root, root, emit_and_run::empty_app())
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/json_response_escaping/cases");
+    for name in ["own_override", "parent_override", "method_override", "global_html", "initializer_order", "jsonp_mime", "unrelated_class"] {
+        let expected = match name {
+            "own_override" | "parent_override" | "method_override" | "unrelated_class" => r#"{"text":"\u003c"}"#,
+            "global_html" => r#"{"text":"<"}"#,
+            "initializer_order" => "{\"text\":\"\u{2028}\"}",
+            _ => r#"/**/receive({"text":"\u003c"})"#,
+        };
+        let mime = if name == "jsonp_mime" { "text/javascript; charset=utf-8" } else { "application/json; charset=utf-8" };
+        let program = format!("require_relative 'app/controllers/payloads_controller'\nRails.env_name = 'test'\nc = PayloadsController.new\nc.process_action(:index)\nraise 'body' unless c.body.bytes == ({}).bytes\nraise 'type' unless c.content_type == {:?}\n", serde_json::to_string(expected).unwrap(), mime);
+        overlay(&root.join(name)).run_ruby(&program).assert_passes();
+    }
+    let error = roundhouse::ingest::ingest_app(&root.join("nested_assignment")).unwrap_err().to_string();
+    assert!(error.contains("escape_json_responses"), "{error}");
 }

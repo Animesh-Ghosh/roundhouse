@@ -483,6 +483,25 @@ pub(super) fn rewrite_render_to_views(
                     if entries.iter().any(|(key, _)| matches!(&*key.node,
                         ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "json"))
                     {
+                        if jsonp {
+                            for (key, value) in &mut rest {
+                                if matches!(&*key.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "content_type") {
+                                    match &*value.node {
+                                        ExprNode::Lit { value: Literal::Str { value: mime } }
+                                            if mime.split(';').next().is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json")) => {
+                                            *value = str_lit(value.span, "text/javascript");
+                                        }
+                                        ExprNode::Lit { value: Literal::Str { .. } } => {}
+                                        _ => {
+                                            let mut d = crate::lower::residue_diagnostic("controller_render", "jsonp_content_type", value.span,
+                                                "jsonp_content_type_not_modelled", "JSONP content_type must be a literal media type".into());
+                                            d.severity = crate::diagnostic::Severity::Error;
+                                            crate::emit::diagnostics::push(d);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // Literal blank callbacks do not wrap a response.
                         // Nonliteral callback options retain previous handling.
                         if callback.is_none_or(|v| matches!(&*v.node,
@@ -1158,6 +1177,13 @@ fn json_render_body(value: &Expr, jsonp: bool) -> Expr {
             "body" => *method = Symbol::from("body_for_callback"),
             _ => {}
         }
+    }
+    if !jsonp && let ExprNode::Send { method, args, .. } = &mut *encoded.node
+        && matches!(method.as_str(), "encode" | "body" | "escape_json_response")
+    {
+        args.push(Expr::new(value.span, ExprNode::Send {
+            recv: None, method: Symbol::from("json_render_escape"), args: vec![], block: None, parenthesized: true,
+        }));
     }
     encoded
 }
