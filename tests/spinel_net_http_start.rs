@@ -100,7 +100,7 @@ fn the_lazy_start_yields_the_session_and_answers_the_blocks_value() {
 #[test]
 #[ignore]
 fn a_request_no_stub_answers_reads_the_response_and_decodes_gzip() {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
 
     // `Zlib.gzip("decoded widget")` with a fixed mtime.
@@ -145,15 +145,22 @@ fn a_request_no_stub_answers_reads_the_response_and_decodes_gzip() {
             let mut request_line = String::new();
             reader.read_line(&mut request_line).unwrap();
             let mut accept_encoding = String::new();
+            let mut content_length = 0usize;
             loop {
                 let mut line = String::new();
                 if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
                     break;
                 }
-                if line.to_ascii_lowercase().starts_with("accept-encoding:") {
+                let lower = line.to_ascii_lowercase();
+                if lower.starts_with("content-length:") {
+                    content_length = line[15..].trim().parse().expect("valid Content-Length");
+                }
+                if lower.starts_with("accept-encoding:") {
                     accept_encoding = line[16..].trim().to_string();
                 }
             }
+            let mut request_body = vec![0u8; content_length];
+            reader.read_exact(&mut request_body).unwrap();
             accept_encodings.push(accept_encoding);
             let mut stream = reader.into_inner();
             let (encoding, body): (&str, &[u8]) = if request_line.starts_with("GET /gzip ") {
