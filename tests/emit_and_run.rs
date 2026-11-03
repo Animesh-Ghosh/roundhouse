@@ -30,6 +30,8 @@ mod session_cookie_key;
 mod inertia_runtime_props;
 #[path = "emit_and_run/form_builder_fields.rs"]
 mod form_builder_fields;
+#[path = "emit_and_run/stylesheet_helper.rs"]
+mod stylesheet_helper;
 #[path = "emit_and_run/stylesheet_source.rs"]
 mod stylesheet_source;
 #[path = "emit_and_run/time_tag.rs"]
@@ -20613,6 +20615,9 @@ mod record_slice;
 
 #[path = "emit_and_run/csrf_meta_tag_alias.rs"]
 mod csrf_meta_tag_alias;
+
+#[path = "emit_and_run/python_nested_modifier_if.rs"]
+mod python_nested_modifier_if;
 
 #[path = "emit_and_run/namespaced_class_consts.rs"]
 mod namespaced_class_consts;
