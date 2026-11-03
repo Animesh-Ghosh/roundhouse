@@ -35,6 +35,8 @@ mod time_zone_tzinfo;
 
 #[path = "emit_and_run/current_page.rs"]
 mod current_page;
+#[path = "emit_and_run/strict_json_render_escape.rs"]
+mod strict_json_render_escape;
 #[path = "emit_and_run/stylesheet_helper.rs"]
 mod stylesheet_helper;
 #[path = "emit_and_run/stylesheet_source.rs"]
@@ -20414,6 +20416,8 @@ mod console_only_definitions;
 mod open_classes;
 #[path = "emit_and_run/parameterized_mailer.rs"]
 mod parameterized_mailer;
+#[path = "emit_and_run/change_table_migrations.rs"]
+mod change_table_migrations;
 #[path = "emit_and_run/model_delegate_to_reader.rs"]
 mod model_delegate_to_reader;
 #[path = "emit_and_run/private_calls.rs"]
