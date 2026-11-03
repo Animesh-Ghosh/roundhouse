@@ -892,6 +892,9 @@ class Routing(unittest.TestCase):
             "runtime/spinel/http_stub.rbs": "spinel_net_http_start",
             "runtime/spinel/tcp_socket_stub.rb": "spinel_net_http_start",
             "runtime/spinel/tcp_socket_stub.rbs": "spinel_net_http_start",
+            "tests/spinel_net_http_stream.rb": "spinel_net_http_start",
+            "tests/spinel_net_http_raise.rb": "spinel_net_http_start",
+            "tests/spinel_net_http_transport.rb": "spinel_net_http_start",
         }
         for path, binary in cases.items():
             with self.subTest(path=path):
