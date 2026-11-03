@@ -2571,7 +2571,7 @@ fn walk_decl_body_with_visibility<'pr>(
         return Ok(out);
     };
 
-    let statements = flatten_statements(b);
+    let statements = inline_load_time_definers(flatten_statements(b));
     // This body's literal constants, for the `define_method` loops in it
     // and in the bodies it encloses (`class << self`, `included do`).
     let _constants = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::of(owner, &statements));
@@ -5999,6 +5999,67 @@ fn requires_files(stmt: &ruby_prism::Node<'_>) -> bool {
     let mut found = Requires(false);
     ruby_prism::Visit::visit(&mut found, stmt);
     found.0
+}
+
+/// A bare call in the body to a method of a module the body extends, whose
+/// body only writes `def self.…` (raabro's `make_includable`), defines those
+/// methods on this module as the body loads: each stands in for the call.
+fn inline_load_time_definers<'pr>(statements: Vec<ruby_prism::Node<'pr>>) -> Vec<ruby_prism::Node<'pr>> {
+    let extended: Vec<String> = statements
+        .iter()
+        .filter_map(|s| s.as_call_node())
+        .filter(|c| c.receiver().is_none() && constant_id_str(&c.name()) == "extend")
+        .flat_map(|c| c.arguments().map(|a| a.arguments().iter().collect::<Vec<_>>()).unwrap_or_default())
+        .filter_map(|a| a.as_constant_read_node().map(|r| constant_id_str(&r.name()).to_string()))
+        .collect();
+    if extended.is_empty() {
+        return statements;
+    }
+    let singleton_defs = |m: &ruby_prism::ModuleNode<'pr>, wanted: Option<&str>| -> Vec<(String, Vec<ruby_prism::Node<'pr>>)> {
+        let mut found = Vec::new();
+        let Some(body) = m.body() else { return found };
+        for def in flatten_statements(body) {
+            let Some(d) = def.as_def_node() else { continue };
+            let name = constant_id_str(&d.name()).to_string();
+            if d.receiver().is_some() || d.parameters().is_some() || wanted.is_some_and(|w| w != name) {
+                continue;
+            }
+            let Some(inner) = d.body() else { continue };
+            let defs = flatten_statements(inner);
+            if !defs.is_empty() && defs.iter().all(|n| n.as_def_node().is_some_and(|x| x.receiver().is_some_and(|r| r.as_self_node().is_some()))) {
+                found.push((name, defs));
+            }
+        }
+        found
+    };
+    let mut definers: Vec<(String, usize)> = Vec::new();
+    for (i, s) in statements.iter().enumerate() {
+        let Some(m) = s.as_module_node() else { continue };
+        let Some(name) = module_name_path(&m).and_then(|p| (p.len() == 1).then(|| p[0].clone())) else { continue };
+        if extended.contains(&name) {
+            definers.extend(singleton_defs(&m, None).into_iter().map(|(n, _)| (n, i)));
+        }
+    }
+    if definers.is_empty() {
+        return statements;
+    }
+    let mut replaced: crate::det::HashMap<usize, Vec<ruby_prism::Node<'pr>>> = crate::det::HashMap::default();
+    for (i, s) in statements.iter().enumerate() {
+        let called = s.as_call_node().filter(|c| c.receiver().is_none() && c.arguments().is_none() && c.block().is_none());
+        if let Some((name, at)) = called.and_then(|c| definers.iter().find(|(n, _)| n == constant_id_str(&c.name())))
+            && let Some(m) = statements[*at].as_module_node()
+        {
+            replaced.insert(i, singleton_defs(&m, Some(name)).into_iter().flat_map(|(_, defs)| defs).collect());
+        }
+    }
+    let mut out = Vec::new();
+    for (i, s) in statements.into_iter().enumerate() {
+        match replaced.remove(&i) {
+            Some(defs) => out.extend(defs),
+            None => out.push(s),
+        }
+    }
+    out
 }
 
 /// The locals of a class body that one of its constants reads.
