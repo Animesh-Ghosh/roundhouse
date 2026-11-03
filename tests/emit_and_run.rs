@@ -33,6 +33,8 @@ mod form_builder_fields;
 #[path = "emit_and_run/time_zone_tzinfo.rs"]
 mod time_zone_tzinfo;
 
+#[path = "emit_and_run/current_page.rs"]
+mod current_page;
 #[path = "emit_and_run/stylesheet_helper.rs"]
 mod stylesheet_helper;
 #[path = "emit_and_run/stylesheet_source.rs"]
@@ -20615,6 +20617,9 @@ mod record_slice;
 
 #[path = "emit_and_run/csrf_meta_tag_alias.rs"]
 mod csrf_meta_tag_alias;
+
+#[path = "emit_and_run/python_route_format.rs"]
+mod python_route_format;
 
 #[path = "emit_and_run/python_nested_modifier_if.rs"]
 mod python_nested_modifier_if;
