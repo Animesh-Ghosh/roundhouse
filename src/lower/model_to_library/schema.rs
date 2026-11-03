@@ -628,7 +628,7 @@ pub(super) fn push_schema_methods(
     // lobsters emits.)
 
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
-    methods.push(synth_initialize(owner, table, model, through_joins, runtime_relation));
+    methods.push(synth_initialize(owner, table, model, &inherited_belongs_to(model, models, table), through_joins, runtime_relation));
 
     // def id; @identifier; end / def id=(value); @identifier = value; end
     // — when the key column is not called `id` and the table has no
@@ -2755,10 +2755,33 @@ fn guard_unless_nil(lookup: Expr, action: Expr) -> Expr {
     )
 }
 
+/// Not only the model's own: Rails routes `new(job: record)` through an ancestor's `belongs_to` writer too.
+fn inherited_belongs_to(model: &Model, models: &[Model], table: &Table) -> Vec<Association> {
+    let mut seen: crate::det::HashSet<Symbol> = model.associations().map(|a| a.name().clone()).collect();
+    let mut visited: crate::det::HashSet<ClassId> = crate::det::HashSet::default();
+    let mut out = Vec::new();
+    let mut parent = model.parent.clone();
+    while let Some(id) = parent {
+        if !visited.insert(id.clone()) {
+            break;
+        }
+        let Some(ancestor) = models.iter().find(|m| m.name == id) else { break };
+        for assoc in ancestor.associations() {
+            let Association::BelongsTo { foreign_key, polymorphic: false, .. } = assoc else { continue };
+            if table.columns.iter().any(|c| &c.name == foreign_key) && seen.insert(assoc.name().clone()) {
+                out.push(assoc.clone());
+            }
+        }
+        parent = ancestor.parent.clone();
+    }
+    out
+}
+
 fn synth_initialize(
     owner: &ClassId,
     table: &Table,
     model: &Model,
+    inherited: &[Association],
     through_joins: &super::associations::ThroughJoins,
     runtime_relation: super::RuntimeRelation,
 ) -> MethodDef {
@@ -3116,7 +3139,7 @@ fn synth_initialize(
             }
         }
     }
-    for assoc in model.associations() {
+    for assoc in model.associations().chain(inherited.iter()) {
         if let Association::BelongsTo { name, target, foreign_key, polymorphic: false, .. } = assoc
         {
             let lookup = Expr::new(

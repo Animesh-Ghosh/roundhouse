@@ -1296,7 +1296,10 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 921 on 2026-11-04 (on 920): `I18nHost.config_name` reads
     // the thread's config name out of `Thread.current`, untyped as
     // `locale_name`'s read beside it is (+1 in i18n_host.rb).
-    const CEILING: usize = 921;
+    // MEASURED 924 on 2026-11-04 (on 921): `Type::Value#serialize`
+    // takes any value, as Rails' does, and reads it three times
+    // (+3 in active_record/types.rb).
+    const CEILING: usize = 924;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

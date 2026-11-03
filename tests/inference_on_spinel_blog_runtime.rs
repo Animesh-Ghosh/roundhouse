@@ -550,7 +550,11 @@ fn untyped_subexpressions_baseline() {
     // are `Base.table_exists?`/`column_names`; their parameters and the
     // type text they read are vars on this RBS-less probe (+18), and
     // connection.rbs types them for the RBS-paired gate.
-    const CEILING: usize = 1228;
+    // MEASURED 1232 on 2026-11-04 (on 1228): `Type::Value#serialize`
+    // reads its value three times and `initialize` its `json_coder`
+    // once, vars on this RBS-less probe (+4 in active_record/types.rb);
+    // types.rbs types them for the RBS-paired gate.
+    const CEILING: usize = 1232;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

@@ -20540,6 +20540,8 @@ mod load_time_definer;
 mod gem_source_shapes;
 #[path = "emit_and_run/serialized_size_truncate_bytes.rs"]
 mod serialized_size_truncate_bytes;
+#[path = "emit_and_run/inherited_belongs_to_initializer.rs"]
+mod inherited_belongs_to_initializer;
 #[path = "emit_and_run/settled_builtin_probe.rs"]
 mod settled_builtin_probe;
 

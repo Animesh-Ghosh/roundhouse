@@ -5,7 +5,7 @@ use super::solid_queue_worker_contract as solid_queue_worker;
 
 #[test]
 fn jobs_run_through_solid_queues_records() {
-    let run = solid_queue_worker::app().run_ruby(solid_queue_worker::ASSERTIONS);
+    let run = solid_queue_worker::app().run_ruby(&solid_queue_worker::assertions());
     run.assert_passes();
     assert!(run.stdout.contains("solid_queue worker passed"), "{}", run.stdout);
 }

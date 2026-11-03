@@ -61,7 +61,7 @@ pub fn app() -> emit_and_run::Overlay {
     overlay
 }
 
-pub const ASSERTIONS: &str = r##"
+const ASSERTIONS: &str = r##"
 def check(label, got, want)
   raise "#{label}: got #{got.inspect}, want #{want.inspect}" unless got == want
 end
@@ -83,8 +83,20 @@ check("retried", [SolidQueue::ReadyExecution.count, SolidQueue::FailedExecution.
 begin
   SolidQueue::ClaimedExecution.discard_all_in_batches
   raise "no error"
-rescue NameError => e
-  check("name error", e.message, "uninitialized constant #<Class:SolidQueue::ClaimedExecution>::UndiscardableError")
+DISCARD_RESCUE
 end
 puts "solid_queue worker passed"
 "##;
+
+/// Not one expectation for every release: 1.7.0's `class << self` names a bare
+/// constant only an ancestor defines, so Ruby raises NameError, and 1.7.1 names it in full.
+pub fn assertions() -> String {
+    let (version, _) = installed_solid_queue();
+    let parts: Vec<u32> = version.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+    let rescue = if parts < vec![1, 7, 1] {
+        "rescue NameError => e\n  check(\"name error\", e.message, \"uninitialized constant #<Class:SolidQueue::ClaimedExecution>::UndiscardableError\")"
+    } else {
+        "rescue SolidQueue::Execution::UndiscardableError => e\n  check(\"undiscardable\", e.message, \"Can't discard jobs in progress\")"
+    };
+    ASSERTIONS.replace("DISCARD_RESCUE", rescue)
+}

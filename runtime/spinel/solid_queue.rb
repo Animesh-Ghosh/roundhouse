@@ -60,6 +60,8 @@ module SolidQueue
   end
 
   module Processes
+    class UnrecoverableError < RuntimeError; end
+
     class ProcessPrunedError < RuntimeError
       def initialize(last_heartbeat_at)
         super("Process was found dead and pruned (last heartbeat at: #{last_heartbeat_at}")
