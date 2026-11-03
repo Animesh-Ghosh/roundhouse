@@ -257,6 +257,10 @@ mod enumerable_mixin;
 mod file_level_struct_contract;
 #[path = "spinel_toolchain/file_level_struct.rs"]
 mod file_level_struct;
+#[path = "support/concern_class_side.rs"]
+mod concern_class_side_contract;
+#[path = "spinel_toolchain/concern_class_side.rs"]
+mod concern_class_side;
 #[path = "support/concern_define_loop.rs"]
 mod concern_define_loop_contract;
 #[path = "spinel_toolchain/concern_define_loop.rs"]

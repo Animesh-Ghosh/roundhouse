@@ -191,6 +191,7 @@ module ActiveRecord
     def self.delete_by: (Hash[Symbol, untyped] | String conditions) -> Integer
     def self.destroy_by: (Hash[Symbol, untyped] | String conditions) -> Array[Base]
     def self.distinct: (?(bool | Symbol | String) value) -> Relation
+    def self.optimizer_hints: (*String hints) -> Relation
     def self.eager_load: (*(Symbol | Hash[Symbol, Symbol | EagerFilter]) names) -> Relation
     def self.excluding: (*untyped records) -> Relation
     def self.find_each: () { (Base) -> void } -> Relation

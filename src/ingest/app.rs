@@ -2865,6 +2865,7 @@ end
         concern_class_method_spans.extend(carriers);
         framework_shadow_scopes.extend(shadows);
     }
+    app.concern_class_side_spans = concern_class_method_spans.iter().flat_map(|c| c.methods.iter().copied()).collect();
     // Registered source paths are prefixed with this (the fs walk
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();

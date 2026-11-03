@@ -20603,6 +20603,10 @@ mod enumerable_mixin;
 mod file_level_struct_contract;
 #[path = "emit_and_run/file_level_struct.rs"]
 mod file_level_struct;
+#[path = "support/concern_class_side.rs"]
+mod concern_class_side_contract;
+#[path = "emit_and_run/concern_class_side.rs"]
+mod concern_class_side;
 #[path = "support/concern_define_loop.rs"]
 mod concern_define_loop_contract;
 #[path = "emit_and_run/concern_define_loop.rs"]

@@ -1639,6 +1639,10 @@ module ActiveRecord
       all.distinct(value)
     end
 
+    def self.optimizer_hints(*hints)
+      all.optimizer_hints(*hints)
+    end
+
     def self.eager_load(*names)
       all.eager_load(*names)
     end
