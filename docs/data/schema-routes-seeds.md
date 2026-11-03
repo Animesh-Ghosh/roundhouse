@@ -524,7 +524,25 @@ then flags; a model that declares none is refused, since Rails would key
 it on every column and this compiler does not yet. When there is neither (never migrated locally, or gitignored),
 the walk falls back to folding `db/migrate/*.rb` in filename order —
 `src/ingest/schema.rs::ingest_migration`, called from
-`src/ingest/app.rs`. Migration shapes it can't fold deterministically
+`src/ingest/app.rs`. A `change_table` block folds through the verbs
+its `t.<method>` calls stand for in Rails' `Table`: `t.change`,
+`t.change_default`, `t.change_null`, `t.rename`, `t.remove` (once per
+name), column adds through `t.<type>` (once per name, with `index:`) and
+`t.column`, `t.index`, `t.remove_index`, `t.rename_index`,
+`t.timestamps`, `t.remove_timestamps`, `t.references` / `t.belongs_to`
+and their removals, and `t.foreign_key`. Questions (`column_exists?`
+and the like) and constraint verbs change nothing the fold models. A
+non-literal table or column name, a block that is not a literal block,
+and an unmapped column type are gaps. `change_column` (and `t.change`)
+keeps the column's nullability, default and key unless the call gives
+them, as every Rails adapter does, and redefines the column in place.
+`execute` folds when every statement in its literal SQL only sets the
+table's default character set or collation (`ALTER TABLE posts
+COLLATE=utf8mb4_bin`, `… DEFAULT CHARSET=utf8mb4`), which applies only
+to columns added later; any other SQL, `CONVERT TO CHARACTER SET`
+included (it can retype the string columns it re-encodes), is a gap that
+quotes the statement.
+Migration shapes it can't fold deterministically
 (see `UNSUPPORTED_VERBS`) error with a pointer to `rails db:migrate`,
 which materializes the schema.rb this fallback substitutes for. Roda
 apps get the same fallback for Sequel-DSL migrations via
