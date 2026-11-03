@@ -1490,9 +1490,12 @@ module ActionView
     # `ColorField#render`'s `options["value"] ||= …` for a computed
     # `value:`: the option as given, or the record's value through
     # `color_value_attr` when it is nil or false (`||=`). One call, so the
-    # option is evaluated once.
+    # option is evaluated once. `false` is a non-String whose `to_s` is
+    # "false" (`render_attrs`'s boolean-attribute check, keeping the
+    # String "false"): `option == false` does not type on C# (no
+    # `object == bool`) or Swift (`Any` is not `Bool`).
     def self.color_field_value_attr(option, value)
-      if option.nil? || option == false
+      if option.nil? || (!option.is_a?(String) && option.to_s == "false")
         color_value_attr(value)
       else
         %( value="#{html_escape(option.to_s)}")
