@@ -551,27 +551,22 @@ fn emit_select_options(
                 map_loop_options(&container, selected.as_ref(), multiple, field_str, blank, ctx)?;
             Some((setup, loop_var))
         }
+        // `collect`, its alias: the pairs as `map`'s. A block answering one
+        // value per element runs as written under the scalar loop below,
+        // whatever its parameters; pairs the map loop can't inline go to
+        // the general fallback.
+        ExprNode::Send { method, block: Some(block), .. } if method.as_str() == "collect" => {
+            if let Some(found) = map_loop_options(&container, selected.as_ref(), multiple, field_str, blank.clone(), ctx) {
+                return Some(found);
+            }
+            if block_answers_array(block) {
+                return None;
+            }
+            Some(scalar_select_loop(&container, selected.as_ref(), multiple, field_str, blank, ctx))
+        }
         // Any other container expr — flat scalar loop (the corpus:
         // `@moderators`, `Category.pluck(:category)` — plain strings).
-        _ => {
-            let el = Symbol::from("_choice");
-            let el_ref = Expr::new(
-                Span::synthetic(),
-                ExprNode::Var { id: VarId(0), name: el.clone() },
-            );
-            let mut option = Vec::new();
-            push_dynamic_option(
-                &mut option,
-                to_s(el_ref.clone()),
-                to_s(el_ref),
-                &[],
-                selected.as_ref(),
-                multiple,
-            );
-            let (setup, var) =
-                each_loop(&container, el, string_interp(option), field_str, blank, ctx);
-            Some((setup, var))
-        }
+        _ => Some(scalar_select_loop(&container, selected.as_ref(), multiple, field_str, blank, ctx)),
     }
 }
 
@@ -717,7 +712,48 @@ fn collection_options(
     Some((setup, var))
 }
 
-/// `<coll>.map { |x| [text, value] / [text, {attrs}, value] }` — loop
+/// Whether a block's last expression is an array literal (`[text, value]`).
+fn block_answers_array(block: &Expr) -> bool {
+    let ExprNode::Lambda { body, .. } = &*block.node else { return false };
+    let last = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last(),
+        _ => Some(body),
+    };
+    last.is_some_and(|e| matches!(&*e.node, ExprNode::Array { .. }))
+}
+
+/// Whether `e` holds a `next` or `break` for the block it sits in (nested
+/// blocks keep their own).
+fn exits_block(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Next { .. } | ExprNode::Break { .. } => true,
+        ExprNode::Lambda { .. } => false,
+        node => {
+            let mut found = false;
+            node.for_each_child(&mut |child| found |= exits_block(child));
+            found
+        }
+    }
+}
+
+/// One `<option>` per element of `container`, its `to_s` as text and value.
+fn scalar_select_loop(
+    container: &Expr,
+    selected: Option<&Expr>,
+    multiple: bool,
+    field_str: &str,
+    blank: Vec<InterpPart>,
+    ctx: &ViewCtx,
+) -> (Vec<Expr>, Expr) {
+    let el = Symbol::from("_choice");
+    let el_ref = Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: el.clone() });
+    let mut option = Vec::new();
+    push_dynamic_option(&mut option, to_s(el_ref.clone()), to_s(el_ref), &[], selected, multiple);
+    each_loop(container, el, string_interp(option), field_str, blank, ctx)
+}
+
+/// `<coll>.map { |x| [text, value] / [text, {attrs}, value] }` (or
+/// `collect`) — loop
 /// over the map SOURCE with the lambda's element exprs inlined (the
 /// loop rebinds the lambda's own param name, so the exprs read it
 /// directly).
@@ -733,11 +769,17 @@ fn map_loop_options(
     else {
         return None;
     };
-    if method.as_str() != "map" {
+    if !matches!(method.as_str(), "map" | "collect") {
         return None;
     }
-    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { return None };
-    if !extra_params.is_empty() {
+    let ExprNode::Lambda { extra_params, params, rest_param, body, .. } = &*block.node else { return None };
+    // One element parameter: the loop binds only that one.
+    if !extra_params.is_empty() || rest_param.is_some() || params.len() != 1 {
+        return None;
+    }
+    // The loop appends one option per element, so a `next` or `break`
+    // answering the block's value would skip it instead.
+    if exits_block(body) {
         return None;
     }
     let el = params.first().cloned()?;
