@@ -702,10 +702,9 @@ fn apply_table_verb(
         // Column typing itself is unaffected: the FK column is already an
         // ordinary integer column from `create_table`.
         "add_foreign_key" => apply_add_foreign_key(args, schema),
-        // Extensions (and FK removal — schema.rb is canonical state, so
-        // a remove would only appear in migration folds where the add is
-        // also seen) don't affect column typing; skipped like before.
-        "remove_foreign_key" | "enable_extension" | "disable_extension" => {}
+        "remove_foreign_key" => apply_remove_foreign_key(args, file, schema)?,
+        // Extensions don't affect column typing; skipped like before.
+        "enable_extension" | "disable_extension" => {}
         // Anything else receiver-less is arbitrary migration Ruby
         // (`say`, backfill helpers) — not schema-affecting.
         _ => {}
@@ -969,6 +968,7 @@ fn apply_table_method<'pr>(
         "timestamps" => delegate("add_timestamps", schema),
         "remove_timestamps" => delegate("remove_timestamps", schema),
         "foreign_key" => delegate("add_foreign_key", schema),
+        "remove_foreign_key" => delegate("remove_foreign_key", schema),
         "column" => {
             delegate("add_column", schema)?;
             let args = call_arguments(inner);
@@ -991,10 +991,9 @@ fn apply_table_method<'pr>(
             Ok(())
         }
         // Questions about the table, and constraints the fold does not
-        // model (a constraint costs the DDL nothing; `remove_foreign_key`
-        // is skipped like the top-level verb).
+        // model (a constraint costs the DDL nothing).
         "name" | "column_exists?" | "index_exists?" | "foreign_key_exists?"
-        | "check_constraint_exists?" | "remove_foreign_key" | "check_constraint"
+        | "check_constraint_exists?" | "check_constraint"
         | "remove_check_constraint" | "validate_check_constraint" | "validate_constraint"
         | "unique_constraint" | "remove_unique_constraint" | "exclusion_constraint"
         | "remove_exclusion_constraint" => Ok(()),
@@ -1238,6 +1237,48 @@ fn apply_add_foreign_key(args: &[Node<'_>], schema: &mut Schema) {
             on_update,
         });
     }
+}
+
+/// `remove_foreign_key "comments", "articles"` (or `to_table:`,
+/// `column:`, `primary_key:`) drops the first recorded key that matches
+/// every part given, as Rails' `foreign_key_for` picks it. A key named
+/// by `name:` cannot be matched (the fold does not record names), so it
+/// is a gap rather than a key left in place. No recorded key to
+/// match changes nothing: the add was one the fold does not record.
+fn apply_remove_foreign_key(args: &[Node<'_>], file: &str, schema: &mut Schema) -> IngestResult<()> {
+    let gap = |why: &str| IngestError::Unsupported {
+        file: file.into(),
+        message: format!("migration `remove_foreign_key` {why}; the schema fold cannot apply it"),
+    };
+    let Some(from_t) = args.first().and_then(table_name_value) else {
+        return Err(gap("names its table by a non-literal"));
+    };
+    let positional_to = args.get(1).filter(|arg| arg.as_keyword_hash_node().is_none());
+    let to_table = match positional_to {
+        Some(arg) => Some(table_name_value(arg).ok_or_else(|| gap("names its target table by a non-literal"))?),
+        None => kwarg_value(args.iter().skip(1), "to_table").map(|v| table_name_value(&v).ok_or_else(|| gap("names its target table by a non-literal"))).transpose()?,
+    };
+    let kw = |key: &str| kwarg_value(args.iter().skip(1), key);
+    let literal = |key: &str| kw(key).map(|v| name_value(&v).ok_or_else(|| gap(&format!("gives a non-literal `{key}:`")))).transpose();
+    let column = literal("column")?;
+    let primary_key = literal("primary_key")?;
+    if kw("name").is_some() {
+        return Err(gap("names its key by `name:`, which the fold does not record"));
+    }
+    if to_table.is_none() && column.is_none() {
+        return Err(gap("names no target table or column"));
+    }
+    if let Some(table) = schema.tables.get_mut(&Symbol::from(from_t)) {
+        let matches = |fk: &crate::schema::ForeignKey| {
+            to_table.as_deref().is_none_or(|to| fk.to_table.0.as_str() == to)
+                && column.as_deref().is_none_or(|c| fk.from_column.as_str() == c)
+                && primary_key.as_deref().is_none_or(|pk| fk.to_column.as_str() == pk)
+        };
+        if let Some(at) = table.foreign_keys.iter().position(matches) {
+            table.foreign_keys.remove(at);
+        }
+    }
+    Ok(())
 }
 
 /// `on_delete:`/`on_update:` symbol → the neutral referential action.
@@ -2589,6 +2630,56 @@ mod tests {
         assert!(!title.nullable);
         assert_eq!(col(&schema, "posts", "body").col_type, ColumnType::Text);
         assert!(!schema.tables.contains_key(&Symbol::from("never_created")));
+    }
+
+    /// `remove_foreign_key`, top-level or `t.remove_foreign_key`, drops
+    /// the key it matches, so derived schema SQL does not keep a
+    /// constraint the migrations dropped. A key named by `name:` is a gap.
+    #[test]
+    fn remove_foreign_key_drops_the_matching_key() {
+        let keys = |schema: &Schema| -> Vec<(String, String)> {
+            schema.tables[&Symbol::from("posts")]
+                .foreign_keys
+                .iter()
+                .map(|fk| (fk.from_column.as_str().to_string(), fk.to_table.0.as_str().to_string()))
+                .collect()
+        };
+        let create = r#"
+            class CreateAuthors < ActiveRecord::Migration[8.1]
+              def change
+                create_table :authors do |t|
+                  t.string :name
+                end
+                create_table :posts do |t|
+                  t.integer :author_id
+                  t.integer :editor_id
+                end
+                change_table :posts do |t|
+                  t.foreign_key :authors
+                end
+                add_foreign_key :posts, :authors, column: :editor_id
+              end
+            end
+        "#;
+        let mut schema = fold(&[create]);
+        assert_eq!(
+            keys(&schema),
+            [("author_id".into(), "authors".into()), ("editor_id".into(), "authors".into())]
+        );
+        let change = |body: &str| format!("class Drop < ActiveRecord::Migration[8.1]\n  def change\n{body}\n  end\nend\n");
+        ingest_migration(change("change_table :posts do |t|\n  t.remove_foreign_key column: :editor_id\nend").as_bytes(), "2_drop.rb", &mut schema)
+            .expect("t.remove_foreign_key");
+        assert_eq!(keys(&schema), [("author_id".to_string(), "authors".to_string())]);
+        ingest_migration(change("remove_foreign_key :posts, :authors").as_bytes(), "3_drop.rb", &mut schema)
+            .expect("remove_foreign_key");
+        assert!(keys(&schema).is_empty(), "{:?}", keys(&schema));
+
+        let mut schema = fold(&[create]);
+        for body in ["remove_foreign_key :posts, name: :fk_rails_1", "remove_foreign_key :posts"] {
+            let message = ingest_migration(change(body).as_bytes(), "2_drop.rb", &mut schema).expect_err(body).to_string();
+            assert!(message.contains("migration `remove_foreign_key`"), "{message}");
+        }
+        assert_eq!(keys(&schema).len(), 2);
     }
 
     /// Any other SQL stays a gap naming the verb and the statement, so

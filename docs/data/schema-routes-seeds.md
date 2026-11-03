@@ -530,10 +530,14 @@ its `t.<method>` calls stand for in Rails' `Table`: `t.change`,
 name), column adds through `t.<type>` (once per name, with `index:`) and
 `t.column`, `t.index`, `t.remove_index`, `t.rename_index`,
 `t.timestamps`, `t.remove_timestamps`, `t.references` / `t.belongs_to`
-and their removals, and `t.foreign_key`. Questions (`column_exists?`
-and the like) and constraint verbs change nothing the fold models. A
-non-literal table or column name, a block that is not a literal block,
-and an unmapped column type are gaps. `change_column` (and `t.change`)
+and their removals, and `t.foreign_key` / `t.remove_foreign_key`.
+`remove_foreign_key`, top-level or in the block, drops the first
+recorded key matching every part it gives (target table, `column:`,
+`primary_key:`); one named by `name:` is a gap, since the fold does not
+record key names. Questions (`column_exists?` and the like) and other
+constraint verbs change nothing the fold models. A non-literal table or
+column name, a block that is not a literal block, and an unmapped column
+type are gaps. `change_column` (and `t.change`)
 keeps the column's nullability, default and key unless the call gives
 them, as every Rails adapter does, and redefines the column in place.
 `execute` folds when every statement in its literal SQL only sets the
