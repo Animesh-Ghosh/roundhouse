@@ -1515,7 +1515,8 @@ impl<'a> BodyTyper<'a> {
                 {
                     let span = expr.span;
                     // Not the whole path: Ruby names the first segment it could not find, in the lexical scope it looked from.
-                    let root = path.iter().map(|p| p.as_str()).find(|p| !p.is_empty()).unwrap_or_default().to_string();
+                    let segments: Vec<&str> = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect();
+                    let root = segments.first().copied().unwrap_or_default().to_string();
                     let scope = match ctx.lexical_self.as_ref().or(ctx.self_ty.as_ref()) {
                         _ if path.first().is_some_and(|p| p.as_str().is_empty()) => None,
                         Some(Ty::Class { id, args }) if id.0.as_str() == "Class" => match args.first() {
@@ -2997,6 +2998,10 @@ impl<'a> BodyTyper<'a> {
                                          that changes while the program runs; no compiled target has one", method.as_str()),
                     }));
                     return dispatched;
+                }
+                // Not a refusal: a receiver that always raises never reaches the call.
+                if matches!(recv_ty, Some(Ty::Bottom)) {
+                    return Ty::Bottom;
                 }
                 if matches!(dispatched, Ty::Var { .. } | Ty::Untyped) && self.inquirers.is_some()
                     && (recv.is_some() || (ctx.self_ty.is_some() && (send::is_module_protocol(method)
