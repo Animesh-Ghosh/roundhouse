@@ -188,6 +188,25 @@ fn a_select_over_collect_renders_as_rails_does() {
         .assert_passes();
 }
 
+/// A `collect` block with a rest parameter (`|key, *rest|`) is not
+/// expanded into a loop that binds only `key`: `rest` would be unbound
+/// (review, form_builder.rs:747).
+#[test]
+fn a_select_over_collect_with_a_rest_param_renders_as_rails_does() {
+    let app = emit_and_run::real_blog().edit(
+        "app/views/articles/_form.html.erb",
+        "    <%= form.label :body %>\n",
+        concat!(
+            "    <%= form.select :body, { \"Kay\" => \"k\", \"Vee\" => \"v\" }.collect { |key, *rest| [key, rest.first] } %>\n",
+            "    <%= form.label :body %>\n",
+        ),
+    );
+    let test = "require \"test_helper\"\n\nclass CollectRestSelectControllerTest < ActionDispatch::IntegrationTest\n  test \"options\" do\n    get new_article_url\n    assert_response :success\n    assert_select \"select[name='article[body]'] option[value=k]\", \"Kay\"\n    assert_select \"select[name='article[body]'] option[value=v]\", \"Vee\"\n  end\nend\n";
+    app.write("test/controllers/collect_rest_select_controller_test.rb", test)
+        .run_test("test/controllers/collect_rest_select_controller_test.rb")
+        .assert_passes();
+}
+
 /// `Time.find_zone(…)` answers a zone or nil; its `tzinfo` is refused off
 /// the ruby family as a zone's is (review, time_calendar.rs:609).
 #[test]

@@ -553,12 +553,12 @@ fn emit_select_options(
         }
         // `collect`, its alias: the pairs as `map`'s; a block answering one
         // value per element falls to the scalar loop below, and one taking
-        // other than one parameter to the general fallback.
+        // other than one parameter (a rest one too) to the general fallback.
         ExprNode::Send { method, block: Some(block), .. } if method.as_str() == "collect" => {
             if let Some(found) = map_loop_options(&container, selected.as_ref(), multiple, field_str, blank.clone(), ctx) {
                 return Some(found);
             }
-            if !matches!(&*block.node, ExprNode::Lambda { params, extra_params, .. } if params.len() == 1 && extra_params.is_empty()) {
+            if !matches!(&*block.node, ExprNode::Lambda { params, rest_param: None, extra_params, .. } if params.len() == 1 && extra_params.is_empty()) {
                 return None;
             }
             Some(scalar_select_loop(&container, selected.as_ref(), multiple, field_str, blank, ctx))
@@ -747,9 +747,9 @@ fn map_loop_options(
     if !matches!(method.as_str(), "map" | "collect") {
         return None;
     }
-    let ExprNode::Lambda { extra_params, params, body, .. } = &*block.node else { return None };
+    let ExprNode::Lambda { extra_params, params, rest_param, body, .. } = &*block.node else { return None };
     // One element parameter: the loop binds only that one.
-    if !extra_params.is_empty() || params.len() != 1 {
+    if !extra_params.is_empty() || rest_param.is_some() || params.len() != 1 {
         return None;
     }
     let el = params.first().cloned()?;
