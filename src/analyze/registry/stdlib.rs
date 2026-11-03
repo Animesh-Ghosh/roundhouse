@@ -944,6 +944,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // does not define it, so `project::unavailable_class_module_construct`
         // ledgers it there.
         "Zlib::DataError", "Encoding::CompatibilityError", "Net::HTTPBadResponse",
+        // `rescue EncodingError` around a zone file's text (tzinfo's ZoneinfoDataSource).
+        "EncodingError",
         // `rescue SQLite3::Exception` — campfire's `ResponseCache` drops
         // its observer on any driver error (see `SQLite3::Database`).
         "SQLite3::Exception", "SQLite3::CantOpenException",
@@ -1418,6 +1420,20 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         gem.class_methods
             .entry(Symbol::from("loaded_specs"))
             .or_insert(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) });
+    }
+    // Ruby's exact fraction (tzinfo's Timestamp keeps its sub-second as one); CRuby and spinel both carry it.
+    {
+        let rational = || Ty::Class { id: ClassId(Symbol::from("Rational")), args: vec![].into() };
+        register_stdlib_class(classes, "Rational", &[], &[
+            ("numerator", Ty::Int), ("denominator", Ty::Int),
+            ("to_i", Ty::Int), ("to_f", Ty::Float), ("to_r", rational()), ("to_s", Ty::Str), ("inspect", Ty::Str),
+            ("+", rational()), ("-", rational()), ("*", rational()), ("/", rational()), ("abs", rational()),
+            ("<", Ty::Bool), ("<=", Ty::Bool), (">", Ty::Bool), (">=", Ty::Bool), ("==", Ty::Bool),
+            ("<=>", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+            ("zero?", Ty::Bool), ("negative?", Ty::Bool), ("positive?", Ty::Bool),
+            ("floor", Ty::Int), ("ceil", Ty::Int), ("round", Ty::Int), ("truncate", Ty::Int),
+            ("hash", Ty::Int), ("eql?", Ty::Bool),
+        ]);
     }
     register_stdlib_class(classes, "Mutex", &[], &[]);
     // The queue constructors, Thread's core aliases, and the standard

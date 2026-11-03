@@ -20524,6 +20524,8 @@ mod append_features_bridge;
 mod io_seek_date_reform_constants;
 #[path = "emit_and_run/class_variable_computed_initializer.rs"]
 mod class_variable_computed_initializer;
+#[path = "emit_and_run/comparable_alias_rational.rs"]
+mod comparable_alias_rational;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;

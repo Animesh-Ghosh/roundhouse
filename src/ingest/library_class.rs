@@ -2651,6 +2651,19 @@ fn walk_decl_body_with_visibility<'pr>(
                 && matches!(constant_id_str(&c.name()), "include" | "prepend")
         })
     });
+    // Comparable as the body's one mixin: an alias of its method captures Comparable's, which reads the body's `<=>`.
+    let comparable_only = mixes_in
+        && statements.iter().all(|stmt| {
+            stmt.as_call_node().is_none_or(|c| {
+                !(c.receiver().is_none_or(|r| r.as_self_node().is_some())
+                    && matches!(constant_id_str(&c.name()), "include" | "prepend"))
+                    || (constant_id_str(&c.name()) == "include"
+                        && c.arguments().is_some_and(|a| {
+                            let args: Vec<_> = a.arguments().iter().collect();
+                            matches!(args.as_slice(), [arg] if arg.as_constant_read_node().is_some_and(|r| constant_id_str(&r.name()) == "Comparable"))
+                        }))
+            })
+        });
     if let Some(name) = super::util::hoisted_name_collision(&statements) {
         return Err(IngestError::Unsupported {
             file: file.into(),
@@ -3081,6 +3094,22 @@ fn walk_decl_body_with_visibility<'pr>(
                 // body's, the module's or the superclass's definition.
                 // `alias to_s to_s` rebinds the method it names: a no-op.
                 if to == from && OBJECT_BUILTINS.iter().any(|(name, _, _)| *name == from.as_str()) {
+                    continue;
+                }
+                if receiver == MethodReceiver::Instance
+                    && comparable_only
+                    && COMPARABLE_METHODS.iter().any(|(name, _, _)| *name == from.as_str())
+                    && !out.methods.iter().any(|method| method.name.as_str() == from && method.receiver == receiver)
+                    && !defined_instance_methods.contains(from.as_str())
+                {
+                    let span = Span {
+                        file: super::sources::file_id(file),
+                        start: alias.location().start_offset() as u32,
+                        end: alias.location().end_offset() as u32,
+                    };
+                    let mut method = mixin_alias_method(to.as_str(), from.as_str(), COMPARABLE_METHODS, owner, file, span)?;
+                    visibility.apply(&statement, &mut method);
+                    out.methods.push(method);
                     continue;
                 }
                 if receiver == MethodReceiver::Instance
@@ -3776,8 +3805,22 @@ fn delegates_to_builtin(e: &Expr) -> bool {
 /// and the call marked `BUILTIN_ALIAS`. Through the `send` family, keyword
 /// arguments reach the target as a trailing Hash (library methods do not
 /// keep `**`/`...`).
+pub(crate) const COMPARABLE_METHODS: &[(&str, &str, &str)] = &[
+    ("==", "other", "other"),
+    ("<", "other", "other"),
+    ("<=", "other", "other"),
+    (">", "other", "other"),
+    (">=", "other", "other"),
+    ("between?", "min, max", "min, max"),
+    ("clamp", "*args", "*args"),
+];
+
 fn builtin_alias_method(to: &str, from: &str, owner: &ClassId, file: &str, span: Span) -> IngestResult<MethodDef> {
-    let (_, params, args) = OBJECT_BUILTINS.iter().find(|(name, _, _)| *name == from).expect("a builtin");
+    mixin_alias_method(to, from, OBJECT_BUILTINS, owner, file, span)
+}
+
+fn mixin_alias_method(to: &str, from: &str, table: &[(&str, &str, &str)], owner: &ClassId, file: &str, span: Span) -> IngestResult<MethodDef> {
+    let (_, params, args) = table.iter().find(|(name, _, _)| *name == from).expect("a builtin");
     // `self.`: a bare `class(…)` is the keyword.
     let source = format!("def {to}({params})\n  self.{from}({args})\nend\n");
     let parsed = super::prism::parse_silent(source.as_bytes());
