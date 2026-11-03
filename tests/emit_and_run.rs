@@ -20520,6 +20520,8 @@ mod guarded_absent_constant;
 mod settled_conditional_definition;
 #[path = "emit_and_run/append_features_bridge.rs"]
 mod append_features_bridge;
+#[path = "emit_and_run/io_seek_date_reform_constants.rs"]
+mod io_seek_date_reform_constants;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;
