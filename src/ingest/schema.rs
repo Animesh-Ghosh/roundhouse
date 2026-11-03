@@ -328,8 +328,9 @@ enum SqlToken {
 
 /// Tokenize `sql`, dropping whitespace and comments. `None` for anything
 /// outside the small grammar the fold reads, including MySQL's
-/// executable comments (`/*! … */`) and optimizer hints (`/*+ … */`),
-/// which run their contents rather than hiding them.
+/// executable comments (`/*! … */`), MariaDB's (`/*M! … */`) and
+/// optimizer hints (`/*+ … */`), which run their contents rather than
+/// hiding them.
 fn sql_tokens(sql: &str) -> Option<Vec<SqlToken>> {
     let characters: Vec<char> = sql.chars().collect();
     let mut tokens = Vec::new();
@@ -344,7 +345,10 @@ fn sql_tokens(sql: &str) -> Option<Vec<SqlToken>> {
                 }
             }
             '/' if next == Some('*') => {
-                if matches!(characters.get(position + 2), Some('!' | '+')) {
+                let third = characters.get(position + 2).copied();
+                if matches!(third, Some('!' | '+'))
+                    || (matches!(third, Some('M' | 'm')) && characters.get(position + 3) == Some(&'!'))
+                {
                     return None;
                 }
                 let close = (position + 2..characters.len().saturating_sub(1))
@@ -2606,6 +2610,8 @@ mod tests {
             r#"execute "ALTER TABLE posts COLLATE=utf8mb4_bin, DROP COLUMN legacy""#,
             r#"execute "ALTER TABLE posts COLLATE=utf8mb4_bin; DROP TABLE posts""#,
             r#"execute "ALTER TABLE posts /*!50100 DROP COLUMN legacy */ COLLATE=utf8mb4_bin""#,
+            r#"execute "ALTER TABLE posts /*M! DROP COLUMN legacy, */ COLLATE=utf8mb4_bin""#,
+            r#"execute "ALTER TABLE posts /*M!100500 DROP COLUMN legacy, */ COLLATE=utf8mb4_bin""#,
             r#"execute "ALTER TABLE posts COLLATE=""#,
             r#"execute "ALTER TABLE posts COLLATE=utf8mb4_bin,""#,
             r#"execute "ALTER TABLE posts CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_bin""#,
