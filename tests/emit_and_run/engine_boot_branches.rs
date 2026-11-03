@@ -36,6 +36,11 @@ const ENGINE: &str = r##"module Relay
       end
     end
 
+    initializer "relay.assets" do |app|
+      app.config.assets.paths << root.join("app/assets/stylesheets")
+      app.config.assets.precompile += %w[ relay_manifest ]
+    end
+
     config.before_initialize do
       if Relay.adapters.include?(:resque)
         ActiveJob::QueueAdapters::ResqueAdapter.prepend Relay::ResqueExt
@@ -74,6 +79,7 @@ fn app() -> emit_and_run::Overlay {
         .write(&format!("{GEM}/lib/relay/engine.rb"), ENGINE)
         .write(&format!("{GEM}/lib/relay/resque_ext.rb"), RESQUE_EXT)
         .write(&format!("{GEM}/lib/relay/solid_queue_ext.rb"), SOLID_QUEUE_EXT)
+        .write(&format!("{GEM}/app/assets/stylesheets/relay/panel.css"), "body { color: red; }\n")
 }
 
 #[test]
@@ -104,6 +110,7 @@ fn boot_replays_the_engines_before_initialize() {
     let run = app().run_ruby(
         "raise Relay.adapters.to_a.inspect unless Relay.adapters.to_a == [:solid_queue]\n\
          raise \"label\" unless ActiveJob::QueueAdapters::SolidQueueAdapter.new.relay_label == \"solid\"\n\
+         raise \"asset\" unless Rails.application.propshaft_asset_path(\"relay/panel.css\").match?(%r{\\A/assets/relay/panel-\\h+\\.css\\z})\n\
          puts \"engine boot replay passed\"\n",
     );
     run.assert_passes();

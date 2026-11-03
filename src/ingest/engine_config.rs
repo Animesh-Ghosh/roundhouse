@@ -85,6 +85,9 @@ struct State {
     quiet: Vec<(String, u32, u32)>,
     namespaces: Vec<Vec<String>>,
     replays: Vec<Replay>,
+    /// `initializer`s whose only work is adding an engine's directories to the asset paths, and those directories.
+    asset_initializers: Vec<(String, u32)>,
+    asset_dirs: Vec<PathBuf>,
 }
 
 /// An engine's `before_initialize` / `after_initialize` block, read into
@@ -122,6 +125,8 @@ pub(super) fn prepare<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf]) {
     state.dead = settled.dead;
     state.quiet = settled.quiet;
     state.replays = settled.replays;
+    state.asset_initializers = settled.asset_initializers;
+    state.asset_dirs = settled.asset_dirs;
     state.namespaces = forwarders.iter().map(|f| f.path.clone()).collect();
     STATE.with(|s| *s.borrow_mut() = state);
 }
@@ -171,6 +176,9 @@ pub(super) fn engine_statement(node: &Node<'_>, path: &str) -> Option<EngineStat
         return Some(EngineStatement::Consumed("config namespace the engine copies onto a module (engine_config)"));
     }
     let start = node.location().start_offset() as u32;
+    if STATE.with(|s| s.borrow().asset_initializers.iter().any(|(file, at)| *at == start && (file == path || file.ends_with(&format!("/{path}"))))) {
+        return Some(EngineStatement::Consumed("the engine's directories added to Propshaft's asset paths (engine_config)"));
+    }
     if STATE.with(|s| s.borrow().replays.iter().any(|r| r.start == start && (r.file == path || r.file.ends_with(&format!("/{path}"))))) {
         return Some(EngineStatement::Consumed("a boot block replayed into the boot program (engine_config)"));
     }
@@ -1001,6 +1009,8 @@ struct Settled {
     dead: Vec<(String, u32, u32)>,
     quiet: Vec<(String, u32, u32)>,
     replays: Vec<Replay>,
+    asset_initializers: Vec<(String, u32)>,
+    asset_dirs: Vec<PathBuf>,
 }
 
 fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forwarders: &[Forwarder]) -> Settled {
@@ -1026,7 +1036,11 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
             }
         }
     }
-    let mut settled = Settled { dead: Vec::new(), quiet: Vec::new(), replays: Vec::new() };
+    let mut settled = Settled { dead: Vec::new(), quiet: Vec::new(), replays: Vec::new(), asset_initializers: Vec::new(), asset_dirs: Vec::new() };
+    let propshaft = vfs
+        .read_to_string(&dir.join("Gemfile.lock"))
+        .ok()
+        .is_some_and(|text| crate::gems::Lockfile::parse(&text).has("propshaft"));
     let app_module = host_app_module(vfs, dir);
     for lib in libs {
         if !vfs.is_dir(lib) {
@@ -1100,6 +1114,14 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
                     } else if let Some((app, hook)) = initializer_block(&stmt) {
                         // Not one the ledger already takes: a quiet one runs nothing, and a load hook's mixins are carried.
                         if settled.quiet.iter().any(|(f, at, _)| *f == boot.file && *at == start) {
+                            continue;
+                        }
+                        if propshaft
+                            && let Some(root) = lib.parent()
+                            && let Some(dirs) = asset_path_initializer(&hook, app.as_deref())
+                        {
+                            settled.asset_initializers.push((boot.file.clone(), start));
+                            settled.asset_dirs.extend(dirs.into_iter().map(|d| root.join(d)));
                             continue;
                         }
                         (Phase::Initializer, hook, app)
@@ -1191,6 +1213,69 @@ fn prepend_overlaps(app: &App, name: &crate::ident::ClassId, mixins: &[crate::id
             .find(|lc| lc.name == *m)
             .is_some_and(|module| module.methods.iter().any(|mm| own.methods.iter().any(|om| om.name == mm.name && om.receiver == mm.receiver)))
     })
+}
+
+/// The engine directories Propshaft serves beside the app's (`propshaft::ingest`).
+pub(super) fn asset_dirs() -> Vec<PathBuf> {
+    STATE.with(|s| s.borrow().asset_dirs.clone())
+}
+
+/// An initializer that only adds the engine's own directories to the
+/// asset paths: `app.config.assets.paths << root.join("app/javascript")`,
+/// beside a `precompile +=`, which Propshaft never reads (it serves every
+/// file on its paths). Their relative paths.
+fn asset_path_initializer(statements: &[Node<'_>], app: Option<&str>) -> Option<Vec<String>> {
+    let app = app?;
+    let is_app_assets = |node: &Node<'_>, last: &str| -> bool {
+        let Some(call) = node.as_call_node() else { return false };
+        if constant_id_str(&call.name()) != last {
+            return false;
+        }
+        let Some(assets) = call.receiver().and_then(|r| r.as_call_node()) else { return false };
+        let Some(config) = assets.receiver().and_then(|r| r.as_call_node()) else { return false };
+        constant_id_str(&assets.name()) == "assets"
+            && constant_id_str(&config.name()) == "config"
+            && config.receiver().and_then(|r| r.as_local_variable_read_node()).is_some_and(|r| constant_id_str(&r.name()) == app)
+    };
+    let mut dirs = Vec::new();
+    for stmt in statements {
+        if let Some(call) = stmt.as_call_node()
+            && constant_id_str(&call.name()) == "<<"
+            && call.receiver().is_some_and(|r| is_app_assets(&r, "paths"))
+        {
+            let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            let [arg] = args.as_slice() else { return None };
+            let join = arg.as_call_node()?;
+            let root = join.receiver()?.as_call_node()?;
+            if constant_id_str(&join.name()) != "join" || constant_id_str(&root.name()) != "root" || root.receiver().is_some() {
+                return None;
+            }
+            let parts: Vec<Node<'_>> = join.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            let [part] = parts.as_slice() else { return None };
+            let rel = String::from_utf8_lossy(part.as_string_node()?.unescaped()).into_owned();
+            if rel.contains("..") || rel.starts_with('/') {
+                return None;
+            }
+            dirs.push(rel);
+            continue;
+        }
+        if let Some(w) = stmt.as_call_operator_write_node()
+            && constant_id_str(&w.read_name()) == "precompile"
+            && w.receiver().is_some_and(|r| {
+                r.as_call_node().is_some_and(|assets| {
+                    constant_id_str(&assets.name()) == "assets"
+                        && assets.receiver().and_then(|c| c.as_call_node()).is_some_and(|config| {
+                            constant_id_str(&config.name()) == "config"
+                                && config.receiver().and_then(|r| r.as_local_variable_read_node()).is_some_and(|r| constant_id_str(&r.name()) == app)
+                        })
+                })
+            })
+        {
+            continue;
+        }
+        return None;
+    }
+    (!dirs.is_empty()).then_some(dirs)
 }
 
 /// The block parameter of `config.after_initialize do |app| … end`.
