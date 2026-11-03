@@ -538,8 +538,11 @@ picks: the first matching every part it gives (target table, `column:`,
 is a gap, since the fold does not
 record key names. Questions (`column_exists?` and the like) and other
 constraint verbs change nothing the fold models. A non-literal table or
-column name, a block that is not a literal block, and an unmapped column
-type are gaps. `change_column` (and `t.change`)
+column name, a block that is not a literal block, an unmapped column
+type, and a `t` used other than as the receiver of a plain statement
+(under an `if` or `case`, or passed to a helper) are gaps. Removing a
+column, top-level or in the block, removes the indexes over it.
+`change_column` (and `t.change`)
 keeps the column's nullability, default and key unless the call gives
 them, as every Rails adapter does, and redefines the column in place.
 `execute` folds when every statement in its literal SQL only sets the

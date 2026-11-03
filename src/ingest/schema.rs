@@ -852,6 +852,10 @@ fn remove_named_column(
     }
     if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
         table.columns.retain(|x| x.name.as_str() != c);
+        // An index over the removed column goes with it (Rails drops it;
+        // left here, the schema SQL indexes a column that is not there).
+        let columns = &table.columns;
+        table.indexes.retain(|idx| idx.columns.iter().all(|name| columns.iter().any(|col| col.name == *name)));
     }
     Ok(())
 }
@@ -884,16 +888,40 @@ fn apply_change_table(
         return Err(unsupported("block does not take one plain parameter"));
     };
     let Some(body) = block.body() else { return Ok(()) };
-    let mut result = Ok(());
-    walk_calls(&body, &mut |inner| {
-        if result.is_err() {
-            return;
-        }
-        let on_table = inner
+    let on_table = |inner: &ruby_prism::CallNode<'_>| {
+        inner
             .receiver()
             .and_then(|receiver| receiver.as_local_variable_read_node())
-            .is_some_and(|receiver| constant_id_str(&receiver.name()) == parameter);
-        if on_table {
+            .is_some_and(|receiver| constant_id_str(&receiver.name()) == parameter)
+    };
+    // The walk reaches calls, statements and blocks only. A `t` read it
+    // does not reach as a call's receiver (`t.string :slug if …`, a
+    // `case`, `add_columns(t)`) would be skipped, leaving the schema
+    // short of what Rails builds; refuse the block instead.
+    struct Reads<'a>(&'a str, usize);
+    impl<'pr> ruby_prism::Visit<'pr> for Reads<'_> {
+        fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+            if constant_id_str(&node.name()) == self.0 {
+                self.1 += 1;
+            }
+        }
+    }
+    let mut reads = Reads(&parameter, 0);
+    ruby_prism::Visit::visit(&mut reads, &body);
+    let mut walked = 0;
+    walk_calls(&body, &mut |inner| {
+        if on_table(inner) {
+            walked += 1;
+        }
+    });
+    if walked != reads.1 {
+        return Err(unsupported(&format!(
+            "block reads `{parameter}` outside a plain `{parameter}.<method>` call (a conditional, a loop or an argument)"
+        )));
+    }
+    let mut result = Ok(());
+    walk_calls(&body, &mut |inner| {
+        if result.is_ok() && on_table(inner) {
             result = apply_table_method(call, inner, file, schema, dialect);
         }
     });
@@ -2474,7 +2502,8 @@ mod tests {
                   t.index :views, name: "by_views"
                   t.rename_index "by_views", "posts_by_views"
                   t.check_constraint "views >= 0", name: "views_non_negative"
-                  t.remove_check_constraint name: "views_non_negative" if t.column_exists?(:views)
+                  t.remove_check_constraint name: "views_non_negative"
+                  t.column_exists?(:views)
                 end
               end
             end
@@ -2547,6 +2576,59 @@ mod tests {
         ]);
         assert_eq!(col_names(&schema, "posts"), ["id", "title", "body", "legacy", "obsolete", "views"]);
         assert!(schema.tables[&Symbol::from("posts")].indexes.is_empty());
+    }
+
+    /// Removing a column removes the indexes over it, top-level and in a
+    /// `change_table`, so the schema SQL never indexes a missing column.
+    #[test]
+    fn removing_a_column_removes_its_indexes() {
+        let index_names = |schema: &Schema| -> Vec<String> {
+            schema.tables[&Symbol::from("posts")].indexes.iter().map(|i| i.name.as_str().to_string()).collect()
+        };
+        let indexed = r#"
+            class Index < ActiveRecord::Migration[8.1]
+              def change
+                add_timestamps :posts
+                add_index :posts, :legacy, name: "by_legacy"
+                add_index :posts, [:obsolete, :views], name: "by_obsolete_views"
+                add_index :posts, :created_at, name: "by_created"
+                add_index :posts, :views, name: "by_views"
+              end
+            end
+        "#;
+        let schema = fold(&[
+            CREATE_POSTS,
+            indexed,
+            "class A < ActiveRecord::Migration[8.1]\n  def change\n    remove_column :posts, :legacy\n    change_table :posts do |t|\n      t.remove :obsolete\n      t.remove_timestamps\n    end\n  end\nend\n",
+        ]);
+        assert_eq!(index_names(&schema), ["by_views"]);
+    }
+
+    /// A `t` the walk would not reach as a call's receiver (under a
+    /// conditional or a `case`, or handed to a helper) is a gap, not a
+    /// silently skipped column.
+    #[test]
+    fn change_table_refuses_t_outside_a_plain_call() {
+        for body in [
+            "t.string :slug if ENV[\"SLUG\"]",
+            "if ENV[\"SLUG\"]\n  t.string :slug\nend",
+            "unless ENV[\"SLUG\"]\n  t.remove :legacy\nend",
+            "case ENV[\"KIND\"]\nwhen \"a\" then t.string :slug\nend",
+            "t.remove :legacy if t.column_exists?(:legacy)",
+            "add_slug(t)",
+        ] {
+            let mut schema = fold(&[CREATE_POSTS]);
+            let source = format!("class A < ActiveRecord::Migration[8.1]\n  def change\n    change_table :posts do |t|\n{body}\n    end\n  end\nend\n");
+            let message = ingest_migration(source.as_bytes(), "2_change.rb", &mut schema).expect_err(body).to_string();
+            assert!(message.contains("migration `change_table` block reads `t` outside"), "{body}: {message}");
+            assert_eq!(col_names(&schema, "posts"), ["id", "title", "body", "legacy", "obsolete", "views"], "{body}");
+        }
+        // Plain calls are still reached.
+        let schema = fold(&[
+            CREATE_POSTS,
+            "class A < ActiveRecord::Migration[8.1]\n  def change\n    change_table :posts do |t|\n      t.string :slug\n      t.remove :legacy, :obsolete\n    end\n  end\nend\n",
+        ]);
+        assert_eq!(col_names(&schema, "posts"), ["id", "title", "body", "views", "slug"]);
     }
 
     /// Top-level `add_timestamps` honors `null:`, and `rename_index` and
