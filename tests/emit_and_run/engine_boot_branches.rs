@@ -95,6 +95,21 @@ fn the_tree_boots_without_the_extension_it_left_out() {
     assert!(run.stdout.contains("engine boot branches passed"), "{}", run.stdout);
 }
 
+/// Boot runs the engine's `before_initialize` blocks as Rails does: the
+/// adapter filled from the host's, and the extension of that adapter
+/// mixed into the adapter class (the `prepend` the branch the app takes
+/// writes), with the branch for any other adapter not run.
+#[test]
+fn boot_replays_the_engines_before_initialize() {
+    let run = app().run_ruby(
+        "raise Relay.adapters.to_a.inspect unless Relay.adapters.to_a == [:solid_queue]\n\
+         raise \"label\" unless ActiveJob::QueueAdapters::SolidQueueAdapter.new.relay_label == \"solid\"\n\
+         puts \"engine boot replay passed\"\n",
+    );
+    run.assert_passes();
+    assert!(run.stdout.contains("engine boot replay passed"), "{}", run.stdout);
+}
+
 #[test]
 fn the_extension_of_the_adapter_the_app_runs_is_kept() {
     let errors = app()

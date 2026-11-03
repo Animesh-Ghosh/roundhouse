@@ -54,6 +54,21 @@ module ActiveJob
   end
 end
 
+module ActiveJob
+  module QueueAdapters
+    # solid_queue's adapter: the job recorded in its tables, now or at its time.
+    class SolidQueueAdapter
+      def enqueue(job)
+        SolidQueue::Job.enqueue(job)
+      end
+
+      def enqueue_at(job, timestamp)
+        SolidQueue::Job.enqueue(job, scheduled_at: Time.at(timestamp))
+      end
+    end
+  end
+end
+
 # Not solid_queue's supervisor and its forked worker: one worker, registered in this process, runs when the app's drain does.
 module SolidQueueRunner
   WORKER = []

@@ -519,7 +519,7 @@ fn an_accounted_engine_boot_admits_the_mount_and_an_unaccounted_one_is_named() {
 
     std::fs::write(
         app.join("vendor/catalog/lib/catalog/engine.rb"),
-        "module Catalog\n  class Engine < Rails::Engine\n    isolate_namespace Catalog\n\n    config.after_initialize do\n      Catalog.warm!\n    end\n  end\nend\n",
+        "module Catalog\n  class Engine < Rails::Engine\n    isolate_namespace Catalog\n\n    config.after_initialize do\n      Catalog.warm!(config.catalog_cache)\n    end\n  end\nend\n",
     )
     .unwrap();
     let out = fixture.0.join("refused");

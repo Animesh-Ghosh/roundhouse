@@ -28,9 +28,19 @@
 //! that settles is one boot never takes ([`dead_spans`]): mission_control-jobs
 //! prepends its Resque extension only `if MissionControl::Jobs.adapters.include?(:resque)`,
 //! after filling the adapters from the queue adapter. A condition it
-//! cannot settle keeps both branches. Nothing of the blocks is replayed
-//! yet; the dead branches only stop counting as a use
-//! (`unreached_gem_modules`).
+//! cannot settle keeps both branches, and the dead branches stop counting
+//! as a use (`unreached_gem_modules`).
+//!
+//! The engine's `before_initialize`, `initializer` and `after_initialize`
+//! blocks are then replayed into the boot program, in Rails' order
+//! (`Replayer`): what boot does not take left out, a settled `if` reduced
+//! to the branch it runs, a write to a forwarded config key made on the
+//! module the forwarder copies it to, the host's adapter for
+//! `config.active_job.queue_adapter`, and `app.credentials` /
+//! `app.class.module_parent.name` read off the host. `Klass.include M` /
+//! `Klass.prepend M` on an adapter class becomes the reopen that mixes
+//! `M` in (`carry_boot_mixin`). A block that reads anything else of
+//! `config` or the app is not replayed and stays on the ledger.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -39,7 +49,7 @@ use ruby_prism::Node;
 
 use crate::app::App;
 use crate::det::{HashMap, HashSet};
-use crate::expr::{Expr, ExprNode, LValue};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
 use crate::span::Span;
 use crate::vfs::Vfs;
@@ -74,6 +84,25 @@ struct State {
     dead: Vec<(String, u32, u32)>,
     quiet: Vec<(String, u32, u32)>,
     namespaces: Vec<Vec<String>>,
+    replays: Vec<Replay>,
+}
+
+/// An engine's `before_initialize` / `after_initialize` block, read into
+/// the statements boot runs for it (`Replayer`).
+#[derive(Clone, Debug)]
+struct Replay {
+    file: String,
+    start: u32,
+    phase: Phase,
+    statements: Vec<Expr>,
+}
+
+/// When boot runs a replayed block, in Rails' order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Phase {
+    BeforeInitialize,
+    Initializer,
+    AfterInitialize,
 }
 
 thread_local! {
@@ -92,6 +121,7 @@ pub(super) fn prepare<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf]) {
     let settled = dead_branches(vfs, dir, libs, &forwarders);
     state.dead = settled.dead;
     state.quiet = settled.quiet;
+    state.replays = settled.replays;
     state.namespaces = forwarders.iter().map(|f| f.path.clone()).collect();
     STATE.with(|s| *s.borrow_mut() = state);
 }
@@ -139,6 +169,10 @@ pub(super) fn engine_statement(node: &Node<'_>, path: &str) -> Option<EngineStat
     }
     if declares_namespace(node) {
         return Some(EngineStatement::Consumed("config namespace the engine copies onto a module (engine_config)"));
+    }
+    let start = node.location().start_offset() as u32;
+    if STATE.with(|s| s.borrow().replays.iter().any(|r| r.start == start && (r.file == path || r.file.ends_with(&format!("/{path}"))))) {
+        return Some(EngineStatement::Consumed("a boot block replayed into the boot program (engine_config)"));
     }
     let call = call?;
     if call.receiver().is_some() || constant_id_str(&call.name()) != "initializer" {
@@ -199,7 +233,15 @@ pub(super) fn carry(app: &mut App, dir: &Path) -> super::boot_program::Taken {
         statements.push(Expr::new(span, ExprNode::Assign { target, value: setting.value }));
         taken.insert((APPLICATION.to_string(), setting.start));
     }
+    // Rails' order: the host's config, then every engine's `before_initialize`, the initializers, and `after_initialize` last.
+    let replays = STATE.with(|s| s.borrow().replays.clone());
+    let phase = |p: Phase| replays.iter().filter(move |r| r.phase == p).flat_map(|r| r.statements.clone());
+    let mut before: Vec<Expr> = phase(Phase::BeforeInitialize).chain(phase(Phase::Initializer)).collect();
+    before.retain(|statement| !carry_boot_mixin(app, statement));
+    let after: Vec<Expr> = phase(Phase::AfterInitialize).collect();
+    statements.extend(before);
     app.boot_program.splice(0..0, statements);
+    app.boot_program.extend(after);
     taken
 }
 
@@ -554,6 +596,8 @@ struct Boot<'a> {
     /// The name an `initializer` block gives the app (`do |app|`).
     app: Option<String>,
     dead: Vec<(String, u32, u32)>,
+    /// The `if`s whose condition boot settles true: their statements always run.
+    live: Vec<(String, u32)>,
     /// Statements run that are not a settled `if`/`unless`.
     effects: usize,
     /// An opaque statement ran: an unset namespace key no longer reads as nil.
@@ -632,6 +676,7 @@ impl Boot<'_> {
             let other = n.subsequent();
             match self.value(&n.predicate()).truthy() {
                 Some(true) => {
+                    self.live.push((self.file.clone(), node.location().start_offset() as u32));
                     self.kill(other);
                     self.branch(then);
                 }
@@ -955,6 +1000,7 @@ fn host_app_config<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> HashMap<String, Val>
 struct Settled {
     dead: Vec<(String, u32, u32)>,
     quiet: Vec<(String, u32, u32)>,
+    replays: Vec<Replay>,
 }
 
 fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forwarders: &[Forwarder]) -> Settled {
@@ -980,7 +1026,8 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
             }
         }
     }
-    let mut settled = Settled { dead: Vec::new(), quiet: Vec::new() };
+    let mut settled = Settled { dead: Vec::new(), quiet: Vec::new(), replays: Vec::new() };
+    let app_module = host_app_module(vfs, dir);
     for lib in libs {
         if !vfs.is_dir(lib) {
             continue;
@@ -995,6 +1042,7 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
             for (_, class) in find_all_classes_with_scope(&parsed.node()) {
                 let is_engine = class.superclass().and_then(|s| constant_path_of(&s)).is_some_and(|p| p == ["Rails", "Engine"]);
                 let Some(body) = class.body().filter(|_| is_engine) else { continue };
+                let hooks = flatten_statements(class.body().unwrap());
                 let mut modules = HashMap::default();
                 for fw in forwarders.iter().filter(|f| f.lib == *lib) {
                     for (attr, value) in defaults(&lib_sources, &fw.module) {
@@ -1010,6 +1058,7 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
                     app_config: app_config.clone(),
                     app: None,
                     dead: Vec::new(),
+                    live: Vec::new(),
                     effects: 0,
                     config_opaque: false,
                 };
@@ -1032,11 +1081,327 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
                         }
                     }
                 }
+                let replayer = Replayer {
+                    file: boot.file.clone(),
+                    dead: &boot.dead,
+                    live: &boot.live,
+                    forwarders: forwarders.iter().filter(|f| f.lib == *lib).collect(),
+                    host_keys: &config,
+                    queue_adapter: &queue_adapter,
+                    app: None,
+                    app_module: app_module.as_deref(),
+                };
+                for stmt in hooks {
+                    let start = stmt.location().start_offset() as u32;
+                    let (phase, hook, app) = if let Some(hook) = config_hook(&stmt, "before_initialize") {
+                        (Phase::BeforeInitialize, hook, None)
+                    } else if let Some(hook) = config_hook(&stmt, "after_initialize") {
+                        (Phase::AfterInitialize, hook, hook_param(&stmt))
+                    } else if let Some((app, hook)) = initializer_block(&stmt) {
+                        // Not one the ledger already takes: a quiet one runs nothing, and a load hook's mixins are carried.
+                        if settled.quiet.iter().any(|(f, at, _)| *f == boot.file && *at == start) {
+                            continue;
+                        }
+                        (Phase::Initializer, hook, app)
+                    } else {
+                        continue;
+                    };
+                    let replayer = Replayer { app, ..replayer.clone() };
+                    if let Some(statements) = replayer.block(&hook) {
+                        settled.replays.push(Replay { file: boot.file.clone(), start, phase, statements });
+                    }
+                }
                 settled.dead.extend(boot.dead);
             }
         }
     }
     settled
+}
+
+/// `Klass.include M` / `Klass.prepend M` run at boot, carried as the
+/// reopen `class Klass; include M; end` writes: the class's own surface
+/// then has `M`'s methods, as the analysis and every emit read it. A
+/// `prepend` is the same mixin while the class defines none of `M`'s
+/// methods, which holds for the adapter classes engines extend (Rails'
+/// `SolidQueueAdapter` defines the enqueue side, mission_control-jobs'
+/// `SolidQueueExt` the inspection side).
+fn carry_boot_mixin(app: &mut App, statement: &Expr) -> bool {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*statement.node else { return false };
+    if !matches!(method.as_str(), "include" | "prepend") || args.is_empty() {
+        return false;
+    }
+    let ExprNode::Const { path } = &*recv.node else { return false };
+    let mixins: Option<Vec<crate::ident::ClassId>> = args
+        .iter()
+        .map(|a| match &*a.node {
+            ExprNode::Const { path } => Some(crate::ident::ClassId(Symbol::from(path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::").as_str()))),
+            _ => None,
+        })
+        .collect();
+    let Some(mixins) = mixins else { return false };
+    let name = crate::ident::ClassId(Symbol::from(path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::").as_str()));
+    // Not a module the app carries no body of: an `include` of nothing the tree defines would fail where the reopen loads.
+    if !mixins.iter().all(|m| app.library_classes.iter().any(|lc| lc.name == *m && lc.is_module)) {
+        return false;
+    }
+    if prepend_overlaps(app, &name, &mixins) && method.as_str() == "prepend" {
+        return false;
+    }
+    match app.library_classes.iter_mut().find(|lc| lc.name == name) {
+        Some(lc) => {
+            for m in mixins {
+                lc.includes.push(m);
+                lc.include_spans.push(statement.span);
+            }
+        }
+        None => {
+            if !BOOT_MIXIN_CLASSES.contains(&name.0.as_str()) {
+                return false;
+            }
+            let count = mixins.len();
+            app.library_classes.push(crate::dialect::LibraryClass {
+                name,
+                is_module: false,
+                parent: None,
+                parent_span: statement.span,
+                includes: mixins,
+                include_spans: vec![statement.span; count],
+                methods: Vec::new(),
+                nullable_columns: Vec::new(),
+                origin: None,
+                constants: Vec::new(),
+                conditional_definitions: Vec::new(),
+                unknown_calls: Vec::new(),
+                class_ivar_initializers: Vec::new(),
+            });
+        }
+    }
+    true
+}
+
+/// The runtime classes a boot mixin may reopen: the ones the runtime defines with no method an extension overrides.
+const BOOT_MIXIN_CLASSES: &[&str] = &["ActiveJob::QueueAdapters::AsyncAdapter", "ActiveJob::QueueAdapters::SolidQueueAdapter"];
+
+/// Whether the app's own reopen of `name` defines a method one of `mixins` does: then `prepend` is not `include`.
+fn prepend_overlaps(app: &App, name: &crate::ident::ClassId, mixins: &[crate::ident::ClassId]) -> bool {
+    let Some(own) = app.library_classes.iter().find(|lc| lc.name == *name) else { return false };
+    mixins.iter().any(|m| {
+        app.library_classes
+            .iter()
+            .find(|lc| lc.name == *m)
+            .is_some_and(|module| module.methods.iter().any(|mm| own.methods.iter().any(|om| om.name == mm.name && om.receiver == mm.receiver)))
+    })
+}
+
+/// The block parameter of `config.after_initialize do |app| … end`.
+fn hook_param(node: &Node<'_>) -> Option<String> {
+    let block = node.as_call_node()?.block()?.as_block_node()?;
+    let params = block.parameters()?.as_block_parameters_node()?.parameters()?;
+    let first = params.requireds().iter().next()?;
+    Some(constant_id_str(&first.as_required_parameter_node()?.name()).to_string())
+}
+
+/// The module the host's `Rails::Application` sits in (`app.class.module_parent.name`).
+fn host_app_module<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
+    let source = vfs.read(&dir.join(APPLICATION)).ok()?;
+    let parsed = super::prism::parse_silent(&source);
+    find_all_classes_with_scope(&parsed.node()).into_iter().find_map(|(scope, class)| {
+        let is_application = class.superclass().and_then(|s| constant_path_of(&s)).is_some_and(|p| p == ["Rails", "Application"]);
+        (is_application && !scope.is_empty()).then(|| scope.join("::"))
+    })
+}
+
+/// An engine boot block read as what boot runs: the branches boot never
+/// takes left out, a write to a forwarded config key made on the module
+/// the forwarder copies it to (the forwarder itself then copies nothing
+/// more), `config.active_job.queue_adapter` the host's adapter, and the
+/// app's module name for `app.class.module_parent.name`. A block with
+/// anything else it reads of `config` or the app is not replayed.
+#[derive(Clone)]
+struct Replayer<'a> {
+    file: String,
+    dead: &'a [(String, u32, u32)],
+    live: &'a [(String, u32)],
+    forwarders: Vec<&'a Forwarder>,
+    host_keys: &'a HashMap<Vec<String>, Val>,
+    queue_adapter: &'a Val,
+    app: Option<String>,
+    app_module: Option<&'a str>,
+}
+
+impl Replayer<'_> {
+    fn block(&self, nodes: &[Node<'_>]) -> Option<Vec<Expr>> {
+        let mut out = Vec::new();
+        for node in nodes {
+            let expr = super::expr::ingest_expr(node, &self.file).ok()?;
+            if let Some(expr) = self.statement(expr)? {
+                out.push(expr);
+            }
+        }
+        Some(out)
+    }
+
+    fn dead(&self, span: Span) -> bool {
+        span.end > span.start
+            && span.file == super::sources::file_id(&self.file)
+            && self.dead.iter().any(|(file, start, end)| *file == self.file && *start <= span.start && span.end <= *end)
+    }
+
+    fn forwarded(&self, chain: &[String]) -> Option<&Forwarder> {
+        self.forwarders.iter().copied().find(|f| chain.len() == f.path.len() + 1 && chain.starts_with(&f.path))
+    }
+
+    fn module_write(&self, span: Span, module: &str, attr: &Symbol, value: Expr) -> Expr {
+        let mut recv = Expr::new(span, ExprNode::Const { path: module.split("::").map(Symbol::from).collect() });
+        // Not resolved from the source at its span: that span is the engine's `config.…` write, which never names the module.
+        recv.decisions |= crate::expr::GENERATED_CONST_REF;
+        Expr::new(span, ExprNode::Assign { target: LValue::Attr { recv, name: attr.clone() }, value })
+    }
+
+    /// `None` when the statement cannot be replayed; `Some(None)` when boot runs nothing for it.
+    fn statement(&self, expr: Expr) -> Option<Option<Expr>> {
+        if self.dead(expr.span) {
+            return Some(None);
+        }
+        let span = expr.span;
+        match *expr.node {
+            ExprNode::Seq { exprs } => {
+                let mut kept = Vec::new();
+                for e in exprs {
+                    kept.extend(self.statement(e)?);
+                }
+                Some(Some(Expr::new(span, ExprNode::Seq { exprs: kept })))
+            }
+            ExprNode::If { cond, then_branch, else_branch } => {
+                if span.file == super::sources::file_id(&self.file) && self.live.iter().any(|(f, at)| *f == self.file && *at == span.start) {
+                    return self.statement(then_branch);
+                }
+                if self.dead(then_branch.span) {
+                    return self.statement(else_branch);
+                }
+                if self.dead(else_branch.span) {
+                    return self.statement(then_branch);
+                }
+                let cond = self.value(cond)?;
+                let nil = || Expr::new(span, ExprNode::Seq { exprs: Vec::new() });
+                let then_branch = self.statement(then_branch)?.unwrap_or_else(nil);
+                let else_branch = self.statement(else_branch)?.unwrap_or_else(nil);
+                Some(Some(Expr::new(span, ExprNode::If { cond, then_branch, else_branch })))
+            }
+            // The forwarder: each write above already went to the module.
+            ExprNode::Send { recv: Some(ref recv), ref method, block: Some(_), .. }
+                if method.as_str() == "each" && expr_config_chain(recv).is_some_and(|c| self.forwarders.iter().any(|f| f.path == c)) =>
+            {
+                Some(None)
+            }
+            ExprNode::OpAssign { target: LValue::Attr { ref recv, ref name }, op: crate::expr::OpAssignOp::OrOr, ref value }
+                if expr_config_chain(recv).is_some() =>
+            {
+                let mut chain = expr_config_chain(recv)?;
+                chain.push(name.as_str().to_string());
+                let fw = self.forwarded(&chain)?;
+                // Not `||=` on the module: the key is unset unless the host set it, so the engine's value is what the forwarder copies.
+                if self.host_keys.contains_key(&chain) {
+                    return Some(None);
+                }
+                Some(Some(self.module_write(span, &fw.module, name, self.value(value.clone())?)))
+            }
+            ExprNode::Send { recv: Some(ref recv), ref method, ref args, block: None, .. }
+                if args.len() == 1 && method.as_str().ends_with('=') && expr_config_chain(recv).is_some() =>
+            {
+                let name = Symbol::from(method.as_str().trim_end_matches('='));
+                let mut chain = expr_config_chain(recv)?;
+                chain.push(name.as_str().to_string());
+                let fw = self.forwarded(&chain)?;
+                Some(Some(self.module_write(span, &fw.module, &name, self.value(args[0].clone())?)))
+            }
+            ExprNode::Assign { target: LValue::Attr { ref recv, ref name }, ref value } if expr_config_chain(recv).is_some() => {
+                let mut chain = expr_config_chain(recv)?;
+                chain.push(name.as_str().to_string());
+                let fw = self.forwarded(&chain)?;
+                Some(Some(self.module_write(span, &fw.module, name, self.value(value.clone())?)))
+            }
+            _ => self.value(expr).map(Some),
+        }
+    }
+
+    /// The expression with the host's adapter and app module written in; `None` for any other read of `config` or the app.
+    fn value(&self, mut expr: Expr) -> Option<Expr> {
+        if let Some(chain) = expr_config_chain(&expr) {
+            if chain != ["active_job", "queue_adapter"] {
+                return None;
+            }
+            let value = match self.queue_adapter {
+                Val::Sym(s) => Literal::Sym { value: Symbol::from(s.as_str()) },
+                Val::Nil => Literal::Nil,
+                _ => return None,
+            };
+            return Some(Expr::new(expr.span, ExprNode::Lit { value }));
+        }
+        if let Some(app) = &self.app {
+            if is_app_module_name(&expr, app) {
+                let module = self.app_module?;
+                return Some(Expr::new(expr.span, ExprNode::Lit { value: Literal::Str { value: module.to_string() } }));
+            }
+            if is_app_reader(&expr, app, "credentials") {
+                let rails = Expr::new(expr.span, ExprNode::Const { path: vec![Symbol::from("Rails")] });
+                let application = Expr::new(expr.span, ExprNode::Send { recv: Some(rails), method: Symbol::from("application"), args: Vec::new(), block: None, parenthesized: false });
+                return Some(Expr::new(expr.span, ExprNode::Send { recv: Some(application), method: Symbol::from("credentials"), args: Vec::new(), block: None, parenthesized: false }));
+            }
+            if matches!(&*expr.node, ExprNode::Var { name, .. } if name.as_str() == app) {
+                return None;
+            }
+        }
+        let mut ok = true;
+        expr.node.for_each_child_mut(&mut |child| {
+            if ok {
+                match self.value(child.clone()) {
+                    Some(v) => *child = v,
+                    None => ok = false,
+                }
+            }
+        });
+        ok.then_some(expr)
+    }
+}
+
+/// `[]` for `config`, `["a", "b"]` for `config.a.b`, as ingested.
+fn expr_config_chain(expr: &Expr) -> Option<Vec<String>> {
+    let ExprNode::Send { recv, method, args, block: None, .. } = &*expr.node else { return None };
+    if !args.is_empty() {
+        return None;
+    }
+    match recv {
+        None => (method.as_str() == "config").then(Vec::new),
+        Some(r) => {
+            let mut chain = expr_config_chain(r)?;
+            chain.push(method.as_str().to_string());
+            Some(chain)
+        }
+    }
+}
+
+/// `app.<reader>`.
+fn is_app_reader(expr: &Expr, app: &str, reader: &str) -> bool {
+    matches!(&*expr.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+        if method.as_str() == reader && args.is_empty() && matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == app))
+}
+
+/// `app.class.module_parent.name`.
+fn is_app_module_name(expr: &Expr, app: &str) -> bool {
+    let mut names = Vec::new();
+    let mut cur = expr;
+    loop {
+        match &*cur.node {
+            ExprNode::Send { recv: Some(r), method, args, block: None, .. } if args.is_empty() => {
+                names.push(method.as_str().to_string());
+                cur = r;
+            }
+            ExprNode::Var { name, .. } if name.as_str() == app => break,
+            _ => return false,
+        }
+    }
+    names == ["name", "module_parent", "class"]
 }
 
 /// `initializer "name" do |app| … end`: the block's app parameter and statements.
