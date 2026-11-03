@@ -117,13 +117,13 @@ impl<'a> DelegateEligibility<'a> {
                         })
                         .unwrap_or_default()
                 });
-        let Some(&visibility) = visibility_defaults.get(&(call.span.start as usize)) else {
+        if !visibility_defaults.contains_key(&(call.span.start as usize)) {
             super::super::survey::record(&crate::ingest::IngestError::Unsupported {
                 file,
                 message: "delegate visibility could not be resolved from its source".into(),
             });
             return None;
-        };
+        }
 
         let mut entries = Vec::new();
         for method in &declaration.names {
@@ -189,11 +189,8 @@ impl<'a> DelegateEligibility<'a> {
                 name,
                 file: file.clone(),
                 declaration_span: call.span,
-                visibility: match declaration.private {
-                    Some(true) => MethodVisibility::Private,
-                    Some(false) => MethodVisibility::Public,
-                    None => visibility,
-                },
+                // Not the body's `private` in effect: Rails defines the forwarders through `module_eval`, which starts public.
+                visibility: if declaration.private == Some(true) { MethodVisibility::Private } else { MethodVisibility::Public },
                 allow_nil: declaration.allow_nil,
                 block,
             });

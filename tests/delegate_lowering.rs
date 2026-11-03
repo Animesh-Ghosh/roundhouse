@@ -49,7 +49,9 @@ fn emit_model(app: &mut roundhouse::App, suffix: &str) -> String {
 }
 
 #[test]
-fn private_delegate_visibility_is_preserved_for_models_and_library_classes() {
+/// Rails' `delegate` defines its forwarders with `module_eval`, which starts
+/// public: a `private` above the declaration does not reach them.
+fn a_delegate_after_private_is_public_for_models_and_library_classes() {
     let mut files = tree("");
     files.insert(
         PathBuf::from("app/models/account.rb"),
@@ -80,7 +82,7 @@ fn private_delegate_visibility_is_preserved_for_models_and_library_classes() {
         .expect("model delegate");
     assert_eq!(
         account_delegate.visibility,
-        roundhouse::dialect::MethodVisibility::Private
+        roundhouse::dialect::MethodVisibility::Public
     );
     let service = app
         .library_classes
@@ -94,7 +96,7 @@ fn private_delegate_visibility_is_preserved_for_models_and_library_classes() {
         .expect("library-class delegate");
     assert_eq!(
         service_delegate.visibility,
-        roundhouse::dialect::MethodVisibility::Private
+        roundhouse::dialect::MethodVisibility::Public
     );
 }
 
