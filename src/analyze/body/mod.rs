@@ -195,6 +195,8 @@ pub struct Ctx {
     /// module's sole includer (a controller), but the emitted body runs
     /// in the view, where a bare `render` is ActionView's String.
     pub helper_body: bool,
+    /// The method whose body this is (its class, name and side), which a `super` in it continues.
+    pub super_method: Option<(ClassId, Symbol, bool)>,
 }
 
 /// User-class dispatch data: table name (if any), instance shape,
@@ -1562,15 +1564,11 @@ impl<'a> BodyTyper<'a> {
                         self.analyze_expr(a, ctx);
                     }
                 }
-                // `super` invokes the parent's same-name method;
-                // tracking which method we're inside (and looking up
-                // its parent in the registry) is future work. Until
-                // then, type as `Untyped` — `super` is an
-                // intentional jump out of the typed envelope, similar
-                // in spirit to RBS's `untyped` declaration. Distinct
-                // from `Var` (analyzer gap) so the gradual diagnostic
-                // shape is right.
-                Ty::Untyped
+                // Not resolved where the next method is not a known one: an untyped `super` stays the gradual escape it was.
+                ctx.super_method
+                    .as_ref()
+                    .and_then(|(owner, name, class_side)| self.super_return(owner, name, *class_side))
+                    .unwrap_or(Ty::Untyped)
             }
 
             ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
@@ -4426,6 +4424,37 @@ fn collect_array_pushes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
 /// A computed receiver (`a.b[k] = v`) has no binding to refine and is
 /// skipped. Open written types are skipped for the same reason as in
 /// [`collect_array_pushes`] — they carry nothing to union in.
+impl BodyTyper<'_> {
+    /// What the method `super` reaches answers: past the owner, its
+    /// extended modules then its parent's class side, or its included
+    /// modules (the last included first) then its parent's instances.
+    fn super_return(&self, owner: &ClassId, name: &Symbol, class_side: bool) -> Option<Ty> {
+        let classes = self.classes();
+        let info = classes.get(owner)?;
+        let modules = if class_side { &info.class_method_extensions } else { &info.includes };
+        for module in modules.iter().rev() {
+            if let Some(ty) = classes.get(module).and_then(|m| m.instance_methods.get(name)) {
+                return Some(ty.clone()).filter(|t| !t.is_open());
+            }
+        }
+        let mut parent = info.parent.clone();
+        let mut seen = 0;
+        while let Some(p) = parent {
+            seen += 1;
+            if seen > 32 {
+                return None;
+            }
+            let pinfo = classes.get(&p)?;
+            let table = if class_side { &pinfo.class_methods } else { &pinfo.instance_methods };
+            if let Some(ty) = table.get(name) {
+                return Some(ty.clone()).filter(|t| !t.is_open());
+            }
+            parent = pinfo.parent.clone();
+        }
+        None
+    }
+}
+
 fn mentions_var(ty: &Ty) -> bool {
     match ty {
         Ty::Var { .. } => true,

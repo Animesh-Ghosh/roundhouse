@@ -2039,7 +2039,7 @@ impl Analyzer {
                 query_class_objects: Default::default(),
                 constants: Default::default(),
                 annotate_self_dispatch: false,
-                in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                 view_name: None,
             };
             self.body_typer().analyze_expr(&mut helper.body, &ctx);
@@ -2380,7 +2380,7 @@ impl Analyzer {
                     query_class_objects: Default::default(),
                     constants: shared.clone(),
                     annotate_self_dispatch: false,
-                    in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                    in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                     view_name: None,
                 };
                 let ty = typer.analyze_expr(value, &ctx);
@@ -2662,7 +2662,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
             };
             for item in model.body.iter_mut() {
                 if let ModelBodyItem::Unknown { expr, .. } = item {
@@ -2680,7 +2680,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
             };
 
             // Pass A: type every method body with only `@attributes`
@@ -2751,7 +2751,7 @@ impl Analyzer {
                     class_objects: Default::default(),
                     query_class_objects: Default::default(),
                     constants: class_constants.clone(),
-                    annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                    annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                 };
 
                 // The class body has run before any class method does, so its writes are not nilable there.
@@ -2818,7 +2818,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: global_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
             };
             if retype {
                 for item in controller.body.iter_mut() {
@@ -2840,7 +2840,7 @@ impl Analyzer {
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
             };
 
             // Snapshot this controller's own segment of the filter chain
@@ -3419,7 +3419,7 @@ impl Analyzer {
                             class_objects: Default::default(),
                             query_class_objects: Default::default(),
                             constants: meta.class_constants.clone(),
-                            annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                            annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                         };
                         // Seed helper-method params from the inferred-params
                         // table too, so `period(query)`'s body resolves on
@@ -3926,7 +3926,7 @@ impl Analyzer {
                         query_class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
-                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                         view_name: None,
                     };
                     let origin = app
@@ -3998,7 +3998,7 @@ impl Analyzer {
                         query_class_objects: Default::default(),
                         constants: class_constants.clone(),
                         annotate_self_dispatch: false,
-                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: false,
+                        in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                         view_name: None,
                     };
                     let inner_ctx = self.seed_action_params(
@@ -4182,7 +4182,7 @@ impl Analyzer {
                 local_bindings: HashMap::default(),
                 class_objects: Default::default(),
                 query_class_objects: Default::default(),
-                constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: self.helper_modules.contains(&lc.name),
+                constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: self.helper_modules.contains(&lc.name),
             };
 
             if retype {
@@ -4323,7 +4323,7 @@ impl Analyzer {
                     local_bindings: HashMap::default(),
                     class_objects: Default::default(),
                     query_class_objects: Default::default(),
-                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), helper_body: class_ctx.helper_body,
+                    constants: Default::default(), annotate_self_dispatch: false, in_view: false, view_name: None, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: class_ctx.helper_body,
                 };
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method, true);
@@ -4865,6 +4865,7 @@ impl Analyzer {
         ctx.class_side = matches!(method.receiver, crate::dialect::MethodReceiver::Class);
         ctx.instance_body = !ctx.class_side;
         ctx.method_body = true;
+        ctx.super_method = Some((class_id.clone(), method.name.clone(), ctx.class_side));
         // A Module hook's implicit self mixes in while the includer's body loads; an explicit existing class is still a live change
         ctx.building_self = ctx.class_side
             && matches!(
@@ -5606,32 +5607,46 @@ impl Analyzer {
             .map(|(id, c)| (id.clone(), c.includes.clone()))
             .collect();
         for (id, includes) in targets {
-            // Transitive closure over module includes.
-            let mut queue = includes;
-            let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
-            let mut qi = 0;
-            while qi < queue.len() {
-                let m = queue[qi].clone();
-                qi += 1;
-                let Some((inst, class_side, nested)) = module_surfaces.get(&m) else {
-                    continue;
-                };
-                for n in nested {
-                    if seen.insert(n.clone()) {
-                        queue.push(n.clone());
+            // Not breadth-first over the closure: Ruby looks a method up in the last-included module first, and in a module before the modules it includes.
+            fn ancestors(m: &ClassId, surfaces: &HashMap<ClassId, Surface>, seen: &mut BTreeSet<ClassId>, out: &mut Vec<ClassId>) {
+                if !seen.insert(m.clone()) {
+                    return;
+                }
+                out.push(m.clone());
+                if let Some((_, _, nested)) = surfaces.get(m) {
+                    for n in nested.iter().rev() {
+                        ancestors(n, surfaces, seen, out);
                     }
                 }
+            }
+            let mut queue = Vec::new();
+            let mut seen: BTreeSet<ClassId> = BTreeSet::new();
+            for m in includes.iter().rev() {
+                ancestors(m, &module_surfaces, &mut seen, &mut queue);
+            }
+            let mut taken_inst: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
+            let mut taken_class: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
+            for m in &queue {
+                let Some((inst, class_side, _)) = module_surfaces.get(m) else {
+                    continue;
+                };
                 let folded = self.concern_folded.entry(id.clone()).or_default();
                 let cls = self.classes.entry(id.clone()).or_default();
                 for (name, ty) in inst {
                     if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
                         continue; // own/catalog entry wins
                     }
+                    if !taken_inst.insert(name.clone()) {
+                        continue;
+                    }
                     cls.instance_methods.insert(name.clone(), ty.clone());
                     folded.0.insert(name.clone());
                 }
                 for (name, ty) in class_side {
                     if cls.class_methods.contains_key(name) && !folded.1.contains(name) {
+                        continue;
+                    }
+                    if !taken_class.insert(name.clone()) {
                         continue;
                     }
                     cls.class_methods.insert(name.clone(), ty.clone());

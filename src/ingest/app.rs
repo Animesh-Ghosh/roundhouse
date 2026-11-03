@@ -3206,6 +3206,7 @@ end
     super::unreached_gem_modules::drop(&mut app, dir);
     super::interpolated_renders::expand(&mut app);
     super::controller_delegates::expand(&mut app);
+    super::queue_adapter_reader::synthesize(&mut app);
     super::container_specialize::specialize(&mut app);
     super::unreachable_views::mark(&mut app);
     // After every pass that changes a controller's methods, the concern
