@@ -402,7 +402,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
             let ty = if spec.nested_fields.contains_key(field) {
                 crate::lower::controller_to_library::params::field_ty(spec, field)
             } else {
-                Ty::Str
+                crate::lower::controller_to_library::params::written_scalar_ty(spec, field).unwrap_or(Ty::Str)
             };
             register(field.clone(), ty);
             register(
@@ -463,9 +463,23 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     } else {
         HashSet::default()
     };
+    let relation_returns = if runtime_relation == RuntimeRelation::Present {
+        crate::lower::scope_chain::build_user_method_returns(models).class
+    } else {
+        Default::default()
+    };
     let mut out = Vec::new();
     for (mut methods, _, table, model) in all_methods {
         for method in &mut methods {
+            if runtime_relation == RuntimeRelation::Present && method.receiver == MethodReceiver::Class {
+                fn late_bound_self(expr: &mut Expr) {
+                    expr.node.for_each_child_mut(&mut late_bound_self);
+                    if matches!(&*expr.node, ExprNode::Const { .. })
+                        && expr.decisions & crate::expr::IMPLICIT_MODEL_FINDER_RECEIVER != 0
+                    { *expr.node = ExprNode::SelfRef; }
+                }
+                late_bound_self(&mut method.body);
+            }
             // Arel pass — rewrite recognized AR call sites
             // (`Comment.where(article_id: @id)`, `Article.find_by(id:
             // @id)`, `Comment.all`, `Comment.count`, `Comment.exists?`)
@@ -481,8 +495,14 @@ pub(crate) fn lower_models_inner_with_ruby_values(
             // constant, and an inline whole-table count would bake in
             // the reading Rails does not have. Only the Ruby-family
             // entry ever names one.
+            //
+            // Held back, too, for a class method whose body answers a
+            // relation (`scope_chain::UserMethodReturns::class`): its
+            // callers chain on the result as they chain on a scope's,
+            // and the fold would answer an Array.
+            let key = (model.name.clone(), method.name.clone());
             let unfold = method.receiver == crate::dialect::MethodReceiver::Class
-                && unfolded.contains(&(model.name.clone(), method.name.clone()));
+                && (unfolded.contains(&key) || relation_returns.contains_key(&key));
             if !unfold {
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                     &mut method.body, schema, &classes, &[], ruby_read_values,
@@ -1451,7 +1471,7 @@ fn build_methods_with_finder_inputs(
         // controller.
         if let (Some(fields), Some(spec)) = (permitted_fields, canonical) {
             self::schema::push_from_params_method(
-                &mut methods, model, fields, Some(table), &spec.class_id,
+                &mut methods, model, fields, Some(table), spec,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
             );
         }
@@ -1479,7 +1499,7 @@ fn build_methods_with_finder_inputs(
             }
             let writable = writable_permit_fields(model, Some(table), &spec.fields);
             self::schema::push_from_params_method(
-                &mut methods, model, &writable, Some(table), &spec.class_id,
+                &mut methods, model, &writable, Some(table), spec,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
             );
             let writable = writable_permit_fields(model, Some(table), &scalar);
@@ -1524,7 +1544,7 @@ fn build_methods_with_finder_inputs(
             }
             let writable = writable_permit_fields(model, None, &spec.fields);
             self::schema::push_from_params_method(
-                &mut methods, model, &writable, None, &spec.class_id,
+                &mut methods, model, &writable, None, spec,
                 factory,
             );
         }
@@ -2482,6 +2502,7 @@ fn build_class_info_with_finder_inputs(
             info.source_class_methods.insert(method.name.clone());
         }
     }
+    info.source_class_methods.extend(model.scopes().map(|s| s.name.clone()));
 
     // Attributes row from schema columns.
     if let Some(t) = table {

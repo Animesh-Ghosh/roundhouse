@@ -102,6 +102,9 @@ pub const HELPER_BODY_TRANSLATE: u64 = 1 << 18;
 /// replays where the source has it (`ingest::app_extension_calls`).
 pub const REPLAYED_CLASS_BODY: u64 = 1 << 19;
 
+/// A value-only inherited call: non-Ruby targets retain their previous warning.
+pub const INHERITED_CLASS_BODY: u64 = 1 << 52;
+
 /// A model's `private :has_role?` naming a method its body does not
 /// define (generated, a superclass's or a gem's): kept as a statement for
 /// the lowering to apply and the analyzer to enforce.
@@ -179,6 +182,16 @@ pub const INHERITED_ALIAS_COPY: u64 = 1 << 36;
 
 /// A source-resolved library call whose native keyword ABI is preserved.
 pub const NATIVE_KEYWORD_ARGUMENTS: u64 = 1 << 35;
+/// A retained finder dispatch: subclass arms are explicit, or hook ownership
+/// is unknown. Later registries must not relicense a framework rewrite.
+/// Bits 36–39 belong to inherited aliases, format variants and indexer
+/// decisions. Bits 40–47 are reserved for future decision groups, so finder
+/// decisions start at 48.
+pub const FINDER_DISPATCH_FALLBACK: u64 = 1 << 48;
+/// Ingest qualified a bare model finder; a runtime relation keeps its late-bound self.
+pub const IMPLICIT_MODEL_FINDER_RECEIVER: u64 = 1 << 49;
+/// Unknown-hook dynamic dispatch has no established emitted implementation.
+pub const FINDER_IMPLEMENTATION_UNKNOWN: u64 = 1 << 50;
 
 /// On a route-helper call `lower::route_format_suffix` renamed for its
 /// literal `format:` (`widget_url(w, format: :json)` to
