@@ -249,3 +249,27 @@ fn a_partial_reading_its_record_through_local_assigns_keeps_it() {
         app.write("test/controllers/card_controller_test.rb", test).run_test("test/controllers/card_controller_test.rb").assert_passes();
     }
 }
+
+/// The record local a block render can't also pass is the one the
+/// lowering binds the yielded body to: `product_item` under a hyphenated
+/// `product-items/`, and a collection's `as:` local (review,
+/// diagnostics.rs:194).
+#[test]
+fn a_block_render_passing_the_partials_record_local_is_refused() {
+    for (path, markup) in [
+        (
+            "app/views/product-items/_blurb.html.erb",
+            "<%= render \"product-items/blurb\", product_item: \"v\" do %>x<% end %>\n",
+        ),
+        (
+            "app/views/articles/_wrap.html.erb",
+            "<%= render partial: \"articles/wrap\", collection: @articles, as: :card %>\n<%= render \"articles/wrap\", card: \"v\" do %>x<% end %>\n",
+        ),
+    ] {
+        let errors = emit_and_run::real_blog()
+            .write(path, BLURB)
+            .edit("app/views/articles/index.html.erb", "<% content_for :title, \"Articles\" %>\n", &format!("<% content_for :title, \"Articles\" %>\n{markup}"))
+            .check_errors();
+        assert!(errors.iter().any(|e| e.contains("render with a block not supported") && e.contains("also passes")), "{markup}: {errors:?}");
+    }
+}

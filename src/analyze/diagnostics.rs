@@ -182,12 +182,11 @@ fn unmodeled_block_renders(app: &App) -> Vec<Diagnostic> {
         }
         // The lowering's own answer (its effective record local, every
         // format of the partial): a partial outside it reads that local.
-        if !carrying.contains(partial.name.as_str()) {
+        let Some(record) = carrying.get(partial.name.as_str()) else {
             return Some("the partial's yielded body rides its record local, which this partial (or another format of it) also reads");
-        }
-        let record = crate::naming::singularize(dir.rsplit('/').next().unwrap_or(&dir));
+        };
         let passed = locals.is_some_and(|ls| {
-            ls.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == record))
+            ls.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == record.as_str()))
         });
         if passed {
             return Some("the partial's yielded body rides its record local, which this render also passes");

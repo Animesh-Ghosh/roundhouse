@@ -3852,9 +3852,10 @@ fn yielding_partials(
 }
 
 /// The view names of the partials that carry their yield in the record
-/// slot (`yielding_partials`), for `analyze::diagnostics`, which refuses
-/// a block render to any other partial.
-pub(crate) fn yield_carrying_partials(app: &crate::App) -> crate::det::HashSet<String> {
+/// slot (`yielding_partials`), each with that slot's local, for
+/// `analyze::diagnostics`, which refuses a block render to any other
+/// partial or one that also passes that local.
+pub(crate) fn yield_carrying_partials(app: &crate::App) -> crate::det::HashMap<String, String> {
     let known_models: Vec<String> = app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     let element_locals = collection_element_locals(&app.views, app);
     let keys = yielding_partials(&app.views, &element_locals, &known_models);
@@ -3862,7 +3863,7 @@ pub(crate) fn yield_carrying_partials(app: &crate::App) -> crate::det::HashSet<S
     app.views
         .iter()
         .filter(|v| view_key_of(v, &stems).is_some_and(|k| keys.contains(&k)))
-        .map(|v| v.name.as_str().to_string())
+        .map(|v| (v.name.as_str().to_string(), effective_record_arg(v, &element_locals, &known_models, &stems)))
         .collect()
 }
 
