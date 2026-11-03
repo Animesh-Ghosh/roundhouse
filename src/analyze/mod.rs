@@ -365,11 +365,6 @@ impl Analyzer {
             cls.class_methods.insert(Symbol::from("attribute_names"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
             cls.class_methods.insert(Symbol::from("column_names"), Ty::Array { elem: std::sync::Arc::new(Ty::Str) });
             cls.class_methods.insert(Symbol::from("columns_hash"), Ty::Untyped);
-            // The rest of the schema-reflection surface every model has:
-            // `columns` is the list of `ActiveRecord::ConnectionAdapters::Column`
-            // objects (not modelled, so their elements stay untyped), the
-            // `sanitize_sql*` family builds a SQL fragment string, and
-            // `base_class` is the STI root, a class.
             cls.class_methods.insert(Symbol::from("columns"), Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
             for sanitizer in ["sanitize_sql", "sanitize_sql_array", "sanitize_sql_for_conditions", "sanitize_sql_like"] {
                 cls.class_methods.insert(Symbol::from(sanitizer), Ty::Str);
@@ -1224,6 +1219,9 @@ impl Analyzer {
                 if method.name.as_str() == "each" && forwards_block_to_each(method) {
                     classes.entry(id.clone()).or_default().each_forwards_block = true;
                 }
+                if expr_calls_super(&method.body) {
+                    classes.entry(id.clone()).or_default().delegating_instance_methods.insert(method.name.clone());
+                }
             }
             if method.receiver == crate::dialect::MethodReceiver::Instance
                 && method.name.as_str() == "initialize"
@@ -1287,6 +1285,22 @@ impl Analyzer {
 
         let const_resolver = app.const_resolver.for_sources(&app.sources);
         record_class_side_ownership(&mut classes, app, &const_resolver);
+        // Keep main's inference/encoding path for source-defined readers.
+        // Withdraw only unsupported framework defaults after ownership is known.
+        for model in &app.models {
+            for name in ["columns_hash", "columns", "attribute_names"] {
+                let name = Symbol::from(name);
+                if !ClassInfo::class_method_implementation_exists(&classes, &model.name, &name)
+                    && !ClassInfo::class_method_ownership_unknown(&classes, &model.name, &name)
+                {
+                    classes.get_mut(&model.name).unwrap().class_methods.remove(&name);
+                }
+            }
+        }
+        let connection = ClassId(Symbol::from("ActiveRecord::Connection"));
+        if !source_methods.instance_method(&connection, "indexes") {
+            classes.get_mut(&connection).unwrap().instance_methods.remove(&Symbol::from("indexes"));
+        }
         let data_factories = data::register(app, &const_resolver, &mut classes);
         let data_factories_without_custom_initialize = app
             .library_classes
