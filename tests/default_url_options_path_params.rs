@@ -130,8 +130,25 @@ const NILS: &str = r#"class NilsController < ApplicationController
   end
 end
 "#;
-const EDGE_CALLS: &[(&str, &str)] =
-    &[("/acme/admin/peek", "/admin/posts/1"), ("/acme/nils/show", "!"), ("/acme/nils/index", "!")];
+/// `default_url_options` with optional params, which Rails' `url_options`
+/// calls with none: each holds its default. A bare `super` passes them on,
+/// and Base's own takes none, so Rails raises; a required one raises too.
+const OPTIONAL: &[(&str, &str)] = &[
+    ("options", "def default_url_options(options = {})\n    { path_params: { blog: \"opts\" } }\n  end"),
+    ("defaults", "def default_url_options(options = { path_params: { blog: \"dflt\" } })\n    options\n  end"),
+    ("opt_supers", "def default_url_options(options = {})\n    { path_params: { blog: \"opt\" } }.merge(super)\n  end"),
+    ("requireds", "def default_url_options(options)\n    { path_params: { blog: \"req\" } }\n  end"),
+];
+
+const EDGE_CALLS: &[(&str, &str)] = &[
+    ("/acme/admin/peek", "/admin/posts/1"),
+    ("/acme/nils/show", "!"),
+    ("/acme/nils/index", "!"),
+    ("/acme/options/show", "/opts/posts/1"),
+    ("/acme/defaults/show", "/dflt/posts/1"),
+    ("/acme/opt_supers/show", "!"),
+    ("/acme/requireds/show", "!"),
+];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Variant {
@@ -181,6 +198,9 @@ fn files(variant: Variant) -> Vec<(String, String)> {
     routes.push_str("    get \"drafts/show\", to: \"drafts#show\"\n    get \"drafts/view\", to: \"drafts#view\"\n");
     if variant == Variant::None {
         routes.push_str("    get \"admin/peek\", to: \"admin/posts#peek\"\n    get \"nils/show\", to: \"nils#show\"\n    get \"nils/index\", to: \"nils#index\"\n");
+        for (name, _) in OPTIONAL {
+            routes.push_str(&format!("    get \"{name}/show\", to: \"{name}#show\"\n"));
+        }
     }
     routes.push_str("  end\n  get \"/health\", to: \"links#health\", as: :health\nend\n");
     out.push(("config/routes.rb".into(), routes));
@@ -197,6 +217,13 @@ fn files(variant: Variant) -> Vec<(String, String)> {
         out.push(("app/controllers/admin/posts_controller.rb".into(), ADMIN.into()));
         out.push(("app/views/admin/posts/peek.html.erb".into(), "<%= post_path(@post) %>\n".into()));
         out.push(("app/controllers/nils_controller.rb".into(), NILS.into()));
+        for (name, def) in OPTIONAL {
+            let class = name.split('_').map(|w| w[..1].to_uppercase() + &w[1..]).collect::<String>();
+            out.push((
+                format!("app/controllers/{name}_controller.rb"),
+                format!("class {class}Controller < ApplicationController\n  {def}\n\n  def show\n    render plain: post_path(1)\n  end\nend\n"),
+            ));
+        }
     }
     if variant == Variant::PathParams {
         out.push(("app/controllers/drafts_controller.rb".into(), DRAFTS.into()));
@@ -298,6 +325,11 @@ fn an_unread_default_url_options_warns_at_its_def() {
         "app/controllers/supers_controller.rb".into(),
         b"class SupersController < ApplicationController\n  def default_url_options\n    { blog: super.fetch(:blog, \"main\") }\n  end\nend\n".to_vec(),
     );
+    // An optional param read with a default that is not a literal: its value is known only at run time.
+    tree.insert(
+        "app/controllers/fallbacks_controller.rb".into(),
+        b"class FallbacksController < ApplicationController\n  def default_url_options(options = fallback_options)\n    options.merge(path_params: { blog: \"fb\" })\n  end\n\n  def fallback_options\n    {}\n  end\nend\n".to_vec(),
+    );
     // Not a shape giving a segment, whatever keys it keeps: nothing to say.
     tree.insert(
         "app/controllers/hosts_controller.rb".into(),
@@ -306,11 +338,19 @@ fn an_unread_default_url_options_warns_at_its_def() {
     let mut app = ingest_app_from_tree(tree).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
     let warnings: Vec<_> = diagnose(&app).into_iter().filter(|d| d.message.contains("default_url_options")).collect();
-    assert_eq!(warnings.len(), 3, "{warnings:#?}");
-    for (warning, controller) in warnings.iter().zip(["NotesController", "PinsController", "SupersController"]) {
-        assert!(warning.message.contains(&format!("{controller}#default_url_options")), "{}", warning.message);
-        assert!(!warning.span.is_synthetic(), "{warning:?}");
-    }
+    let mut warned: Vec<&str> = warnings
+        .iter()
+        .map(|w| {
+            assert!(!w.span.is_synthetic(), "{w:?}");
+            w.message.split('`').nth(1).and_then(|m| m.strip_suffix("#default_url_options")).unwrap_or(&w.message)
+        })
+        .collect();
+    warned.sort();
+    assert_eq!(
+        warned,
+        ["FallbacksController", "NotesController", "OptSupersController", "PinsController", "RequiredsController", "SupersController"],
+        "{warnings:#?}"
+    );
 }
 
 /// The Spinel tree gives `ApplicationController` the overlay and hands it

@@ -255,7 +255,7 @@ fn url_defaults(app: &App, segments: &HashSet<String>) -> HashMap<ClassId, UrlDe
             None => UrlDefaults::Absent,
         };
         let resolved = match own_definition(c) {
-            Some(def) => parse_top(&def.body, &parent, segments).unwrap_or(UrlDefaults::Unread(def_span(def))),
+            Some(def) => parse_def(def, &parent, segments).unwrap_or(UrlDefaults::Unread(def_span(def))),
             None => parent,
         };
         out.insert(name.clone(), resolved.clone());
@@ -269,7 +269,73 @@ fn url_defaults(app: &App, segments: &HashSet<String>) -> HashMap<ClassId, UrlDe
 }
 
 fn own_definition(c: &Controller) -> Option<&Action> {
-    c.actions().find(|a| a.name.as_str() == "default_url_options" && a.formal_params().is_empty())
+    c.actions().find(|a| a.name.as_str() == "default_url_options")
+}
+
+/// The definition as Rails' `url_options` calls it, with no arguments
+/// (actionpack 8.1.4, `routing/url_for.rb:118`): each optional param
+/// holds its default, read in its place when that is a literal. A
+/// required param raises there, and a bare `super` passes the optional
+/// ones on, which Base's own `default_url_options` does not take; both
+/// are unread, as is a read of `*rest`, `**opts` or `&blk`.
+fn parse_def(def: &Action, parent: &UrlDefaults, segments: &HashSet<String>) -> Option<UrlDefaults> {
+    if !def.params.fields.is_empty() || def.kw_params.iter().any(|(_, d)| d.is_none()) || def.anonymous_formal.is_some() {
+        return None;
+    }
+    let defaults: Vec<(Symbol, Expr)> = def
+        .opt_params
+        .iter()
+        .cloned()
+        .chain(def.kw_params.iter().filter_map(|(n, d)| Some((n.clone(), d.clone()?))))
+        .collect();
+    let opaque: Vec<&Symbol> = def.rest_param.iter().chain(&def.kwrest_param).chain(&def.block_param).collect();
+    if defaults.is_empty() && opaque.is_empty() {
+        return parse_top(&def.body, parent, segments);
+    }
+    if !defaults.is_empty() && passes_formals(&def.body) {
+        return None;
+    }
+    let mut body = def.body.clone();
+    in_place_of_params(&mut body, &defaults, &opaque)?;
+    parse_top(&body, parent, segments)
+}
+
+/// Whether `e` has a bare `super`, which passes the method's own arguments.
+fn passes_formals(e: &Expr) -> bool {
+    let mut found = matches!(&*e.node, ExprNode::Super { args: None });
+    e.node.for_each_child(&mut |c| found = found || passes_formals(c));
+    found
+}
+
+/// Each read of an optional param replaced by its literal default;
+/// `None` for a read of any other param, or a write to one.
+fn in_place_of_params(e: &mut Expr, defaults: &[(Symbol, Expr)], opaque: &[&Symbol]) -> Option<()> {
+    fn literal(e: &Expr) -> bool {
+        match &*e.node {
+            ExprNode::Lit { .. } => true,
+            ExprNode::Hash { entries, .. } => entries.iter().all(|(k, v)| literal(k) && literal(v)),
+            ExprNode::Array { elements, .. } => elements.iter().all(literal),
+            _ => false,
+        }
+    }
+    let formal = |n: &Symbol| defaults.iter().any(|(d, _)| d == n) || opaque.contains(&n);
+    match &*e.node {
+        ExprNode::Var { name, .. } if formal(name) => {
+            let (_, default) = defaults.iter().find(|(d, _)| d == name).filter(|(_, d)| literal(d))?;
+            *e = default.clone();
+            return Some(());
+        }
+        ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, .. }
+        | ExprNode::OpAssign { target: crate::expr::LValue::Var { name, .. }, .. }
+            if formal(name) =>
+        {
+            return None;
+        }
+        _ => {}
+    }
+    let mut ok = true;
+    e.node.for_each_child_mut(&mut |c| ok = ok && in_place_of_params(c, defaults, opaque).is_some());
+    ok.then_some(())
 }
 
 fn def_span(def: &Action) -> Span {

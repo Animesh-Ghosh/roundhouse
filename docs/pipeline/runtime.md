@@ -3430,6 +3430,12 @@ It reads a Hash literal (`path_params:` a Hash literal too), `super`,
 `merge` of those, and `if cond` around one with no segments on the
 other branch, and a `compact`, `reject`, `slice`, … of one that gives
 no segment; each controller its own definition or the one it inherits.
+A `def default_url_options(options = {})` is read as Rails'
+`url_options` calls it, with no arguments: a read of an optional param
+is its default when that is a literal. A required param raises there,
+and a bare `super` passes the optional ones on to Base's
+`default_url_options`, which takes none, so Rails raises for both; they
+are unread, as is a read of any other param.
 Any other shape, a record value, and a value or guard that reads the
 method's own context (`super`, `yield`, `binding`, `__method__`) keeps
 the helpers' positional binding, and `check` warns at its `def`. A nil
