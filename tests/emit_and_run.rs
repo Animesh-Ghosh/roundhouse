@@ -20490,6 +20490,8 @@ mod interpolated_partial;
 mod indifferent_ivar;
 #[path = "emit_and_run/library_class_state.rs"]
 mod library_class_state;
+#[path = "emit_and_run/fold_and_destructure_types.rs"]
+mod fold_and_destructure_types;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;

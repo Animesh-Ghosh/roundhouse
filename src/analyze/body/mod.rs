@@ -2355,6 +2355,49 @@ impl<'a> BodyTyper<'a> {
                     }
                     _ => block_ret,
                 };
+                // `each_with_object` answers its seed, filled by the block: `{}` takes the `[]=` writes to the memo, `[]` its pushes.
+                if matches!(method.as_str(), "each_with_object" | "with_object")
+                    && !self.owns_operator(owner_ty, method, class_object_receiver)
+                    && let ([seed], Some(b)) = (args.as_slice(), block.as_ref())
+                    && let ExprNode::Lambda { params, body, .. } = &*b.node
+                    && let [_, memo] = params.as_slice()
+                    && let Some(seed_ty) = seed.ty.clone()
+                {
+                    let mut writes = Vec::new();
+                    collect_hash_index_writes(body, &mut writes);
+                    let mut pushes = Vec::new();
+                    collect_array_pushes(body, &mut pushes);
+                    let filled = match seed_ty {
+                        Ty::Hash { key, value } => {
+                            let mut key = (*key).clone();
+                            let mut value = (*value).clone();
+                            for (is_ivar, name, ty) in writes {
+                                if !is_ivar && name == *memo {
+                                    value = if matches!(value, Ty::Var { .. }) { ty } else { union_of(value, ty) };
+                                }
+                            }
+                            let mut keys = Vec::new();
+                            memo_keys(body, memo, &mut keys);
+                            for ty in keys {
+                                key = if matches!(key, Ty::Var { .. }) { ty } else { union_of(key, ty) };
+                            }
+                            Ty::Hash { key: std::sync::Arc::new(key), value: std::sync::Arc::new(value) }
+                        }
+                        Ty::Array { elem } => {
+                            let mut elem = (*elem).clone();
+                            for (is_ivar, name, ty) in pushes {
+                                if !is_ivar && name == *memo {
+                                    elem = if matches!(elem, Ty::Var { .. }) { ty } else { union_of(elem, ty) };
+                                }
+                            }
+                            Ty::Array { elem: std::sync::Arc::new(elem) }
+                        }
+                        other => other,
+                    };
+                    if !filled.is_open() {
+                        return filled;
+                    }
+                }
                 if recv_ty.as_ref() == Some(&Ty::Str) && method.as_str() == "bytes"
                     && let Some(b) = block.as_ref()
                     && let ExprNode::Lambda { body, .. } = &*b.node
@@ -4302,8 +4345,24 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![].into() }),
         Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
         Some(Ty::Untyped) => Some(Ty::Untyped),
+        // Not splatted: a value with no `to_ary` goes whole to the first target, and the rest read nil.
+        Some(ty @ (Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool | Ty::Nil | Ty::Hash { .. })) => {
+            Some(if index == 0 { ty.clone() } else { Ty::Nil })
+        }
+        Some(ty @ Ty::Class { id, .. }) if !splats(id.0.as_str()) => Some(if index == 0 { ty.clone() } else { Ty::Nil }),
+        Some(ty @ Ty::Union { variants })
+            if variants.iter().all(|v| multiassign_target_ty(&Some(v.clone()), 1) == Some(Ty::Nil)) =>
+        {
+            Some(if index == 0 { ty.clone() } else { Ty::Nil })
+        }
         _ => None,
     }
+}
+
+/// The classes whose instances answer `to_ary`, which a multiple assignment splats.
+fn splats(class: &str) -> bool {
+    matches!(class, "Array" | "ActiveRecord::Relation" | "ActiveRecord::Result")
+        || class.ends_with("::CollectionProxy")
 }
 
 /// Walk an Expr collecting every `Assign { target: LValue::Var, .. }`
@@ -4361,6 +4420,19 @@ fn collect_array_pushes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
 /// A computed receiver (`a.b[k] = v`) has no binding to refine and is
 /// skipped. Open written types are skipped for the same reason as in
 /// [`collect_array_pushes`] — they carry nothing to union in.
+/// The key types of the `memo[k] = v` writes to a block's local `memo`.
+fn memo_keys(expr: &Expr, memo: &Symbol, out: &mut Vec<Ty>) {
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
+        && matches!(method.as_str(), "[]=" | "store")
+        && args.len() == 2
+        && matches!(&*r.node, ExprNode::Var { name, .. } if name == memo)
+        && let Some(ty) = args[0].ty.clone().filter(|t| !t.is_open())
+    {
+        out.push(ty);
+    }
+    expr.node.for_each_child(&mut |child| memo_keys(child, memo, out));
+}
+
 fn collect_hash_index_writes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
     let write = match &*expr.node {
         ExprNode::Assign { target: LValue::Index { recv, .. }, value }

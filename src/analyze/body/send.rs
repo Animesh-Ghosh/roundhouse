@@ -502,6 +502,22 @@ impl<'a> BodyTyper<'a> {
                 }
             }
         }
+        // `each_with_object(memo) { |elem, memo| … }` yields the seed object itself beside each element.
+        if !class_object_receiver
+            && matches!(method.as_str(), "each_with_object" | "with_object")
+            && let ([elem, memo], [seed]) = (params.as_slice(), args)
+            && let Some(seed_ty) = seed.ty.clone()
+        {
+            let elem_ty = match recv_ty.map(super::narrowing::remove_nil) {
+                Some(Ty::Hash { key, value }) => Some(Ty::Tuple { elems: vec![(*key).clone(), (*value).clone()].into() }),
+                other => other.as_ref().and_then(|r| self.block_params_for(Some(r), &Symbol::from("each"), false)).and_then(|v| v.first().cloned()),
+            };
+            if let Some(elem_ty) = elem_ty {
+                new_ctx.local_bindings.insert(elem.clone(), elem_ty);
+            }
+            new_ctx.local_bindings.insert(memo.clone(), seed_ty);
+            return new_ctx;
+        }
         // `Thread.new(state) { |state| ... }` forwards constructor
         // arguments to the block. Unlike iterator methods, the yielded
         // values come from this call's positional arguments rather than
