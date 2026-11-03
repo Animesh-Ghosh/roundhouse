@@ -30,6 +30,8 @@ mod session_cookie_key;
 mod inertia_runtime_props;
 #[path = "emit_and_run/form_builder_fields.rs"]
 mod form_builder_fields;
+#[path = "emit_and_run/current_page.rs"]
+mod current_page;
 #[path = "emit_and_run/stylesheet_helper.rs"]
 mod stylesheet_helper;
 #[path = "emit_and_run/stylesheet_source.rs"]
@@ -20615,6 +20617,12 @@ mod csrf_meta_tag_alias;
 
 #[path = "emit_and_run/validates_rule_gaps.rs"]
 mod validates_rule_gaps;
+
+#[path = "emit_and_run/render_partial_block.rs"]
+mod render_partial_block;
+
+#[path = "emit_and_run/python_route_format.rs"]
+mod python_route_format;
 
 #[path = "emit_and_run/python_nested_modifier_if.rs"]
 mod python_nested_modifier_if;
