@@ -8970,6 +8970,13 @@ fn emit_library_class_decl_inner(
             let (cname, value) = &lc.constants[i];
             nested.borrow_mut().write_expr(s, depth, lc, value);
             let rendered = super::emit_expr(&top_level(value));
+            // Not the statements written after `NAME =`: only the first would be the constant's, the rest would run as the body's own.
+            let rendered = if matches!(&*value.node, ExprNode::Seq { exprs } if exprs.len() > 1) {
+                let inner: String = rendered.lines().map(|l| format!("  {l}\n")).collect();
+                format!("begin\n{inner}end")
+            } else {
+                rendered
+            };
             if let Some(factory) = lifted_data_factory(lc, cname.as_str(), classes, factories) {
                 writeln!(s, "{body_pad}{} = {rendered} do", cname.as_str()).unwrap();
                 for method in &factory.methods {

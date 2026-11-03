@@ -20510,6 +20510,8 @@ mod active_model_keyword_super;
 mod arguments_deserialize;
 #[path = "emit_and_run/i18n_config.rs"]
 mod i18n_config;
+#[path = "emit_and_run/computed_class_constants.rs"]
+mod computed_class_constants;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;

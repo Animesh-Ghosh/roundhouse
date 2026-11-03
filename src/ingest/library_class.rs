@@ -2683,7 +2683,31 @@ fn walk_decl_body_with_visibility<'pr>(
     });
     // A module mixed in before `X = … unless defined?(X)` may hold `X` already.
     let mut mixed_in = false;
+    let const_locals = constant_body_locals(&statements);
+    let mut local_history: Vec<Expr> = Vec::new();
     for statement in statements {
+        // Not dropped with the body's other locals: a constant built from them (fugit's `NHOURS = sixties[0, 13]…`) replays their writes ahead of its value.
+        if !const_locals.is_empty()
+            && statement.as_constant_write_node().is_none()
+            && statement.as_def_node().is_none()
+            && reads_local(&statement, &const_locals)
+        {
+            local_history.push(ingest_expr(&statement, file)?);
+            continue;
+        }
+        if let Some(cw) = statement.as_constant_write_node()
+            && reads_local(&cw.value(), &const_locals)
+        {
+            let mut exprs = local_history.clone();
+            exprs.push(ingest_expr(&cw.value(), file)?);
+            let span = exprs.last().map(|e| e.span).unwrap_or_else(crate::span::Span::synthetic);
+            out.constants.push((Symbol::from(constant_id_str(&cw.name())), Expr::new(span, ExprNode::Seq { exprs })));
+            continue;
+        }
+        if let Some(writes) = computed_constant_multi_write(&statement, file)? {
+            out.constants.extend(writes);
+            continue;
+        }
         // An `if` / `unless` around a `def`, a visibility marker, or an
         // accessor this walk would otherwise lower is not a statement it
         // can keep. Check the source statement, before a visibility
@@ -5975,6 +5999,101 @@ fn requires_files(stmt: &ruby_prism::Node<'_>) -> bool {
     let mut found = Requires(false);
     ruby_prism::Visit::visit(&mut found, stmt);
     found.0
+}
+
+/// The locals of a class body that one of its constants reads.
+fn constant_body_locals(statements: &[ruby_prism::Node<'_>]) -> Vec<String> {
+    let written: Vec<String> = statements
+        .iter()
+        .filter_map(|s| s.as_local_variable_write_node().map(|w| constant_id_str(&w.name()).to_string()))
+        .collect();
+    if written.is_empty() {
+        return Vec::new();
+    }
+    let mut read = Vec::new();
+    for s in statements {
+        if let Some(cw) = s.as_constant_write_node() {
+            for name in &written {
+                if !read.contains(name) && reads_local(&cw.value(), std::slice::from_ref(name)) {
+                    read.push(name.clone());
+                }
+            }
+        }
+    }
+    read
+}
+
+fn reads_local(node: &ruby_prism::Node<'_>, names: &[String]) -> bool {
+    struct Reads<'n>(&'n [String], bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Reads<'_> {
+        fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+            self.1 |= self.0.iter().any(|n| n == constant_id_str(&node.name()));
+        }
+        fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+            self.1 |= self.0.iter().any(|n| n == constant_id_str(&node.name()));
+            ruby_prism::visit_local_variable_write_node(self, node);
+        }
+        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
+    }
+    if names.is_empty() {
+        return false;
+    }
+    let mut v = Reads(names, false);
+    ruby_prism::Visit::visit(&mut v, node);
+    v.1
+}
+
+/// `A, B = value` whose value is computed (fugit's `INFLA_KEYS, NON_INFLA_KEYS = KEYS.partition { … }`):
+/// each constant reads its element, as Ruby's multiple assignment does (the
+/// first takes a non-Array value whole, the rest nil).
+fn computed_constant_multi_write(stmt: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Option<Vec<(Symbol, Expr)>>> {
+    let Some(write) = stmt.as_multi_write_node() else { return Ok(None) };
+    if write.rest().is_some() || !write.rights().is_empty() || write.value().as_array_node().is_some() {
+        return Ok(None);
+    }
+    let Some(names) = write
+        .lefts()
+        .iter()
+        .map(|left| {
+            left.as_constant_target_node().map(|target| (constant_id_str(&target.name()).to_string(), target.location().end_offset() as u32))
+        })
+        .collect::<Option<Vec<(String, u32)>>>()
+    else {
+        return Ok(None);
+    };
+    let value = ingest_expr(&write.value(), file)?;
+    let mut out = Vec::new();
+    for (i, (name, name_end)) in names.iter().enumerate() {
+        // Not the shared value's span: a constant's declaration is the last name written before its value's start.
+        let span = crate::span::Span { start: *name_end, end: *name_end, ..value.span };
+        // Not one hidden constant holding the value: it would show in the module's `constants`, so each target evaluates it again.
+        let tmp = Symbol::from("__rh_multi");
+        let var = || Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: tmp.clone() });
+        let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+            Expr::new(span, ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: true })
+        };
+        let lit = |value: Literal| Expr::new(span, ExprNode::Lit { value });
+        let assign = Expr::new(
+            span,
+            ExprNode::Assign { target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: tmp.clone() }, value: value.clone() },
+        );
+        let pick = Expr::new(
+            span,
+            ExprNode::If {
+                cond: send(var(), "is_a?", vec![{
+                    let mut array = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Array")] });
+                    // Not resolved from the source at its span: that text is the assigned value.
+                    array.decisions |= crate::expr::GENERATED_CONST_REF;
+                    array
+                }]),
+                then_branch: send(var(), "[]", vec![lit(Literal::Int { value: i as i64 })]),
+                else_branch: if i == 0 { var() } else { lit(Literal::Nil) },
+            },
+        );
+        let exprs = vec![assign, pick];
+        out.push((Symbol::from(name.as_str()), Expr::new(span, ExprNode::Seq { exprs })));
+    }
+    Ok(Some(out))
 }
 
 /// `A, B = x, y` in a class or module body: each target a bare constant,

@@ -3733,6 +3733,11 @@ pub(super) fn hash_method(
         "to_a" => Ty::Array {
             elem: std::sync::Arc::new(Ty::Tuple { elems: vec![key.clone(), value.clone()].into() }),
         },
+        "partition" => Ty::Array {
+            elem: std::sync::Arc::new(Ty::Array {
+                elem: std::sync::Arc::new(Ty::Tuple { elems: vec![key.clone(), value.clone()].into() }),
+            }),
+        },
         "dup" | "clone" | "deep_dup" => Ty::Hash {
             key: std::sync::Arc::new(key.clone()),
             value: std::sync::Arc::new(value.clone()),

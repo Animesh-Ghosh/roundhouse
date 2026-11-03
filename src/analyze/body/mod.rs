@@ -3124,7 +3124,8 @@ impl<'a> BodyTyper<'a> {
                 };
                 narrowing::drop_unstable_members(&mut else_ctx, &[&*cond, &*else_branch]);
                 let e = self.analyze_expr(else_branch, &else_ctx);
-                union_of(t, e)
+                // Not joined with the else branch: no value reaches it.
+                if pred.as_ref().is_some_and(|p| narrowing::is_a_settled(p, &base)) { t } else { union_of(t, e) }
             }
 
             ExprNode::Case { scrutinee, arms } => {
