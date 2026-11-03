@@ -6155,6 +6155,24 @@ fn constant_body_locals(statements: &[ruby_prism::Node<'_>]) -> Vec<String> {
             }
         }
     }
+    // Not only the locals a constant reads: those its locals were built from too (fugit's `sixties` from `one_to_nine`).
+    loop {
+        let before = read.len();
+        for s in statements {
+            if let Some(w) = s.as_local_variable_write_node()
+                && read.iter().any(|r| r == constant_id_str(&w.name()))
+            {
+                for name in &written {
+                    if !read.contains(name) && reads_local(&w.value(), std::slice::from_ref(name)) {
+                        read.push(name.clone());
+                    }
+                }
+            }
+        }
+        if read.len() == before {
+            break;
+        }
+    }
     read
 }
 

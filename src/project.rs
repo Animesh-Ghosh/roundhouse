@@ -2276,6 +2276,8 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 // whichever arm of the receiver it is (`Rails::AppPath?`, `Rails::AppPath | Pathname`).
                 (Some(_), "expand_path") if recv_ty.is_some_and(names_app_path) => Some("Rails::AppPath#expand_path"),
                 (Some(_), "to_session_value") if recv_ty.is_some_and(names_flash) => Some("ActionDispatch::Flash#to_session_value"),
+                // Ruby's Integer has no width; a fixed-width one wraps the literal's high limbs away.
+                _ if expr.decisions & crate::expr::WIDE_INTEGER_LITERAL != 0 => Some("Integer literal wider than 64 bits"),
                 (Some(_), name) if crate::analyze::ACTIVE_JOB_RUBY_FIELDS.contains(&name)
                     && recv_ty.is_some_and(|t| names_job(t, jobs)) => Some("ActiveJob::Base job fields"),
                 _ => None,
@@ -10788,8 +10790,18 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     for_each_app_constant(app, &mut |_, path| {
         owned.extend(ownership.owners(path).into_iter().map(str::to_string));
     });
+    // Not only direct gems: a gem compiled from source no longer requires its own dependencies, so the real ones it names come in here (fugit's raabro and et-orbi).
+    let source_deps: Vec<crate::gems::GemEntry> = lock
+        .source
+        .iter()
+        .flat_map(|g| lock.spec_deps.get(g).into_iter().flatten())
+        .filter(|dep| !lock.source.contains(dep) && !census.gems.iter().any(|g| &g.name == *dep))
+        .filter(|dep| matches!(crate::gems::fate_of(dep), crate::gems::GemFate::Unknown))
+        .map(|dep| crate::gems::GemEntry { name: dep.clone(), version: lock.version_of(dep).map(str::to_string), fate: crate::gems::GemFate::Unknown })
+        .collect();
     let needed: Vec<_> = census
         .unknown()
+        .chain(source_deps.iter())
         .filter(|gem| {
             // Fail-closed: a GIT-sourced unknown must not be rewritten as a
             // rubygems.org name/version pin.
@@ -10823,6 +10835,8 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         match lock.gemfile_requires.get(&gem.name) {
             Some(features) => eager_requires.extend(features.iter().cloned()),
             None if crate::gems::loads_by_gem_name(&gem.name) => eager_requires.push(gem.name.clone()),
+            // A source gem's dependency: its own `require "et-orbi"` is the one the compiled gem no longer runs.
+            None if source_deps.iter().any(|d| d.name == gem.name) => eager_requires.push(gem.name.clone()),
             None => {}
         }
         let version = gem.version.as_deref();
@@ -10850,6 +10864,8 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         }
     }
     if let Some((_, boot)) = files.iter_mut().find(|(path, _)| path == "boot.rb") {
+        eager_requires.sort();
+        eager_requires.dedup();
         let requires = eager_requires
             .iter()
             .filter(|feature| !boot.contains(&format!("require {feature:?}")))
@@ -11520,6 +11536,12 @@ fn names_constant(src: &str, konst: &str) -> bool {
                     return true;
                 }
             }
+        }
+        // A mixin's argument: `include Raabro` (fugit's parsers) stands bare at end of line too.
+        if let Some(rest) = ["include ", "extend ", "prepend "].iter().find_map(|kw| line.trim().strip_prefix(kw))
+            && rest.split(',').any(|arg| arg.trim().trim_start_matches("::") == konst)
+        {
+            return true;
         }
         let b = line.as_bytes();
         let mut i = 0;
@@ -13538,6 +13560,13 @@ mod tests {
         };
         assert!(!test("WebMock.stub_request(:get, \"/\")\n"));
         assert!(test("assert true\n"));
+    }
+
+    #[test]
+    fn names_constant_reads_a_mixin_argument() {
+        assert!(names_constant("  include Raabro\n", "Raabro"));
+        assert!(names_constant("  extend ::Raabro, Other\n", "Raabro"));
+        assert!(!names_constant("  include RaabroExt\n", "Raabro"));
     }
 
     /// A rooted `::Name` names the top-level constant, and so does a value

@@ -20530,6 +20530,8 @@ mod comparable_alias_rational;
 mod job_class_safe_constantize;
 #[path = "emit_and_run/load_time_definer.rs"]
 mod load_time_definer;
+#[path = "emit_and_run/gem_source_shapes.rs"]
+mod gem_source_shapes;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;

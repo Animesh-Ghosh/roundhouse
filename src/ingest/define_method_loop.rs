@@ -160,6 +160,24 @@ fn literal_key(node: &Node<'_>) -> Option<Key> {
 fn literal_entries(value: &Node<'_>) -> Option<Entries> {
     // `{ … }.freeze` / `%i[…].freeze`
     if let Some(call) = value.as_call_node() {
+        // `%w[ year month ].collect(&:to_sym)` (fugit's TimeCursor): each key converted as the block converts it.
+        if matches!(constant_id_str(&call.name()), "collect" | "map") && call.arguments().is_none() {
+            let to = call
+                .block()
+                .and_then(|b| b.as_block_argument_node())
+                .and_then(|b| b.expression())
+                .and_then(|e| e.as_symbol_node())
+                .map(|s| String::from_utf8_lossy(s.unescaped()).into_owned())?;
+            let Entries::Array(keys) = literal_entries(&call.receiver()?)? else { return None };
+            let text = |k: &Key| match k {
+                Key::Sym(t) | Key::Str(t) => t.clone(),
+            };
+            return match to.as_str() {
+                "to_sym" => Some(Entries::Array(keys.iter().map(|k| Key::Sym(text(k))).collect())),
+                "to_s" => Some(Entries::Array(keys.iter().map(|k| Key::Str(text(k))).collect())),
+                _ => None,
+            };
+        }
         if constant_id_str(&call.name()) != "freeze" || call.arguments().is_some() || call.block().is_some() {
             return None;
         }
