@@ -649,6 +649,7 @@ pub(super) fn push_schema_methods(
 
     // def attributes; { col: @col, ... } excluding id; end
     methods.push(synth_attributes(owner, table, model));
+    methods.push(synth_serializable_hash(owner, table));
 
     // def [](name): dispatch by public column name, then selected alias.
     methods.push(synth_index_read(owner, table, model, runtime_relation));
@@ -3590,6 +3591,40 @@ fn synth_attributes(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+// Not `attributes`: Rails serializes every attribute, `id` among them, through its reader (a Time, an enum's label), not the stored value.
+fn synth_serializable_hash(owner: &ClassId, table: &Table) -> MethodDef {
+    let entries: Vec<(Expr, Expr)> = table
+        .columns
+        .iter()
+        .map(|c| {
+            let read = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send { recv: None, method: c.name.clone(), args: Vec::new(), block: None, parenthesized: false },
+            );
+            (super::lit_str(c.name.as_str().to_string()), read)
+        })
+        .collect();
+    let hash_ty = Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) };
+    let body = with_ty(Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: false }), hash_ty.clone());
+    MethodDef {
+        visibility: crate::dialect::MethodVisibility::Public,
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: crate::span::Span::synthetic(),
+        name: Symbol::from("serializable_hash"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], hash_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
     }
 }
 

@@ -415,12 +415,14 @@ end
 
 /// An engine's statements the engine's own boot accounts for leave the
 /// ledger: blocks only a `rails` command runs, the config namespace it
-/// copies onto a module, the load-hook mixins the ingest carries, and an
-/// initializer whose only branch the host's config never takes.
+/// copies onto a module, the load-hook mixins the ingest carries, an
+/// initializer whose only branch the host's config never takes, and the
+/// `before_initialize` boot replays; the engine is then admitted, so its
+/// `isolate_namespace` is consumed too.
 #[test]
 fn an_engines_settled_boot_statements_leave_the_ledger() {
     let (_, ledger) = ingest(&engine_tree(SETTLED_ENGINE, &[]));
-    assert_eq!(statements(&ledger), ["isolate_namespace", "config.before_initialize"]);
+    assert!(statements(&ledger).is_empty(), "{:?}", statements(&ledger));
 }
 
 #[test]

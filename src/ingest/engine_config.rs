@@ -1100,6 +1100,17 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
                     config_opaque: false,
                 };
                 let statements = flatten_statements(body);
+                // Not a use: a block only a `rails` command runs (rake, console, generators, runner) names what the app never loads.
+                for stmt in &statements {
+                    if let Some(call) = stmt.as_call_node()
+                        && call.receiver().is_none()
+                        && call.block().is_some()
+                        && matches!(constant_id_str(&call.name()).as_ref(), "rake_tasks" | "console" | "generators" | "runner")
+                    {
+                        let loc = stmt.location();
+                        boot.dead.push((boot.file.clone(), loc.start_offset() as u32, loc.end_offset() as u32));
+                    }
+                }
                 // Not source order: Rails runs every `before_initialize` before the engine's initializers.
                 for stmt in &statements {
                     if let Some(hook) = config_hook(stmt, "before_initialize") {

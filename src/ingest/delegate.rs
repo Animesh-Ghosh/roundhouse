@@ -240,6 +240,14 @@ pub(super) fn expand_delegates(
                         end: delegate.declaration_span.start,
                     };
                 }
+                // Not resolved from the source at its span: the forwarder's text is synthesized, and a `to:` constant names itself.
+                fn generated_consts(e: &mut Expr) {
+                    if matches!(&*e.node, ExprNode::Const { .. }) {
+                        e.decisions |= crate::expr::GENERATED_CONST_REF;
+                    }
+                    e.node.for_each_child_mut(&mut generated_consts);
+                }
+                generated_consts(&mut method.body);
                 method
             })
             .collect(),

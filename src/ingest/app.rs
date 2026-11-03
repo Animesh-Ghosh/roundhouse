@@ -3205,6 +3205,8 @@ end
     report_unmodelled_records(&app);
     super::unreached_gem_modules::drop(&mut app, dir);
     super::interpolated_renders::expand(&mut app);
+    super::controller_delegates::expand(&mut app);
+    super::container_specialize::specialize(&mut app);
     super::unreachable_views::mark(&mut app);
     // After every pass that changes a controller's methods, the concern
     // splice and the class-body macros above all: the lowering clones
@@ -4461,6 +4463,26 @@ fn splice_concerns_into_controllers(app: &mut App) {
     > = HashMap::default();
     let mut module_includes: HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> =
         HashMap::default();
+    // An `included do … delegate … end` runs in the includer: its forwarders are the controller's (`controller_delegates`).
+    let module_delegates: HashMap<crate::ident::ClassId, Vec<crate::expr::Expr>> = app
+        .concern_model_items
+        .iter()
+        .map(|(module, items)| {
+            let calls: Vec<crate::expr::Expr> = items
+                .iter()
+                .filter_map(|item| match item {
+                    crate::dialect::ModelBodyItem::Unknown { expr, .. }
+                        if matches!(&*expr.node, crate::expr::ExprNode::Send { recv: None, method, .. } if method.as_str() == "delegate") =>
+                    {
+                        Some(expr.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            (module.clone(), calls)
+        })
+        .filter(|(_, calls)| !calls.is_empty())
+        .collect();
     for lc in &app.library_classes {
         module_methods.insert(
             lc.name.clone(),
@@ -4577,6 +4599,9 @@ fn splice_concerns_into_controllers(app: &mut App) {
             }
         }
         for module in &queue {
+            for call in module_delegates.get(module).into_iter().flatten() {
+                methods.push(ControllerBodyItem::Unknown { expr: call.clone(), leading_comments: Vec::new(), leading_blank_line: false });
+            }
             for method in module_methods.get(module).into_iter().flatten() {
                 if !defined.insert(method.name.clone()) {
                     continue;

@@ -139,6 +139,9 @@ impl<'a> DelegateEligibility<'a> {
             {
                 return None;
             }
+            if matches!(declaration.prefix, DelegatePrefix::Target) && is_constant_target(declaration.target.as_str()) {
+                return None;
+            }
             let name = generated_name(
                 method.as_str(),
                 &declaration.prefix,
@@ -304,16 +307,16 @@ fn parse_declaration(call: &Expr) -> Option<ParsedDeclaration> {
                         continue;
                     };
                     match key.as_str() {
-                        "to" => {
-                            if let ExprNode::Lit {
-                                value: Literal::Sym { value },
-                            } = &*value.node
-                            {
-                                target = Some(value.clone());
-                            } else {
-                                has_unsupported_option = true;
+                        "to" => match &*value.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => target = Some(value.clone()),
+                            // Rails writes `to.to_s` into the forwarder, so a constant is its own receiver.
+                            ExprNode::Const { path } if !path.is_empty() => {
+                                let rooted = path[0].as_str().is_empty();
+                                let joined = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+                                target = Some(Symbol::from(if rooted { format!("::{joined}") } else { joined }));
                             }
-                        }
+                            _ => has_unsupported_option = true,
+                        },
                         "prefix" => match &*value.node {
                             ExprNode::Lit {
                                 value: Literal::Bool { value: true },
@@ -459,8 +462,17 @@ impl DelegateEligibility<'_> {
 }
 
 fn valid_delegate_target(target: &str) -> bool {
+    if is_constant_target(target) {
+        return true;
+    }
     let name = target.strip_prefix('@').unwrap_or(target);
     valid_identifier(name)
+}
+
+pub(super) fn is_constant_target(target: &str) -> bool {
+    let path = target.strip_prefix("::").unwrap_or(target);
+    !path.is_empty()
+        && path.split("::").all(|seg| seg.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && valid_identifier(seg))
 }
 
 fn valid_delegate_method(name: &str) -> bool {

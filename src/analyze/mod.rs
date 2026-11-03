@@ -4817,28 +4817,24 @@ impl Analyzer {
     /// `dsl_macro_host`: model and library-class concern hosts may declare
     /// first-class DSL macros (`has_markdown` on `ActionText::HasMarkdown`).
     /// Controllers and test modules do not — keep their diagnostics.
-    /// A library class's `@@x` (`mattr_accessor :x, default: v`'s storage):
-    /// what its class-body seed and its own class methods write, as the
-    /// next round's reads of it answer. Only when every write has a type:
-    /// a writer whose value no call types yet may store anything.
+    // Not typed from a write whose value has no type yet (a writer no call reaches), nor as a lone nil: the default alone says nothing of what a writer stores.
     fn library_class_vars(&mut self, app: &App) {
-        fn writes(e: &Expr, out: &mut HashMap<Symbol, Option<Ty>>) {
+        fn writes(e: &Expr, out: &mut HashMap<Symbol, Ty>) {
             if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } = &*e.node
                 && let Some(cvar) = name.as_str().strip_prefix("@@")
+                && let Some(ty) = value.ty.clone().filter(|t| !t.is_open() && !matches!(t, Ty::Untyped))
             {
-                let ty = value.ty.clone().filter(|t| !t.is_open() && !matches!(t, Ty::Untyped));
                 let key = Symbol::from(cvar);
-                let joined = match (out.remove(&key), ty) {
-                    (Some(Some(old)), Some(ty)) => Some(union_of(old, ty)),
-                    (None, ty) => ty,
-                    _ => None,
+                let joined = match out.remove(&key) {
+                    Some(old) => union_of(old, ty),
+                    None => ty,
                 };
                 out.insert(key, joined);
             }
             e.node.for_each_child(&mut |c| writes(c, out));
         }
         for lc in app.library_classes.iter().filter(|lc| !app.models.iter().any(|m| m.name == lc.name)) {
-            let mut vars: HashMap<Symbol, Option<Ty>> = HashMap::default();
+            let mut vars: HashMap<Symbol, Ty> = HashMap::default();
             for init in &lc.class_ivar_initializers {
                 writes(init, &mut vars);
             }
@@ -4847,13 +4843,10 @@ impl Analyzer {
             }
             let cls = self.classes.entry(lc.name.clone()).or_default();
             for (name, ty) in vars {
-                match ty {
-                    Some(ty) => {
-                        cls.class_vars.insert(name, ty);
-                    }
-                    None => {
-                        cls.class_vars.remove(&name);
-                    }
+                if ty == Ty::Nil {
+                    cls.class_vars.remove(&name);
+                } else {
+                    cls.class_vars.insert(name, ty);
                 }
             }
         }

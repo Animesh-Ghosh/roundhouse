@@ -2367,6 +2367,8 @@ impl<'a> BodyTyper<'a> {
                     collect_hash_index_writes(body, &mut writes);
                     let mut pushes = Vec::new();
                     collect_array_pushes(body, &mut pushes);
+                    // Not filled from a write still pending: its known half alone (a lone nil) would be a type the value never has.
+                    let pending = writes.iter().chain(pushes.iter()).any(|(is_ivar, name, ty)| !is_ivar && name == memo && (ty.mentions_unknown() || *ty == Ty::Nil));
                     let filled = match seed_ty {
                         Ty::Hash { key, value } => {
                             let mut key = (*key).clone();
@@ -2394,7 +2396,7 @@ impl<'a> BodyTyper<'a> {
                         }
                         other => other,
                     };
-                    if !filled.is_open() {
+                    if !pending && !filled.is_open() {
                         return filled;
                     }
                 }
