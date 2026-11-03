@@ -240,7 +240,8 @@ fn native_initializers_in_test_inner_classes_keep_the_target_boundary() {
         });
         let gates: Vec<_> = diags.iter().filter(|d| matches!(&d.kind,
             DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "class variable write")).collect();
-        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        // Spinel carries class variables as Ruby does (its test/class_var_* suite).
+        if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
             assert!(gates.is_empty(), "{target:?}: {diags:?}");
         } else {
             assert!(!gates.is_empty(), "{target:?}: {diags:?}");

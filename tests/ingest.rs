@@ -1630,7 +1630,7 @@ end
 }
 
 /// Survey mode substitutes `nil` for an expression it cannot ingest
-/// (an integer wider than i64) and still returns that expression.
+/// (a Rational wider than i64) and still returns that expression.
 /// Accepting it would guard the check with `nil`, so a validation
 /// Rails runs would never run. The call stays a gap.
 #[test]
@@ -1638,7 +1638,7 @@ fn survey_recovered_lambda_condition_on_validates_stays_a_gap() {
     let (model, warnings, gaps) = ingest_widget(
         r#"
 class Widget < ApplicationRecord
-  validates :name, presence: true, if: -> { 9223372036854775808 }
+  validates :name, presence: true, if: -> { 9223372036854775808r }
 end
 "#,
     );
