@@ -4050,12 +4050,6 @@ fn mentions_relation(ty: &crate::ty::Ty) -> bool {
     }
 }
 
-/// This view's ivar name → model snake-singular, for every ivar the
-/// analyzer typed as a model class (`App::view_ivar_types`). The
-/// singular is what Rails' `param_key` yields, so a form built on
-/// `@edit_user` names its fields `user[...]` the way Rails does. Ivars
-/// whose type is anything else (a collection, a scalar, untyped) are
-/// left out — the caller falls back to its own convention.
 /// This view's ivars the analyzer typed `String` (`App::view_ivar_types`).
 fn view_str_ivars(app: &App, view_name: &Symbol) -> crate::det::HashSet<String> {
     app.view_ivar_types
@@ -4070,13 +4064,20 @@ fn view_str_ivars(app: &App, view_name: &Symbol) -> crate::det::HashSet<String> 
         .unwrap_or_default()
 }
 
+/// This view's ivar name → model snake-singular, for every ivar the
+/// analyzer typed as a model class (`App::view_ivar_types`), or as one or
+/// nil (`find_by`, `first`, `last`). The singular is what Rails'
+/// `param_key` yields, so a form built on `@edit_user` names its fields
+/// `user[...]` the way Rails does. Ivars whose type is anything else (a
+/// collection, a scalar, untyped) are left out — the caller falls back to
+/// its own convention.
 fn view_ivar_models(app: &App, view_name: &Symbol) -> crate::det::HashMap<String, String> {
     let Some(ivars) = app.view_ivar_types.get(view_name) else {
         return crate::det::HashMap::default();
     };
     ivars
         .iter()
-        .filter_map(|(name, ty)| match ty {
+        .filter_map(|(name, ty)| match ty.peel_nilable() {
             crate::ty::Ty::Class { id, .. } => {
                 Some((name.as_str().to_string(), app.model_param_key(id.0.as_str())))
             }
