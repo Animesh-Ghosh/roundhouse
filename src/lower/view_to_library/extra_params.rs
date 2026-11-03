@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use crate::det::HashSet;
 
 use crate::dialect::View;
-use crate::expr::{Expr, ExprNode, InterpPart, LValue};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Pattern};
 use crate::ident::Symbol;
 
 use super::{local_assigns_key, rewrite_ivars_to_locals, IvarLocals};
@@ -307,6 +307,22 @@ fn walk_for_extra(e: &Expr, bound: &[String], out: &mut Vec<String>) {
             walk_for_extra(cond, bound, out);
             walk_for_extra(then_branch, bound, out);
             walk_for_extra(else_branch, bound, out);
+        }
+        ExprNode::Case { scrutinee, arms } => {
+            walk_for_extra(scrutinee, bound, out);
+            for arm in arms {
+                if let Pattern::Expr { expr } = &arm.pattern {
+                    walk_for_extra(expr, bound, out);
+                }
+                if let Some(g) = &arm.guard {
+                    walk_for_extra(g, bound, out);
+                }
+                walk_for_extra(&arm.body, bound, out);
+            }
+        }
+        ExprNode::While { cond, body, .. } => {
+            walk_for_extra(cond, bound, out);
+            walk_for_extra(body, bound, out);
         }
         ExprNode::BoolOp { left, right, .. } => {
             walk_for_extra(left, bound, out);
