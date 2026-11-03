@@ -841,17 +841,29 @@ fn remove_named_column(
     schema: &mut Schema,
     dialect: GeneratedExpressionDialect,
 ) -> Result<(), IngestError> {
+    // A reference column is stored under its logical name (`author`), but
+    // Rails names the database column `author_id`, so `remove_column
+    // :posts, :author_id` removes the reference.
+    let stored = schema.tables.get(&Symbol::from(t)).and_then(|table| {
+        let column = c.strip_suffix("_id")?;
+        (!table.columns.iter().any(|col| col.name.as_str() == c)
+            && table.columns.iter().any(|col| {
+                col.name.as_str() == column && matches!(col.col_type, ColumnType::Reference { .. })
+            }))
+        .then(|| column.to_string())
+    });
+    let removed = stored.as_deref().unwrap_or(c);
     if let Some(table) = schema.tables.get(&Symbol::from(t)) {
         refuse_predicate_column(verb, table, c, file)?;
-        refuse_indexed_generated_column_mutation(verb, table, c, file)?;
+        refuse_indexed_generated_column_mutation(verb, table, removed, file)?;
         if table.columns.iter().any(|column| column.generated.is_some()) {
             let mut candidate = table.clone();
-            candidate.columns.retain(|column| column.name.as_str() != c);
+            candidate.columns.retain(|column| column.name.as_str() != removed);
             validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
         }
     }
     if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
-        table.columns.retain(|x| x.name.as_str() != c);
+        table.columns.retain(|x| x.name.as_str() != removed);
         // An index over the removed column goes with it (Rails drops it;
         // left here, the schema SQL indexes a column that is not there).
         let columns = &table.columns;
@@ -2602,6 +2614,18 @@ mod tests {
             "class A < ActiveRecord::Migration[8.1]\n  def change\n    remove_column :posts, :legacy\n    change_table :posts do |t|\n      t.remove :obsolete\n      t.remove_timestamps\n    end\n  end\nend\n",
         ]);
         assert_eq!(index_names(&schema), ["by_views"]);
+    }
+
+    /// A reference is stored under its logical name (`author`), so removing
+    /// Rails' `author_id` column, top-level or in a `change_table`, removes it.
+    #[test]
+    fn removing_a_references_id_column_removes_the_reference() {
+        let schema = fold(&[
+            CREATE_POSTS,
+            "class A < ActiveRecord::Migration[8.1]\n  def change\n    add_reference :posts, :author\n    change_table :posts do |t|\n      t.references :editor\n    end\n  end\nend\n",
+            "class B < ActiveRecord::Migration[8.1]\n  def change\n    remove_column :posts, :author_id\n    change_table :posts do |t|\n      t.remove :editor_id\n    end\n  end\nend\n",
+        ]);
+        assert_eq!(col_names(&schema, "posts"), ["id", "title", "body", "legacy", "obsolete", "views"]);
     }
 
     /// A `t` the walk would not reach as a call's receiver (under a
