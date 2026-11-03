@@ -20411,6 +20411,8 @@ mod console_only_definitions;
 mod open_classes;
 #[path = "emit_and_run/parameterized_mailer.rs"]
 mod parameterized_mailer;
+#[path = "emit_and_run/change_table_migrations.rs"]
+mod change_table_migrations;
 #[path = "emit_and_run/model_delegate_to_reader.rs"]
 mod model_delegate_to_reader;
 #[path = "emit_and_run/private_calls.rs"]
