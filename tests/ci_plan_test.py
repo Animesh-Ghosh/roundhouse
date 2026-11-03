@@ -124,6 +124,18 @@ class Routing(unittest.TestCase):
         self.assertIn("browser-smoke-typescript", wasm["jobs"])
         self.assertNotIn("compare", wasm["jobs"])
 
+    def test_guide_and_docs_renderer_select_the_site_build(self):
+        for path in ["docs-site/_config.yml", "docs-site/_plugins/repo_docs.rb", "docs/guide/install.md"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertTrue(plan["site"])
+                self.assertIn("build-site", plan["jobs"])
+        # Other published docs refresh with the next site build rather than
+        # pulling in the WASM build and browser smoke on their own.
+        for path in ["docs/pipeline/runtime.md", "RELEASES.md", "docs/roda-sequel-plan.md"]:
+            with self.subTest(path=path):
+                self.assertFalse(ci.select([path])["site"])
+
     def test_shared_emitters_select_cross_target_full_coverage(self):
         for path in [
             "src/emit/shared/schema_sql.rs",

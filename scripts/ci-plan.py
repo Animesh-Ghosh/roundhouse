@@ -813,7 +813,9 @@ def select(
         if path.startswith("wasm/"):
             wasm = True
             reasons.append(f"{path}: WASM/browser compiler")
-        if path.startswith(("site/", "docs/guide/")):
+        # The user guide and the docs renderer rebuild the site at once; the
+        # other published docs refresh with the next site build.
+        if path.startswith(("site/", "docs/guide/", "docs-site/")):
             site = wasm = True
         if (
             path.startswith("e2e/") and not path.startswith("e2e/campfire/")

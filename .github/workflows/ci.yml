@@ -3249,6 +3249,25 @@ jobs:
             mkdir -p _site
           fi
 
+      # The docs pages → _site/docs/. Jekyll renders docs/*.md and
+      # RELEASES.md in place (docs-site/_plugins/repo_docs.rb) and
+      # replaces the guide pages `--site` wrote, adding the contributor
+      # and pipeline docs. The build fails if a page doesn't convert.
+      - name: Install the docs site's gems
+        if: needs.plan.outputs.site == 'true'
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY }}
+          bundler-cache: true
+          working-directory: ./docs-site
+      - name: Render the docs pages (→ _site/docs)
+        if: needs.plan.outputs.site == 'true'
+        run: |
+          (cd docs-site && bundle exec jekyll build --destination "$RUNNER_TEMP/docs-site")
+          rm -rf _site/docs
+          cp -R "$RUNNER_TEMP/docs-site/docs" _site/docs
+          echo "docs pages:"; find _site/docs -name '*.html' | sort
+
       # Live SharedWorker blog demo → _site/blog/. Emits real-blog under
       # the worker profile, vite-builds it with ROUNDHOUSE_BASE set to the
       # Pages mount path, and drops dist/ alongside the static site. The

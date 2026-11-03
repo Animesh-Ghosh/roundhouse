@@ -1,0 +1,10 @@
+source "https://rubygems.org"
+
+# The docs pages of roundhouse-rb.dev: docs/*.md rendered in place (see _plugins/repo_docs.rb).
+gem "jekyll", "~> 4.4"
+# CommonMark + GitHub extensions, as GitHub and src/guide.rs render these files.
+gem "commonmarker", "~> 2.5"
+
+group :development do
+  gem "webrick", "~> 1.9" # jekyll serve
+end
