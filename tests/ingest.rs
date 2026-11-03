@@ -2199,8 +2199,10 @@ fn a_literal_classvar_initializer_is_kept_and_an_expression_refused() {
     use roundhouse::ingest::ingest_library_classes;
 
     // ancestry's `@@default_update_strategy = :ruby`: a literal reads no
-    // other state, so it is kept as the class's initializer. A computed
-    // value is refused: it would observe the emitted body's order.
+    // other state, so it is kept as the class's initializer. A value that
+    // reads the body's own methods is refused: it would observe the emitted
+    // body's order (one that reads only constants is kept; see
+    // `emit_and_run::class_variable_computed_initializer`).
     let classes = ingest_library_classes(b"class Twitter\n  @@TIMEOUT = 30\nend\n", "extras/twitter.rb")
         .expect("a literal class-variable initializer ingests");
     assert!(
@@ -2209,7 +2211,7 @@ fn a_literal_classvar_initializer_is_kept_and_an_expression_refused() {
         classes[0].class_ivar_initializers
     );
     assert!(
-        ingest_library_classes(b"class Twitter\n  @@TIMEOUT = ENV.fetch(\"T\")\nend\n", "extras/twitter.rb").is_err(),
+        ingest_library_classes(b"class Twitter\n  @@TIMEOUT = default_timeout\nend\n", "extras/twitter.rb").is_err(),
         "a computed class-variable initializer must be refused"
     );
 }
