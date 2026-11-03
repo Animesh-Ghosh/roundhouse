@@ -3212,6 +3212,7 @@ end
     super::unreachable_views::mark(&mut app);
     super::settled_conditionals::settle(&mut app);
     super::job_class_lookup::rewrite(&mut app);
+    super::uncalled_definers::mark(&mut app);
     super::absence_guards::mark(&mut app);
     // After every pass that changes a controller's methods, the concern
     // splice and the class-body macros above all: the lowering clones

@@ -201,6 +201,8 @@ pub const SINGLETON_NAME_ERROR: u64 = 1 << 53;
 pub const ABSENCE_GUARDED: u64 = 1 << 54;
 /// A `raise NameError` standing for such a read of a constant nothing defines.
 pub const GUARDED_NAME_ERROR: u64 = 1 << 55;
+/// A nested `def` in a method no call reaches: its load-time calls were expanded in place.
+pub const UNCALLED_DEFINER: u64 = 1 << 56;
 
 /// On a route-helper call `lower::route_format_suffix` renamed for its
 /// literal `format:` (`widget_url(w, format: :json)` to

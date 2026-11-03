@@ -485,7 +485,11 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
             if let Some(DiagnosticKind::Unsupported { target, construct, detail }) = &expr.diagnostic()
                 && construct.as_str() != crate::diagnostic::CONSTRUCTOR_KEYWORD_ARGUMENTS
             {
-                out.push(Diagnostic::unsupported(expr.span, target.clone(), construct.as_str(), detail.clone()));
+                let mut d = Diagnostic::unsupported(expr.span, target.clone(), construct.as_str(), detail.clone());
+                if expr.decisions & crate::expr::UNCALLED_DEFINER != 0 {
+                    d.severity = crate::diagnostic::Severity::Warning;
+                }
+                out.push(d);
             }
         }
         // Not dropped with the policy's other misses: the typer stamps it only in place of an Object-extension refusal.
@@ -970,6 +974,7 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
                 {
                     crate::diagnostic::Severity::Warning
                 }
+                DiagnosticKind::Unsupported { .. } if expr.decisions & crate::expr::UNCALLED_DEFINER != 0 => crate::diagnostic::Severity::Warning,
                 _ => Diagnostic::default_severity(kind),
             };
             out.push(Diagnostic { span: expr.span, kind: kind.clone(), severity, message });
