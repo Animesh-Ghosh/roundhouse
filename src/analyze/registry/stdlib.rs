@@ -622,6 +622,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         sq.class_methods.insert(Symbol::from("deprecator"), Ty::Class { id: ClassId(Symbol::from("SolidQueue::Deprecator")), args: vec![].into() });
     }
     register_stdlib_class(classes, "SolidQueue::Deprecator", &[], &[("warn", Ty::Nil)]);
+    // importmap-rails' map object (runtime/spinel/importmap.rb), an engine's `mattr_accessor :importmap` default.
+    register_stdlib_class(classes, "Importmap::Map", &[("new", Ty::Class { id: ClassId(Symbol::from("Importmap::Map")), args: vec![].into() })], &[]);
     // Ruby's `Hash.ruby2_keywords_hash(hash)`: a copy of the Hash, flagged to splat as keywords.
     classes.entry(ClassId(Symbol::from("Hash"))).or_default().class_methods.entry(Symbol::from("ruby2_keywords_hash")).or_insert(
         Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },

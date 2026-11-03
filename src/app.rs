@@ -130,6 +130,11 @@ pub struct App {
     /// None when the app has no importmap.rb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub importmap: Option<Importmap>,
+    /// An engine's own import map (`MissionControl::Jobs.importmap`), by
+    /// the module it is drawn onto: `Importmap.pins_for_<module>` in the
+    /// emitted tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_importmaps: Vec<(String, Importmap)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inertia: Option<InertiaConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1203,6 +1208,7 @@ impl App {
             seeds: None,
             boot_program: Vec::new(),
             importmap: None,
+            engine_importmaps: Vec::new(),
             inertia: None,
             vite_manifest: None,
             stylesheets: Vec::new(),

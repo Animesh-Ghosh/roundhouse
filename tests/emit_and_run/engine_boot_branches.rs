@@ -19,6 +19,7 @@ loader.setup
 
 module Relay
   mattr_accessor :adapters, default: Set.new
+  mattr_accessor :importmap, default: Importmap::Map.new
 end
 "##;
 
@@ -38,7 +39,15 @@ const ENGINE: &str = r##"module Relay
 
     initializer "relay.assets" do |app|
       app.config.assets.paths << root.join("app/assets/stylesheets")
+      app.config.assets.paths << root.join("app/javascript")
       app.config.assets.precompile += %w[ relay_manifest ]
+    end
+
+    initializer "relay.importmap", after: "importmap" do |app|
+      Relay.importmap.draw(root.join("config/importmap.rb"))
+      if app.config.importmap.sweep_cache && app.config.reloading_enabled?
+        Relay.importmap.cache_sweeper(watches: root.join("app/javascript"))
+      end
     end
 
     config.before_initialize do
@@ -80,6 +89,13 @@ fn app() -> emit_and_run::Overlay {
         .write(&format!("{GEM}/lib/relay/resque_ext.rb"), RESQUE_EXT)
         .write(&format!("{GEM}/lib/relay/solid_queue_ext.rb"), SOLID_QUEUE_EXT)
         .write(&format!("{GEM}/app/assets/stylesheets/relay/panel.css"), "body { color: red; }\n")
+        .write(
+            &format!("{GEM}/config/importmap.rb"),
+            "pin \"application\", to: \"relay/application.js\", preload: true\npin_all_from Relay::Engine.root.join(\"app/javascript/relay/controllers\"), under: \"controllers\", to: \"relay/controllers\"\n",
+        )
+        .write(&format!("{GEM}/app/javascript/relay/application.js"), "import \"controllers\"\n")
+        .write(&format!("{GEM}/app/javascript/relay/controllers/index.js"), "export {}\n")
+        .write(&format!("{GEM}/app/javascript/relay/controllers/form_controller.js"), "export default class {}\n")
 }
 
 #[test]
@@ -110,6 +126,8 @@ fn boot_replays_the_engines_before_initialize() {
     let run = app().run_ruby(
         "raise Relay.adapters.to_a.inspect unless Relay.adapters.to_a == [:solid_queue]\n\
          raise \"label\" unless ActiveJob::QueueAdapters::SolidQueueAdapter.new.relay_label == \"solid\"\n\
+         pins = Importmap.pins_for_relay.map { |p| [p[:name], p[:path]] }\n\
+         raise pins.inspect unless pins == [[\"application\", \"/assets/relay/application.js\"], [\"controllers/form_controller\", \"/assets/relay/controllers/form_controller.js\"], [\"controllers\", \"/assets/relay/controllers/index.js\"]]\n\
          raise \"asset\" unless Rails.application.propshaft_asset_path(\"relay/panel.css\").match?(%r{\\A/assets/relay/panel-\\h+\\.css\\z})\n\
          puts \"engine boot replay passed\"\n",
     );

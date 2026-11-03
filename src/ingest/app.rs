@@ -2580,6 +2580,15 @@ end
         }
     }
 
+    // An engine's own import map, drawn at boot onto its module (`engine_config::importmap_initializer`).
+    for engine in super::engine_config::importmaps() {
+        let file = engine.file.display().to_string();
+        let Ok(source) = vfs.read_to_string(&engine.file) else { continue };
+        if let Some(importmap) = unwrap_or_record(ingest_importmap_of(vfs, &source, &engine.root, &file, Some(&engine.engine)))? {
+            app.engine_importmaps.push((engine.module.clone(), importmap));
+        }
+    }
+
     app.vite_manifest = super::vite::read_manifest(vfs, dir);
     let vite_digest = app.vite_manifest.as_ref().map(|m| m.digest.clone());
     app.inertia = super::inertia::load_inertia_config(vfs, dir, vite_digest.as_deref())?;
@@ -7976,6 +7985,19 @@ fn ingest_importmap<V: Vfs + ?Sized>(
     app_dir: &Path,
     file: &str,
 ) -> IngestResult<crate::app::Importmap> {
+    ingest_importmap_of(vfs, source, app_dir, file, None)
+}
+
+/// [`ingest_importmap`] for an importmap whose `pin_all_from` may name
+/// its directory as `<engine>.root.join("…")`: `engine` is that engine
+/// class's path, and `app_dir` its root.
+pub(super) fn ingest_importmap_of<V: Vfs + ?Sized>(
+    vfs: &V,
+    source: &str,
+    app_dir: &Path,
+    file: &str,
+    engine: Option<&[String]>,
+) -> IngestResult<crate::app::Importmap> {
     use crate::app::{Importmap, ImportmapPin};
     super::sources::register(file, source);
     let result = super::prism::parse(source.as_bytes(), file);
@@ -8029,13 +8051,15 @@ fn ingest_importmap<V: Vfs + ?Sized>(
                 let Some(dir_arg) = args.first() else {
                     continue;
                 };
-                let Some(dir_str) = string_literal_value(dir_arg) else {
+                let Some(dir_str) = string_literal_value(dir_arg).or_else(|| engine.and_then(|e| engine_root_join(dir_arg, e))) else {
                     continue;
                 };
                 let under = args
                     .iter()
                     .skip(1)
                     .find_map(|a| extract_kwarg_str(a, "under"));
+                // importmap-rails' `to:`: the asset path the files live under, when it is not `under:`.
+                let to = args.iter().skip(1).find_map(|a| extract_kwarg_str(a, "to")).or_else(|| under.clone());
                 let walk_dir = app_dir.join(&dir_str);
                 if !vfs.is_dir(&walk_dir) {
                     continue;
@@ -8072,7 +8096,7 @@ fn ingest_importmap<V: Vfs + ?Sized>(
                         (None, false) => stem.clone(),
                     };
                     let file = rel.strip_suffix(".js").unwrap_or(rel);
-                    let path = match &under {
+                    let path = match &to {
                         Some(ns) => format!("/assets/{ns}/{file}.js"),
                         None => format!("/assets/{file}.js"),
                     };
@@ -8100,6 +8124,22 @@ fn collect_js_tree<V: Vfs + ?Sized>(
         }
     }
     Ok(())
+}
+
+/// `"lit"` for `<engine>.root.join("lit")`, `engine` the engine class's path.
+fn engine_root_join(node: &Node<'_>, engine: &[String]) -> Option<String> {
+    let join = node.as_call_node()?;
+    let root = join.receiver()?.as_call_node()?;
+    if super::util::constant_id_str(&join.name()) != "join" || super::util::constant_id_str(&root.name()) != "root" {
+        return None;
+    }
+    if super::util::constant_path_of(&root.receiver()?)?.as_slice() != engine {
+        return None;
+    }
+    let args: Vec<Node<'_>> = join.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    let [arg] = args.as_slice() else { return None };
+    let rel = string_literal_value(arg)?;
+    (!rel.contains("..") && !rel.starts_with('/')).then_some(rel)
 }
 
 fn string_literal_value(node: &Node<'_>) -> Option<String> {

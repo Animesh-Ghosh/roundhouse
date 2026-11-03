@@ -155,8 +155,11 @@ fn required_files<V: Vfs + ?Sized>(
     // An engine's app/ is no require target: Rails puts it on the host's load paths, so it is the gem's code too
     if super::app::declares_rails_engine(vfs, &lib) {
         // Its route set too, which the host's `mount` draws.
-        if vfs.exists(&gem.join("config/routes.rb")) && !vfs.is_symlink(&gem.join("config/routes.rb")) {
-            seen.insert(PathBuf::from("config/routes.rb"));
+        // And its own import map, which an initializer of its draws (`engine_config::importmap_initializer`).
+        for file in ["config/routes.rb", "config/importmap.rb"] {
+            if vfs.exists(&gem.join(file)) && !vfs.is_symlink(&gem.join(file)) {
+                seen.insert(PathBuf::from(file));
+            }
         }
         let mut dirs = vec![gem.join("app")];
         while let Some(dir) = dirs.pop() {

@@ -180,6 +180,7 @@ fn tiny_blog_round_trips() {
         seeds: None,
         boot_program: Vec::new(),
         importmap: None,
+        engine_importmaps: Vec::new(),
         inertia: None,
         vite_manifest: None,
         stylesheets: vec![],

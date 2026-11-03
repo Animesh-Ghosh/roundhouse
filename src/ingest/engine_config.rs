@@ -88,6 +88,7 @@ struct State {
     /// `initializer`s whose only work is adding an engine's directories to the asset paths, and those directories.
     asset_initializers: Vec<(String, u32)>,
     asset_dirs: Vec<PathBuf>,
+    importmaps: Vec<EngineImportmap>,
 }
 
 /// An engine's `before_initialize` / `after_initialize` block, read into
@@ -127,6 +128,7 @@ pub(super) fn prepare<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf]) {
     state.replays = settled.replays;
     state.asset_initializers = settled.asset_initializers;
     state.asset_dirs = settled.asset_dirs;
+    state.importmaps = settled.importmaps;
     state.namespaces = forwarders.iter().map(|f| f.path.clone()).collect();
     STATE.with(|s| *s.borrow_mut() = state);
 }
@@ -1011,6 +1013,17 @@ struct Settled {
     replays: Vec<Replay>,
     asset_initializers: Vec<(String, u32)>,
     asset_dirs: Vec<PathBuf>,
+    importmaps: Vec<EngineImportmap>,
+}
+
+/// An engine's own import map, drawn from its `config/importmap.rb` onto
+/// `<module>.importmap` (`importmap_initializer`).
+#[derive(Clone, Debug)]
+pub(super) struct EngineImportmap {
+    pub(super) module: String,
+    pub(super) file: PathBuf,
+    pub(super) root: PathBuf,
+    pub(super) engine: Vec<String>,
 }
 
 fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forwarders: &[Forwarder]) -> Settled {
@@ -1036,7 +1049,11 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
             }
         }
     }
-    let mut settled = Settled { dead: Vec::new(), quiet: Vec::new(), replays: Vec::new(), asset_initializers: Vec::new(), asset_dirs: Vec::new() };
+    let mut settled = Settled { dead: Vec::new(), quiet: Vec::new(), replays: Vec::new(), asset_initializers: Vec::new(), asset_dirs: Vec::new(), importmaps: Vec::new() };
+    // importmap-rails sweeps its cache only in development and test, unless the app's own config says otherwise.
+    let sweeps = [APPLICATION, "config/environments/production.rb"]
+        .iter()
+        .any(|f| vfs.read_to_string(&dir.join(f)).is_ok_and(|t| t.contains("sweep_cache")));
     let propshaft = vfs
         .read_to_string(&dir.join("Gemfile.lock"))
         .ok()
@@ -1053,10 +1070,11 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
             }
             let lib_sources: Vec<Vec<u8>> = super::app::read_rb_files(vfs, lib).unwrap_or_default().iter().filter_map(|f| vfs.read(f).ok()).collect();
             let parsed = super::prism::parse_silent(&source);
-            for (_, class) in find_all_classes_with_scope(&parsed.node()) {
+            for (scope, class) in find_all_classes_with_scope(&parsed.node()) {
                 let is_engine = class.superclass().and_then(|s| constant_path_of(&s)).is_some_and(|p| p == ["Rails", "Engine"]);
                 let Some(body) = class.body().filter(|_| is_engine) else { continue };
                 let hooks = flatten_statements(class.body().unwrap());
+                let engine_path: Vec<String> = scope.iter().cloned().chain(constant_path_of(&class.constant_path()).unwrap_or_default()).collect();
                 let mut modules = HashMap::default();
                 for fw in forwarders.iter().filter(|f| f.lib == *lib) {
                     for (attr, value) in defaults(&lib_sources, &fw.module) {
@@ -1114,6 +1132,13 @@ fn dead_branches<V: Vfs + ?Sized>(vfs: &V, dir: &Path, libs: &[PathBuf], forward
                     } else if let Some((app, hook)) = initializer_block(&stmt) {
                         // Not one the ledger already takes: a quiet one runs nothing, and a load hook's mixins are carried.
                         if settled.quiet.iter().any(|(f, at, _)| *f == boot.file && *at == start) {
+                            continue;
+                        }
+                        if let Some(root) = lib.parent()
+                            && let Some((module, file)) = importmap_initializer(&hook, app.as_deref(), &sweeps)
+                        {
+                            settled.asset_initializers.push((boot.file.clone(), start));
+                            settled.importmaps.push(EngineImportmap { module, file: root.join(file), root: root.to_path_buf(), engine: engine_path.clone() });
                             continue;
                         }
                         if propshaft
@@ -1213,6 +1238,68 @@ fn prepend_overlaps(app: &App, name: &crate::ident::ClassId, mixins: &[crate::id
             .find(|lc| lc.name == *m)
             .is_some_and(|module| module.methods.iter().any(|mm| own.methods.iter().any(|om| om.name == mm.name && om.receiver == mm.receiver)))
     })
+}
+
+/// The engines' own import maps (`App::engine_importmaps`).
+pub(super) fn importmaps() -> Vec<EngineImportmap> {
+    STATE.with(|s| s.borrow().importmaps.clone())
+}
+
+/// `M.importmap.draw(root.join("config/importmap.rb"))`, beside the cache
+/// sweeper importmap-rails installs only where it sweeps (development and
+/// test, `sweeps` when the app's config says otherwise): the module and
+/// the file, relative to the engine's root.
+fn importmap_initializer(statements: &[Node<'_>], app: Option<&str>, sweeps: &bool) -> Option<(String, String)> {
+    let app = app?;
+    let mut drawn = None;
+    for stmt in statements {
+        if let Some(call) = stmt.as_call_node()
+            && constant_id_str(&call.name()) == "draw"
+            && drawn.is_none()
+        {
+            let importmap = call.receiver()?.as_call_node()?;
+            if constant_id_str(&importmap.name()) != "importmap" || importmap.arguments().is_some() {
+                return None;
+            }
+            let module = constant_path_of(&importmap.receiver()?)?.join("::");
+            let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            let [arg] = args.as_slice() else { return None };
+            let join = arg.as_call_node()?;
+            let root = join.receiver()?.as_call_node()?;
+            if constant_id_str(&join.name()) != "join" || constant_id_str(&root.name()) != "root" || root.receiver().is_some() {
+                return None;
+            }
+            let parts: Vec<Node<'_>> = join.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            let [part] = parts.as_slice() else { return None };
+            let rel = String::from_utf8_lossy(part.as_string_node()?.unescaped()).into_owned();
+            if rel.contains("..") || rel.starts_with('/') {
+                return None;
+            }
+            drawn = Some((module, rel));
+            continue;
+        }
+        // `if app.config.importmap.sweep_cache && …`: importmap-rails' default leaves it false in production.
+        if let Some(n) = stmt.as_if_node()
+            && !*sweeps
+            && n.subsequent().is_none()
+            && reads_sweep_cache(&n.predicate(), app)
+        {
+            continue;
+        }
+        return None;
+    }
+    drawn
+}
+
+fn reads_sweep_cache(node: &Node<'_>, app: &str) -> bool {
+    let and_left = node.as_and_node().map(|a| a.left());
+    let Some(sweep) = and_left.as_ref().unwrap_or(node).as_call_node() else { return false };
+    let Some(importmap) = sweep.receiver().and_then(|r| r.as_call_node()) else { return false };
+    let Some(config) = importmap.receiver().and_then(|r| r.as_call_node()) else { return false };
+    constant_id_str(&sweep.name()) == "sweep_cache"
+        && constant_id_str(&importmap.name()) == "importmap"
+        && constant_id_str(&config.name()) == "config"
+        && config.receiver().and_then(|r| r.as_local_variable_read_node()).is_some_and(|r| constant_id_str(&r.name()) == app)
 }
 
 /// The engine directories Propshaft serves beside the app's (`propshaft::ingest`).
