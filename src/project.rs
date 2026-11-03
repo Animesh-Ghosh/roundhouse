@@ -1986,13 +1986,14 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
             {
                 Some("lambda optional, keyword or keyword-rest parameters")
             }
+            // Spinel carries Ruby's class variables, shared down the hierarchy (its test/class_var_* suite).
             ExprNode::Assign { target: LValue::Var { name, .. }, .. }
             | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
-                if name.as_str().starts_with("@@") => Some("class variable write"),
+                if name.as_str().starts_with("@@") && target != BuildTarget::Spinel => Some("class variable write"),
             ExprNode::Assign { target: LValue::Var { name, .. }, .. }
             | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. }
                 if name.as_str().starts_with('$') => Some("global variable write"),
-            ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => Some("class variable read"),
+            ExprNode::Var { name, .. } if name.as_str().starts_with("@@") && target != BuildTarget::Spinel => Some("class variable read"),
             _ => None,
         };
         if let Some(construct) = construct {

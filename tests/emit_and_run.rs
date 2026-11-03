@@ -20532,6 +20532,8 @@ mod job_class_safe_constantize;
 mod load_time_definer;
 #[path = "emit_and_run/gem_source_shapes.rs"]
 mod gem_source_shapes;
+#[path = "emit_and_run/settled_builtin_probe.rs"]
+mod settled_builtin_probe;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;
