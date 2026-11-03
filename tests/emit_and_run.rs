@@ -20518,6 +20518,8 @@ mod computed_class_constants;
 mod guarded_absent_constant;
 #[path = "emit_and_run/settled_conditional_definition.rs"]
 mod settled_conditional_definition;
+#[path = "emit_and_run/append_features_bridge.rs"]
+mod append_features_bridge;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;

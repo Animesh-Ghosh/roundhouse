@@ -2357,7 +2357,8 @@ fn included_hook_parameter(def: &ruby_prism::DefNode<'_>, in_singleton_class: bo
         None if in_singleton_class => {}
         _ => return None,
     }
-    if constant_id_str(&def.name()) != "included" {
+    // `append_features(base)` with its `super` is the hook `included` runs after: Ruby's include, then the extend.
+    if !matches!(constant_id_str(&def.name()), "included" | "append_features") {
         return None;
     }
     let params = def.parameters()?;
@@ -2386,7 +2387,11 @@ fn is_class_methods_bridge(def: &ruby_prism::DefNode<'_>, in_singleton_class: bo
     let Some(param_name) = included_hook_parameter(def, in_singleton_class) else { return false };
     let Some(body) = def.body() else { return false };
     let stmts = flatten_statements(body);
-    let [stmt] = &stmts[..] else { return false };
+    let stmt = match &stmts[..] {
+        [stmt] if constant_id_str(&def.name()) == "included" => stmt,
+        [first, stmt] if constant_id_str(&def.name()) == "append_features" && first.as_forwarding_super_node().is_some() => stmt,
+        _ => return false,
+    };
     let Some(call) = stmt.as_call_node() else { return false };
     if constant_id_str(&call.name()) != "extend" || call.block().is_some() {
         return false;
