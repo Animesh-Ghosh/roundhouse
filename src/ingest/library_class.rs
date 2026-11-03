@@ -1950,9 +1950,10 @@ impl DeclBody {
         // cannot observe one another, so emitting them in a different order
         // than the source wrote them changes nothing (lobsters' `Twitter`:
         // `@@CONSUMER_KEY = nil` beside `MAX_TWEET_LEN = 280`).
-        let order_independent = self.constants.iter().all(|(_, value)| is_literal_value(value))
+        // Not only literals: a value that reads no class variable, ivar, local or implicit-self method sees the same constants in the emitted order, which keeps the source's (tzinfo's `@@search_path = DEFAULT_SEARCH_PATH.dup`).
+        let order_independent = self.constants.iter().all(|(_, value)| is_order_safe_value(value))
             && self.class_initializers.iter().all(|expr| match &*expr.node {
-                ExprNode::Assign { value, .. } => is_literal_value(value),
+                ExprNode::Assign { value, .. } => is_order_safe_value(value),
                 _ => false,
             });
         let literal_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
@@ -1962,15 +1963,24 @@ impl DeclBody {
         // Not `include`: an ancestor's `@@x` is shared with this body's. An extended module's methods read their own (rolify's `extend Configure` beside `@@resource_types = []`).
         let mixins_only = self.unknown_calls.iter().all(|call| match &*call.node {
             ExprNode::Send { recv: None, method, args, block: None, .. } => {
-                method.as_str() == "extend"
+                (method.as_str() == "extend"
                     && !args.is_empty()
-                    && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. }))
+                    && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. })))
+                    // A visibility declaration over names reads no class variable.
+                    || (matches!(method.as_str(), "private_constant" | "public_constant" | "private_class_method" | "public_class_method")
+                        && args.iter().all(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } })))
             }
             _ => false,
         });
+        let safe_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
+            ExprNode::Assign { value, .. } => is_order_safe_value(value),
+            _ => false,
+        });
+        // Not an ancestor whose `@@x` this body's would share: Ruby's own mixins hold none.
+        let builtin_includes = self.includes.iter().all(|i| matches!(i.0.as_str(), "Comparable" | "Enumerable" | "Kernel"));
         if has_source_ordered_init
-            && ((!self.unknown_calls.is_empty() && !(literal_inits && mixins_only))
-                || !self.includes.is_empty()
+            && ((!self.unknown_calls.is_empty() && !((literal_inits || safe_inits) && mixins_only))
+                || !builtin_includes
                 || (!self.constants.is_empty() && !order_independent))
         {
             return Err(IngestError::Unsupported {
@@ -1979,6 +1989,22 @@ impl DeclBody {
             });
         }
         Ok(())
+    }
+}
+
+/// A value whose answer does not depend on where the class body runs it:
+/// it reads constants and calls their methods, but no class variable, ivar,
+/// local or method of the body's own.
+fn is_order_safe_value(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef => false,
+        ExprNode::Send { recv: None, .. } => false,
+        ExprNode::Send { block: Some(_), .. } => false,
+        _ => {
+            let mut ok = true;
+            e.node.for_each_child(&mut |c| ok = ok && is_order_safe_value(c));
+            ok
+        }
     }
 }
 
@@ -2888,7 +2914,7 @@ fn walk_decl_body_with_visibility<'pr>(
         if stmt.as_class_variable_write_node().is_some() {
             let initializer = ingest_expr(&stmt, file)?;
             // Not any value: one that reads other state would observe the order the emitted body runs in
-            if !matches!(&*initializer.node, ExprNode::Assign { value, .. } if is_literal_value(value)) {
+            if !matches!(&*initializer.node, ExprNode::Assign { value, .. } if is_order_safe_value(value)) {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
                     message: "class-variable initializer with a non-literal value".into(),

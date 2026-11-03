@@ -20522,6 +20522,8 @@ mod settled_conditional_definition;
 mod append_features_bridge;
 #[path = "emit_and_run/io_seek_date_reform_constants.rs"]
 mod io_seek_date_reform_constants;
+#[path = "emit_and_run/class_variable_computed_initializer.rs"]
+mod class_variable_computed_initializer;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;
