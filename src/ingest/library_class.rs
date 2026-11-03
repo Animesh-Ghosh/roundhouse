@@ -4721,6 +4721,9 @@ pub struct ConcernClassMethodSpans {
     pub concern_extensions: Vec<Span>,
     pub concern_calls: Vec<Span>,
     pub has_other_extensions: bool,
+    /// The module's own `class << self` defs among `methods`: Ruby defines
+    /// them on the module itself, which ingest also copies onto includers.
+    pub own_singleton: Vec<Span>,
 }
 
 pub fn ingest_concern_class_method_spans(
@@ -4764,6 +4767,7 @@ pub fn ingest_concern_class_method_spans(
         let mut concern_extensions = Vec::new();
         let mut concern_calls = Vec::new();
         let mut has_other_extensions = false;
+        let mut own_singleton: Vec<Span> = Vec::new();
         for stmt in flatten_statements(body) {
             if let Some(m) = stmt.as_module_node() {
                 if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
@@ -4837,6 +4841,7 @@ pub fn ingest_concern_class_method_spans(
                 // defs so an includer receives them. `module_function`
                 // is not this node and stays on the module.
                 if singleton.expression().as_self_node().is_some() {
+                    defs_in(singleton.body(), file, &mut own_singleton);
                     defs_in(singleton.body(), file, &mut spans);
                     // Except the module's own `def included(base)`: that
                     // hook runs when the module is included and is not
@@ -4881,6 +4886,7 @@ pub fn ingest_concern_class_method_spans(
                 concern_extensions,
                 concern_calls,
                 has_other_extensions,
+                own_singleton,
             });
         }
     }
