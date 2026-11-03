@@ -20502,6 +20502,8 @@ mod backtrace_cleaner;
 mod method_lookup_order;
 #[path = "emit_and_run/inquiry_safe_nav.rs"]
 mod inquiry_safe_nav;
+#[path = "emit_and_run/record_as_json.rs"]
+mod record_as_json;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;
