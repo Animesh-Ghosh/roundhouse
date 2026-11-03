@@ -39,8 +39,12 @@
 //! `config.active_job.queue_adapter`, and `app.credentials` /
 //! `app.class.module_parent.name` read off the host. `Klass.include M` /
 //! `Klass.prepend M` on an adapter class becomes the reopen that mixes
-//! `M` in (`carry_boot_mixin`). A block that reads anything else of
-//! `config` or the app is not replayed and stays on the ledger.
+//! `M` in (`carry_boot_mixin`). `ActiveJob::QueueAdapters.lookup(name).new`
+//! becomes a `case` over the adapters the app can run (async and the one
+//! it configures), raising the `NameError` Rails' constant lookup does for
+//! any other name. An initializer whose load hooks `on_load_reopen`
+//! carries is not replayed. A block that reads anything else of `config`
+//! or the app is not replayed and stays on the ledger.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -1509,6 +1513,10 @@ impl Replayer<'_> {
 
     /// The expression with the host's adapter and app module written in; `None` for any other read of `config` or the app.
     fn value(&self, mut expr: Expr) -> Option<Expr> {
+        if let Some(name) = adapter_lookup_new(&expr) {
+            let name = self.value(name.clone())?;
+            return self.adapter_instance(name, expr.span);
+        }
         if let Some(chain) = expr_config_chain(&expr) {
             if chain != ["active_job", "queue_adapter"] {
                 return None;
@@ -1545,6 +1553,59 @@ impl Replayer<'_> {
         });
         ok.then_some(expr)
     }
+}
+
+impl Replayer<'_> {
+    /// Rails' `QueueAdapters.lookup(name).new` reads the constant `"#{name.camelize}Adapter"`; the
+    /// adapters this app can run are async and the one it configures, and any other name is the
+    /// `NameError` that constant lookup raises.
+    fn adapter_instance(&self, name: Expr, span: crate::span::Span) -> Option<Expr> {
+        let mut adapters = vec![("async", "AsyncAdapter")];
+        match self.queue_adapter {
+            Val::Nil => {}
+            Val::Sym(s) if s == "async" => {}
+            Val::Sym(s) if s == "solid_queue" => adapters.push(("solid_queue", "SolidQueueAdapter")),
+            _ => return None,
+        }
+        let sym = |s: &str| Symbol::from(s);
+        let send = |recv: Option<Expr>, method: &str, args: Vec<Expr>| {
+            Expr::new(span, ExprNode::Send { recv, method: sym(method), args, block: None, parenthesized: true })
+        };
+        let scrutinee = send(Some(name.clone()), "to_s", Vec::new());
+        let mut arms: Vec<crate::expr::Arm> = adapters
+            .into_iter()
+            .map(|(key, class)| crate::expr::Arm {
+                pattern: crate::expr::Pattern::Lit { value: Literal::Str { value: key.to_string() } },
+                guard: None,
+                body: send(Some(Expr::new(span, ExprNode::Const { path: vec![sym("ActiveJob"), sym("QueueAdapters"), sym(class)] })), "new", Vec::new()),
+            })
+            .collect();
+        let message = Expr::new(
+            span,
+            ExprNode::StringInterp {
+                parts: vec![
+                    crate::expr::InterpPart::Text { value: "uninitialized constant ActiveJob::QueueAdapters::".to_string() },
+                    crate::expr::InterpPart::Expr { expr: send(Some(send(Some(name), "to_s", Vec::new())), "camelize", Vec::new()) },
+                    crate::expr::InterpPart::Text { value: "Adapter".to_string() },
+                ],
+            },
+        );
+        let error = send(Some(Expr::new(span, ExprNode::Const { path: vec![sym("NameError")] })), "new", vec![message]);
+        arms.push(crate::expr::Arm { pattern: crate::expr::Pattern::Wildcard, guard: None, body: Expr::new(span, ExprNode::Raise { value: error }) });
+        Some(Expr::new(span, ExprNode::Case { scrutinee, arms }))
+    }
+}
+
+/// The `name` of `ActiveJob::QueueAdapters.lookup(name).new`.
+fn adapter_lookup_new(expr: &Expr) -> Option<&Expr> {
+    let ExprNode::Send { recv: Some(lookup), method, args, block: None, .. } = &*expr.node else { return None };
+    if method.as_str() != "new" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Send { recv: Some(adapters), method, args, block: None, .. } = &*lookup.node else { return None };
+    let ExprNode::Const { path } = &*adapters.node else { return None };
+    let path: Vec<&str> = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect();
+    (method.as_str() == "lookup" && path == ["ActiveJob", "QueueAdapters"] && args.len() == 1).then(|| &args[0])
 }
 
 /// `[]` for `config`, `["a", "b"]` for `config.a.b`, as ingested.

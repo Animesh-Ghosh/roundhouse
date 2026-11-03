@@ -20,6 +20,7 @@ loader.setup
 module Relay
   mattr_accessor :adapters, default: Set.new
   mattr_accessor :importmap, default: Importmap::Map.new
+  mattr_accessor :servers, default: {}
 end
 "##;
 
@@ -57,6 +58,14 @@ const ENGINE: &str = r##"module Relay
 
       if Relay.adapters.include?(:solid_queue)
         ActiveJob::QueueAdapters::SolidQueueAdapter.prepend Relay::SolidQueueExt
+      end
+    end
+
+    config.after_initialize do |app|
+      if Relay.servers.empty?
+        Relay.adapters.each do |adapter|
+          Relay.servers[adapter] = ActiveJob::QueueAdapters.lookup(adapter).new
+        end
       end
     end
   end
@@ -126,6 +135,7 @@ fn boot_replays_the_engines_before_initialize() {
     let run = app().run_ruby(
         "raise Relay.adapters.to_a.inspect unless Relay.adapters.to_a == [:solid_queue]\n\
          raise \"label\" unless ActiveJob::QueueAdapters::SolidQueueAdapter.new.relay_label == \"solid\"\n\
+         raise Relay.servers.inspect unless Relay.servers.keys == [:solid_queue] && Relay.servers[:solid_queue].relay_label == \"solid\"\n\
          pins = Importmap.pins_for_relay.map { |p| [p[:name], p[:path]] }\n\
          raise pins.inspect unless pins == [[\"application\", \"/assets/relay/application.js\"], [\"controllers/form_controller\", \"/assets/relay/controllers/form_controller.js\"], [\"controllers\", \"/assets/relay/controllers/index.js\"]]\n\
          raise \"asset\" unless Rails.application.propshaft_asset_path(\"relay/panel.css\").match?(%r{\\A/assets/relay/panel-\\h+\\.css\\z})\n\
