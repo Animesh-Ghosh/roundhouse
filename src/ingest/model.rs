@@ -343,7 +343,11 @@ pub(super) fn ingest_model_with_enum_constants(
                                 leading_comments: Vec::new(),
                                 leading_blank_line: false,
                             })
-                            .chain(singleton.class_body.into_iter().map(|expr| {
+                            .chain(singleton.class_body.into_iter().map(|mut expr| {
+                                // Its constants live on the singleton class, where the Ruby trees read them (`expr::SINGLETON_BODY`).
+                                if let crate::expr::ExprNode::Assign { target: crate::expr::LValue::Const { .. }, value } = &mut *expr.node {
+                                    value.decisions |= crate::expr::SINGLETON_BODY;
+                                }
                                 ModelBodyItem::Unknown {
                                     expr,
                                     leading_comments: Vec::new(),

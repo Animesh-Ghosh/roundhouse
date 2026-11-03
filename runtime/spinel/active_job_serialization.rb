@@ -334,3 +334,84 @@ module ActiveJob
     end
   end
 end
+
+module ActiveJob
+  # Rails' job object, for the code that handles one rather than a payload
+  # (solid_queue's records, a batch's callbacks): the `serialize` hash's
+  # fields, read back by `deserialize`. The arguments stay the payload's
+  # JSON text, as Rails keeps them serialized until `perform` reads them.
+  class Base
+    attr_accessor :job_id, :queue_name, :priority, :scheduled_at, :enqueued_at, :executions, :arguments_json, :provider_job_id, :successfully_enqueued
+
+    def successfully_enqueued?
+      @successfully_enqueued == true
+    end
+
+    def serialize
+      JSON.parse(Payload.of(self))
+    end
+
+    def deserialize(job_data)
+      @job_id = job_data["job_id"].to_s
+      queue = job_data["queue_name"]
+      @queue_name = queue.nil? ? "default" : queue.to_s
+      priority = job_data["priority"]
+      @priority = priority.nil? ? nil : priority.to_i
+      @executions = job_data["executions"].to_i
+      @provider_job_id = job_data["provider_job_id"]
+      scheduled = job_data["scheduled_at"]
+      @scheduled_at = scheduled.nil? ? nil : Arguments.parse_time(scheduled.to_s)
+      enqueued = job_data["enqueued_at"]
+      @enqueued_at = enqueued.nil? ? nil : Arguments.parse_time(enqueued.to_s)
+      @arguments_json = JSON.generate(job_data["arguments"])
+      deserialize_extras(job_data)
+      self
+    end
+
+    # What an adapter's extension adds to the hash (solid_queue's batch id); none here.
+    def serialize_extras
+      ""
+    end
+
+    def deserialize_extras(job_data)
+      nil
+    end
+
+    def self.deserialize(job_data)
+      name = job_data["job_class"].to_s
+      job = JobRegistry.instantiate(name)
+      raise NameError, "uninitialized constant " + name if job.nil?
+      job.deserialize(job_data)
+    end
+
+    # Not the job's enqueue callbacks: no job's are modeled in this runtime, and `perform_later` runs none either.
+    def run_callbacks(kind)
+      yield
+    end
+  end
+
+  module Payload
+    # `job.serialize` as JSON, from the job's fields, keys in Rails' order.
+    def self.of(job)
+      provider = job.provider_job_id
+      priority = job.priority
+      "{\"job_class\":" + Arguments.str(job.class.name.to_s) +
+        ",\"job_id\":" + Arguments.str(job.job_id.to_s) +
+        ",\"provider_job_id\":" + (provider.nil? ? "null" : JSON.generate(provider)) +
+        ",\"queue_name\":" + Arguments.str(job.queue_name.nil? ? "default" : job.queue_name.to_s) +
+        ",\"priority\":" + (priority.nil? ? "null" : priority.to_s) +
+        ",\"arguments\":" + (job.arguments_json.nil? ? "[]" : job.arguments_json.to_s) +
+        ",\"executions\":" + job.executions.to_i.to_s +
+        ",\"exception_executions\":{}" +
+        ",\"locale\":\"en\"" +
+        ",\"timezone\":\"UTC\"" +
+        ",\"enqueued_at\":" + time_or_null(job.enqueued_at) +
+        ",\"scheduled_at\":" + time_or_null(job.scheduled_at) +
+        job.serialize_extras + "}"
+    end
+
+    def self.time_or_null(time)
+      time.nil? ? "null" : Arguments.str(time.utc.iso8601(9))
+    end
+  end
+end

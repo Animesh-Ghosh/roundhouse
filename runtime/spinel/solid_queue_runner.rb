@@ -31,20 +31,39 @@ module ActiveJob
   end
 end
 
+module ActiveJob
+  # What solid_queue's engine includes into every job (`ActiveJob::BatchId`,
+  # `ActiveJob::ConcurrencyControls`): the batch a job belongs to, carried in
+  # its serialized hash, and no concurrency key unless the job limits it.
+  class Base
+    attr_accessor :batch_id, :callback_batch_id
+
+    def concurrency_key
+      nil
+    end
+
+    def serialize_extras
+      id = @batch_id
+      id.nil? ? "" : ",\"batch_id\":" + JSON.generate(id)
+    end
+
+    def deserialize_extras(job_data)
+      @batch_id = job_data["batch_id"]
+      nil
+    end
+  end
+end
+
 # Not solid_queue's supervisor and its forked worker: one worker, registered in this process, runs when the app's drain does.
 module SolidQueueRunner
   WORKER = []
 
+  # Rails' SolidQueueAdapter#enqueue: the job object, recorded by solid_queue's own `Job.enqueue`.
   def self.enqueue(queue, data)
-    SolidQueue::Job.create!(
-      queue_name: queue == "" ? "default" : queue,
-      active_job_id: data["job_id"].to_s,
-      priority: data["priority"].to_i,
-      scheduled_at: Time.now,
-      class_name: data["job_class"].to_s,
-      arguments: data,
-      concurrency_key: nil
-    )
+    job = ActiveJob::Base.deserialize(data)
+    job.queue_name = queue unless queue == ""
+    scheduled = job.scheduled_at
+    SolidQueue::Job.enqueue(job, scheduled_at: scheduled.nil? ? Time.now : scheduled)
   end
 
   def self.process

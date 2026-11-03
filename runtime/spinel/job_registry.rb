@@ -39,6 +39,10 @@ module JobRegistry
     false
   end
 
+  def self.instantiate(job_class)
+    nil
+  end
+
   def self.discards_deserialization_error(job_class)
     false
   end

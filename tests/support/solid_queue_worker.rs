@@ -68,6 +68,11 @@ end
 ActiveJob.register_drain
 QueueStats.enqueue_both
 check("jobs", SolidQueue::Job.count, 2)
+data = SolidQueue::Job.first.arguments
+job = ActiveJob::Base.deserialize(data)
+check("job class", job.class.name, "HelloJob")
+check("round trip", [job.serialize["job_id"], job.serialize["arguments"]], [data["job_id"], data["arguments"]])
+check("provider id", SolidQueue::Job.first.active_job_id, data["job_id"])
 check("ready", SolidQueue::ReadyExecution.count, 2)
 check("drained", ActiveJob.drain, 2)
 check("finished", SolidQueue::Job.where.not(finished_at: nil).count, 1)

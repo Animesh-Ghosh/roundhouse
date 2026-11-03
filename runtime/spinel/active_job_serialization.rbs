@@ -48,3 +48,29 @@ module ActiveJob
     def self.build_at: (String job_class, String queue_name, Float at, String arguments_json) -> String
   end
 end
+
+module ActiveJob
+  class Base
+    attr_accessor job_id: String?
+    attr_accessor queue_name: String?
+    attr_accessor priority: Integer?
+    attr_accessor scheduled_at: Time?
+    attr_accessor enqueued_at: Time?
+    attr_accessor executions: Integer?
+    attr_accessor arguments_json: String?
+    attr_accessor provider_job_id: untyped
+    attr_accessor successfully_enqueued: bool?
+    def successfully_enqueued?: () -> bool
+    def serialize: () -> Hash[String, untyped]
+    def deserialize: (Hash[String, untyped] job_data) -> ActiveJob::Base
+    def serialize_extras: () -> String
+    def deserialize_extras: (Hash[String, untyped] job_data) -> nil
+    def self.deserialize: (Hash[String, untyped] job_data) -> ActiveJob::Base
+    def run_callbacks: (Symbol kind) { () -> untyped } -> untyped
+  end
+
+  module Payload
+    def self.of: (ActiveJob::Base job) -> String
+    def self.time_or_null: (Time? time) -> String
+  end
+end
