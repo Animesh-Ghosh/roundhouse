@@ -30,6 +30,9 @@ mod session_cookie_key;
 mod inertia_runtime_props;
 #[path = "emit_and_run/form_builder_fields.rs"]
 mod form_builder_fields;
+#[path = "emit_and_run/time_zone_tzinfo.rs"]
+mod time_zone_tzinfo;
+
 #[path = "emit_and_run/current_page.rs"]
 mod current_page;
 #[path = "emit_and_run/strict_json_render_escape.rs"]
@@ -20645,6 +20648,9 @@ mod record_slice;
 
 #[path = "emit_and_run/csrf_meta_tag_alias.rs"]
 mod csrf_meta_tag_alias;
+
+#[path = "emit_and_run/link_to_blob.rs"]
+mod link_to_blob;
 
 #[path = "emit_and_run/render_partial_block.rs"]
 mod render_partial_block;

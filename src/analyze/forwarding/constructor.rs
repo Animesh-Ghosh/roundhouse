@@ -505,7 +505,7 @@ fn constructor_contract<'a>(
     contracts: &SourceContractIndex<'a>,
     owner: &ClassId,
 ) -> Option<ConstructorContract<'a>> {
-    if !contracts.verified_hierarchy(owner, &mut HashSet::default()) {
+    if !contracts.verified(owner) {
         return Some(ConstructorContract::UnknownLookup);
     }
     // `new` itself may be replaced: no own `initialize` changes that.
