@@ -511,7 +511,7 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
-    if path in {"tests/spinel_net_http_transport.rb", "tests/spinel_net_http_stream.rb"}:
+    if path in {"tests/spinel_net_http_transport.rb", "tests/spinel_net_http_stream.rb", "tests/spinel_net_http_raise.rb"}:
         suites.add("spinel_net_http_start")
     if path.startswith("tests/spinel_faye_websocket/") or path == "runtime/spinel/faye_websocket.rb":
         suites.add("spinel_faye_websocket")

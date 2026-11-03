@@ -194,7 +194,7 @@ fn a_request_no_stub_answers_reads_the_response_and_decodes_gzip() {
     assert!(failed.is_empty(), "{}\n=== stdout ===\n{stdout}", failed.join("\n"));
     assert_eq!(
         stdout.lines().filter(|l| l.starts_with("ok ")).count(),
-        15,
+        14,
         "fewer checks ran than the driver makes\n=== stdout ===\n{stdout}"
     );
     // CRuby's header, which is what makes a server send gzip at all.

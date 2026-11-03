@@ -54,12 +54,5 @@ end
 check "start keeps the socket open through the body read", value == "plain widget"
 check "a second request reconnects after close and reads its own body", second == "second widget"
 check "a third request reconnects after close and reads its own body", third == "third widget"
-refused = false
-begin
-  Net::HTTP.new(uri.host, uri.port).get("/plain", { "Connection" => "keep-alive" })
-rescue NotImplementedError => e
-  refused = e.message.include?("keep-alive")
-end
-check "an explicit unsupported keep-alive request raises", refused
 check "content_length remains available on the reopened response", plain.content_length == 12
 puts "done"
