@@ -52,6 +52,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("to_s", Ty::Str), ("to_path", Ty::Str), ("read", Ty::Str),
         ("readlines", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }), ("exist?", Ty::Bool),
     ]);
+    // runtime/ruby/rails.rb's `Rails::BacktraceCleaner`.
+    let cleaner = class("Rails::BacktraceCleaner");
+    register_stdlib_class(classes, "Rails::BacktraceCleaner", &[("new", cleaner)], &[
+        ("clean", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+    ]);
     register_stdlib_class(classes, "ActiveSupport", &[
         ("event_reporter", event_reporter.clone()), ("error_reporter", error_reporter.clone()),
         ("event_reporter=", event_reporter.clone()), ("error_reporter=", error_reporter.clone()),

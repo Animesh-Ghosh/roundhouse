@@ -2356,8 +2356,11 @@ impl<'a> BodyTyper<'a> {
                     _ => block_ret,
                 };
                 // `each_with_object` answers its seed, filled by the block: `{}` takes the `[]=` writes to the memo, `[]` its pushes.
+                // Not an app class's own `each_with_object`: a builtin Enumerable's answers its seed (Set's registry entry is no override).
+                let builtin_enumerable = matches!(owner_ty.map(narrowing::remove_nil), Some(Ty::Array { .. } | Ty::Hash { .. } | Ty::Relation { .. } | Ty::Untyped))
+                    || matches!(owner_ty.map(narrowing::remove_nil), Some(Ty::Class { ref id, .. }) if matches!(id.0.as_str(), "Set" | "Range" | "Enumerator"));
                 if matches!(method.as_str(), "each_with_object" | "with_object")
-                    && !self.owns_operator(owner_ty, method, class_object_receiver)
+                    && (builtin_enumerable || !self.owns_operator(owner_ty, method, class_object_receiver))
                     && let ([seed], Some(b)) = (args.as_slice(), block.as_ref())
                     && let ExprNode::Lambda { params, body, .. } = &*b.node
                     && let [_, memo] = params.as_slice()
@@ -2368,7 +2371,7 @@ impl<'a> BodyTyper<'a> {
                     let mut pushes = Vec::new();
                     collect_array_pushes(body, &mut pushes);
                     // Not filled from a write still pending: its known half alone (a lone nil) would be a type the value never has.
-                    let pending = writes.iter().chain(pushes.iter()).any(|(is_ivar, name, ty)| !is_ivar && name == memo && (ty.mentions_unknown() || *ty == Ty::Nil));
+                    let pending = writes.iter().chain(pushes.iter()).any(|(is_ivar, name, ty)| !is_ivar && name == memo && (mentions_var(ty) || *ty == Ty::Nil));
                     let filled = match seed_ty {
                         Ty::Hash { key, value } => {
                             let mut key = (*key).clone();
@@ -4423,6 +4426,17 @@ fn collect_array_pushes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
 /// A computed receiver (`a.b[k] = v`) has no binding to refine and is
 /// skipped. Open written types are skipped for the same reason as in
 /// [`collect_array_pushes`] — they carry nothing to union in.
+fn mentions_var(ty: &Ty) -> bool {
+    match ty {
+        Ty::Var { .. } => true,
+        Ty::Union { variants } => variants.iter().any(mentions_var),
+        Ty::Array { elem } => mentions_var(elem),
+        Ty::Hash { key, value } => mentions_var(key) || mentions_var(value),
+        Ty::Class { args, .. } => args.iter().any(mentions_var),
+        _ => false,
+    }
+}
+
 /// The key types of the `memo[k] = v` writes to a block's local `memo`.
 fn memo_keys(expr: &Expr, memo: &Symbol, out: &mut Vec<Ty>) {
     if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
