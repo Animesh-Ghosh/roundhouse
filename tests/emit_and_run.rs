@@ -20508,6 +20508,8 @@ mod record_as_json;
 mod active_model_keyword_super;
 #[path = "emit_and_run/arguments_deserialize.rs"]
 mod arguments_deserialize;
+#[path = "emit_and_run/i18n_config.rs"]
+mod i18n_config;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;

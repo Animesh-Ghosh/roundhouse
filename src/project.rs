@@ -5827,6 +5827,58 @@ fn i18n_table_text(app: &App) -> String {
     out
 }
 
+/// The app's `I18n::Config` subclasses, a subclass ahead of its parent
+/// so `case config when …` takes the nearest.
+fn i18n_config_classes(app: &App) -> Vec<String> {
+    let parent_of = |name: &str| {
+        app.library_classes
+            .iter()
+            .find(|lc| lc.name.0.as_str() == name)
+            .and_then(|lc| lc.parent.as_ref())
+            .map(|p| p.0.as_str().trim_start_matches("::").to_string())
+    };
+    let depth = |name: &str| {
+        let mut at = name.to_string();
+        let mut n = 0usize;
+        while let Some(p) = parent_of(&at) {
+            if p == "I18n::Config" {
+                return Some(n);
+            }
+            if n > 32 {
+                return None;
+            }
+            at = p;
+            n += 1;
+        }
+        None
+    };
+    let mut found: Vec<(usize, String)> = app
+        .library_classes
+        .iter()
+        .filter(|lc| !lc.is_module)
+        .filter_map(|lc| depth(lc.name.0.as_str()).map(|d| (d, lc.name.0.as_str().to_string())))
+        .collect();
+    found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    found.into_iter().map(|(_, name)| name).collect()
+}
+
+fn i18n_config_source(classes: &[String]) -> String {
+    if classes.is_empty() {
+        return "  def self.config_named(name, locale_name)\n    Config.new(locale_name)\n  end\n\n  def self.config_name_of(config)\n    \"\"\n  end\n\n  def self.config_default_locale\n    app_default_locale\n  end\n\n  def self.config_available_locales\n    app_available_locales\n  end\n".to_string();
+    }
+    let arms = |each: &dyn Fn(&str) -> String| classes.iter().map(|c| each(c)).collect::<String>();
+    format!(
+        "  def self.config_named(name, locale_name)\n    case name\n{}    else\n      Config.new(locale_name)\n    end\n  end\n\n\
+         \x20 def self.config_name_of(config)\n    case config\n{}    else\n      \"\"\n    end\n  end\n\n\
+         \x20 def self.config_default_locale\n    case I18nHost.config_name\n{}    else\n      app_default_locale\n    end\n  end\n\n\
+         \x20 def self.config_available_locales\n    case I18nHost.config_name\n{}    else\n      app_available_locales\n    end\n  end\n",
+        arms(&|c| format!("    when \"{c}\"\n      {c}.new(locale_name)\n")),
+        arms(&|c| format!("    when {c}\n      \"{c}\"\n")),
+        arms(&|c| format!("    when \"{c}\"\n      {c}.new.default_locale\n")),
+        arms(&|c| format!("    when \"{c}\"\n      {c}.new.available_locales\n")),
+    )
+}
+
 fn apply_i18n_locales(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "  # >>> generated: i18n-locales\n";
     const TAIL: &str = "  # <<< generated: i18n-locales\n";
@@ -5840,8 +5892,9 @@ fn apply_i18n_locales(files: &mut [(String, String)], app: &App) {
     // object on CRuby 3.4+, and `I18n.locale` searches this list on every
     // call (once per element of a cached collection's keys).
     let generated = format!(
-        "{HEAD}  def self.app_default_locale\n    {}\n  end\n\n  def self.app_available_locales\n    [{available}].freeze\n  end\n{TAIL}",
-        sym(&catalog.locale)
+        "{HEAD}  def self.app_default_locale\n    {}\n  end\n\n  def self.app_available_locales\n    [{available}].freeze\n  end\n\n{}{TAIL}",
+        sym(&catalog.locale),
+        i18n_config_source(&i18n_config_classes(app)),
     );
     for (path, content) in files.iter_mut() {
         if !path.ends_with("runtime/i18n_locale.rb") {
