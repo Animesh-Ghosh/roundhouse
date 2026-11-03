@@ -1240,8 +1240,10 @@ fn apply_add_foreign_key(args: &[Node<'_>], schema: &mut Schema) {
 }
 
 /// `remove_foreign_key "comments", "articles"` (or `to_table:`,
-/// `column:`, `primary_key:`) drops the first recorded key that matches
-/// every part given, as Rails' `foreign_key_for` picks it. A key named
+/// `column:`, `primary_key:`) drops the key Rails' `foreign_key_for`
+/// picks: without `column:`, among the keys on the default column
+/// (`article_id`) when there are any, the first that matches every part
+/// given. A key named
 /// by `name:` cannot be matched (the fold does not record names), so it
 /// is a gap rather than a key left in place. No recorded key to
 /// match changes nothing: the add was one the fold does not record.
@@ -1274,7 +1276,17 @@ fn apply_remove_foreign_key(args: &[Node<'_>], file: &str, schema: &mut Schema) 
                 && column.as_deref().is_none_or(|c| fk.from_column.as_str() == c)
                 && primary_key.as_deref().is_none_or(|pk| fk.to_column.as_str() == pk)
         };
-        if let Some(at) = table.foreign_keys.iter().position(matches) {
+        // Without `column:`, Rails first narrows to the keys on the
+        // default column (`author_id` for `:authors`), when any exist.
+        let default_column = match (&column, &to_table) {
+            (None, Some(to)) => Some(format!("{}_id", crate::naming::singularize(to))),
+            _ => None,
+        };
+        let on_default = |fk: &crate::schema::ForeignKey| {
+            default_column.as_deref().is_some_and(|c| fk.from_column.as_str() == c)
+        };
+        let narrowed = table.foreign_keys.iter().any(on_default);
+        if let Some(at) = table.foreign_keys.iter().position(|fk| (!narrowed || on_default(fk)) && matches(fk)) {
             table.foreign_keys.remove(at);
         }
     }
@@ -2673,6 +2685,19 @@ mod tests {
         ingest_migration(change("remove_foreign_key :posts, :authors").as_bytes(), "3_drop.rb", &mut schema)
             .expect("remove_foreign_key");
         assert!(keys(&schema).is_empty(), "{:?}", keys(&schema));
+
+        // The default column wins even when its key was recorded later.
+        let mut schema = fold(&[&create.replace(
+            "change_table :posts do |t|\n                  t.foreign_key :authors\n                end\n                add_foreign_key :posts, :authors, column: :editor_id",
+            "add_foreign_key :posts, :authors, column: :editor_id\n                change_table :posts do |t|\n                  t.foreign_key :authors\n                end",
+        )]);
+        assert_eq!(
+            keys(&schema),
+            [("editor_id".into(), "authors".into()), ("author_id".into(), "authors".into())]
+        );
+        ingest_migration(change("remove_foreign_key :posts, :authors").as_bytes(), "2_drop.rb", &mut schema)
+            .expect("remove_foreign_key");
+        assert_eq!(keys(&schema), [("editor_id".to_string(), "authors".to_string())]);
 
         let mut schema = fold(&[create]);
         for body in ["remove_foreign_key :posts, name: :fk_rails_1", "remove_foreign_key :posts"] {
