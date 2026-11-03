@@ -47,6 +47,8 @@ pub fn app(defaults: &str) -> emit_and_run::Overlay {
         .write("config/application.rb", &format!("module EscapingApplication\n  class Application < Rails::Application\n{defaults}  end\nend\n"))
         .write("config/environments/force_true.rb", "Rails.application.configure do\n  config.action_controller.escape_json_responses = true\nend\n")
         .write("config/environments/force_false.rb", "Rails.application.configure do\n  config.action_controller.escape_json_responses = false\nend\n")
+        .write("config/environments/self_defaults.rb", "Rails.application.configure do\n  self.config.load_defaults 8.1\nend\n")
+        .write("config/environments/false_then_older.rb", "Rails.application.configure do\n  self.config.action_controller.escape_json_responses = false\n  self.config.active_support.escape_js_separators_in_json = false\n  self.config.load_defaults 8.0\nend\n")
         .write("config/routes.rb", &routes)
         .write("db/schema.rb", "ActiveRecord::Schema.define do\nend\n")
         .write("app/controllers/payloads_controller.rb", &controller)
@@ -54,14 +56,22 @@ pub fn app(defaults: &str) -> emit_and_run::Overlay {
 
 pub fn program(defaults: &str) -> String {
     let mut program = String::from("require_relative \"app/controllers/payloads_controller\"\n");
-    for row in expected().into_iter().filter(|r| r["defaults"] == defaults) {
+    let mut rows: Vec<_> = expected().into_iter().filter(|r| r["defaults"] == defaults)
+        .map(|row| {
+            let env = match row["explicit"].as_str().unwrap() {
+                "true" => "force_true", "false" => "force_false", _ => "test",
+            };
+            (row, env)
+        }).collect();
+    // Both environments end with the same two false flags as 8.1 defaults.
+    // An older load_defaults call must not reset explicit false values.
+    for env in ["self_defaults", "false_then_older"] {
+        rows.extend(expected().into_iter()
+            .filter(|r| r["defaults"] == "8.1" && r["explicit"] == "unset")
+            .map(|row| (row, env)));
+    }
+    for (row, env) in rows {
         let form = row["form"].as_str().unwrap();
-        let explicit = row["explicit"].as_str().unwrap();
-        let env = match explicit {
-            "true" => "force_true",
-            "false" => "force_false",
-            _ => "test",
-        };
         let callback = if row["callback"] == true {
             "_callback"
         } else {

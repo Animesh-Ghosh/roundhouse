@@ -26,6 +26,42 @@ fn json_response_defaults_run_on_ruby() {
 }
 
 #[test]
+fn configuration_spellings_and_older_defaults_keep_rails_response_bytes() {
+    use std::path::Path;
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/support/json_response_escaping/oracle.rb");
+    for (variant, spelling) in [
+        ("self", "self.config.load_defaults"),
+        ("spaced", "config .load_defaults"),
+        ("rooted", "::Rails.application.config.load_defaults"),
+    ] {
+        let oracle = emit_and_run::ruby().arg(&script).args(["8.1", "unset", variant]).output().unwrap();
+        if oracle.status.code() == Some(77) { return; }
+        assert!(oracle.status.success(), "{}", String::from_utf8_lossy(&oracle.stderr));
+        let actual: Vec<serde_json::Value> = String::from_utf8(oracle.stdout).unwrap().lines()
+            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        let expected: Vec<_> = json_response_escaping::expected().into_iter()
+            .filter(|r| r["defaults"] == "8.1" && r["explicit"] == "unset").collect();
+        assert_eq!(actual, expected, "{variant}");
+        json_response_escaping::app("8.1")
+            .edit("config/application.rb", "config.load_defaults", spelling)
+            .run_ruby(&json_response_escaping::program("8.1")).assert_passes();
+    }
+    let oracle = emit_and_run::ruby().arg(script).args(["8.0", "unset", "false_then_older"]).output().unwrap();
+    if oracle.status.code() == Some(77) { return; }
+    assert!(oracle.status.success(), "{}", String::from_utf8_lossy(&oracle.stderr));
+    for line in String::from_utf8(oracle.stdout).unwrap().lines() {
+        let actual: serde_json::Value = serde_json::from_str(line).unwrap();
+        let expected = json_response_escaping::expected().into_iter().find(|r|
+            r["defaults"] == "8.1" && r["explicit"] == "unset"
+            && r["form"] == actual["form"] && r["callback"] == actual["callback"]).unwrap();
+        assert_eq!(actual["bytes"], expected["bytes"]);
+        assert_eq!(actual["effective"], false);
+        assert_eq!(actual["js_separator_escape"], false);
+    }
+}
+
+#[test]
 #[ignore = "requires the Spinel toolchain"]
 fn json_response_defaults_run_on_spinel() {
     for defaults in ["none", "8.0", "8.1"] {

@@ -78,6 +78,32 @@ impl Setting {
     }
 }
 
+fn json_setting(setting: &Setting) -> bool {
+    matches!((setting.section, setting.key),
+        ("action_controller", "escape_json_responses") |
+        ("active_support", "escape_js_separators_in_json"))
+}
+
+// Read config receivers structurally so self, whitespace and rooted Rails
+// spellings cannot silently retain the legacy JSON defaults.
+fn json_config_receiver(node: &Node<'_>) -> bool {
+    let Some(config) = node.as_call_node() else { return false };
+    if constant_id_str(&config.name()) != "config" || config.arguments().is_some() {
+        return false;
+    }
+    let Some(receiver) = config.receiver() else { return true };
+    if receiver.as_self_node().is_some() { return true; }
+    let Some(application) = receiver.as_call_node() else { return false };
+    if constant_id_str(&application.name()) != "application" || application.arguments().is_some() {
+        return false;
+    }
+    application.receiver().is_some_and(|root| {
+        root.as_constant_read_node().is_some_and(|n| constant_id_str(&n.name()) == "Rails")
+            || root.as_constant_path_node().is_some_and(|n| n.parent().is_none()
+                && n.name().is_some_and(|name| constant_id_str(&name) == "Rails"))
+    })
+}
+
 pub(super) const HEADERS: Setting = Setting {
     section: "public_file_server",
     key: "headers",
@@ -100,17 +126,19 @@ pub(super) fn assignment<'pr>(node: &Node<'pr>, setting: &Setting) -> Option<Nod
     if constant_id_str(&section.name()) != setting.section || section.arguments().is_some() {
         return None;
     }
-    let config = section.receiver()?;
-    let config = config.as_call_node()?;
+    let config_node = section.receiver()?;
+    let config = config_node.as_call_node()?;
     if constant_id_str(&config.name()) != "config" || config.arguments().is_some() {
         return None;
     }
-    let anchored = match config.receiver() {
+    let anchored = if json_setting(setting) {
+        json_config_receiver(&config_node)
+    } else { match config.receiver() {
         None => true,
         Some(inner) => inner
             .as_call_node()
             .is_some_and(|c| constant_id_str(&c.name()) == "application"),
-    };
+    }};
     if !anchored {
         return None;
     }
@@ -214,23 +242,26 @@ fn steps(stmts: Vec<Node<'_>>, src: &str, setting: &Setting) -> Vec<Step> {
         if let Some(call) = stmt.as_call_node() {
             // Rails 8.1 changes these two independent defaults. Replay the
             // load_defaults call in order with explicit config assignments.
-            if matches!((setting.section, setting.key),
-                ("action_controller", "escape_json_responses") |
-                ("active_support", "escape_js_separators_in_json"))
+            if json_setting(setting)
                 && constant_id_str(&call.name()) == "load_defaults"
-                && text(&stmt, src).starts_with("config.load_defaults")
+                && call.receiver().is_some_and(|r| json_config_receiver(&r))
             {
-                let literal = call.arguments().is_some_and(|args| {
+                let version = call.arguments().and_then(|args| {
                     let values: Vec<_> = args.arguments().iter().collect();
-                    values.len() == 1 && (values[0].as_float_node().is_some()
-                        || values[0].as_integer_node().is_some() || values[0].as_string_node().is_some())
-                        && text(&values[0], src).trim_matches(|c| c == '"' || c == '\'')
-                            .replace('_', "").parse::<f64>().is_ok_and(f64::is_finite)
+                    if values.len() != 1 || !(values[0].as_float_node().is_some()
+                        || values[0].as_integer_node().is_some() || values[0].as_string_node().is_some()) {
+                        return None;
+                    }
+                    text(&values[0], src).trim_matches(|c| c == '"' || c == '\'')
+                        .replace('_', "").parse::<f64>().ok().filter(|v| v.is_finite())
                 });
-                let value = literal.then(|| super::app::load_defaults_version(&text(&stmt, src))).flatten()
-                    .map(|version| (version < 8.1).to_string())
-                    .ok_or_else(|| "config.load_defaults must name a literal version to determine JSON escaping".to_string());
-                out.push(Step::Set(value));
+                match version {
+                    // Older defaults do not assign these flags, so retain any
+                    // earlier explicit value rather than resetting it to true.
+                    Some(version) if version < 8.1 => {}
+                    Some(_) => out.push(Step::Set(Ok("false".into()))),
+                    None => out.push(Step::Set(Err("config.load_defaults must name a literal version to determine JSON escaping".into()))),
+                }
                 continue;
             }
             if constant_id_str(&call.name()) == "configure" {

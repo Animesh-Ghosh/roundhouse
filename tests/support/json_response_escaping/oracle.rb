@@ -13,7 +13,22 @@ class EscapeOracleApp < Rails::Application
   config.logger = Logger.new(File::NULL)
 end
 config = EscapeOracleApp.config
-config.load_defaults(defaults) unless defaults == "none"
+if ARGV[2] == "false_then_older"
+  config.action_controller.escape_json_responses = false
+  config.active_support.escape_js_separators_in_json = false
+end
+unless defaults == "none"
+  case ARGV[2]
+  when "self"
+    EscapeOracleApp.class_eval { self.config.load_defaults(defaults) }
+  when "spaced"
+    config .load_defaults(defaults)
+  when "rooted"
+    ::Rails.application.config.load_defaults(defaults)
+  else
+    config.load_defaults(defaults)
+  end
+end
 config.action_controller.escape_json_responses = explicit == "true" unless explicit == "unset"
 EscapeOracleApp.initialize!
 class EscapeOracleController < ActionController::API
