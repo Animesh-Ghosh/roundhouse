@@ -128,3 +128,69 @@ end
     run.assert_passes();
     assert_eq!(run.stdout, "3\n");
 }
+
+#[test]
+fn operator_splat_keeps_explicit_keyword_call_syntax() {
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", r#"class Options
+  def +(h)
+    h.fetch(:value, 9)
+  end
+end
+class Probe
+  def self.run
+    h = {value: 3}
+    Options.new.+(**h)
+  end
+end
+"#)
+        .run_ruby("puts Probe.run");
+    run.assert_passes();
+    assert_eq!(run.stdout, "3\n");
+}
+
+#[test]
+fn index_writer_splat_keeps_explicit_keyword_call_syntax() {
+    let run = emit_and_run::real_blog()
+        .write("app/lib/probe.rb", r#"class Options
+  def []=(key, h)
+    h.fetch(:value, 9)
+  end
+end
+class Probe
+  def self.run
+    h = {value: 3}
+    Options.new.[]=(:key, **h)
+  end
+end
+"#)
+        .run_ruby("puts Probe.run");
+    run.assert_passes();
+    assert_eq!(run.stdout, "3\n");
+}
+
+#[test]
+fn marked_and_structural_packets_keep_the_same_call_syntax() {
+    use roundhouse::expr::{Expr, ExprNode, Literal, ERASED_KEYWORD_SPLAT};
+    use roundhouse::{ident::Symbol, span::Span};
+    let span = Span::synthetic();
+    for method in ["+", "[]=", "[]", "value=", "+@", "-@", "!", "~", "`"] {
+        let value = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: "packet".to_string() } });
+        let mut marked = value.clone();
+        marked.decisions |= ERASED_KEYWORD_SPLAT;
+        let structural = Expr::new(span, ExprNode::KeywordSplat { value });
+        let call = |packet| {
+            let mut args = vec![];
+            if method == "[]=" {
+                args.push(Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from("key") } }));
+            }
+            args.push(packet);
+            Expr::new(span, ExprNode::Send {
+                recv: Some(Expr::new(span, ExprNode::SelfRef)), method: Symbol::from(method),
+                args, block: None, parenthesized: true,
+            })
+        };
+        assert_eq!(roundhouse::emit::ruby::emit_expr(&call(marked)),
+                   roundhouse::emit::ruby::emit_expr(&call(structural)), "{method}");
+    }
+}
