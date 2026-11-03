@@ -53,6 +53,7 @@ pub mod sidekiq_yml;
 pub mod cable_yml;
 mod public_file_server_config;
 mod action_controller_caching_config;
+mod json_response_config;
 mod active_job_config;
 mod caches_page;
 mod boot_program;
@@ -131,6 +132,7 @@ pub(crate) mod rake_tasks;
 pub mod util;
 pub mod view;
 pub mod vite;
+pub mod current_page;
 pub mod time_tag;
 mod visibility;
 
