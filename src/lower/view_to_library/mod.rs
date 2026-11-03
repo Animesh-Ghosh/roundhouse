@@ -5078,7 +5078,7 @@ fn time_column_names(
                 }
             }
         }
-        out.insert(crate::naming::snake_case(m.name.0.as_str()), set);
+        out.insert(m.name.0.as_str().to_owned(), set);
     }
     out
 }

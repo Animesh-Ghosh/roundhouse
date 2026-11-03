@@ -1431,7 +1431,7 @@ fn emit_datetime_local_field(
         None => {
             let is_time = ctx
                 .time_columns
-                .get(binding.model_name.as_str())
+                .get(binding.metadata_class(ctx).unwrap_or(""))
                 .is_some_and(|names| names.contains(field_str));
             let helper = if is_time { "datetime_local_value_attr" } else { "optional_value_attr" };
             let read = field_value_read(binding, field_sym.clone(), ctx);

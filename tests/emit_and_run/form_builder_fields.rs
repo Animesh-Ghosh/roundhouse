@@ -330,3 +330,36 @@ fn a_color_field_two_partials_down_is_refused_on_roda() {
         .emit(roundhouse::project::BuildTarget::Roda);
     assert!(errors.iter().any(|e| e.contains("form builder field not supported") && e.contains("roda")), "{errors:?}");
 }
+
+const NAMESPACED_MODEL_TEST: &str = r#"require "test_helper"
+
+class NamespacedDatetimeLocalFieldsControllerTest < ActionDispatch::IntegrationTest
+  test "a namespaced model's datetime column renders as Rails' datetime-local value" do
+    get edit_article_url(articles(:one))
+    assert_response :success
+    assert_select "input#billing_invoice_due_at[type=datetime-local][value='2026-11-01T09:30:15']"
+  end
+end
+"#;
+
+/// A namespaced model's form prefix is `billing_invoice`, not its
+/// class's snake case `billing::invoice`, so the datetime column is
+/// looked up by the builder's model class.
+#[test]
+fn a_datetime_local_field_on_a_namespaced_model_renders_rails_value() {
+    emit_and_run::real_blog()
+        .edit(
+            "db/schema.rb",
+            "  add_foreign_key",
+            "  create_table \"invoices\", force: :cascade do |t|\n    t.datetime \"due_at\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  add_foreign_key",
+        )
+        .write("app/models/billing/invoice.rb", "module Billing\n  class Invoice < ApplicationRecord\n  end\nend\n")
+        .edit(
+            "app/views/articles/edit.html.erb",
+            "  <%= render \"form\", article: @article %>\n",
+            "  <%= render \"form\", article: @article %>\n\n  <%= form_with(model: Billing::Invoice.new(due_at: \"2026-11-01 09:30:15\"), url: \"/invoices\") do |f| %>\n    <%= f.datetime_local_field :due_at %>\n  <% end %>\n",
+        )
+        .write("test/controllers/namespaced_datetime_local_fields_controller_test.rb", NAMESPACED_MODEL_TEST)
+        .run_test("test/controllers/namespaced_datetime_local_fields_controller_test.rb")
+        .assert_passes();
+}
