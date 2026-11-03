@@ -307,6 +307,9 @@ fn a_raising_response_block_closes_the_connection_before_the_next_request() {
             }
             let (stream, _) = listener.accept().unwrap();
             let mut first = headers(stream);
+            first
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
             let prefix = if mode == "reader" {
                 vec![b'a'; 16384]
             } else {
@@ -320,9 +323,6 @@ fn a_raising_response_block_closes_the_connection_before_the_next_request() {
             .unwrap();
             let _ = first.write_all(&prefix);
             let (mut ack, _) = control.accept().unwrap();
-            first
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
             let eof = match first.read(&mut [0u8; 1]) {
                 Ok(0) => true,
                 Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => true,
