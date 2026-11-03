@@ -604,6 +604,7 @@ pub(crate) enum KeywordPolicy {
     Native,
     NativeLibrary,
     Legacy,
+    LegacyRubySplat,
     Refuse,
     RefuseOrdinarySuper,
 }
@@ -721,11 +722,24 @@ fn keyword_calls_with_index(
                     KeywordPolicy::Legacy
                 }
             };
+            let policy = if policy == KeywordPolicy::Legacy
+                && matches!(&*e.node, ExprNode::Send { .. })
+                && destination(app, contracts, context, e, None).map(|d| d.method)
+                    .or_else(|| match &*e.node {
+                        ExprNode::Send { recv: None, method, .. } if helper_fallback =>
+                            app.helper_method_index.get(method).and_then(|owner|
+                                contracts.effective_call(owner, method, MethodReceiver::Instance)).map(|(m, _)| m),
+                        _ => None,
+                    }).is_none_or(|m| !m.params.iter().any(|p| p.keyword || p.from_keyword || p.from_kwrest))
+            { KeywordPolicy::LegacyRubySplat } else { policy };
             plans
                 .entry(e.span)
                 .and_modify(|previous| {
                     if *previous != policy {
-                        *previous = KeywordPolicy::Refuse;
+                        *previous = if matches!((*previous, policy),
+                            (KeywordPolicy::Legacy | KeywordPolicy::LegacyRubySplat,
+                             KeywordPolicy::Legacy | KeywordPolicy::LegacyRubySplat))
+                        { KeywordPolicy::Legacy } else { KeywordPolicy::Refuse };
                     }
                 })
                 .or_insert(policy);
