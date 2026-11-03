@@ -463,6 +463,11 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     } else {
         HashSet::default()
     };
+    let relation_returns = if runtime_relation == RuntimeRelation::Present {
+        crate::lower::scope_chain::build_user_method_returns(models).class
+    } else {
+        Default::default()
+    };
     let mut out = Vec::new();
     for (mut methods, _, table, model) in all_methods {
         for method in &mut methods {
@@ -490,8 +495,14 @@ pub(crate) fn lower_models_inner_with_ruby_values(
             // constant, and an inline whole-table count would bake in
             // the reading Rails does not have. Only the Ruby-family
             // entry ever names one.
+            //
+            // Held back, too, for a class method whose body answers a
+            // relation (`scope_chain::UserMethodReturns::class`): its
+            // callers chain on the result as they chain on a scope's,
+            // and the fold would answer an Array.
+            let key = (model.name.clone(), method.name.clone());
             let unfold = method.receiver == crate::dialect::MethodReceiver::Class
-                && unfolded.contains(&(model.name.clone(), method.name.clone()));
+                && (unfolded.contains(&key) || relation_returns.contains_key(&key));
             if !unfold {
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                     &mut method.body, schema, &classes, &[], ruby_read_values,
