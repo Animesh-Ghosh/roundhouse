@@ -15,17 +15,26 @@
     var icon = button.querySelector("use");
     var timer;
     button.hidden = false;
+    function show(state, text, iconId) {
+      button.classList.remove("is-copied", "is-failed");
+      if (state) button.classList.add(state);
+      label.textContent = text;
+      icon.setAttribute("href", iconId);
+    }
     button.addEventListener("click", function () {
+      clearTimeout(timer);
       navigator.clipboard.writeText(button.dataset.copy).then(function () {
-        button.classList.add("is-copied");
-        label.textContent = "Copied";
-        icon.setAttribute("href", "#icon-check");
-        clearTimeout(timer);
-        timer = setTimeout(function () {
-          button.classList.remove("is-copied");
-          label.textContent = "Copy";
-          icon.setAttribute("href", "#icon-copy");
-        }, 1600);
+        show("is-copied", "Copied", "#icon-check");
+      }, function () {
+        // The browser refused the write: select the command so a keyboard copy works.
+        var range = document.createRange();
+        range.selectNodeContents(button.closest(".cmd").querySelector(".cmd-text"));
+        var selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        show("is-failed", "Copy failed; the command is selected", "#icon-copy");
+      }).then(function () {
+        timer = setTimeout(function () { show(null, "Copy", "#icon-copy"); }, 1600);
       });
     });
   });
