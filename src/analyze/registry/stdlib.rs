@@ -654,7 +654,6 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("run_callbacks", Ty::Untyped),
             ("enqueue_error", opt(Ty::Class { id: ClassId(Symbol::from("ActiveJob::EnqueueError")), args: vec![].into() })),
             ("concurrency_key", Ty::Nil),
-            ("enqueue", Ty::Union { variants: vec![Ty::Class { id: ClassId(Symbol::from("ActiveJob::Base")), args: vec![].into() }, Ty::Bool].into() }),
         ] {
             base.instance_methods.entry(Symbol::from(name)).or_insert(ty);
         }

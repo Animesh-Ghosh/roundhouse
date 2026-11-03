@@ -71,7 +71,6 @@ module ActiveJob
     attr_accessor enqueue_error: ActiveJob::EnqueueError?
     def successfully_enqueued?: () -> bool
     def set: (?Hash[Symbol, untyped] options) -> self
-    def enqueue: (?Hash[Symbol, untyped] options) -> (self | false)
     def concurrency_key: () -> nil
     def serialize: () -> Hash[String, untyped]
     def deserialize: (Hash[String, untyped] job_data) -> ActiveJob::Base

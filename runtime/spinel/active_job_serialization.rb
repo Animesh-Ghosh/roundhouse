@@ -419,24 +419,6 @@ module ActiveJob
       self
     end
 
-    # Rails' `enqueue`: handed to the class's adapter, now or at its time; an EnqueueError is kept, and the answer is false.
-    def enqueue(options = {})
-      set(options)
-      @successfully_enqueued = false
-      run_callbacks(:enqueue) do
-        scheduled = @scheduled_at
-        if scheduled.nil?
-          self.class.queue_adapter.enqueue(self)
-        else
-          self.class.queue_adapter.enqueue_at(self, scheduled.to_f)
-        end
-        @successfully_enqueued = true
-      rescue ActiveJob::EnqueueError => e
-        @enqueue_error = e
-      end
-      successfully_enqueued? ? self : false
-    end
-
     # Not solid_queue's `limits_concurrency` key: no job here declares a limit, so none has one.
     def concurrency_key
       nil
