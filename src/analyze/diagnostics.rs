@@ -114,6 +114,40 @@ fn unlowered_form_builder_calls(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+/// A `current_page?` that `ingest::current_page` left as written: Rails
+/// answers it through `url_for(options)` (an options hash, or
+/// `check_parameters:`/`method:`), which the runtime does not model.
+fn unlowered_current_page(app: &App) -> Vec<Diagnostic> {
+    // The app's own `current_page?` is a call like any other: a body it
+    // answers is left out of `for_each_view_context_body`.
+    fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
+        if let ExprNode::Send { recv: None, method, .. } = &*expr.node
+            && method.as_str() == "current_page?"
+            && !expr.span.is_synthetic()
+        {
+            let reason = "only a path or URL argument is modeled (not an options hash, a splat, `check_parameters:` or `method:`)";
+            out.push(Diagnostic::unsupported(expr.span, None, "current_page?", reason));
+        }
+        // `ingest::current_page` rewrites before types: a path analysis
+        // can't type as a String (a record, which Rails passes to
+        // `url_for`; a Hash; a value that may be nil) would reach the
+        // runtime's `path.bytes`.
+        if let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node
+            && method.as_str() == "current_page_match?"
+            && matches!(&*r.node, ExprNode::Const { path } if path.len() == 2 && path[0].as_str() == "ActionView" && path[1].as_str() == "ViewHelpers")
+            && args.get(4).is_some_and(|path| !matches!(path.ty, Some(crate::ty::Ty::Str)))
+            && !expr.span.is_synthetic()
+        {
+            let reason = "its argument is not known to be a String path or URL; a record or an options hash goes through Rails' `url_for`, which is not modeled";
+            out.push(Diagnostic::unsupported(expr.span, None, "current_page?", reason));
+        }
+        expr.node.for_each_child(&mut |child| visit(child, out));
+    }
+    let mut out = Vec::new();
+    crate::ingest::current_page::for_each_view_context_body(app, &mut |body| visit(body, &mut out));
+    out
+}
+
 /// `stylesheet_link_tag` in an `app/helpers` method that
 /// `tag_builder::rewrite_stylesheet_link_tag` leaves as written: a Symbol
 /// name (a stylesheet group a view expands from its stylesheet list, which
@@ -527,6 +561,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     }
     out.extend(attribute_macro_refusals(app));
     out.extend(unlowered_form_builder_calls(app));
+    out.extend(unlowered_current_page(app));
     out.extend(helper_stylesheet_link_tags(app));
     out.extend(unlowered_time_tags(app));
     out.extend(devise_refusals(app));
