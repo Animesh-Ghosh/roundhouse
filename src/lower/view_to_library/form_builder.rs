@@ -551,14 +551,15 @@ fn emit_select_options(
                 map_loop_options(&container, selected.as_ref(), multiple, field_str, blank, ctx)?;
             Some((setup, loop_var))
         }
-        // `collect`, its alias: the pairs as `map`'s; a block answering one
-        // value per element falls to the scalar loop below, and one taking
-        // other than one parameter (a rest one too) to the general fallback.
+        // `collect`, its alias: the pairs as `map`'s. A block answering one
+        // value per element runs as written under the scalar loop below,
+        // whatever its parameters; pairs the map loop can't inline go to
+        // the general fallback.
         ExprNode::Send { method, block: Some(block), .. } if method.as_str() == "collect" => {
             if let Some(found) = map_loop_options(&container, selected.as_ref(), multiple, field_str, blank.clone(), ctx) {
                 return Some(found);
             }
-            if !matches!(&*block.node, ExprNode::Lambda { params, rest_param: None, extra_params, .. } if params.len() == 1 && extra_params.is_empty()) {
+            if block_answers_array(block) {
                 return None;
             }
             Some(scalar_select_loop(&container, selected.as_ref(), multiple, field_str, blank, ctx))
@@ -711,6 +712,30 @@ fn collection_options(
     Some((setup, var))
 }
 
+/// Whether a block's last expression is an array literal (`[text, value]`).
+fn block_answers_array(block: &Expr) -> bool {
+    let ExprNode::Lambda { body, .. } = &*block.node else { return false };
+    let last = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last(),
+        _ => Some(body),
+    };
+    last.is_some_and(|e| matches!(&*e.node, ExprNode::Array { .. }))
+}
+
+/// Whether `e` holds a `next` or `break` for the block it sits in (nested
+/// blocks keep their own).
+fn exits_block(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Next { .. } | ExprNode::Break { .. } => true,
+        ExprNode::Lambda { .. } => false,
+        node => {
+            let mut found = false;
+            node.for_each_child(&mut |child| found |= exits_block(child));
+            found
+        }
+    }
+}
+
 /// One `<option>` per element of `container`, its `to_s` as text and value.
 fn scalar_select_loop(
     container: &Expr,
@@ -750,6 +775,11 @@ fn map_loop_options(
     let ExprNode::Lambda { extra_params, params, rest_param, body, .. } = &*block.node else { return None };
     // One element parameter: the loop binds only that one.
     if !extra_params.is_empty() || rest_param.is_some() || params.len() != 1 {
+        return None;
+    }
+    // The loop appends one option per element, so a `next` or `break`
+    // answering the block's value would skip it instead.
+    if exits_block(body) {
         return None;
     }
     let el = params.first().cloned()?;

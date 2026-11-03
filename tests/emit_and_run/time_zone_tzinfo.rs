@@ -220,3 +220,41 @@ fn a_looked_up_zones_tzinfo_is_refused_off_the_ruby_family() {
         .emit(roundhouse::project::BuildTarget::Typescript);
     assert!(errors.iter().any(|e| e.contains("tzinfo not supported")), "{errors:?}");
 }
+
+/// A `collect` block answering one value per element runs as written
+/// whatever its parameters, keeping `include_blank:` (review,
+/// form_builder.rs:562).
+#[test]
+fn a_select_over_a_two_parameter_scalar_collect_keeps_its_blank() {
+    let app = emit_and_run::real_blog().edit(
+        "app/views/articles/_form.html.erb",
+        "    <%= form.label :body %>\n",
+        concat!(
+            "    <%= form.select :body, { \"Kay\" => \"k\", \"Vee\" => \"v\" }.collect { |key, value| value }, include_blank: true %>\n",
+            "    <%= form.label :body %>\n",
+        ),
+    );
+    let test = "require \"test_helper\"\n\nclass CollectScalarSelectControllerTest < ActionDispatch::IntegrationTest\n  test \"options\" do\n    get new_article_url\n    assert_response :success\n    assert_select \"select[name='article[body]'] option\", 3\n    assert_select \"select[name='article[body]'] option[value='']\"\n    assert_select \"select[name='article[body]'] option[value=k]\", \"k\"\n    assert_select \"select[name='article[body]'] option[value=v]\", \"v\"\n  end\nend\n";
+    app.write("test/controllers/collect_scalar_select_controller_test.rb", test)
+        .run_test("test/controllers/collect_scalar_select_controller_test.rb")
+        .assert_passes();
+}
+
+/// A pair the block answers through `next` is an option too; the loop
+/// that inlines the block's last pair would skip it (review,
+/// form_builder.rs:559).
+#[test]
+fn a_select_over_a_collect_answering_through_next_keeps_that_option() {
+    let app = emit_and_run::real_blog().edit(
+        "app/views/articles/_form.html.erb",
+        "    <%= form.label :body %>\n",
+        concat!(
+            "    <%= form.select :body, [\"a\", nil].collect { |x| next [\"Other\", \"other\"] if x.nil?; [x.upcase, x] } %>\n",
+            "    <%= form.label :body %>\n",
+        ),
+    );
+    let test = "require \"test_helper\"\n\nclass CollectNextSelectControllerTest < ActionDispatch::IntegrationTest\n  test \"options\" do\n    get new_article_url\n    assert_response :success\n    assert_select \"select[name='article[body]'] option\", 2\n    assert_select \"select[name='article[body]'] option[value=a]\", \"A\"\n    assert_select \"select[name='article[body]'] option[value=other]\", \"Other\"\n  end\nend\n";
+    app.write("test/controllers/collect_next_select_controller_test.rb", test)
+        .run_test("test/controllers/collect_next_select_controller_test.rb")
+        .assert_passes();
+}
