@@ -633,6 +633,12 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     classes.entry(ClassId(Symbol::from("Hash"))).or_default().class_methods.entry(Symbol::from("ruby2_keywords_hash")).or_insert(
         Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
     );
+    // Not an element type for `ActiveJob::Arguments.deserialize`: its arguments are the wire's, any JSON value.
+    {
+        let args = classes.entry(ClassId(Symbol::from("ActiveJob::Arguments"))).or_default();
+        args.is_module = true;
+        args.class_methods.entry(Symbol::from("deserialize")).or_insert(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+    }
     // `ActiveJob::Base.execute(job_data)`, the job a claimed solid_queue execution runs (runtime/spinel/solid_queue_runner.rb).
     classes.entry(ClassId(Symbol::from("ActiveJob::Base"))).or_default().class_methods.entry(Symbol::from("execute")).or_insert(Ty::Nil);
     {

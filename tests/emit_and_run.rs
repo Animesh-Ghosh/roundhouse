@@ -20506,6 +20506,8 @@ mod inquiry_safe_nav;
 mod record_as_json;
 #[path = "emit_and_run/active_model_keyword_super.rs"]
 mod active_model_keyword_super;
+#[path = "emit_and_run/arguments_deserialize.rs"]
+mod arguments_deserialize;
 
 #[path = "emit_and_run/where_record_seed_redirect_back.rs"]
 mod where_record_seed_redirect_back;

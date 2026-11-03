@@ -41,6 +41,14 @@ module ActiveJob
     def self.serialized_value: (untyped value, String serializer) -> String
     def self.key_of: (untyped value, String key) -> untyped
     def self.parse_time: (String text) -> Time
+    TIME_WITH_ZONE_SERIALIZER: String
+    SYMBOL_KEYS_KEY: String
+    RUBY2_KEYWORDS_KEY: String
+    WITH_INDIFFERENT_ACCESS_KEY: String
+    def self.deserialize: (untyped arguments) -> Array[untyped]
+    def self.deserialize_argument: (untyped argument) -> untyped
+    def self.deserialize_serialized: (untyped hash) -> untyped
+    def self.deserialize_hash: (untyped hash) -> Hash[untyped, untyped]
   end
 
   module Payload

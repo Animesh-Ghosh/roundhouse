@@ -298,6 +298,65 @@ module ActiveJob
       end
       Time.at(Time.utc(year, mon, day, hour, min, sec).to_i - offset, nsec, :nsec).utc
     end
+
+    # ---- Whole-argument read: Rails' `Arguments.deserialize` ----------
+
+    TIME_WITH_ZONE_SERIALIZER = "ActiveJob::Serializers::TimeWithZoneSerializer"
+    SYMBOL_KEYS_KEY = "_aj_symbol_keys"
+    RUBY2_KEYWORDS_KEY = "_aj_ruby2_keywords"
+    WITH_INDIFFERENT_ACCESS_KEY = "_aj_hash_with_indifferent_access"
+
+    # Not every Rails serializer: Date, DateTime, Duration, BigDecimal, Range, Module and an app's own raise DeserializationError.
+    def self.deserialize(arguments)
+      arguments.map { |argument| deserialize_argument(argument) }
+    rescue ActiveJob::DeserializationError
+      raise
+    rescue StandardError => e
+      raise ActiveJob::DeserializationError, deserialize_message(e.message)
+    end
+
+    def self.deserialize_argument(argument)
+      case argument
+      when nil, true, false, Integer, Float, String
+        argument
+      when Array
+        argument.map { |part| deserialize_argument(part) }
+      when Hash
+        if argument.size == 1 && argument.key?(GLOBALID_KEY)
+          parts = gid_parts(argument)
+          JobRegistry.locate(parts[1], parts[2])
+        elsif argument.key?(SERIALIZER_KEY)
+          deserialize_serialized(argument)
+        else
+          deserialize_hash(argument)
+        end
+      else
+        raise ArgumentError, "Can only deserialize primitive arguments: " + argument.inspect
+      end
+    end
+
+    def self.deserialize_serialized(hash)
+      name = hash[SERIALIZER_KEY].to_s
+      case name
+      when SYMBOL_SERIALIZER
+        hash["value"].to_s.to_sym
+      when TIME_SERIALIZER, TIME_WITH_ZONE_SERIALIZER
+        parse_time(hash["value"].to_s)
+      else
+        raise ArgumentError, "Serializer " + name + " is not known"
+      end
+    end
+
+    # Not a HashWithIndifferentAccess for `_aj_hash_with_indifferent_access`: the runtime has none, so its keys stay Strings.
+    def self.deserialize_hash(hash)
+      symbol_keys = hash[SYMBOL_KEYS_KEY] || hash[RUBY2_KEYWORDS_KEY]
+      result = {}
+      hash.each do |key, value|
+        next if key == SYMBOL_KEYS_KEY || key == RUBY2_KEYWORDS_KEY || key == WITH_INDIFFERENT_ACCESS_KEY
+        result[symbol_keys && symbol_keys.include?(key) ? key.to_sym : key] = deserialize_argument(value)
+      end
+      result
+    end
   end
 
   module Payload

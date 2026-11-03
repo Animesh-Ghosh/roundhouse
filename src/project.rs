@@ -6725,6 +6725,58 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
     }
 }
 
+/// `JobRegistry.locate(model_name, id)`, the gid half of
+/// `ActiveJob::Arguments.deserialize`: one `when` per model, spelled as a
+/// literal constant (a name from the wire is never turned into a class).
+/// Written only for an app that calls `Arguments.deserialize`; the
+/// scaffold's body, which raises Rails' NameError, stands otherwise.
+fn apply_job_registry_locate(files: &mut [(String, String)], app: &App) {
+    const HEAD: &str = "  # >>> generated: job-registry-locate\n";
+    const TAIL: &str = "  # <<< generated: job-registry-locate\n";
+    if !calls_arguments_deserialize(app) {
+        return;
+    }
+    let mut generated = format!("{HEAD}  def self.locate(model_name, id)\n    case model_name\n");
+    for model in app.models.iter().filter(|m| !crate::lower::model_to_library::markers::is_abstract_class(m)) {
+        let name = model.name.0.as_str();
+        generated.push_str(&format!(
+            "    when \"{name}\"\n      {name}.find(GlobalID::Locator.cast_id(id))\n"
+        ));
+    }
+    generated.push_str("    else\n      raise NameError, \"uninitialized constant \" + model_name\n    end\n  end\n");
+    generated.push_str(TAIL);
+    for (path, content) in files.iter_mut() {
+        if !path.ends_with("job_registry.rb") {
+            continue;
+        }
+        let Some(start) = content.find(HEAD) else { continue };
+        let Some(rel_end) = content[start..].find(TAIL) else { continue };
+        let end = start + rel_end + TAIL.len();
+        content.replace_range(start..end, &generated);
+    }
+}
+
+fn calls_arguments_deserialize(app: &App) -> bool {
+    fn walk(e: &crate::expr::Expr, found: &mut bool) {
+        if let crate::expr::ExprNode::Send { recv: Some(r), method, .. } = &*e.node
+            && method.as_str() == "deserialize"
+            && let crate::expr::ExprNode::Const { path } = &*r.node
+        {
+            let names: Vec<&str> = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect();
+            if names == ["ActiveJob", "Arguments"] {
+                *found = true;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, found));
+    }
+    let mut found = false;
+    crate::lower::for_each_hook_body_ref(app, &mut |e| walk(e, &mut found));
+    for view in &app.views {
+        walk(&view.body, &mut found);
+    }
+    found
+}
+
 fn apply_global_id_locate(files: &mut [(String, String)], app: &App) {
     const HEAD: &str = "    # >>> generated: global-id-locate\n";
     const TAIL: &str = "    # <<< generated: global-id-locate\n";
@@ -9668,6 +9720,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_attachable_locate(&mut files, app);
     // Same reason: both lanes require `runtime/job_registry.rb`.
     apply_job_registry(&mut files, app);
+    apply_job_registry_locate(&mut files, app);
     apply_views_aggregator(&mut files);
     apply_models_aggregator(&mut files);
     apply_route_helpers_demand(&mut files);
