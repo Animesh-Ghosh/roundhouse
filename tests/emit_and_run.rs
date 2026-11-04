@@ -20646,6 +20646,9 @@ mod record_slice;
 #[path = "emit_and_run/csrf_meta_tag_alias.rs"]
 mod csrf_meta_tag_alias;
 
+#[path = "emit_and_run/namespaced_model_paths.rs"]
+mod namespaced_model_paths;
+
 #[path = "emit_and_run/link_to_blob.rs"]
 mod link_to_blob;
 #[path = "emit_and_run/validates_rule_gaps.rs"]

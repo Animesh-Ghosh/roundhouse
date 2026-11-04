@@ -1282,6 +1282,63 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
     true
 }
 
+/// Rust re-exports each model from `src/models/mod.rs` by its struct name
+/// (the last segment of the class name) from a module named by its
+/// flattened stem (`Admin::Note` → `admin_note::Note`). The synthesized
+/// `<Model>Row` and `<Resource>Params` classes are declared there too.
+/// Two of them with one struct name (`Note` and `Admin::Note`, or
+/// `Admin::ArticleRow` and `Article`'s row `ArticleRow`) or one stem
+/// (`AdminNote` and `Admin::Note`) would be declared twice; so would a
+/// model and a synthesized class of the same name (a model `ArticleRow`
+/// and `Article`'s row), whose one file keeps only the last written.
+/// Refused, naming both, rather than renamed. An `Err`, so a caller with
+/// no diagnostic scope (`build_archives`) stops too.
+fn reject_rust_model_name_collisions(app: &App, target: BuildTarget) -> Result<(), String> {
+    if target != BuildTarget::Rust {
+        return Ok(());
+    }
+    // (class name, the span to report it at, what declares it), models first.
+    let mut names: Vec<(String, crate::span::Span, String)> = app
+        .models
+        .iter()
+        .map(|m| (m.name.0.as_str().to_string(), m.parent_span, "the model".to_string()))
+        .collect();
+    for model in app.models.iter().filter(|m| app.schema.tables.contains_key(&m.table.0)) {
+        let row = crate::lower::model_to_library::row::row_class_id(&model.name);
+        names.push((row.0.as_str().to_string(), model.parent_span, format!("`{}`'s row", model.name.0.as_str())));
+    }
+    for spec in crate::lower::controller_to_library::params::collect_specs(&app.controllers).iter() {
+        names.push((spec.class_id.0.as_str().to_string(), spec.span, "the params class".to_string()));
+    }
+    let mut seen: Vec<(String, String, &str, crate::span::Span, &str)> = Vec::new();
+    let mut messages: Vec<String> = Vec::new();
+    for (name, span, origin) in &names {
+        let stem = crate::emit::rust::rust_model_stem(name);
+        let strukt = crate::emit::rust::rust_struct_name(name).to_string();
+        if let Some((_, _, other, other_span, other_origin)) = seen
+            .iter()
+            .find(|(s, n, o, _, oo)| (*o != name.as_str() || *oo != origin.as_str()) && (*s == stem || *n == strukt))
+        {
+            let span = if span.is_synthetic() { *other_span } else { *span };
+            let pair = if *other == name.as_str() {
+                format!("`{name}` ({other_origin}) and `{name}` ({origin})")
+            } else {
+                format!("`{other}` and `{name}`")
+            };
+            let diagnostic = crate::diagnostic::Diagnostic::unsupported(
+                span,
+                Some(crate::ident::Symbol::from(target.as_str())),
+                "model name",
+                format!("{pair} would both be declared as `src/models/{stem}.rs` or as struct `{strukt}`"),
+            );
+            messages.push(diagnostic.message.clone());
+            emit::diagnostics::push(diagnostic);
+        }
+        seen.push((stem, strukt, name.as_str(), *span, origin.as_str()));
+    }
+    if messages.is_empty() { Ok(()) } else { Err(messages.join("\n")) }
+}
+
 /// Roda converts views from their ERB, and its translator writes plain
 /// HTML for `form.label`, `text_field`, `textarea` and `submit` only
 /// (`emit::roda::views::translate_form_field`). A `color_field` or
@@ -3309,6 +3366,7 @@ fn target_files_inner(
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
+    reject_rust_model_name_collisions(app, target)?;
     report_datetime_local_reads(app, target);
     report_roda_form_fields(app, target);
     report_tzinfo_reads(app, target);
