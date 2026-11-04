@@ -816,6 +816,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             } else {
                 ""
             };
+            // A model gets `validate` only with validations and
+            // `fill_timestamps` only with timestamp columns; with neither
+            // there is nothing to run, as `ActiveRecord::Base`'s would.
+            let validate_call = if has_method("validate") { "self.validate();\n" } else { "" };
+            let fill_timestamps_call = if has_method("fill_timestamps") { "self.fill_timestamps(true);\n" } else { "" };
             let destroy_body = format!(
                 "{before}self._adapter_delete();{after}",
                 before = if has_before_destroy { "self.before_destroy(); " } else { "" },
@@ -889,7 +894,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn error_messages_for(&self, attribute: &str) -> Vec<String> {{ crate::errors_ext::validation_error_details_snapshot().into_iter().filter(|(a, _, _, _, _, _)| a == attribute).map(|(_, _, m, _, _, _)| m).collect() }}\n\
                         pub fn save(&mut self) -> bool {{\n\
                             crate::errors_ext::validation_errors_clear();\n\
-                            self.validate();\n\
+                            {validate_call}\
                             if !crate::errors_ext::validation_errors_is_empty() {{ return false; }}\n\
                             self.save_after_validation()\n\
                         }}\n\
@@ -900,7 +905,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                             true\n\
                         }}\n\
                         pub fn _insert_row(&mut self) -> bool {{\n\
-                            self.fill_timestamps(true);\n\
+                            {fill_timestamps_call}\
                             self.id = self._adapter_insert();\n\
                             true\n\
                         }}\n\
@@ -927,6 +932,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     destroy_body = destroy_body,
                     after_create_commit = after_create_commit,
                     after_update_commit = after_update_commit,
+                    validate_call = validate_call,
+                    fill_timestamps_call = fill_timestamps_call,
                 )
             } else {
                 String::new()
