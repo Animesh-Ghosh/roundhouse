@@ -588,6 +588,27 @@ fn emit_link_to_inline(
 /// `html_escape` is deliberately monomorphic `(String) -> String`.
 /// `nil.to_s == ""` is what Rails renders.
 fn escaped_label(text: &Expr, ctx: &ViewCtx) -> Expr {
+    // An escape the template applied (`h(x)`, `ERB::Util.html_escape(x)`)
+    // is html-safe in Rails: escaped here once, before the rewrite folds a
+    // literal one to text that no longer looks escaped.
+    let escaped_arg = match &*text.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "h" && args.len() == 1 && !ctx.is_local("h") =>
+        {
+            Some(&args[0])
+        }
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if matches!(method.as_str(), "html_escape" | "h")
+                && args.len() == 1
+                && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ERB", "Util"])) =>
+        {
+            Some(&args[0])
+        }
+        _ => None,
+    };
+    if let Some(arg) = escaped_arg {
+        return view_helpers_call("html_escape", vec![lit_str_coerce(rewrite_helpers_in_expr(arg, ctx))]);
+    }
     let lowered = rewrite_helpers_in_expr(text, ctx);
     let pre_escaped = matches!(&*lowered.node,
         ExprNode::Send { recv: Some(r), method, args, .. }

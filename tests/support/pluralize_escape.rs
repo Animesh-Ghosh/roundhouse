@@ -1,7 +1,8 @@
 //! `pluralize` in a template: Rails 8.1.4 escapes its String, which isn't
-//! html-safe, where the emitted views appended it as it was. A label
-//! that `link_to` or `button_to` escape is escaped once, not twice, and a
-//! label through an app's own `html_escape` is still escaped.
+//! html-safe, where the emitted views appended it as it was. A label that
+//! `link_to` or `button_to` escape is escaped once, not twice, an `h` or
+//! `ERB::Util.html_escape` label too, and a label through an app's own
+//! `html_escape` is still escaped.
 
 use super::emit_and_run;
 
@@ -11,6 +12,8 @@ pub const VIEW: &str = concat!(
     "<%= pluralize(2, \"comment\") %>\n",
     "<%= link_to pluralize(4, \"<s>\"), \"/x\" %>\n",
     "<%= button_to pluralize(3, \"<u>\"), \"/x\" %>\n",
+    "<%= link_to h(\"<v>\"), \"/z\" %>\n",
+    "<%= button_to ERB::Util.html_escape(\"<k>\"), \"/z\" %>\n",
 );
 
 /// What Rails 8.1.4 renders for the lines of `VIEW` (the `button_to`
@@ -21,10 +24,12 @@ pub const RENDERS: &[&str] = &[
     "2 comments",
     "<a href=\"/x\">4 &lt;s&gt;s</a>",
     "3 &lt;u&gt;s",
+    "<a href=\"/z\">&lt;v&gt;</a>",
+    "&lt;k&gt;",
 ];
 
 /// Neither the raw words nor a second escape of them.
-pub const ABSENT: &[&str] = &["<b>x</b>", "<i>s", "<s>s", "<u>s", "&amp;lt;"];
+pub const ABSENT: &[&str] = &["<b>x</b>", "<i>s", "<s>s", "<u>s", "<v>", "<k>", "&amp;lt;"];
 
 /// A label through an app's own `html_escape`, which returns its argument
 /// as it is: Rails 8.1.4 still escapes it. Ruby and Spinel only, since
