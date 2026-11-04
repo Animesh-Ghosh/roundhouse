@@ -664,6 +664,17 @@ class Routing(unittest.TestCase):
                     | ({"compare-jruby"} if binary in {"param_binds_values", "param_binds_cleanup"} else set()),
                 )
 
+    def test_object_blank_owns_its_runtime_lowering_and_native_suite(self):
+        for path in [
+            "runtime/ruby/active_support_ext.rb",
+            "src/lower/blank.rs",
+            "tests/object_blank.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("object_blank", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
     def test_param_binds_owns_lowering_drivers_and_database_runtime(self):
         for path in [
             "src/lower/arel/visitor.rs",

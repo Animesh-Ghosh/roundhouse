@@ -83,6 +83,7 @@ SPINEL_TESTS = [
     "date_columns_spinel",
     "temporal_initialize_spinel",
     "framework_tests_spinel",
+    "object_blank",
     "spinel_web_push_crypto",
     "openssl_random",
     "spinel_db_lease",
@@ -504,6 +505,8 @@ def native_coverage(path):
     suites = set()
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
         suites.add("framework_tests_spinel")
+    if path in {"runtime/ruby/active_support_ext.rb", "src/lower/blank.rs"}:
+        suites.add("object_blank")
     # `Model.transaction` (rollback, nesting, savepoints) lives here; its
     # gate compiles it with the real_blog fixture.
     if path in {
