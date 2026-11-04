@@ -84,8 +84,8 @@ fn source_reuse_is_pr_only_and_never_grants_a_validation_receipt() {
         "${{ steps.fixture-cache.outcome == 'success' && steps.fixture-cache.outputs.cache-hit == 'true' }}"
     );
     for command in [
-        "gem install rails --no-document",
-        "bin/rh fixture",
+        "gem install rails -v 8.1.4 --no-document",
+        "bin/rh fixture --rails 8.1.4",
         "cd fixtures && ../scripts/create-store store",
     ] {
         let step = steps.iter().find(|step| step["run"] == command).unwrap();
