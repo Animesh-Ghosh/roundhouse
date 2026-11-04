@@ -45,6 +45,13 @@ pub(super) fn splice_included_extends(app: &mut App) {
         .filter_map(|lc| Some((lc.name.clone(), instance_eval_extends(lc, &names)?)))
         .collect();
     let included: HashSet<ClassId> = app.library_classes.iter().flat_map(|c| c.includes.iter().cloned()).collect();
+    let hook_extended: HashSet<ClassId> = hooks
+        .iter()
+        .flat_map(|(_, ex)| ex.iter().filter_map(|e| match e {
+            Extend::Module(id) => Some(id.clone()),
+            Extend::Itself => None,
+        }))
+        .collect();
     let snapshot = app.library_classes.clone();
     let mut spliced = Vec::new();
     let mut expanded_hooks: HashSet<ClassId> = HashSet::default();
@@ -62,7 +69,9 @@ pub(super) fn splice_included_extends(app: &mut App) {
                 hook_ids.push(inc.clone());
             }
         }
-        let body_extends: Vec<ClassId> = lc.unknown_calls.iter().filter_map(|e| extend_const(e, &names)).collect();
+        // Not every body-level `extend` (a concern's `extend ActiveSupport::Concern`): only of a module a hook here extends its includers with, as raabro extends itself with its ModuleMethods.
+        let body_extends: Vec<ClassId> =
+            lc.unknown_calls.iter().filter_map(|e| extend_const(e, &names)).filter(|id| hook_extended.contains(id)).collect();
         extends.extend(body_extends.iter().cloned().map(Extend::Module));
         // Not `extend self` in a module something includes: moving its instance methods would take them from the includer.
         let itself_blocked = extends.iter().any(|e| matches!(e, Extend::Itself)) && included.contains(&lc.name);
@@ -76,7 +85,7 @@ pub(super) fn splice_included_extends(app: &mut App) {
         }));
         splice(lc, &extends, &snapshot);
         lc.includes.retain(|i| !hook_ids.contains(i) || has_instance_methods(i, &snapshot));
-        lc.unknown_calls.retain(|e| extend_const(e, &names).is_none());
+        lc.unknown_calls.retain(|e| !extend_const(e, &names).is_some_and(|id| body_extends.contains(&id)));
         spliced.push(idx);
         expanded_hooks.extend(hook_ids);
     }
@@ -90,8 +99,7 @@ pub(super) fn splice_included_extends(app: &mut App) {
             lc.methods.retain(|m| !(m.receiver == MethodReceiver::Class && m.name.as_str() == "included"));
         }
     }
-    drop_unreferenced(app, &extended);
-    for idx in spliced {
+    for idx in spliced.iter().copied() {
         let lc = &mut app.library_classes[idx];
         let methods = lc.methods.clone();
         let owner = lc.name.0.as_str().to_string();
@@ -100,6 +108,8 @@ pub(super) fn splice_included_extends(app: &mut App) {
             ground_prefixed_sends(&mut m.body, &methods, &owner);
         }
     }
+    // Last: it shifts `library_classes`, which `spliced` indexes.
+    drop_unreferenced(app, &extended);
 }
 
 /// A module every extender took in that nothing else includes, extends or names: its methods run only as the copies, and left in the tree its body is checked and compiled for nothing.
