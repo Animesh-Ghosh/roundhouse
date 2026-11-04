@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+require "time"
 # ActiveJob payloads on the Ruby-family lanes: job arguments written in
 # ActiveJob's wire format, and read back when the drain runs the job.
 #
@@ -263,40 +264,12 @@ module ActiveJob
       nil
     end
 
-    # `YYYY-MM-DDTHH:MM:SS[.fffffffff](Z|+HH:MM|-HH:MM)` -> Time, in UTC.
-    # Hand-written because spinel has no `Time.iso8601` (it compiles and
-    # raises NoMethodError). The instant is exact to the nanosecond: whole
-    # seconds come from `Time.utc`, and nanoseconds go in through
-    # `Time.at(..., :nsec)`, since adding a Rational loses one on spinel.
     # Rails answers the time in the offset it was written with; this one
     # answers the same instant in UTC.
     def self.parse_time(text)
-      raise ActiveJob::DeserializationError, deserialize_message("bad time " + text) if text.length < 20
-      year = text[0, 4].to_i
-      mon = text[5, 2].to_i
-      day = text[8, 2].to_i
-      hour = text[11, 2].to_i
-      min = text[14, 2].to_i
-      sec = text[17, 2].to_i
-      pos = 19
-      nsec = 0
-      if text[pos] == "."
-        pos += 1
-        digits = +""
-        while pos < text.length && text[pos] >= "0" && text[pos] <= "9"
-          digits << text[pos]
-          pos += 1
-        end
-        nsec = (digits + "000000000")[0, 9].to_i
-      end
-      offset = 0
-      zone = text[pos, text.length - pos]
-      if zone != "Z"
-        raise ActiveJob::DeserializationError, deserialize_message("bad time " + text) unless zone.length == 6
-        offset = zone[1, 2].to_i * 3600 + zone[4, 2].to_i * 60
-        offset = -offset if zone[0] == "-"
-      end
-      Time.at(Time.utc(year, mon, day, hour, min, sec).to_i - offset, nsec, :nsec).utc
+      Time.iso8601(text).utc
+    rescue ArgumentError
+      raise ActiveJob::DeserializationError, deserialize_message("bad time " + text)
     end
 
     # ---- Whole-argument read: Rails' `Arguments.deserialize` ----------

@@ -111,6 +111,7 @@ SPINEL_TESTS = [
     "before_action_return_spinel",
     "partial_flash_from_caller_spinel",
     "plain_class_optional_keywords_spinel",
+    "conditional_expression_parens",
     "jbuilder_array_value_spinel",
     "active_job_payload",
     "render_json_encoder_spinel",
@@ -502,6 +503,8 @@ def native_coverage(path):
         or path == "tests/support/full_forwarding.rs"
     ) and not interpreter_only
     suites = set()
+    if path in {"src/emit/ruby.rs", "src/emit/ruby/expr.rs"}:
+        suites.add("conditional_expression_parens")
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
         suites.add("framework_tests_spinel")
     # `Model.transaction` (rollback, nesting, savepoints) lives here; its

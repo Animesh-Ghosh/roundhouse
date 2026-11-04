@@ -20695,6 +20695,44 @@ fn an_assertion_on_a_new_records_method_passes_on_ruby() {
     go_test_literal_receiver::app().run_test("test/models/featured_test.rb").assert_passes();
 }
 
+#[path = "support/rust_bare_model.rs"]
+mod rust_bare_model;
+
+/// #1711: the Rust model's `save` and `_insert_row` call `validate` and
+/// `fill_timestamps` only when the model has them.
+#[test]
+fn a_rust_model_calls_only_the_validate_and_fill_timestamps_it_has() {
+    for (validated, timestamped) in rust_bare_model::VARIANTS {
+        let (emitted, errors) = rust_bare_model::app(validated, timestamped).emit(roundhouse::project::BuildTarget::Rust);
+        assert!(errors.is_empty(), "{errors:?}");
+        let model = std::fs::read_to_string(emitted.join("src/models/account.rs")).unwrap();
+        assert_eq!(model.contains("self.validate()"), validated, "validated: {validated}\n{model}");
+        assert_eq!(model.contains("self.fill_timestamps(true)"), timestamped, "timestamped: {timestamped}\n{model}");
+    }
+}
+
+#[path = "support/pluralize_escape.rs"]
+mod pluralize_escape;
+
+#[test]
+fn pluralize_in_a_template_is_escaped() {
+    pluralize_escape::app_with_app_escape()
+        .write("test/controllers/probes_controller_test.rb", &pluralize_escape::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn pluralize_in_a_template_is_escaped_on_spinel() {
+    pluralize_escape::app_with_app_escape()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"pluralize escaped\"\n",
+            pluralize_escape::body_checks()
+        ))
+        .assert_passes();
+}
+
 #[path = "emit_and_run/unknown_class_association.rs"]
 mod unknown_class_association;
 
