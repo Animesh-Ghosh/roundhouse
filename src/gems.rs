@@ -666,6 +666,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("cgi", GemFate::Stdlib),
     ("csv", GemFate::Stdlib),
     ("date", GemFate::Stdlib),
+    ("did_you_mean", GemFate::Stdlib),
     ("digest", GemFate::Stdlib),
     ("drb", GemFate::Stdlib),
     ("erb", GemFate::Stdlib),

@@ -113,7 +113,7 @@ const RUNTIME_PROVIDED: &[&str] = &[
     "Marshal", "ObjectSpace", "GC", "File", "Dir", "IO", "Math", "Random", "Encoding", "Errno",
     "Etc", "Monitor", "RbConfig", "Gem", "Bundler", "Pathname", "Ractor", "Fiber", "Method",
     "ENV", "ARGV", "ARGF", "STDIN", "STDOUT", "STDERR", "Rack", "Zeitwerk", "I18n", "Minitest",
-    "Rake", "Sprockets", "Thor", "Concurrent", "Racc", "Nokogiri", "Mail", "Marcel", "Rouge",
+    "Rake", "Sprockets", "Thor", "Concurrent", "Racc", "Nokogiri", "Mail", "Marcel", "Rouge", "DidYouMean",
 ];
 
 /// Constants a gem itself defines, for gems the app names directly.
