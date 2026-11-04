@@ -258,13 +258,14 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             // The label as the template's own helpers lower it: a
             // `truncate(…)` arrives as `html_escape(truncate(…))`,
             // already escape-correct, which the two branches below
-            // each take exactly once.
+            // each take exactly once. Only the view helpers' own
+            // `html_escape`: an app's may not escape.
             let lowered = rewrite_helpers_in_expr(text, ctx);
             let pre_escaped = match &*lowered.node {
                 ExprNode::Send { recv: Some(r), method, args, .. }
                     if method.as_str() == "html_escape"
                         && args.len() == 1
-                        && matches!(&*r.node, ExprNode::Const { .. }) =>
+                        && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"])) =>
                 {
                     Some(args[0].clone())
                 }

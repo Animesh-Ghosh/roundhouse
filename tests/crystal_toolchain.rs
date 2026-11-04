@@ -29,6 +29,9 @@ mod record_slice_app;
 #[path = "support/ts_controller_ivars.rs"]
 #[allow(dead_code)]
 mod ts_controller_ivars;
+#[path = "support/link_to_if_escape.rs"]
+#[allow(dead_code)]
+mod link_to_if_escape;
 
 use roundhouse::emit::crystal;
 use roundhouse::ingest::ingest_app;
@@ -308,5 +311,34 @@ fn content_tag_blocks_render() {
     assert!(run.status.success(), "{stdout}\n{stderr}");
     for want in [r#"<section class="boxed">inside</section>"#, r#"<div class="btn primary">blk</div>"#] {
         assert!(stdout.contains(want), "expected {want} in\n{stdout}");
+    }
+}
+
+/// `link_to_if`'s label is escaped in both branches, as Rails 8.1.4
+/// renders it.
+#[test]
+#[ignore]
+fn link_to_if_escapes_its_label() {
+    let (emitted, errors) = link_to_if_escape::app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    shards_install(&emitted);
+    std::fs::write(
+        emitted.join("probe.cr"),
+        "require \"./src/app\"\nc = ProbesController.new\nc.request_method = \"GET\"\nc.process_action(:show)\nputs c.body\n",
+    )
+    .unwrap();
+    let run = Command::new("crystal")
+        .args(["run", "probe.cr"])
+        .current_dir(&emitted)
+        .env("CRYSTAL_CACHE_DIR", emitted.join(".crystal-cache"))
+        .output()
+        .expect("run crystal");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+    for want in link_to_if_escape::RENDERS {
+        assert!(stdout.contains(want), "expected {want} in\n{stdout}");
+    }
+    for absent in link_to_if_escape::ABSENT {
+        assert!(!stdout.contains(absent), "unexpected {absent} in\n{stdout}");
     }
 }
