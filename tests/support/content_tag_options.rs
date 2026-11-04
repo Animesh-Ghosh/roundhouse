@@ -17,12 +17,15 @@ pub const VIEW: &str = concat!(
     "<%= content_tag :p, \"<b>s</b>\".html_safe %>\n",
     "<%= content_tag :p, raw(\"<i>r</i>\") %>\n",
     "<%= content_tag :p, content_tag(:b, \"<n>\") %>\n",
+    "<% w = \"<b>x</b>\" %><%= content_tag :p, pluralize(1, w) %>\n",
+    "<%= content_tag :p, truncate(\"<b>xx</b>\", length: 5) %>\n",
     "<%= content_tag :div, class: \"x\" do %>b<% end %>\n",
 );
 
 /// What Rails 8.1.4 renders for each line of `VIEW`: the content escaped
-/// unless it is html-safe (a helper's markup, `html_safe`, `raw`). The last
-/// line is #1771's block form with options, which Go didn't compile.
+/// unless it is html-safe (a helper's markup, `html_safe`, `raw`): a
+/// `pluralize`'s text is escaped, and a `truncate`'s only once. The last line
+/// is #1771's block form with options, which Go didn't compile.
 pub const RENDERS: &[&str] = &[
     "<p>&lt;b&gt;x&lt;/b&gt;</p>",
     "<span class=\"c\">&lt;i&gt;y</span>",
@@ -34,6 +37,8 @@ pub const RENDERS: &[&str] = &[
     "<p><b>s</b></p>",
     "<p><i>r</i></p>",
     "<p><b>&lt;n&gt;</b></p>",
+    "<p>1 &lt;b&gt;x&lt;/b&gt;</p>",
+    "<p>&lt;b...</p>",
     "<div class=\"x\">b</div>",
 ];
 

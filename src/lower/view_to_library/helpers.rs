@@ -248,12 +248,19 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
         // space-joined.
         ContentTag { name, content, opts } => {
             // Rails escapes the content unless it is html-safe: an
-            // `x.html_safe` or `raw(x)` (`x.to_s.html_safe`), or a helper's
-            // markup (`link_to`, a nested `content_tag`), which the
-            // template's own output appends as it is too.
+            // `x.html_safe` or `raw(x)` (`x.to_s.html_safe`), or a helper
+            // whose call here is markup (`link_to`, a nested `content_tag`),
+            // or already escaped (`truncate`, `word_wrap`). The other kinds
+            // (`pluralize`'s text, `dom_id`) are escaped like any String.
             let helper_markup = matches!(&*content.node,
                 ExprNode::Send { recv: None, method, args, block: None, parenthesized }
-                    if super::walker::classify_template_helper(method.as_str(), args, *parenthesized, ctx).is_some());
+                    if matches!(
+                        super::walker::classify_template_helper(method.as_str(), args, *parenthesized, ctx),
+                        Some(LinkTo { .. } | LinkToIf { .. } | ButtonTo { .. } | ContentTag { .. }
+                            | CsrfMetaTags | CspMetaTag | StylesheetLinkTag { .. }
+                            | JavascriptImportmapTags { .. } | EngineImportmapTags { .. }
+                            | Truncate { .. } | WordWrap { .. })
+                    ));
             let raw_value = match &*content.node {
                 ExprNode::Send { recv: None, method, args, block: None, .. }
                     if method.as_str() == "raw" && args.len() == 1 && !ctx.is_local("raw") =>
