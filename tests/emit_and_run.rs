@@ -20661,6 +20661,8 @@ mod render_partial_block;
 
 #[path = "emit_and_run/python_route_format.rs"]
 mod python_route_format;
+#[path = "emit_and_run/partial_local_shadows_helper.rs"]
+mod partial_local_shadows_helper;
 
 #[path = "emit_and_run/python_nested_modifier_if.rs"]
 mod python_nested_modifier_if;
