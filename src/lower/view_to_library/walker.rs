@@ -1798,6 +1798,18 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
 /// enclosing name rather than counted in the context because the walk
 /// reaches nested blocks through several recursion paths and a counter
 /// threaded through all of them is a second source of truth.
+fn next_capture_name(outer: &str) -> String {
+    let Some(rest) = outer.strip_prefix("_cap") else {
+        return "_cap".to_string();
+    };
+    match rest.parse::<u32>() {
+        Ok(n) => format!("_cap{}", n + 1),
+        // bare "_cap" is depth 1
+        Err(_) if rest.is_empty() => "_cap2".to_string(),
+        Err(_) => "_cap".to_string(),
+    }
+}
+
 /// The locals a template block assigns (`<% css = "b" %>`).
 fn assigned_locals(body: &Expr) -> Vec<String> {
     fn walk(e: &Expr, out: &mut Vec<String>) {
@@ -1842,18 +1854,6 @@ fn replace_local_read(e: &mut Expr, name: &str, at: &Symbol) {
         return;
     }
     e.node.for_each_child_mut(&mut |c| replace_local_read(c, name, at));
-}
-
-fn next_capture_name(outer: &str) -> String {
-    let Some(rest) = outer.strip_prefix("_cap") else {
-        return "_cap".to_string();
-    };
-    match rest.parse::<u32>() {
-        Ok(n) => format!("_cap{}", n + 1),
-        // bare "_cap" is depth 1
-        Err(_) if rest.is_empty() => "_cap2".to_string(),
-        Err(_) => "_cap".to_string(),
-    }
 }
 
 fn block_body_is_template(body: &Expr) -> bool {
