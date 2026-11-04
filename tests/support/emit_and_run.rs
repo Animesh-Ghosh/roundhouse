@@ -42,10 +42,11 @@
 
 #![allow(dead_code)]
 
+#[path = "scratch.rs"]
+mod scratch;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use roundhouse::analyze::diagnose;
 use roundhouse::diagnostic::{Diagnostic, Severity};
@@ -594,23 +595,7 @@ pub fn ruby() -> Command {
 
 /// A fresh directory per run: tests in one binary run in parallel.
 fn scratch_dir() -> PathBuf {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    loop {
-        // Resolved, so paths a child Ruby reports (`__dir__` is a realpath)
-        // match on macOS, where $TMPDIR sits under /var -> /private/var.
-        let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "roundhouse-emit-and-run-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        // Combined suites contain independent copies of this module. Reserve
-        // the path atomically instead of deleting another copy's live tree.
-        match std::fs::create_dir(&dir) {
-            Ok(()) => return dir,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => panic!("create scratch directory {}: {error}", dir.display()),
-        }
-    }
+    scratch::dir("roundhouse-emit-and-run")
 }
 
 fn copy_tree(src: &Path, dst: &Path) {
