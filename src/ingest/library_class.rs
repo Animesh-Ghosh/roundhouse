@@ -5711,11 +5711,12 @@ fn walk_concern_dsl<'pr>(
             && super::model::with_options::is_with_options(&call)
             && call.block().and_then(|b| b.as_block_node()).is_some()
         {
-            // A gap `expand` records (a `validates` option it drops) stays
-            // recorded when its items are taken, as the model walk keeps
-            // it; the flattened walk ingests the same calls again, so the
-            // fallback rewinds them.
+            // A gap `expand` records (a `validates` option it drops) and
+            // its warning stay when its items are taken, as the model walk
+            // keeps them; the flattened walk ingests the same calls again,
+            // so the fallback rewinds both.
             let mark = super::survey::mark();
+            let warned = super::prism::mark();
             let merged = super::model::with_options::expand(&call, &[], owner, file, consts);
             match merged {
                 Ok(items)
@@ -5730,6 +5731,7 @@ fn walk_concern_dsl<'pr>(
                 }
                 _ => {
                     super::survey::rewind(mark);
+                    super::prism::rewind(warned);
                     let mut flat = Vec::new();
                     walk_dsl_stmts(stmt, &mut flat);
                     out.extend(flat.into_iter().map(ConcernDsl::Stmt));
