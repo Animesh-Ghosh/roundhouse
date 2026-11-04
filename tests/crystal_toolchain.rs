@@ -315,7 +315,7 @@ fn content_tag_blocks_render() {
 }
 
 /// `pluralize`'s String is escaped in a template, as Rails 8.1.4 escapes
-/// it.
+/// it, and a `link_to` or `button_to` label made of one is escaped once.
 #[test]
 #[ignore]
 fn pluralize_in_a_template_is_escaped() {

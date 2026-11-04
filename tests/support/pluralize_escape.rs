@@ -1,5 +1,6 @@
 //! `pluralize` in a template: Rails 8.1.4 escapes its String, which isn't
-//! html-safe, where the emitted views appended it as it was.
+//! html-safe, where the emitted views appended it as it was. A label
+//! that `link_to` or `button_to` escape is escaped once, not twice.
 
 use super::emit_and_run;
 
@@ -7,17 +8,22 @@ pub const VIEW: &str = concat!(
     "<% w = \"<b>x</b>\" %><%= pluralize(1, w) %>\n",
     "<%= pluralize(2, \"<i>\") %>\n",
     "<%= pluralize(2, \"comment\") %>\n",
+    "<%= link_to pluralize(4, \"<s>\"), \"/x\" %>\n",
+    "<%= button_to pluralize(3, \"<u>\"), \"/x\" %>\n",
 );
 
-/// What Rails 8.1.4 renders for the lines of `VIEW`.
+/// What Rails 8.1.4 renders for the lines of `VIEW` (the `button_to`
+/// label as the text it escapes).
 pub const RENDERS: &[&str] = &[
     "1 &lt;b&gt;x&lt;/b&gt;",
     "2 &lt;i&gt;s",
     "2 comments",
+    "<a href=\"/x\">4 &lt;s&gt;s</a>",
+    "3 &lt;u&gt;s",
 ];
 
 /// Neither the raw words nor a second escape of them.
-pub const ABSENT: &[&str] = &["<b>x</b>", "<i>s", "&amp;lt;"];
+pub const ABSENT: &[&str] = &["<b>x</b>", "<i>s", "<s>s", "<u>s", "&amp;lt;"];
 
 /// real-blog with `GET /probe` rendering `VIEW`.
 pub fn app() -> emit_and_run::Overlay {

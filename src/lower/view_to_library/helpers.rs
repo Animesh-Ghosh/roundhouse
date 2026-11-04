@@ -573,15 +573,29 @@ fn emit_link_to_inline(
 ) -> Option<Expr> {
     let (prefix, suffix) = link_to_wrapper_parts(url, opts, ctx)?;
     let mut parts = prefix;
-    parts.push(InterpPart::Expr {
-        // Same `.to_s` the bare-interpolation path applies: the label
-        // can be a nullable column read (`link_to article.title, …`),
-        // and `html_escape` is deliberately monomorphic `(String) ->
-        // String`. `nil.to_s == ""` is what Rails renders.
-        expr: view_helpers_call("html_escape", vec![lit_str_coerce(text.clone())]),
-    });
+    parts.push(InterpPart::Expr { expr: escaped_label(text, ctx) });
     parts.extend(suffix);
     Some(string_interp(parts))
+}
+
+/// A `link_to` / `button_to` label, escaped once. Its helpers are lowered
+/// as the template's own are, so a `pluralize(…)` or `truncate(…)` label
+/// reaches its runtime call on every target; one that lowers to
+/// `html_escape(…)` already is escape-correct and is taken as it is. Else
+/// the same `.to_s` the bare-interpolation path applies: the label can be
+/// a nullable column read (`link_to article.title, …`), and `html_escape`
+/// is deliberately monomorphic `(String) -> String`. `nil.to_s == ""` is
+/// what Rails renders.
+fn escaped_label(text: &Expr, ctx: &ViewCtx) -> Expr {
+    let lowered = rewrite_helpers_in_expr(text, ctx);
+    let pre_escaped = matches!(&*lowered.node,
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "html_escape" && args.len() == 1 && matches!(&*r.node, ExprNode::Const { .. }));
+    if pre_escaped {
+        lowered
+    } else {
+        view_helpers_call("html_escape", vec![lit_str_coerce(lowered)])
+    }
 }
 
 /// The anchor both spellings share, split where the link's CONTENT
@@ -644,13 +658,7 @@ fn emit_button_to_inline(
 ) -> Option<Expr> {
     let (prefix, suffix) = button_to_wrapper_parts(url, opts, ctx)?;
     let mut parts = prefix;
-    parts.push(InterpPart::Expr {
-        // Same `.to_s` the bare-interpolation path applies: the label
-        // can be a nullable column read (`link_to article.title, …`),
-        // and `html_escape` is deliberately monomorphic `(String) ->
-        // String`. `nil.to_s == ""` is what Rails renders.
-        expr: view_helpers_call("html_escape", vec![lit_str_coerce(text.clone())]),
-    });
+    parts.push(InterpPart::Expr { expr: escaped_label(text, ctx) });
     parts.extend(suffix);
     Some(string_interp(parts))
 }
