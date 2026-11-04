@@ -385,7 +385,10 @@ fn emit_test_send_go(
                     return format!("DerefString({field})");
                 }
                 field
-            } else if args_s.is_empty() && ar_field_predicates().iter().any(|p| p == method) {
+            } else if args_s.is_empty()
+                && ar_field_predicates().iter().any(|p| p == method)
+                && !model_defines_predicate(r, method, ctx)
+            {
                 // The library emit drops these methods: the struct field
                 // is the reader (`record.persisted?` → `record.Persisted`).
                 format!("{recv_s}.{}", go_field_name(method.trim_end_matches('?')))
@@ -400,6 +403,33 @@ fn emit_test_send_go(
                 format!("{recv_s}.{name}({})", args_s.join(", "))
             }
         }
+    }
+}
+
+/// Does the receiver's model define `method` itself, so the library emit
+/// writes it as a method (`def persisted?; false; end` → `PersistedPred()`)
+/// rather than leaving the field as its reader? The model is the
+/// receiver's type, or else the model its local is named after
+/// (`article`); with neither, any model that defines it counts.
+fn model_defines_predicate(recv: &Expr, method: &str, ctx: GoTestCtx) -> bool {
+    let own = |m: &crate::dialect::Model| {
+        m.methods().any(|d| {
+            matches!(d.receiver, crate::dialect::MethodReceiver::Instance)
+                && d.name.as_str() == method
+                && !super::library::is_trivial_ivar_reader(d)
+        })
+    };
+    let named = match (&recv.ty, &*recv.node) {
+        (Some(crate::ty::Ty::Class { id, .. }), _) => Some(id.0.as_str().to_string()),
+        (_, ExprNode::Var { name, .. }) => Some(crate::naming::camelize(&crate::naming::singularize(name.as_str()))),
+        (_, ExprNode::Send { recv: None, method, args, block: None, .. }) if args.is_empty() => {
+            Some(crate::naming::camelize(&crate::naming::singularize(method.as_str())))
+        }
+        _ => None,
+    };
+    match named.and_then(|n| ctx.app.models.iter().find(|m| m.name.0.as_str() == n)) {
+        Some(model) => own(model),
+        None => ctx.app.models.iter().any(own),
     }
 }
 
