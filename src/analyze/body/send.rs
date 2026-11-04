@@ -1170,6 +1170,19 @@ impl<'a> BodyTyper<'a> {
         ClassInfo::source_class_method(self.classes(), of, method)
     }
 
+    /// Whether `of` is a program subclass of `Time` (tzinfo's `TimeWithOffset`).
+    fn time_subclass(&self, of: &ClassId) -> bool {
+        let mut current = self.classes().get(of).and_then(|c| c.parent.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { return false };
+            if id.0.as_str() == "Time" {
+                return true;
+            }
+            current = self.classes().get(&id).and_then(|c| c.parent.clone());
+        }
+        false
+    }
+
     fn source_ancestor(&self, of: &ClassId, method: &Symbol) -> Option<ClassId> {
         let mut current = self.classes().get(of)?.parent.clone();
         for _ in 0..32 {
@@ -2125,6 +2138,10 @@ impl<'a> BodyTyper<'a> {
                         {
                             return unwrap_fn_ret(&subst(ancestor_ty));
                         }
+                        // Not Time: `TimeWithOffset.at` builds the subclass, which a seed of Time contradicts on Spinel.
+                        if cid.0.as_str() == "Time" && cid != id && matches!(ty, Ty::Time) && time_subclass_constructor(method) {
+                            return Ty::Class { id: id.clone(), args: args.clone() };
+                        }
                         return unwrap_fn_ret(&subst(ty));
                     }
                     if !class_dynamic_finder && let Some(ty) = cls.instance_methods.get(method) {
@@ -2266,7 +2283,18 @@ impl<'a> BodyTyper<'a> {
                     // Not the block's unresolved Var: that would report `use_zone` itself as the failure.
                     return block_ret.filter(|t| !matches!(t, Ty::Var { .. })).cloned().unwrap_or(Ty::Untyped);
                 }
-                if id.0.as_str() == "Time" {
+                if id.0.as_str() != "Time" && self.time_subclass(id) {
+                    // Not Time: these answer the receiver's own class, as CRuby's do for a subclass.
+                    let keeps_class = if instance_receiver {
+                        matches!(method.as_str(), "utc" | "gmtime" | "localtime" | "getlocal" | "getutc" | "getgm" | "to_time")
+                    } else {
+                        time_subclass_constructor(method)
+                    };
+                    if keeps_class {
+                        return Ty::Class { id: id.clone(), args: args.clone() };
+                    }
+                }
+                if id.0.as_str() == "Time" || (instance_receiver && self.time_subclass(id)) {
                     let ty = if instance_receiver && matches!(method.as_str(), "now" | "at") {
                         Some(Ty::Time)
                     } else if instance_receiver {
@@ -3050,6 +3078,12 @@ pub(super) fn range_method(method: &Symbol, elem: Option<&Ty>) -> Option<Ty> {
         _ => return None,
     };
     Some(ty)
+}
+
+/// A class-side `Time` method a subclass answers with its own instance;
+/// not `current`, which Rails builds from `::Time` whatever the receiver.
+fn time_subclass_constructor(method: &Symbol) -> bool {
+    method.as_str() != "current" && time_class_method(method).is_some()
 }
 
 fn time_class_method(method: &Symbol) -> Option<Ty> {

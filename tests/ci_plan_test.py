@@ -677,6 +677,13 @@ class Routing(unittest.TestCase):
                 self.assertIn("object_blank", plan["spinel_tests"])
                 self.assertIn("spinel-framework", plan["jobs"])
 
+    def test_conditional_value_grouping_keeps_native_coverage(self):
+        for path in ["src/emit/ruby.rs", "src/emit/ruby/expr.rs", "tests/conditional_expression_parens.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("conditional_expression_parens", plan["spinel_tests"])
+
     def test_param_binds_owns_lowering_drivers_and_database_runtime(self):
         for path in [
             "src/lower/arel/visitor.rs",

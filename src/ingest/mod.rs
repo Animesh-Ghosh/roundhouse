@@ -114,6 +114,7 @@ mod column_accessors;
 mod model_macros;
 mod referenced_carriers;
 mod extend_splice;
+mod included_extend;
 pub mod on_load_reopen;
 pub mod prism;
 pub(crate) mod prism_api;
