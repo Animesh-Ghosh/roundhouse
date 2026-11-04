@@ -17,7 +17,7 @@ use super::attr_parts::{
     append_attr_parts, default_form_class, default_method_sym, lit_str_coerce, string_interp,
     take_opt,
 };
-use super::walker::rewrite_helpers_in_expr;
+use super::walker::{html_safe_value, rewrite_helpers_in_expr};
 use super::{
     bare_record_name, lit_str, lit_sym, route_helpers_call, send, var_ref,
     view_helpers_call, ViewCtx,
@@ -282,8 +282,12 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                     view_helpers_call("link_to", args)
                 }
             };
+            // A marked label (`x.html_safe`, or an app method whose body
+            // returns one) is shown as it is, as a bare `<%= %>` shows it.
             let bare = if pre_escaped.is_some() {
                 lowered
+            } else if let Some(safe) = html_safe_value(&lowered, ctx) {
+                lit_str_coerce(safe)
             } else {
                 view_helpers_call("html_escape", vec![lit_str_coerce(lowered)])
             };

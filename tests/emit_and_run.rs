@@ -20700,6 +20700,25 @@ fn link_to_if_escapes_its_label_on_spinel() {
         .assert_passes();
 }
 
+#[test]
+fn link_to_if_shows_an_html_safe_app_label_once() {
+    link_to_if_escape::app_with_safe_escape()
+        .write("test/controllers/probes_controller_test.rb", &link_to_if_escape::safe_integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_if_shows_an_html_safe_app_label_once_on_spinel() {
+    link_to_if_escape::app_with_safe_escape()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"safe label once\"\n",
+            link_to_if_escape::safe_body_checks()
+        ))
+        .assert_passes();
+}
+
 #[path = "emit_and_run/unknown_class_association.rs"]
 mod unknown_class_association;
 

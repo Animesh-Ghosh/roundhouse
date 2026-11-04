@@ -32,6 +32,42 @@ pub const APP_ESCAPE_VIEW: &str = concat!(
 pub const APP_ESCAPE_RENDERS: &[&str] = &["&lt;q&gt;", "<a href=\"/y\">&lt;r&gt;</a>"];
 pub const APP_ESCAPE_ABSENT: &[&str] = &["<q>", "<r>"];
 
+/// Through an app's own `html_escape` that escapes and returns an
+/// html_safe string: shown as it is, not escaped again. The false branch
+/// only: the link branch's label is escaped again before this change too.
+/// Its own overlay, as the html_safe mark is recorded per method name.
+pub const SAFE_ESCAPE_VIEW: &str = "<%= link_to_if false, Safe.html_escape(\"<s>\"), \"/z\" %>\n";
+pub const SAFE_ESCAPE_RENDERS: &str = "&lt;s&gt;";
+pub const SAFE_ESCAPE_ABSENT: &[&str] = &["<s>", "&amp;lt;s"];
+
+/// `app` with `SAFE_ESCAPE_VIEW` and the app module it calls.
+pub fn app_with_safe_escape() -> emit_and_run::Overlay {
+    app()
+        .write("app/views/probes/show.html.erb", &format!("{VIEW}{SAFE_ESCAPE_VIEW}"))
+        .write("lib/safe.rb", "module Safe\n  def self.html_escape(s)\n    s.gsub(\"<\", \"&lt;\").gsub(\">\", \"&gt;\").html_safe\n  end\nend\n")
+}
+
+/// A minitest integration test for `app_with_safe_escape()`'s page.
+pub fn safe_integration_test() -> String {
+    let mut asserts = format!("    assert_includes response.body, {}\n", ruby_str(SAFE_ESCAPE_RENDERS));
+    for a in SAFE_ESCAPE_ABSENT {
+        asserts.push_str(&format!("    refute_includes response.body, {}\n", ruby_str(a)));
+    }
+    format!(
+        "require \"test_helper\"\n\nclass ProbesControllerTest < ActionDispatch::IntegrationTest\n  test \"link_to_if shows an html_safe label once\" do\n    get probe_url\n    assert_response :success\n{asserts}  end\nend\n"
+    )
+}
+
+/// Ruby statements that raise unless `body`, `app_with_safe_escape()`'s
+/// page, holds the safe label once escaped.
+pub fn safe_body_checks() -> String {
+    let mut checks = format!("raise body unless body.include?({})\n", ruby_str(SAFE_ESCAPE_RENDERS));
+    for a in SAFE_ESCAPE_ABSENT {
+        checks.push_str(&format!("raise body if body.include?({})\n", ruby_str(a)));
+    }
+    checks
+}
+
 /// real-blog with `GET /probe` rendering `VIEW`.
 pub fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
