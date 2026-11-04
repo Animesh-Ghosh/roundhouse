@@ -271,3 +271,42 @@ fn controller_ivars_named_like_base_state_compile_without_application_controller
     assert!(errors.is_empty(), "{errors:?}");
     assert_crystal_passes("an app with no ApplicationController and ivars named like the base's state", &emitted);
 }
+
+#[test]
+#[ignore]
+fn content_tag_blocks_render() {
+    // `content_tag … do … end` with options: they reach
+    // `content_tag_html` as its trailing Hash (Crystal takes no
+    // keyword into a positional `opts`), and a literal `class:` Array is
+    // space-joined, as Rails 8.1.4 renders it (#1771).
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n  def show\n  end\nend\n")
+        .write(
+            "app/views/probes/show.html.erb",
+            concat!(
+                "<%= content_tag :section, class: \"boxed\" do %>inside<% end %>\n",
+                "<%= content_tag :div, class: [\"btn\", \"primary\"] do %>blk<% end %>\n",
+            ),
+        )
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe\", to: \"probes#show\"\n")
+        .emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    shards_install(&emitted);
+    std::fs::write(
+        emitted.join("probe.cr"),
+        "require \"./src/app\"\nc = ProbesController.new\nc.request_method = \"GET\"\nc.process_action(:show)\nputs c.body\n",
+    )
+    .unwrap();
+    let run = Command::new("crystal")
+        .args(["run", "probe.cr"])
+        .current_dir(&emitted)
+        .env("CRYSTAL_CACHE_DIR", emitted.join(".crystal-cache"))
+        .output()
+        .expect("run crystal");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stdout}\n{stderr}");
+    for want in [r#"<section class="boxed">inside</section>"#, r#"<div class="btn primary">blk</div>"#] {
+        assert!(stdout.contains(want), "expected {want} in\n{stdout}");
+    }
+}

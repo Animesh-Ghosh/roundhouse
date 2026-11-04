@@ -1258,6 +1258,56 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 // that no app in the corpus nested one. campfire does.
                 let cap_owned = next_capture_name(&ctx.accumulator);
                 let cap = cap_owned.as_str();
+                // `content_tag(name[, opts]) do … end`: Rails renders the
+                // block's markup as the tag's content and the second
+                // argument as its options. The runtime's `content_tag` takes
+                // no block, so the capture is a statement and its String the
+                // (already escaped) content of `content_tag_html`.
+                if recv.is_none()
+                    && method.as_str() == "content_tag"
+                    && params.is_empty()
+                    && extra_params.is_empty()
+                    && rest_param.is_none()
+                    && block_param.is_none()
+                    && (1..=2).contains(&sa.len())
+                {
+                    // The capture's statements share the view's scope with
+                    // every other flat capture (a `cache` body's included,
+                    // whose `__cache_io_N` restarts `next_capture_name`), so
+                    // the name is per site, as `emit_cached_fragment`'s are.
+                    let cap_owned = format!("__ctag_io_{}", inner.span.start);
+                    let cap = cap_owned.as_str();
+                    // Rails evaluates the name and options, in order,
+                    // before the block runs: each is read into a local
+                    // first, so the block neither reassigns what they read
+                    // nor runs ahead of a call in them.
+                    let mut stmts = Vec::new();
+                    let mut bound = 0;
+                    let args: Vec<Expr> = sa
+                        .iter()
+                        .map(|a| {
+                            // A literal `class:` Array is space-joined here, as
+                            // form_with's options are: strict targets render
+                            // an Array value with its `to_s`.
+                            let a = match &*a.node {
+                                ExprNode::Hash { entries, kwargs } => Expr::new(a.span, ExprNode::Hash {
+                                    entries: entries.iter().map(|(k, v)| (k.clone(), super::form_with::simplify_opts_value(k, v))).collect(),
+                                    kwargs: *kwargs,
+                                }),
+                                _ => a.clone(),
+                            };
+                            bind_before_block(rewrite_helpers_in_expr(&a, ctx), inner.span.start, &mut bound, &mut stmts)
+                        })
+                        .collect();
+                    let cap_ctx = ViewCtx { accumulator: cap.to_string(), ..ctx.with_locals(std::iter::empty()) };
+                    stmts.push(assign_accumulator_string_new(cap));
+                    stmts.extend(walk_body(body, &cap_ctx));
+                    let mut args = args.into_iter();
+                    let mut call_args = vec![args.next().expect("a content_tag name"), accumulator_result_ref(cap)];
+                    call_args.extend(args);
+                    stmts.push(accumulator_append_call(view_helpers_call("content_tag_html", call_args), ctx));
+                    return stmts;
+                }
                 // Every parameter the block binds is a local in its body, the
                 // optional and keyword ones too: a read of one is not a
                 // helper call.
@@ -1776,6 +1826,41 @@ fn next_capture_name(outer: &str) -> String {
         // bare "_cap" is depth 1
         Err(_) if rest.is_empty() => "_cap2".to_string(),
         Err(_) => "_cap".to_string(),
+    }
+}
+
+/// `e`, evaluated ahead of a `content_tag` block into
+/// `__ctag_<site>_<n>` locals pushed on `stmts`. A literal stays inline,
+/// and so does a Hash or Array literal, whose parts are bound in order:
+/// the options keep the shape the runtime's typed parameter reads.
+fn bind_before_block(e: Expr, site: u32, bound: &mut usize, stmts: &mut Vec<Expr>) -> Expr {
+    match &*e.node {
+        ExprNode::Lit { .. } => e,
+        ExprNode::Hash { entries, kwargs } => {
+            let kwargs = *kwargs;
+            let entries = entries
+                .iter()
+                .map(|(k, v)| {
+                    let k = bind_before_block(k.clone(), site, bound, stmts);
+                    (k, bind_before_block(v.clone(), site, bound, stmts))
+                })
+                .collect();
+            Expr::new(e.span, ExprNode::Hash { entries, kwargs })
+        }
+        ExprNode::Array { elements, style } => {
+            let style = *style;
+            let elements = elements.iter().map(|x| bind_before_block(x.clone(), site, bound, stmts)).collect();
+            Expr::new(e.span, ExprNode::Array { elements, style })
+        }
+        _ => {
+            *bound += 1;
+            let at = Symbol::from(format!("__ctag_{site}_{bound}"));
+            stmts.push(Expr::new(Span::synthetic(), ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: at.clone() },
+                value: e,
+            }));
+            var_ref(at)
+        }
     }
 }
 

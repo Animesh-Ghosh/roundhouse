@@ -20672,6 +20672,9 @@ mod boolop_precedence;
 #[path = "emit_and_run/concern_with_options.rs"]
 mod concern_with_options;
 
+#[path = "emit_and_run/content_tag_block.rs"]
+mod content_tag_block;
+
 #[path = "emit_and_run/unknown_class_association.rs"]
 mod unknown_class_association;
 
