@@ -105,7 +105,10 @@ fn non_nil_assertions_require_runtime_support() {
     // literal block has no message to inline and stays refused.
     refuses("T.must_because(1, &blk)", "non-nil assertion");
     refuses("T.must_because(1) { |why| why }", "non-nil assertion");
-    refuses("1.not_nil!", "not_nil!");
+    // type_toolkit's `x.not_nil!` runs on the CRuby tree
+    // (tests/not_nil_type_toolkit.rs); other trees refuse it at emit
+    // (tests/not_nil_bang.rs).
+    admits("1.not_nil!");
 }
 
 /// A `for` opens no scope: ingest writes it as a `while`, so the loop
