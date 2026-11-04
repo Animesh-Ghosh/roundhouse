@@ -5686,6 +5686,63 @@ fn includer_guard_classes(cond: &crate::expr::Expr) -> Option<(Vec<String>, bool
     }
 }
 
+/// A statement of a concern's `included do` block, or the items a
+/// `with_options` block in it merges into (`walk_concern_dsl`).
+enum ConcernDsl<'pr> {
+    Stmt(ruby_prism::Node<'pr>),
+    Merged(Vec<crate::dialect::ModelBodyItem>),
+}
+
+/// `walk_dsl_stmts` for a concern's `included do`, with each `with_options`
+/// block merged as the model walk merges it (`model::with_options::expand`):
+/// flattened, its calls lost their options (`class_name:`), so a
+/// `has_many` read a class named after itself. A block that doesn't merge
+/// wholly into associations, scopes, validations and callbacks is
+/// flattened as before.
+fn walk_concern_dsl<'pr>(
+    body: ruby_prism::Node<'pr>,
+    owner: &ClassId,
+    file: &str,
+    consts: &super::model::ClassConsts,
+    out: &mut Vec<ConcernDsl<'pr>>,
+) {
+    for stmt in flatten_statements(body) {
+        if let Some(call) = stmt.as_call_node()
+            && super::model::with_options::is_with_options(&call)
+            && call.block().and_then(|b| b.as_block_node()).is_some()
+        {
+            // A gap `expand` records (a `validates` option it drops) and
+            // its warning stay when its items are taken, as the model walk
+            // keeps them; the flattened walk ingests the same calls again,
+            // so the fallback rewinds both.
+            let mark = super::survey::mark();
+            let warned = super::prism::mark();
+            let merged = super::model::with_options::expand(&call, &[], owner, file, consts);
+            match merged {
+                Ok(items)
+                    if !items.is_empty()
+                        && items.iter().all(|item| matches!(item,
+                            crate::dialect::ModelBodyItem::Association { .. }
+                            | crate::dialect::ModelBodyItem::Scope { .. }
+                            | crate::dialect::ModelBodyItem::Validation { .. }
+                            | crate::dialect::ModelBodyItem::Callback { .. })) =>
+                {
+                    out.push(ConcernDsl::Merged(items));
+                }
+                _ => {
+                    super::survey::rewind(mark);
+                    super::prism::rewind(warned);
+                    let mut flat = Vec::new();
+                    walk_dsl_stmts(stmt, &mut flat);
+                    out.extend(flat.into_iter().map(ConcernDsl::Stmt));
+                }
+            }
+            continue;
+        }
+        out.push(ConcernDsl::Stmt(stmt));
+    }
+}
+
 fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
     for stmt in flatten_statements(body) {
         if let Some(call) = stmt.as_call_node() {
@@ -5855,8 +5912,15 @@ pub(in crate::ingest) fn ingest_concern_model_items_with_constants(
             let block_start = items.len();
             let mut unclaimed = false;
             let mut stmts = Vec::new();
-            walk_dsl_stmts(block.body().unwrap(), &mut stmts);
-            for inner in stmts {
+            walk_concern_dsl(block.body().unwrap(), &id, file, &concern_consts, &mut stmts);
+            for dsl in stmts {
+                let inner = match dsl {
+                    ConcernDsl::Merged(merged) => {
+                        items.extend(merged);
+                        continue;
+                    }
+                    ConcernDsl::Stmt(inner) => inner,
+                };
                 // `has_many :x, ... if self == Account`: `included do`
                 // runs with `self` bound to the includer, so the guard
                 // is a fact each includer answers. Carry the statement's
