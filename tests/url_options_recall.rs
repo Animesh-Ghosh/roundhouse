@@ -17,6 +17,8 @@
 //!
 //! Skips when `ruby` is not on the machine; the CI core job has it.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -34,9 +36,7 @@ fn tree_for(target: BuildTarget) -> PathBuf {
     // test ingest a tree the other had just removed.
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir()
-        .join(format!("roundhouse-url-options-recall-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = scratch::dir(&format!("roundhouse-url-options-recall-{n}"));
     for (path, body) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table \"notes\", force: :cascade do |t|\n    t.string \"body\"\n  end\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
@@ -87,6 +87,7 @@ fn the_resolver_recalls_a_segment_as_rails_does() {
     }
     let out = tree();
     let script = r#"
+require File.expand_path("runtime/action_view/view_helpers", Dir.pwd)
 require File.expand_path("app/route_helpers", Dir.pwd)
 r = RouteHelpers
 puts r.path_for_controller_action_page("home", "top", "2", { "length" => "1y" })

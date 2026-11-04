@@ -517,7 +517,13 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 BoolOpKind::Or => "||",
                 BoolOpKind::And => "&&",
             };
-            format!("{} {} {}", emit_expr(ctx, left), op_s, emit_expr(ctx, right))
+            // `&&` binds tighter than `||` here as in Ruby, so an `||`
+            // operand under `&&` keeps its parentheses.
+            let operand = |e: &Expr| match &*e.node {
+                ExprNode::BoolOp { op: BoolOpKind::Or, .. } if matches!(op, BoolOpKind::And) => format!("({})", emit_expr(ctx, e)),
+                _ => emit_expr(ctx, e),
+            };
+            format!("{} {} {}", operand(left), op_s, operand(right))
         }
         ExprNode::StringInterp { parts } => {
             use crate::expr::InterpPart;
@@ -2723,7 +2729,7 @@ fn go_field_ident(ruby_name: &str) -> String {
     go_method_name(&normalized)
 }
 
-fn go_method_ident(ruby_name: &str) -> String {
+pub(super) fn go_method_ident(ruby_name: &str) -> String {
     // Mirror rust's `sanitize_ident` (src/emit/rust/expr/util.rs):
     // `?` predicate suffix maps to `_pred`, `!` maps to `_bang`. The `?`
     // affix (vs a bare strip) keeps a column predicate distinct from its
@@ -4430,7 +4436,7 @@ fn static_is_a(r: &Expr, r_s: &str, class: &str) -> Option<String> {
 /// pointer, so unbox it (nil stays nil). Keyed by name because these
 /// are hand-written runtime functions, not LibraryClass methods with
 /// a param table.
-const UNTYPED_ARG_HELPERS: &[&str] = &["encode_value", "optional_value_attr"];
+const UNTYPED_ARG_HELPERS: &[&str] = &["encode_value", "optional_value_attr", "color_value_attr", "color_field_value_attr", "datetime_local_value_attr"];
 
 /// Unbox a nullable-column argument at an `interface{}` seam, in
 /// place — the call itself still renders through the normal path (its

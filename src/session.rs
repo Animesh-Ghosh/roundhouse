@@ -47,10 +47,22 @@ pub fn analyze_and_lower(app: &mut App) -> Vec<Diagnostic> {
 fn analyze_and_lower_with_target(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
     let mut analyzer = crate::analyze::Analyzer::new(app);
     analyzer.analyze(app);
+    #[cfg(feature = "memory-census")]
+    crate::memory_census::census("after analyze", app);
     app.helper_diagnostics = Some(crate::analyze::diagnose_helper_modules(app));
-    crate::timings::phase("post-analyze lowerings", || {
-        crate::lower::apply_post_analyze_lowerings_for(app, analyzer.class_registry(), target)
-    })
+    // Only the registry outlives the analysis.
+    #[cfg(feature = "memory-census")]
+    let registry = if crate::memory_census::enabled() { analyzer.census_drop() } else { analyzer.into_class_registry() };
+    #[cfg(not(feature = "memory-census"))]
+    let registry = analyzer.into_class_registry();
+    let diagnostics = crate::timings::phase("post-analyze lowerings", || {
+        crate::lower::apply_post_analyze_lowerings_for(app, &registry, target)
+    });
+    #[cfg(feature = "memory-census")]
+    if crate::memory_census::enabled() {
+        crate::memory_census::census("after lowerings", app);
+    }
+    diagnostics
 }
 
 /// [`analyze_and_lower`] for the app one target emits: the target's own
@@ -100,7 +112,9 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
     if !target.parses_numericality_input() {
         refused.extend(crate::ingest::app::refuse_numericality_allow_on_untyped(app, target.as_str()));
     }
-    refused.extend(crate::lower::untyped_subclass_diagnostics(app));
+    if !target.has_runtime_relation() {
+        refused.extend(crate::lower::untyped_subclass_diagnostics(app));
+    }
     refused.extend(analyze_and_lower_with_target(app, target));
     refused
 }

@@ -314,6 +314,7 @@ pub(super) fn emit_form_with_inline(
     inner_ctx.form_records.push(FormBuilderBinding {
         form_param: form_param_str.to_string(),
         model_name: comps.model_name.clone(),
+        model_class: form_model_class(&comps.model, &comps.model_name, ctx),
         record_var: record_var.clone(),
         form_method_var,
         id_prefix: comps.id_prefix.clone(),
@@ -474,7 +475,7 @@ fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx, multipart: bool
 /// pass through unchanged. Matches the existing FormBuilder-side
 /// simplification so per-form-tag and per-input-attr behavior stay
 /// in sync.
-fn simplify_opts_value(k: &Expr, v: &Expr) -> Expr {
+pub(super) fn simplify_opts_value(k: &Expr, v: &Expr) -> Expr {
     let is_class_key = matches!(
         &*k.node,
         ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "class",
@@ -1095,6 +1096,26 @@ fn classify_form_with_components(
     })
 }
 
+/// The typed record class used for metadata, independent of its field prefix.
+pub(super) fn form_model_class(model: &Expr, parameter: &str, ctx: &ViewCtx) -> Option<String> {
+    if let Some(crate::ty::Ty::Class { id, .. }) = model.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
+        return Some(id.0.as_str().to_owned());
+    }
+    if let ExprNode::Send { recv: Some(recv), method, .. } = &*model.node {
+        if method.as_str() == "new" {
+            if let ExprNode::Const { path } = &*recv.node {
+                return Some(path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::"));
+            }
+        }
+    }
+    let name = match &*model.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str()),
+        _ => None,
+    };
+    name.and_then(|name| ctx.record_classes.get(name).cloned())
+        .or_else(|| ctx.i18n.model_class(parameter).map(str::to_owned))
+}
+
 /// The form's object name — what Rails calls `param_key`. Rails names
 /// fields after the RECORD's model (`user[username]` for a User), never
 /// after the view directory; the two agree for a conventional resource
@@ -1114,14 +1135,13 @@ fn record_model_name(model: &Expr, ctx: &ViewCtx, fallback: &str) -> String {
     // named every field after the VIEW that reached the helper and the
     // composer posted `rooms_show[body]` where Rails posts
     // `message[body]`. The class is right there in the expression;
-    // Rails' `param_key` is its demodulized name, underscored, whether
-    // or not the constructor took arguments.
+    // Rails' default `param_key` underscores the complete class name,
+    // joining namespace segments with underscores too.
     if let ExprNode::Send { recv: Some(recv), method, .. } = &*model.node {
         if method.as_str() == "new" {
             if let ExprNode::Const { path } = &*recv.node {
-                if let Some(last) = path.last() {
-                    return snake_case(last.as_str());
-                }
+                let name = path.iter().map(|part| part.as_str()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("::");
+                return ctx.model_param_keys.get(&name).cloned().unwrap_or_else(|| crate::naming::model_param_key(&name));
             }
         }
     }
@@ -1547,6 +1567,7 @@ mod tests {
     fn ctx_with(model_singulars: &[&str], ivar_models: &[(&str, &str)]) -> ViewCtx {
         ViewCtx {
             locals: Vec::new(),
+            ivar_params: Vec::new(),
             arg_name: String::new(),
             resource_dir: String::new(),
             view_name: String::new(),
@@ -1555,6 +1576,7 @@ mod tests {
             nullable_locals: Default::default(),
             reference_reads: Default::default(),
             reference_targets: Default::default(),
+            nested_record_classes: Default::default(),
             nilable_scalar_reads: Default::default(),
             html_safe_methods: Default::default(),
             model_singulars: Rc::new(
@@ -1562,16 +1584,19 @@ mod tests {
             ),
             slug_models: Default::default(),
             bool_readers: Default::default(),
+            time_columns: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
             i18n: Default::default(),
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             form_with_entry: true,
+            model_param_keys: Default::default(),
             stylesheets: Vec::new(),
             lexxy: false,
             lexxy_editor_adapter: false,
             partial_ivars: Default::default(),
+            ivar_records: Default::default(),
             formats: vec!["html".to_string()],
             view_formats: Default::default(),
             multipart_partials: Default::default(),
@@ -1579,15 +1604,20 @@ mod tests {
             partial_stems: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            yielding_partials: Default::default(),
+            record_carries_yield: false,
+            record_classes: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
             own_flash: Default::default(),
+            held_ivars: Vec::new(),
             ivar_models: Rc::new(
                 ivar_models
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect::<HashMap<_, _>>(),
             ),
+            nilable_ivar_models: Default::default(),
         }
     }
 

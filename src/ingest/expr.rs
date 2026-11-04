@@ -37,6 +37,7 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // ingester keeps going. Errors are recorded into the per-thread
     // collector for the post-run punch list. See `survey.rs`.
     match ingest_expr_strict(node, file) {
+        Ok(e) if node.as_call_node().is_some() => Ok(super::engine_helpers::rewrite(proc_new_as_proc(e), file)),
         Ok(e) => Ok(proc_new_as_proc(e)),
         Err(err) if super::survey::is_active() => {
             super::survey::record(&err);
@@ -1433,13 +1434,11 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // `unwrap_or(0)` that stood here was silent, and it was
             // reached: `0xffffffff` does not fit an `i32`, so campfire's
             // `ipaddr.to_i & 0xffffffff` emitted `& 0`.
-            let Some(v) = super::util::integer_i64(&i.value()) else {
-                return Err(IngestError::Unsupported {
-                    file: file.to_string(),
-                    message: "integer literal does not fit in a 64-bit integer".to_string(),
-                });
-            };
-            ExprNode::Lit { value: Literal::Int { value: v } }
+            match super::util::integer_i64(&i.value()) {
+                Some(v) => ExprNode::Lit { value: Literal::Int { value: v } },
+                // Not refused whole: Ruby's Integer has no width, so the literal is its 32-bit limbs shifted together (tzinfo's `0x10000000000000000`).
+                None => return Ok(wide_integer(&i.value(), span)),
+            }
         }
         n if n.as_float_node().is_some() => {
             let f = n.as_float_node().unwrap();
@@ -1510,27 +1509,26 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // `o` (once) flag is dropped: it only memoizes the first
         // interpolation, so re-evaluating is identical for
         // deterministic parts (and merely re-computes otherwise).
-        // Encoding flags (e/s/u/n) change match semantics and stay
-        // a (rarer) visible gap.
+        // The `u` flag becomes the FIXEDENCODING bit (16). Encoding
+        // flags e/s/n change match semantics and stay a (rarer)
+        // visible gap.
         n if n.as_interpolated_regular_expression_node().is_some() => {
             let r = n.as_interpolated_regular_expression_node().unwrap();
-            if r.is_euc_jp()
-                || r.is_windows_31j()
-                || r.is_utf_8()
-                || r.is_ascii_8bit()
-            {
+            if r.is_euc_jp() || r.is_windows_31j() || r.is_ascii_8bit() {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
-                    message: "interpolated regex with once/encoding flag not yet supported".into(),
+                    message: "interpolated regex with e/s/n encoding flag not yet supported".into(),
                 });
             }
             let mut parts: Vec<InterpPart> = Vec::new();
             collect_interp_parts(r.parts(), &mut parts, file)?;
             let pattern_expr = Expr::new(Span::synthetic(), ExprNode::StringInterp { parts });
-            // Ruby Regexp option bits: IGNORECASE=1, EXTENDED=2, MULTILINE=4.
+            // Ruby Regexp option bits: IGNORECASE=1, EXTENDED=2, MULTILINE=4,
+            // FIXEDENCODING=16 (what the `u` literal flag sets).
             let opts = (r.is_ignore_case() as i64)
                 | ((r.is_extended() as i64) << 1)
-                | ((r.is_multi_line() as i64) << 2);
+                | ((r.is_multi_line() as i64) << 2)
+                | ((r.is_utf_8() as i64) << 4);
             let mut args = vec![pattern_expr];
             if opts != 0 {
                 args.push(Expr::new(
@@ -2085,11 +2083,11 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             let name = Symbol::from(constant_id_str(&w.read_name()));
             let value = ingest_expr(&w.value(), file)?;
-            ExprNode::OpAssign {
+            guard_safe_nav_write(w.is_safe_navigation(), &w.location(), recv, |recv| ExprNode::OpAssign {
                 target: crate::expr::LValue::Attr { recv, name },
                 op: crate::expr::OpAssignOp::OrOr,
                 value,
-            }
+            })
         }
         n if n.as_call_and_write_node().is_some() => {
             let w = n.as_call_and_write_node().unwrap();
@@ -2104,11 +2102,11 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             let name = Symbol::from(constant_id_str(&w.read_name()));
             let value = ingest_expr(&w.value(), file)?;
-            ExprNode::OpAssign {
+            guard_safe_nav_write(w.is_safe_navigation(), &w.location(), recv, |recv| ExprNode::OpAssign {
                 target: crate::expr::LValue::Attr { recv, name },
                 op: crate::expr::OpAssignOp::AndAnd,
                 value,
-            }
+            })
         }
         n if n.as_call_operator_write_node().is_some() => {
             let w = n.as_call_operator_write_node().unwrap();
@@ -2131,11 +2129,11 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                     ),
                 })?;
             let value = ingest_expr(&w.value(), file)?;
-            ExprNode::OpAssign {
+            guard_safe_nav_write(w.is_safe_navigation(), &w.location(), recv, |recv| ExprNode::OpAssign {
                 target: crate::expr::LValue::Attr { recv, name },
                 op,
                 value,
-            }
+            })
         }
         // `FOO ||= y`, `FOO &&= y`, `FOO += y` — constant compound writes.
         n if n.as_constant_or_write_node().is_some() => {
@@ -4684,6 +4682,50 @@ fn merge_call(recv: Expr, arg: Expr, span: Span) -> Expr {
     )
 }
 
+/// `recv&.x ||= v` (and `&&=`, `+=`): Ruby evaluates the receiver once and
+/// skips the read, the operator and the write when it is nil, so the
+/// whole expression is nil. The IR has no safe-send flag, so it desugars
+/// to `recv.nil? ? nil : (recv.x ||= v)`, with a receiver that is not a
+/// plain read bound once first, to a local no source name takes
+/// (`(__safe_nav17 = a.b).nil? ? nil : (__safe_nav17.x ||= v)`). Only nil
+/// is skipped: `false&.x ||= v` writes, as Ruby's does.
+/// `request.details&.profile_id ||= …` read as `request.details.profile_id
+/// ||= …` raised on a request whose details were nil.
+fn guard_safe_nav_write(
+    safe: bool,
+    loc: &ruby_prism::Location<'_>,
+    recv: Expr,
+    build: impl FnOnce(Expr) -> ExprNode,
+) -> ExprNode {
+    if !safe {
+        return build(recv);
+    }
+    let span = recv.span;
+    let (checked, target) = if is_plain_read(&recv) {
+        (recv.clone(), recv)
+    } else {
+        let temp = fresh_reserved_local(loc, &format!("__safe_nav{}", recv.span.start));
+        let read = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: temp.clone() });
+        let bound = Expr::new(
+            span,
+            ExprNode::Assign {
+                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: temp },
+                value: recv,
+            },
+        );
+        (bound, read)
+    };
+    let is_nil = Expr::new(
+        span,
+        ExprNode::Send { recv: Some(checked), method: Symbol::from("nil?"), args: vec![], block: None, parenthesized: false },
+    );
+    ExprNode::If {
+        cond: is_nil,
+        then_branch: Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Nil }),
+        else_branch: Expr::new(span, build(target)),
+    }
+}
+
 /// A receiver `&.` may read twice without changing what the program
 /// does: a local, an ivar, a constant, `self`, or a literal.
 fn is_plain_read(e: &Expr) -> bool {
@@ -4793,4 +4835,23 @@ fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<Option
         }
     }
     Some(body)
+}
+
+fn wide_integer(value: &ruby_prism::Integer<'_>, span: Span) -> Expr {
+    let (negative, digits) = value.to_u32_digits();
+    let lit = |v: i64| Expr::new(span, ExprNode::Lit { value: Literal::Int { value: v } });
+    let send = |recv: Expr, method: &str, arg: Option<Expr>| {
+        let mut e = Expr::new(
+            span,
+            ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args: arg.into_iter().collect(), block: None, parenthesized: true },
+        );
+        e.decisions |= crate::expr::WIDE_INTEGER_LITERAL;
+        e
+    };
+    let mut limbs = digits.iter().rev();
+    let mut acc = lit(i64::from(*limbs.next().unwrap_or(&0)));
+    for limb in limbs {
+        acc = send(send(acc, "<<", Some(lit(32))), "|", Some(lit(i64::from(*limb))));
+    }
+    if negative { send(acc, "-@", None) } else { acc }
 }

@@ -610,7 +610,8 @@ pub struct Validation {
     /// `unless_cond` are set, the rules run only when `if:` holds and
     /// `unless:` does not. Anything else (an arity>0 lambda, a String,
     /// a captured local, a body survey mode had to stub with `nil`) is
-    /// not stored; ingest refuses the whole call instead of checking
+    /// not stored; ingest refuses the whole call (the rule, for a
+    /// condition in the rule's own hash) instead of checking
     /// unconditionally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_cond: Option<Expr>,
@@ -1732,6 +1733,21 @@ pub struct Filter {
     /// Lambda/proc-form `unless:` guard body, negated at the call site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_cond_expr: Option<Expr>,
+    /// An `if:`/`unless:` whose value ingest could not read (an Array, a
+    /// callable object): the filter may not run, but no predicate is
+    /// carried, so the dispatch chain still calls it unguarded. Analysis
+    /// that relies on a filter running treats it as guarded.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread_guard: bool,
+    /// An options container ingest could not decode completely. It may
+    /// hide scope or ordering as well as a guard, so replay cannot place
+    /// this callback's writes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread_options: bool,
+    /// Distinguishes `only: []` (no actions) from an absent `only:`.
+    /// Kept separately so existing consumers of `only` retain their contract.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_present: bool,
     /// The whole call for a block-form filter — `before_action do … end`
     /// as one `Send` with its block — so a chain entry synthesized for
     /// it can be located (the trace's `file:line`) and named. Never set
@@ -2153,6 +2169,19 @@ pub enum RouteSpec {
         /// to the engine's mounted proxy, which this runtime does not model.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         suppress_helpers: bool,
+        /// An isolated engine's routes under the path it is mounted at: Rails
+        /// joins the mount's script name and the engine's own `/`, so its
+        /// root's helper keeps the trailing slash a scope's root drops.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mount: bool,
+        /// Set when the scope is written inside a `member do … end` /
+        /// `collection do … end` block: Rails keeps that scope level, so
+        /// the scope's `path` lands AFTER the resource's own segment
+        /// (`collection { scope :approvals { post :approve } }` is
+        /// `/extensions/approvals/approve`, named `approve_extensions`),
+        /// and a `resources` inside it nests under that segment.
+        #[serde(default, skip_serializing_if = "ResourceScope::is_nested")]
+        within: ResourceScope,
         entries: Vec<RouteSpec>,
     },
 }

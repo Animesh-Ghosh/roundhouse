@@ -82,6 +82,8 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "rails-html-sanitizer",
     "net/http/persistent",
     "web-push",
+    "faye/websocket",
+    "eventmachine",
     "faraday",
     "faraday/multipart",
     "faraday/retry",
@@ -97,7 +99,10 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
 /// constant: (require, constant). Loading rest-client pulls in
 /// http-cookie, whose circular require warns under `-w` in every app
 /// that has the gem installed, used or not.
-pub(crate) const DEMAND_REQUIRES: &[(&str, &str)] = &[("rest-client", "RestClient"), ("elastic_apm", "ElasticAPM")];
+pub(crate) const DEMAND_REQUIRES: &[(&str, &str)] = &[
+    ("faye/websocket", "Faye"), ("eventmachine", "EventMachine"),
+    ("rest-client", "RestClient"), ("elastic_apm", "ElasticAPM"),
+];
 
 /// Whether the compiler's own tables have a Ruby-family tree declare or
 /// require `gem`: the runtime gems the emitted Gemfile declares on demand
@@ -114,7 +119,9 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 25] = [
+    const RUNTIME_GEMS: [(Marker, &str); 27] = [
+        (Marker::Constant("Faye"), "faye-websocket"),
+        (Marker::Constant("EventMachine"), "eventmachine"),
         (Marker::Constant("BCrypt"), "bcrypt"),
         (Marker::Constant("HTMLEntities"), "htmlentities"),
         (Marker::Constant("ROTP"), "rotp"),
@@ -658,9 +665,11 @@ const FATES: &[(&str, GemFate)] = &[
     ("bigdecimal", GemFate::Stdlib),
     ("cgi", GemFate::Stdlib),
     ("csv", GemFate::Stdlib),
+    ("date", GemFate::Stdlib),
     ("digest", GemFate::Stdlib),
     ("drb", GemFate::Stdlib),
     ("erb", GemFate::Stdlib),
+    ("find", GemFate::Stdlib),
     ("ipaddr", GemFate::Stdlib),
     ("irb", GemFate::Stdlib),
     ("json", GemFate::Stdlib),
@@ -671,6 +680,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("net-pop", GemFate::Stdlib),
     ("net-smtp", GemFate::Stdlib),
     ("observer", GemFate::Stdlib),
+    ("openssl", GemFate::Stdlib),
     ("ostruct", GemFate::Stdlib),
     ("racc", GemFate::Stdlib),
     ("rake", GemFate::Stdlib),
@@ -678,9 +688,15 @@ const FATES: &[(&str, GemFate)] = &[
     ("rexml", GemFate::Stdlib),
     ("rss", GemFate::Stdlib),
     ("securerandom", GemFate::Stdlib),
+    ("set", GemFate::Stdlib),
+    ("singleton", GemFate::Stdlib),
+    ("strscan", GemFate::Stdlib),
+    ("time", GemFate::Stdlib),
+    ("tmpdir", GemFate::Stdlib),
     ("tsort", GemFate::Stdlib),
     ("uri", GemFate::Stdlib),
     ("yaml", GemFate::Stdlib),
+    ("zlib", GemFate::Stdlib),
     // ── Modeled (each row names where) ───────────────────────────
     ("acts_as_tenant", GemFate::Modeled), // ingest/acts_as_tenant: acts_as_tenant -> belongs_to + dynamic default_scope + create stamp; validates_uniqueness_to_tenant; ActsAsTenant as CurrentAttributes (current_tenant, with_tenant, without_tenant); set_current_tenant_through_filter (not has_global_records/through/polymorphic/require_tenant/subdomain/immutability)
     ("acts_as_votable", GemFate::Modeled), // ingest/acts_as_votable: ActsAsVotable::Vote on `votes`; acts_as_votable/acts_as_voter macros -> votes_for/votes + vote_by/liked_by/unvote_by/update_cached_votes (not vote_up_for/get_voted/association extensions)
@@ -690,6 +706,8 @@ const FATES: &[(&str, GemFate)] = &[
     ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
     ("discard", GemFate::Modeled),
     ("elastic-apm", GemFate::Modeled), // catalog/gems: ElasticAPM, SpanHelpers; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target     // ingest/discard: include Discard::Model -> scopes + predicates + discard/undiscard (not discard_all/undiscard_all); Relation#unscope(where:)
+    ("faye-websocket", GemFate::Modeled), // Spinel faye_websocket: text/open/message/close; no protocols/error events
+    ("eventmachine", GemFate::Modeled), // Spinel faye_websocket: schedule runs on the caller, no reactor
     ("faker", GemFate::Modeled),       // catalog/gems: Faker::*
     ("friendly_id", GemFate::Modeled), // lower/friendly_id + registry: friendly_id/friendly/to_param, Relation#friendly_find (slugged [+history] finder only; slug generation on save, :scoped/:finders/:simple_i18n unmodeled)
     ("geared_pagination", GemFate::Modeled), // registry/controllers: set_page_and_extract_portion_from
@@ -835,6 +853,61 @@ const FAMILIES: &[(&str, GemFate)] = &[
 ];
 
 /// Classify a gem by name.
+/// Whether a standard-library gem's namespace is `root` (Ruby ships it whether or not the lockfile lists it).
+/// The known gems the lockfile lacks whose own nested namespace sits
+/// below every locked gem's (tzinfo-data's `TZInfo::Data` under tzinfo's
+/// `TZInfo`): Ruby has nothing under such a namespace to find. Built once
+/// per lockfile; [`AbsentGemNamespaces::owner`] asks it per constant.
+pub(crate) struct AbsentGemNamespaces {
+    locked: Vec<Vec<String>>,
+    absent: Vec<(&'static str, Vec<String>)>,
+}
+
+impl AbsentGemNamespaces {
+    pub(crate) fn new(lock: &Lockfile) -> Self {
+        let split = |ns: &str| ns.split("::").map(|s| s.to_ascii_lowercase()).collect::<Vec<_>>();
+        let nested = |gem: &str| gem.split('-').map(camelize).collect::<Vec<_>>().join("::");
+        let locked = lock
+            .specs
+            .iter()
+            .flat_map(|(name, _)| std::iter::once(nested(name)).chain(namespace_candidates(name)).map(|ns| split(&ns)).collect::<Vec<_>>())
+            .collect();
+        // Not a standard-library gem, which Ruby ships whether or not the lockfile lists it (net-http's `Net::HTTP`), nor one roundhouse models, which the emitted Gemfile declares when the app uses it (faraday-multipart).
+        let absent = FATES
+            .iter()
+            .filter(|(gem, fate)| matches!(fate, GemFate::Infrastructure | GemFate::Unknown) && lock.version_of(gem).is_none())
+            .map(|(gem, _)| (*gem, split(&nested(gem))))
+            .filter(|(_, ns)| ns.len() >= 2)
+            .collect();
+        Self { locked, absent }
+    }
+
+    /// The absent gem and its namespace's depth, for a constant under it.
+    pub(crate) fn owner(&self, path: &str) -> Option<(&'static str, usize)> {
+        let segs: Vec<String> = path.trim_start_matches("::").split("::").filter(|s| !s.is_empty()).map(|s| s.to_ascii_lowercase()).collect();
+        let under = |ns: &[String]| ns.len() <= segs.len() && ns.iter().zip(&segs).all(|(a, b)| a == b);
+        let (gem, ns) = self.absent.iter().find(|(_, ns)| under(ns))?;
+        let locked = self.locked.iter().filter(|ns| under(ns)).map(|ns| ns.len()).max().unwrap_or(0);
+        (ns.len() > locked).then_some((*gem, ns.len()))
+    }
+}
+
+pub(crate) fn is_stdlib_namespace(root: &str) -> bool {
+    // Ruby's core and the standard library it ships, gem-packaged or not.
+    const RUBY_OWN: &[&str] = &[
+        "Abbrev", "Base64", "Benchmark", "BigDecimal", "Comparable", "Coverage", "CSV", "Date", "DateTime", "Digest", "DRb",
+        "Encoding", "English", "ERB", "Errno", "Etc", "Fiber", "Fiddle", "FileUtils", "Find", "Forwardable", "GC",
+        "GetoptLong", "IO", "IPAddr", "JSON", "Kernel", "Logger", "Marshal", "Math", "Matrix", "Monitor", "MonitorMixin",
+        "Mutex", "Net", "NKF", "ObjectSpace", "Observable", "Open3", "OpenSSL", "OpenStruct", "OptionParser", "PP",
+        "Pathname", "PrettyPrint", "Prime", "Process", "Psych", "Racc", "Ractor", "RbConfig", "RDoc", "Readline",
+        "Reline", "Resolv", "Rinda", "Ripper", "RubyVM", "SecureRandom", "Set", "Shellwords", "Signal", "Singleton",
+        "Socket", "StringIO", "StringScanner", "Syslog", "Tempfile", "Thread", "Time", "Timeout", "TracePoint",
+        "TSort", "UNIXSocket", "URI", "Warning", "WeakRef", "YAML", "Zlib", "TCPSocket", "UDPSocket", "Addrinfo",
+    ];
+    RUBY_OWN.contains(&root)
+        || FATES.iter().any(|(gem, fate)| matches!(fate, GemFate::Stdlib) && namespace_of(gem).eq_ignore_ascii_case(root))
+}
+
 pub fn fate_of(name: &str) -> GemFate {
     if let Some((_, fate)) = FATES.iter().find(|(n, _)| *n == name) {
         return *fate;

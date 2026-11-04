@@ -260,6 +260,8 @@ pub struct LowerControllerOptions<'a> {
     /// App library classes — used to resolve controller-side partial
     /// render contracts.
     pub library_classes: &'a [crate::dialect::LibraryClass],
+    /// Source singleton ownership, including extensions and retained hooks.
+    pub finder_classes: Option<&'a crate::det::HashMap<ClassId, crate::analyze::ClassInfo>>,
     /// Association graph — lowers `includes(:assoc)` to eager-load
     /// preloads (issue #27).
     pub assocs: &'a [crate::lower::model_associations::AssociationEdge],
@@ -320,6 +322,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         schema,
         views,
         library_classes,
+        finder_classes,
         assocs,
         routed_by_controller,
         format_breadth,
@@ -350,6 +353,9 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // What `@parent.<assoc>.build` / `.find` expand to: the same
     // declarations the typed association seed reads.
     let assoc_registry = crate::lower::scope_chain::build_assoc_registry(models);
+    let assoc_registry = if let Some(classes) = finder_classes {
+        assoc_registry.with_finder_classes(classes)
+    } else { assoc_registry };
 
     // The view↔controller ivar contract: each action view's read-ivars,
     // so the render rewrite passes `@<name>` for each (matching the view's
@@ -1071,7 +1077,7 @@ fn subclass_template_hooks(
                         parenthesized: true,
                     },
                 );
-                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, false, &[])
+                rewrites::rewrite_render_to_views(&render, Some(&module), &[], view_ivars, partials, &template, true, false, &[], overlaid(controller, controllers))
             };
             methods.push(MethodDef {
                 visibility: crate::dialect::MethodVisibility::Public,
@@ -1442,7 +1448,7 @@ fn build_methods(
                 body, controller, "process_action", &privs, &params_privs,
                 /*is_public=*/ false, params_specs, assocs, &[], view_ivars, partials,
                 format_breadth, &shadows, route_id_segments, false, false, None, None, &[],
-                /*preserve_named_layout=*/ true,
+                /*preserve_named_layout=*/ true, overlaid(controller, all_controllers),
             ).0
         });
         // Template lowering can introduce a read of self.action_name.
@@ -1520,6 +1526,23 @@ fn build_methods(
         }
     }
 
+    match controller_json_escape(controller, all_controllers) {
+        Ok(Some(value)) => {
+            let mut method = synthesize_controller_string_method(controller, "json_render_escape", "");
+            method.body.node = Box::new(ExprNode::Lit { value: Literal::Bool { value } });
+            method.signature = Some(crate::lower::typing::fn_sig(vec![], Ty::Bool));
+            methods.push(method);
+        }
+        Ok(None) => {}
+        Err(span) => {
+            let mut d = crate::lower::residue_diagnostic("controller_render", "escape_json_responses", span,
+                "controller_json_escape_not_modelled",
+                "controller escape_json_responses override, inheritance interaction or statement placement is not modelled".into());
+            d.severity = crate::diagnostic::Severity::Error;
+            crate::emit::diagnostics::push(d);
+        }
+    }
+
     // Class-side methods are already seeded at the start of build_methods;
     // do not append them again (duplicate defs break several emitters).
 
@@ -1542,6 +1565,63 @@ fn build_methods(
     );
 
     methods
+}
+
+/// Class-attribute inheritance is represented by an ordinary virtual instance
+/// hook. Only unconditional literal writes and literal class predicates are
+/// established here; unknown class-body execution is a named refusal.
+fn controller_json_escape(controller: &Controller, all: &[Controller]) -> Result<Option<bool>, Span> {
+    fn boolean(e: &Expr) -> Option<bool> {
+        match &*e.node {
+            ExprNode::Lit { value: Literal::Bool { value } } => Some(*value),
+            ExprNode::Return { value } => boolean(value),
+            ExprNode::Seq { exprs } if exprs.len() == 1 => boolean(&exprs[0]),
+            _ => None,
+        }
+    }
+    fn write(e: &Expr) -> Option<&Expr> {
+        match &*e.node {
+            ExprNode::Assign { target: crate::expr::LValue::Attr { recv, name }, value }
+                if name.as_str() == "escape_json_responses" && matches!(&*recv.node, ExprNode::SelfRef) => Some(value),
+            ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+                if method.as_str() == "escape_json_responses=" && matches!(&*recv.node, ExprNode::SelfRef) && args.len() == 1 => Some(&args[0]),
+            _ => None,
+        }
+    }
+    fn contains_write(e: &Expr) -> bool {
+        if write(e).is_some() { return true; }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| { found |= contains_write(c); });
+        found
+    }
+    let mut assigned = None;
+    let mut getter = None;
+    let mut predicate = None;
+    for item in &controller.body {
+        match item {
+            ControllerBodyItem::ClassMethod { method, .. } if method.name.as_str() == "escape_json_responses=" => return Err(method.body.span),
+            ControllerBodyItem::ClassMethod { method, .. }
+                if matches!(method.name.as_str(), "escape_json_responses" | "escape_json_responses?") => {
+                if !method.params.is_empty() || method.block_param.is_some() || method.has_anonymous_block { return Err(method.body.span); }
+                let value = boolean(&method.body).ok_or(method.body.span)?;
+                if method.name.as_str().ends_with('?') { predicate = Some(value); }
+                else { getter = Some(value); }
+            }
+            ControllerBodyItem::Unknown { expr, .. } => {
+                if let Some(value) = write(expr) { assigned = Some(boolean(value).ok_or(expr.span)?); }
+                else if contains_write(expr) { return Err(expr.span); }
+            }
+            ControllerBodyItem::Action { action, .. } if action.name.as_str() == "json_render_escape" => return Err(action.body.span),
+            _ => {}
+        }
+    }
+    if predicate.is_none() && (assigned.is_some() || getter.is_some())
+        && ancestor_chain(controller, all).iter().any(|parent| parent.class_methods().any(|m|
+            matches!(m.name.as_str(), "escape_json_responses" | "escape_json_responses?")))
+    {
+        return Err(controller_provenance_span(controller).unwrap_or_default());
+    }
+    Ok(predicate.or(getter).or(assigned))
 }
 
 /// Replace any prior def of `name`, then push the AOT string-literal
@@ -1674,7 +1754,7 @@ fn class_side_clone_names(controller: &Controller) -> Vec<Symbol> {
     out
 }
 
-fn helper_method_marked_names(controller: &Controller) -> Vec<Symbol> {
+pub(crate) fn helper_method_marked_names(controller: &Controller) -> Vec<Symbol> {
     let mut marked: Vec<Symbol> = Vec::new();
     for item in &controller.body {
         let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
@@ -2294,6 +2374,9 @@ fn default_forgery_protection() -> Filter {
         unless_cond: None,
         if_cond_expr: None,
         unless_cond_expr: None,
+        unread_guard: false,
+        unread_options: false,
+        only_present: false,
         block: None,
         prepend: false,
     }
@@ -2568,6 +2651,14 @@ fn inheritor_view_modules(controller: &Controller, all: &[Controller]) -> Vec<St
         .collect()
 }
 
+/// Whether the controller has `route_param_recall::OVERLAY`, its own or inherited.
+fn overlaid(controller: &Controller, all: &[Controller]) -> bool {
+    let name = crate::lower::route_param_recall::OVERLAY;
+    std::iter::once(controller)
+        .chain(ancestor_chain(controller, all))
+        .any(|c| c.actions().any(|a| a.name.as_str() == name))
+}
+
 fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a Controller> {
     let mut chain: Vec<&'a Controller> = Vec::new();
     let mut cur = controller.parent.as_ref();
@@ -2612,7 +2703,7 @@ fn reads_action_name(
             // diagnostics; inspecting its binding must not report them.
             let (bound, _) = crate::emit::diagnostics::scope(|| rewrite_render_to_views(
                 e, views_module_name(c).as_deref(), &[], view_ivars, partials,
-                "", false, false, &[],
+                "", false, false, &[], false,
             ));
             reads(&bound)
         }
@@ -2664,7 +2755,7 @@ mod action_name_probe_tests {
         let action = controller.actions().next().expect("index action");
         let (_, actual) = crate::emit::diagnostics::scope(|| {
             rewrite_render_to_views(&action.body, Some("Probes"), &[], &views,
-                &partials, "index", true, false, &[])
+                &partials, "index", true, false, &[], false)
         });
         assert_eq!(actual.len(), 1, "actual lowering diagnostics: {actual:?}");
         assert!(matches!(&actual[0].kind,
@@ -2854,6 +2945,11 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     info.instance_methods
         .entry(Symbol::from("media_type"))
         .or_insert_with(|| fn_sig(vec![], Ty::Str));
+    // Re-typing a lowered controller needs the same writer surface as
+    // source analysis. Its assignment value is still the RHS, not String.
+    info.instance_methods
+        .entry(Symbol::from("content_type="))
+        .or_insert(Ty::Untyped);
 
     // Rails' implicit `protect_from_forgery` heads every chain; the
     // preamble emits a bare `verify_authenticity_token` send that must
@@ -3175,6 +3271,7 @@ fn action_to_method(
         formats_template.as_ref(),
         &inheritor_modules,
         /*preserve_named_layout=*/ false,
+        overlaid(controller, all_controllers_for_params),
     );
     if let Some(tail) = deferred_tail {
         deferred_out.insert(a.name.clone(), tail);
@@ -3208,6 +3305,9 @@ fn action_to_method(
             || a.name.as_str() == "absolute_redirect_location");
     let ret_ty = if host_policy {
         Ty::Str
+    } else if a.name.as_str() == crate::lower::route_param_recall::OVERLAY {
+        // The request's path parameters, which its views take: the same Hash the runtime's `path_parameters` is.
+        Ty::Hash { key: Ty::Str.into(), value: Ty::Str.into() }
     } else if !is_public && method_name.ends_with("_params") {
         let spec = self::params::first_permit_in(&a.body)
             .and_then(|(resource, fields, nested)| params_specs.find(&resource, &fields, &nested));
@@ -3416,6 +3516,7 @@ fn lower_action_body(
     formats_only_render: Option<&Symbol>,
     inheritor_modules: &[String],
     preserve_named_layout: bool,
+    overlaid: bool,
 ) -> (Expr, Option<Expr>) {
     // BEFORE everything else: this turns a helper the permit recognizer
     // could not read into one that yields the params class, so every
@@ -3520,6 +3621,7 @@ fn lower_action_body(
             is_public,
             preserve_named_layout,
             inheritor_modules,
+            overlaid,
         )
     };
 

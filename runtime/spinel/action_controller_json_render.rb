@@ -27,13 +27,27 @@
 # writer covers it.
 module ActionController
   module JsonRender
-    def self.encode(value)
-      emit_json(jsonify(value))
+    def self.encode(value, escape = Rails.application.action_controller_escape_json_responses)
+      JsonBuilder.escape_json_response(emit_json(jsonify(value)), escape)
+    end
+
+    def self.encode_for_callback(value)
+      encode_escaped(value)
+    end
+
+    # General serialization (including Inertia props) is not the JSON
+    # renderer, so its escaping does not follow escape_json_responses.
+    def self.encode_escaped(value)
+      JsonBuilder.escape_json_response(emit_json(jsonify(value)), true)
     end
 
     # Not in `encode`: Inertia's props encode a String, and only the json renderer sends one as it is.
-    def self.body(value)
-      value.is_a?(String) ? value : encode(value)
+    def self.body(value, escape = Rails.application.action_controller_escape_json_responses)
+      value.is_a?(String) ? value : encode(value, escape)
+    end
+
+    def self.body_for_callback(value)
+      value.is_a?(String) ? value : encode_for_callback(value)
     end
 
     def self.jsonify(value)
@@ -87,16 +101,31 @@ module ActionController
 
     JSON_ESCAPES = {
       "\"" => "\\\"", "\\" => "\\\\", "\b" => "\\b", "\f" => "\\f",
-      "\n" => "\\n", "\r" => "\\r", "\t" => "\\t",
-      "<" => "\\u003c", ">" => "\\u003e", "&" => "\\u0026",
-      "\u2028" => "\\u2028", "\u2029" => "\\u2029"
+      "\n" => "\\n", "\r" => "\\r", "\t" => "\\t"
     }.freeze
 
     def self.quote_json(s)
-      escaped = s.gsub(/["\\\x00-\x1f<>&\u2028\u2029]/) do |c|
+      escaped = s.gsub(/["\\\x00-\x1f]/) do |c|
         JSON_ESCAPES[c] || format("\\u%04x", c.ord)
       end
       "\"#{escaped}\""
     end
   end
+end
+
+# Configuration-aware response policy for the Rails-compatible runtime trees.
+module JsonBuilder
+  # Rails' renderer can disable all extra escaping. JSONP retains the
+  # encoder's escaping, including its separate JS separator setting.
+  def self.escape_json_response(json, escape = Rails.application.action_controller_escape_json_responses)
+    return json unless escape
+    if Rails.application.active_support_escape_html_entities_in_json
+      json = escape_html_entities(json)
+    end
+    if Rails.application.active_support_escape_js_separators_in_json
+      json = json.gsub("\u2028", "\\u2028").gsub("\u2029", "\\u2029")
+    end
+    json
+  end
+
 end

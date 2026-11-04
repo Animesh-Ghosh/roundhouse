@@ -15,7 +15,7 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
-use super::{BodyTyper, Ctx, union_many, union_of, unknown};
+use super::{BodyTyper, ClassInfo, Ctx, union_many, union_of, unknown};
 
 pub(super) fn literal_array_extreme_ty(recv: &Expr, method: &Symbol, args: &[Expr], has_block: bool) -> Option<Ty> {
     if !matches!(method.as_str(), "max" | "min") || !args.is_empty() || has_block {
@@ -202,6 +202,12 @@ impl<'a> BodyTyper<'a> {
     /// for the name (see the call site), so a real class method of this
     /// shape — a `has_secure_password` token finder, say — still wins.
     fn dynamic_finder_ty(&self, model: &ClassId, method: &Symbol) -> Option<Ty> {
+        if ClassInfo::class_method_ownership_unknown(self.classes(), model, method)
+            || self.source_class_side(model, method)
+            || self.source_class_side(model, &Symbol::from("method_missing"))
+        {
+            return None;
+        }
         let (base, bang) = match method.as_str().strip_suffix('!') {
             Some(base) => (base, true),
             None => (method.as_str(), false),
@@ -210,9 +216,19 @@ impl<'a> BodyTyper<'a> {
         if attr.is_empty() {
             return None;
         }
-        let cls = self.classes().get(model)?;
-        if !cls.has_schema_column(&Symbol::from(attr)) {
+        if ClassInfo::schema_column_owner(self.classes(), model, &Symbol::from(attr)).is_none() {
             return None;
+        }
+        // Rails' generated method delegates to find_by / find_by!. A
+        // source delegate owns the return, even when its body is not yet
+        // harvested; never replace that unknown with a record promise.
+        for delegate in if bang { &["find_by!", "find_by"][..] } else { &["find_by"][..] } {
+            let delegate = Symbol::from(*delegate);
+            if ClassInfo::source_class_method(self.classes(), model, &delegate) {
+                let ret = ClassInfo::source_class_method_type(self.classes(), model, &delegate)
+                    .map(unwrap_fn_ret).unwrap_or(Ty::Untyped);
+                return Some(if bang && delegate.as_str() == "find_by" { ret.strip_nil() } else { ret });
+            }
         }
         let kind = if bang {
             crate::catalog::ReturnKind::SelfType
@@ -486,6 +502,22 @@ impl<'a> BodyTyper<'a> {
                 }
             }
         }
+        // `each_with_object(memo) { |elem, memo| … }` yields the seed object itself beside each element.
+        if !class_object_receiver
+            && matches!(method.as_str(), "each_with_object" | "with_object")
+            && let ([elem, memo], [seed]) = (params.as_slice(), args)
+            && let Some(seed_ty) = seed.ty.clone()
+        {
+            let elem_ty = match recv_ty.map(super::narrowing::remove_nil) {
+                Some(Ty::Hash { key, value }) => Some(Ty::Tuple { elems: vec![(*key).clone(), (*value).clone()].into() }),
+                other => other.as_ref().and_then(|r| self.block_params_for(Some(r), &Symbol::from("each"), false)).and_then(|v| v.first().cloned()),
+            };
+            if let Some(elem_ty) = elem_ty {
+                new_ctx.local_bindings.insert(elem.clone(), elem_ty);
+            }
+            new_ctx.local_bindings.insert(memo.clone(), seed_ty);
+            return new_ctx;
+        }
         // `Thread.new(state) { |state| ... }` forwards constructor
         // arguments to the block. Unlike iterator methods, the yielded
         // values come from this call's positional arguments rather than
@@ -603,6 +635,9 @@ impl<'a> BodyTyper<'a> {
         class_object_receiver: bool,
     ) -> Option<Vec<Ty>> {
         let recv_ty = recv_ty?;
+        if !class_object_receiver && let Some(view) = self.enumerable_view(Some(recv_ty), method) {
+            return self.block_params_for(Some(&view), method, false);
+        }
         if matches!(recv_ty, Ty::Class { id, .. } if id.0.as_str() == PARAM_VALUE) {
             return match method.as_str() {
                 "each_with_index" | "each_with_object" => Some(vec![param_value_ty(), Ty::Int]),
@@ -613,6 +648,12 @@ impl<'a> BodyTyper<'a> {
                 }
                 _ => None,
             };
+        }
+        // `ActiveSupport::Notifications.instrument(name, payload) { |payload| … }` yields its payload Hash, as Rails' does (and solid_queue's `SolidQueue.instrument` through it).
+        if method.as_str() == "instrument"
+            && matches!(recv_ty, Ty::Class { id, .. } if matches!(id.0.as_str(), "ActiveSupport::Notifications" | "SolidQueue"))
+        {
+            return Some(vec![Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Untyped) }]);
         }
         // `then` / `yield_self` / `tap` yield the RECEIVER itself, on
         // every type — Kernel methods, not container ones, so they are
@@ -957,12 +998,13 @@ impl<'a> BodyTyper<'a> {
         &self,
         recv: Option<&crate::expr::Expr>,
         method: &Symbol,
+        self_ty: Option<&Ty>,
     ) -> Option<Ty> {
         if method.as_str() != "loaded?" {
             return None;
         }
         let ExprNode::Send {
-            recv: Some(owner),
+            recv: owner,
             method: assoc,
             args,
             block: None,
@@ -970,6 +1012,11 @@ impl<'a> BodyTyper<'a> {
         } = &*recv?.node
         else {
             return None;
+        };
+        // A reader with no receiver is the enclosing model's own (`recurring_executions.loaded?`), as `lower::assoc_loaded` resolves it.
+        let owner_ty = match owner {
+            Some(owner) => owner.ty.as_ref(),
+            None => self_ty,
         };
         // `association(:name).loaded?` — the reflection spelling of the
         // same question, for any association with a flat predicate.
@@ -1003,7 +1050,7 @@ impl<'a> BodyTyper<'a> {
         // Typed owners that miss the flat predicate return None — do
         // not fall through to the unique-name path (that is for
         // untyped view locals only).
-        match owner.ty.as_ref() {
+        match owner_ty {
             Some(Ty::Class { id, .. }) => {
                 return has_flat(id).then_some(Ty::Bool);
             }
@@ -1120,19 +1167,7 @@ impl<'a> BodyTyper<'a> {
     /// `def self.…` on it or a superclass, or in the `class_methods` of a
     /// concern either includes.
     fn source_class_side(&self, of: &ClassId, method: &Symbol) -> bool {
-        let mut stack = vec![of.clone()];
-        let mut seen = std::collections::BTreeSet::new();
-        while let Some(id) = stack.pop() {
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            let Some(cls) = self.classes().get(&id) else { continue };
-            if cls.source_class_methods.contains(method) {
-                return true;
-            }
-            stack.extend(cls.includes.iter().chain(&cls.parent).cloned());
-        }
-        false
+        ClassInfo::source_class_method(self.classes(), of, method)
     }
 
     fn source_ancestor(&self, of: &ClassId, method: &Symbol) -> Option<ClassId> {
@@ -1192,6 +1227,106 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    // The controller writer is the only setter whose assignment path
+    // moves past dispatch. Leave other Ruby writers on their existing path.
+    pub(super) fn controller_writer_receiver(&self, recv: &Ty) -> bool {
+        match recv {
+            Ty::Union { variants } => variants.iter().any(|ty| self.controller_writer_receiver(ty)),
+            Ty::Class { id, .. } => {
+                let mut current = Some(id.clone());
+                for _ in 0..32 {
+                    let Some(id) = current else { return false };
+                    if id.0.as_str() == "ActionController::Base" { return true; }
+                    current = self.classes().get(&id).and_then(|cls| cls.parent.clone());
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    // Method existence is separate evidence from its return type. In
+    // particular, an app writer may exist while its body is unresolved.
+    pub(super) fn defines_writer_surface(&self, recv: &Ty, method: &Symbol, instance_receiver: bool) -> bool {
+        match recv {
+            Ty::Union { variants } => !variants.is_empty()
+                && variants.iter().all(|ty| self.defines_writer_surface(ty, method, instance_receiver)),
+            Ty::Class { id, .. } if instance_receiver => self.defines_instance_method(id, method),
+            Ty::Class { id, .. } => {
+                let mut current = Some(id.clone());
+                for _ in 0..32 {
+                    let Some(id) = current else { return false };
+                    let Some(cls) = self.classes().get(&id) else { return false };
+                    if cls.class_methods.contains_key(method) { return true; }
+                    current = cls.parent.clone();
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    pub(super) fn writer_has_missing_arm(&self, recv: &Ty, method: &Symbol,
+        block_ret: Option<&Ty>, args: &[Expr], receiver_is_instance: bool) -> bool
+    {
+        let Ty::Union { variants } = recv else { return false };
+        variants.iter().any(|arm| {
+            // An unknown arm cannot turn a known instance into a class
+            // receiver. Apply the shape check to this arm independently.
+            let instance_receiver = receiver_is_instance && super::instance_shaped(arm);
+            match arm {
+                Ty::Union { .. } => self.writer_has_missing_arm(arm, method, block_ret, args, receiver_is_instance),
+                Ty::Var { .. } | Ty::Untyped => false,
+                Ty::Class { id, .. } if self.open_classes.is_some_and(|o| o.open(id, !instance_receiver).is_some()) => false,
+                _ => matches!(self.dispatch_on(Some(arm), method, block_ret, args, instance_receiver), Ty::Var { .. })
+                    && !self.defines_writer_surface(arm, method, instance_receiver),
+            }
+        })
+    }
+
+    /// What an `include Enumerable` instance answers `method` as: the
+    /// Array its `each` iterates, when the class's own `each` hands its
+    /// block to that collection's (`ClassInfo::each_forwards_block`) and
+    /// nothing nearer the instance defines `method`. Only the methods
+    /// Spinel's Enumerable answers as CRuby's does on such a class.
+    pub(super) fn enumerable_view(&self, recv_ty: Option<&Ty>, method: &Symbol) -> Option<Ty> {
+        let Some(Ty::Class { id, .. }) = recv_ty else { return None };
+        if !ENUMERABLE_METHODS.contains(&method.as_str()) {
+            return None;
+        }
+        let classes = self.classes();
+        let owns = |c: &ClassInfo| c.instance_methods.contains_key(method) || c.class_methods.contains_key(method);
+        let mut current = Some(id.clone());
+        let mut elem = None;
+        let mut seen = 0;
+        while let Some(cid) = current {
+            seen += 1;
+            let info = classes.get(&cid)?;
+            if seen > 64 || owns(info) || info.open {
+                return None;
+            }
+            if elem.is_none() && info.instance_methods.contains_key(&Symbol::from("each")) {
+                if !info.each_forwards_block {
+                    return None;
+                }
+                elem = match unwrap_fn_ret(&info.instance_methods[&Symbol::from("each")]) {
+                    Ty::Array { elem } => Some(elem),
+                    _ => return None,
+                };
+            }
+            for module in &info.includes {
+                if module_has_enumerable(classes, module, 0) {
+                    return elem.map(|elem| Ty::Array { elem });
+                }
+                if classes.get(module).is_some_and(owns) {
+                    return None;
+                }
+            }
+            current = info.parent.clone();
+        }
+        None
+    }
+
     pub(super) fn dispatch(
         &self,
         recv_ty: Option<&Ty>,
@@ -1211,6 +1346,15 @@ impl<'a> BodyTyper<'a> {
         args: &[crate::expr::Expr],
         instance_receiver: bool,
     ) -> Ty {
+        if !instance_receiver
+            && (matches!(method.as_str(), "find_by" | "find_by!") || method.as_str().starts_with("find_by_"))
+            && let Some(Ty::Class { id, .. }) = recv_ty
+        {
+            if ClassInfo::class_method_ownership_unknown(self.classes(), id, method) { return Ty::Untyped; }
+            if let Some(ty) = ClassInfo::source_class_method_type(self.classes(), id, method) { return unwrap_fn_ret(ty); }
+        }
+        let controller_writer = method.as_str() == "content_type="
+            && recv_ty.is_some_and(|ty| self.controller_writer_receiver(ty));
         // Not the stdlib's String form too: the port reads `other.octets`, which a String lacks.
         if let Some(Ty::Class { id, .. }) = recv_ty
             && id.0.as_str() == "IPAddr"
@@ -1249,6 +1393,9 @@ impl<'a> BodyTyper<'a> {
                 };
                 return self.dispatch(Some(&as_array), method, block_ret, args);
             }
+        }
+        if let Some(view) = self.enumerable_view(recv_ty, method) {
+            return self.dispatch(Some(&view), method, block_ret, args);
         }
         // `self[:generated_at]` / `read_attribute(:generated_at)` read
         // the attribute TYPECAST, so `Time?` for a datetime column and
@@ -1505,6 +1652,16 @@ impl<'a> BodyTyper<'a> {
                 };
                 // Same receiver, so the same side: an instance's send(:m) is its own m, not a class method m.
                 if let Some(name) = literal_name {
+                    // A source reflection wrapper owns this call too;
+                    // only the builtin send aliases rename the target.
+                    if !instance_receiver && (name.as_str().starts_with("find_by_")
+                        || matches!(name.as_str(), "find_by" | "find_by!"))
+                        && let Some(Ty::Class { id, .. }) = recv_ty
+                        && ClassInfo::source_class_method(self.classes(), id, method)
+                    {
+                        return ClassInfo::source_class_method_type(self.classes(), id, method)
+                            .map(unwrap_fn_ret).unwrap_or(Ty::Untyped);
+                    }
                     return self.dispatch_on(recv_ty, &name, block_ret, &args[1..], instance_receiver);
                 }
             }
@@ -1845,6 +2002,15 @@ impl<'a> BodyTyper<'a> {
                 }
                 let mut steps = 0usize;
                 let mut unknown_named_ancestor = false;
+                // An instance method with a finder-shaped name cannot
+                // answer a model-class send. Continue the class-side
+                // ancestry walk before trying the framework finder or
+                // the application's class-side method_missing.
+                let class_dynamic_finder = !instance_receiver
+                    && ClassInfo::active_record_class(self.classes(), id)
+                    && (matches!(method.as_str(), "find_by" | "find_by!")
+                        || method.as_str().strip_suffix('!').unwrap_or(method.as_str()).strip_prefix("find_by_")
+                            .is_some_and(|attr| ClassInfo::schema_column_owner(self.classes(), id, &Symbol::from(attr)).is_some()));
                 // The first `method_missing` on the ancestor walk (the
                 // class's own, then its mixins', then its parents').
                 // Ruby consults it only once the WHOLE chain has failed
@@ -1887,7 +2053,9 @@ impl<'a> BodyTyper<'a> {
                     // Not the ancestor's own class either: an inherited scope or finder answers the receiver's (`User.active` is a `Relation[User]`).
                     let subst = |ty: &Ty| {
                         let ty = ty.subst_self(&Ty::Class { id: id.clone(), args: Vec::new().into() });
-                        let receiver_is_model = self.classes().get(id).is_some_and(|c| c.table.is_some());
+                        let receiver_is_model = self.classes().get(id).is_some_and(|c| c.table.is_some())
+                            || (method.as_str() == "new" && ClassInfo::active_record_class(self.classes(), id)
+                                && !self.source_class_side(id, method) && !matches!(ty, Ty::Fn { .. }));
                         if cid != id && cls.table.is_some() && receiver_is_model { ty.rebind_class(cid, id) } else { ty }
                     };
                     // The class object and its instances share this one type, so a
@@ -1959,15 +2127,22 @@ impl<'a> BodyTyper<'a> {
                         }
                         return unwrap_fn_ret(&subst(ty));
                     }
-                    if let Some(ty) = cls.instance_methods.get(method) {
-                        return unwrap_fn_ret(&subst(ty));
+                    if !class_dynamic_finder && let Some(ty) = cls.instance_methods.get(method) {
+                        if !controller_writer || instance_receiver {
+                            return unwrap_fn_ret(&subst(ty));
+                        }
+
                     }
                     // Mixed-in modules (`include IntervalHelper`)
                     // contribute their instance methods to this class.
                     // Checked after the class's own methods, before the
                     // parent — Ruby's ancestor order puts an included
                     // module between the class and its superclass.
-                    for module_id in &cls.includes {
+                    for module_id in cls.includes.iter().filter(|_| !class_dynamic_finder) {
+                        if controller_writer && !instance_receiver {
+                            continue;
+                        }
+
                         if let Some(ty) = self.lookup_in_module(module_id, method) {
                             return subst(&ty);
                         }
@@ -1983,6 +2158,18 @@ impl<'a> BodyTyper<'a> {
                             .cloned();
                     }
                     current_id = cls.parent.as_ref();
+                }
+                // Rails synthesizes the same per-column finders on the model
+                // class as on its relations. Keep source definitions above
+                // authoritative; an instance does not get this class-side API.
+                if !instance_receiver && ClassInfo::active_record_class(self.classes(), id)
+                    && call_args.len() == 1 && block_ret.is_none()
+                    && !matches!(&*call_args[0].node, ExprNode::Splat { .. } | ExprNode::KeywordSplat { .. })
+                    && let Some(ty) = self.dynamic_finder_ty(id, method)
+                    && !self.source_class_side(id, method)
+                    && !self.source_class_side(id, &Symbol::from("method_missing"))
+                {
+                    return ty;
                 }
                 let _ = args; // already shadowed below for new-call shortcut
                 // Every class in Ruby responds to `.new`, returning an
@@ -2396,6 +2583,14 @@ impl<'a> BodyTyper<'a> {
                         return t;
                     }
                 }
+                // `flatten(depth)` unwraps `depth` levels, not all of them,
+                // and `flatten!` answers nil when nothing was nested.
+                if matches!(method.as_str(), "flatten" | "flatten!") && block_ret.is_none() {
+                    let flat = Ty::Array {
+                        elem: std::sync::Arc::new(flatten_to(elem, FlattenDepth::of(args))),
+                    };
+                    return if method.as_str() == "flatten!" { union_of(flat, Ty::Nil) } else { flat };
+                }
                 // `a[start, length]` and `a[range]` answer a slice (nil past the end), not an element
                 if matches!(method.as_str(), "[]" | "slice")
                     && (args.len() == 2 || args.first().is_some_and(|a| matches!(a.ty, Some(Ty::Class { ref id, .. }) if id.0.as_str() == "Range") || matches!(&*a.node, crate::expr::ExprNode::Range { .. })))
@@ -2423,6 +2618,9 @@ impl<'a> BodyTyper<'a> {
             //      element (`each`/`map`/`size`/…) — same types the
             //      Array representation gives.
             Some(Ty::Relation { of }) => {
+                if (matches!(method.as_str(), "find_by" | "find_by!") || method.as_str().starts_with("find_by_"))
+                    && ClassInfo::class_method_ownership_unknown(self.classes(), of, method)
+                { return Ty::Untyped; }
                 if let Some(t) = self.column_projection(of, method, args) {
                     return t;
                 }
@@ -2618,6 +2816,19 @@ impl<'a> BodyTyper<'a> {
                 // A union of concrete arms that all lack the method
                 // (`Str | Nil` with `join`) still errors, as it should.
                 let has_var = variants.iter().any(|v| matches!(v, Ty::Var { .. }));
+                // `nil.dup` / `nil.clone` answer `nil` (Ruby >= 2.4), so
+                // the copy of a `T | Nil` is `T' | Nil`, not `T'`. A
+                // `@status_change = status_change.dup.freeze` over
+                // `[String?, String]?` was typed `Array[String?]`, the
+                // reader inherited it, and `status_change.present?` ground
+                // to `!status_change.empty?` -- nil at runtime.
+                if matches!(method.as_str(), "dup" | "clone")
+                    && args.is_empty()
+                    && !resolved.is_empty()
+                    && variants.iter().any(|v| matches!(v, Ty::Nil))
+                {
+                    resolved.push(Ty::Nil);
+                }
                 match resolved.len() {
                     0 if has_var => Ty::Untyped,
                     0 => unknown(),
@@ -3530,6 +3741,11 @@ pub(super) fn hash_method(
         "to_a" => Ty::Array {
             elem: std::sync::Arc::new(Ty::Tuple { elems: vec![key.clone(), value.clone()].into() }),
         },
+        "partition" => Ty::Array {
+            elem: std::sync::Arc::new(Ty::Array {
+                elem: std::sync::Arc::new(Ty::Tuple { elems: vec![key.clone(), value.clone()].into() }),
+            }),
+        },
         "dup" | "clone" | "deep_dup" => Ty::Hash {
             key: std::sync::Arc::new(key.clone()),
             value: std::sync::Arc::new(value.clone()),
@@ -3820,7 +4036,7 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // `index`/`rindex` → the substring position or nil.
         "index" | "rindex" => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         "bytes" => Ty::Array { elem: std::sync::Arc::new(Ty::Int) },
-        "chars" | "lines" | "split" | "scan" | "each_char" => Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
+        "chars" | "lines" | "split" | "scan" | "each_char" | "grapheme_clusters" => Ty::Array { elem: std::sync::Arc::new(Ty::Str) },
         // `String#count(chars)` — how many of the given characters occur.
         "count" => Ty::Int,
         // `String#ascii_only?`, `valid_encoding?` and
@@ -3878,7 +4094,7 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "pluralize" | "singularize" | "camelize" | "camelcase"
         | "underscore" | "dasherize" | "titleize" | "titlecase"
         | "humanize" | "demodulize" | "deconstantize" | "classify"
-        | "foreign_key" | "parameterize" | "truncate" | "truncate_words"
+        | "foreign_key" | "parameterize" | "truncate" | "truncate_words" | "truncate_bytes"
         | "squish" | "remove" | "indent"
         | "html_safe" | "to_query" | "to_param" => Ty::Str,
         "constantize" | "safe_constantize" => unknown(),
@@ -3901,6 +4117,10 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
     // Sym-specific shapes here.
     match method.as_str() {
         "to_sym" => Ty::Sym,
+        // `SERIALIZE_PROC = :as_pack.to_proc` (paquito's registry): a
+        // constant holding it was a value with no inferred type, so
+        // every read of it was "constant not supported".
+        "to_proc" => Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from("Proc")), args: vec![].into() },
         "length" | "size" => Ty::Int,
         "upcase" | "downcase" | "capitalize" | "swapcase" => Ty::Sym,
         "empty?" => Ty::Bool,
@@ -3912,6 +4132,8 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
         "match?" => Ty::Bool,
         "=~" => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         "<=>" | "<" | ">" | "<=" | ">=" => Ty::Bool,
+        // ActiveSupport `Object#presence_in(list)`: the receiver when the list holds it, else nil.
+        "presence_in" => Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() },
         _ => unknown(),
     }
 }
@@ -4136,6 +4358,22 @@ fn gradual_array(ty: &Ty) -> bool {
     }
 }
 
+/// `Enumerable` itself, or a module that includes it, at any depth.
+fn module_has_enumerable(classes: &crate::det::HashMap<ClassId, ClassInfo>, module: &ClassId, depth: usize) -> bool {
+    module.0.as_str() == "Enumerable"
+        || (depth < 16
+            && classes.get(module).is_some_and(|m| m.includes.iter().any(|inner| module_has_enumerable(classes, inner, depth + 1))))
+}
+
+/// Enumerable's methods that Spinel answers on an app class including it exactly as CRuby does.
+pub(crate) const ENUMERABLE_METHODS: &[&str] = &[
+    "all?", "any?", "collect", "collect_concat", "compact", "count", "detect", "drop", "drop_while", "each_cons",
+    "each_slice", "each_with_index", "each_with_object", "entries", "filter", "filter_map", "find", "find_all",
+    "find_index", "first", "flat_map", "group_by", "include?", "inject", "map", "max", "max_by", "member?", "min",
+    "min_by", "minmax", "none?", "one?", "partition", "reduce", "reject", "reverse_each", "select", "sort", "sort_by",
+    "sum", "take", "take_while", "tally", "to_a", "uniq", "zip",
+];
+
 fn unwrap_fn_ret(ty: &Ty) -> Ty {
     match ty {
         Ty::Fn { ret, .. } => (**ret).clone(),
@@ -4238,6 +4476,87 @@ fn flatten_elem(t: &Ty) -> Ty {
             .map(flatten_elem)
             .fold(Ty::Bottom, union_of),
         other => other.clone(),
+    }
+}
+
+/// How many levels a `flatten` / `flatten!` call unwraps, read off its
+/// argument.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum FlattenDepth {
+    /// No argument, `nil`, or a negative literal: every level.
+    All,
+    /// A non-negative literal. `0` leaves the array as it is.
+    Levels(usize),
+    /// A depth only known at run time: any of the above.
+    Unknown,
+}
+
+impl FlattenDepth {
+    pub(super) fn of(args: &[Expr]) -> FlattenDepth {
+        match args {
+            [] => FlattenDepth::All,
+            [depth] => match &*depth.node {
+                ExprNode::Lit { value: crate::expr::Literal::Nil } => FlattenDepth::All,
+                ExprNode::Lit { value: crate::expr::Literal::Int { value } } => {
+                    usize::try_from(*value).map_or(FlattenDepth::All, FlattenDepth::Levels)
+                }
+                _ => FlattenDepth::Unknown,
+            },
+            _ => FlattenDepth::Unknown,
+        }
+    }
+
+    /// The depth after the same call runs any number of times, as it can
+    /// in a loop or a block: unwrapping every level or none is the same
+    /// however often it repeats, any other fixed number of levels is not.
+    pub(super) fn repeated(self) -> FlattenDepth {
+        match self {
+            FlattenDepth::All => FlattenDepth::All,
+            FlattenDepth::Levels(0) => FlattenDepth::Levels(0),
+            FlattenDepth::Levels(_) | FlattenDepth::Unknown => FlattenDepth::Unknown,
+        }
+    }
+}
+
+/// The element type of an Array of `elem` flattened to `depth`.
+pub(super) fn flatten_to(elem: &Ty, depth: FlattenDepth) -> Ty {
+    match depth {
+        FlattenDepth::All => flatten_elem(elem),
+        FlattenDepth::Levels(n) => flatten_levels(elem, n),
+        // Every level Ruby could stop at, from none to all.
+        FlattenDepth::Unknown => {
+            let mut all = elem.clone();
+            let mut level = elem.clone();
+            while splices(&level) {
+                level = flatten_levels(&level, 1);
+                all = union_of(all, level.clone());
+            }
+            all
+        }
+    }
+}
+
+fn flatten_levels(t: &Ty, n: usize) -> Ty {
+    if n == 0 {
+        return t.clone();
+    }
+    match t {
+        Ty::Array { elem } => flatten_levels(elem, n - 1),
+        Ty::Relation { of } => Ty::Class { id: of.clone(), args: vec![].into() },
+        Ty::Union { variants } => variants
+            .iter()
+            .map(|v| flatten_levels(v, n))
+            .fold(Ty::Bottom, union_of),
+        other => other.clone(),
+    }
+}
+
+/// Whether flattening an element of type `t` one level changes it.
+fn splices(t: &Ty) -> bool {
+    match t {
+        Ty::Array { .. } | Ty::Relation { .. } => true,
+        Ty::Union { variants } => variants.iter().any(splices),
+        _ => false,
     }
 }
 

@@ -1821,8 +1821,9 @@ come from the job's `perform_later` call sites, and
   envelope (`runtime/spinel/sidekiq_push.rb`, `sidekiq_redis.rb`):
   `SADD queues` and `LPUSH queue:<name>`, or `ZADD schedule` for a
   literal `set(wait:)` or `set(wait_until:)` that lands in the future.
-  Redis comes from `Sidekiq.configure_client`'s `url:` and `password:`,
-  then `REDIS_PROVIDER`, then `REDIS_URL`. The connection is one per
+  Redis comes from `Sidekiq.configure_client`'s `url:` and `password:`
+  only: an app on `:sidekiq` without a `url:` there is an error, with
+  no fallback to `REDIS_PROVIDER`, `REDIS_URL` or localhost. The connection is one per
   process, with 1-second connect and read timeouts, and a refused or
   dropped connection, the first one included, is retried once. A job
   held for COMMIT is dropped when an `after_commit` callback raises, as
@@ -1830,9 +1831,9 @@ come from the job's `perform_later` call sites, and
   under `:sidekiq`, and `set(priority:)` is dropped with a warning.
   This holds on ruby, jruby and spinel; the other targets warn
   (`sidekiq-adapter-not-honored`) and run the jobs in process. A pushed
-  job carries `"retry":true`, so Sidekiq retries it with its own
-  defaults; Active Job's `retry_on`, TLS (`rediss://`) and per-job
-  adapters are still missing.
+  job carries `"retry":true`, or the job's literal `sidekiq_options`
+  (`retry`, `retry_queue`, `retry_for`, `dead`), where Sidekiq writes
+  them. TLS (`rediss://`) and per-job adapters are still missing.
 - **The worker role has no heartbeat.** The same build runs the pushed
   jobs as `./app sidekiq` (spinel) or `ruby sidekiq.rb` (ruby, jruby),
   a Sidekiq 8.1 server process with BasicFetch
@@ -1852,8 +1853,20 @@ come from the job's `perform_later` call sites, and
   `schedule`, back onto their queues with Sidekiq's Lua pop (`EVALSHA`,
   so spinel needs spinel-redis with scripting) every
   `:poll_interval_average:` or 5 s per Sidekiq process, randomized as
-  Sidekiq randomizes it. `retry_on` and the heartbeat Sidekiq's Web UI
-  reads (and the process count the scheduler scales by) are still
+  Sidekiq randomizes it. Before Sidekiq's rules, an error goes to the
+  job's `retry_on` and `discard_on` handlers, searched as Active Job
+  searches them (the job's own, last declared first, then its
+  ancestors'): `discard_on` drops the job, and `retry_on` pushes it
+  again with Active Job's counters (`executions`,
+  `exception_executions`, `provider_job_id`) after its wait (a literal
+  number or Duration, or `:polynomially_longer`, plus `jitter:` or the
+  job's `retry_jitter`, which `load_defaults` 6.1 sets to 0.15) to its
+  `queue:` and `priority:`, until its `attempts:` are used up and the
+  error goes on to Sidekiq's rules. A handler with a block, a computed
+  option or an exception class the tree doesn't define is an error
+  (`job-handler-unsupported`) at its call; `after_discard` is dropped
+  with a warning. The heartbeat Sidekiq's Web UI
+  reads (and the process count the scheduler scales by) is still
   missing. Under
   config/cable.yml's `adapter: redis`, every process's broadcasts go
   out as `PUBLISH <channel_prefix>:<stream>`, as Action Cable's Redis
@@ -1861,8 +1874,12 @@ come from the job's `perform_later` call sites, and
   receives through one `PSUBSCRIBE <channel_prefix>:*` connection
   (`runtime/spinel/sidekiq/redis_cable.rb`). On any other cable
   adapter a job's broadcasts in the worker reach no browser, with a
-  warning. Broadcasts Rails would enqueue (`broadcast_*_later`, and
-  `broadcasts_to`'s create and update) are rendered inline instead.
+  warning. `broadcasts_to`'s create and update broadcasts are pushed
+  as `Turbo::Streams::ActionBroadcastJob` with turbo-rails' arguments,
+  and the worker renders and sends them (`lower::broadcast_job`); the
+  destroy broadcast runs at once, as in Rails. An STI model's
+  `broadcasts_to`, or one whose stream or `target:` isn't a String,
+  stays inline with a `broadcast-later-inline` warning.
 - **Some argument types.** A job whose call sites pass a Hash, a Date,
   an untyped value, or nothing typed at all keeps its closure, with a
   `job-closure-fallback` warning naming the parameter. Lobsters'
@@ -3393,6 +3410,54 @@ with `Journey::Router::Utils.escape_fragment`, which leaves `/`, `?` and
 `:` alone. The generated helper reuses the `url_encode` its query keys
 use, which percent-encodes them. Every anchor the corpus writes is a
 slug, a tag or a `dom_id`, so nothing can tell the difference today.
+
+### `default_url_options` gives a route helper its segments, in the shapes we read
+
+A URL-tenant app writes `scope ":blog"` and answers `{ path_params: {
+blog: current_blog } }` from `default_url_options`. Rails'
+`handle_positional_args` (actionpack 8.1.4, `route_set.rb:290`) then
+binds fewer positionals than the route has segments to the segments
+those options leave open, so `post_path(@post)` is `/acme/posts/1`; a
+segment the call names (`post_path(@post, blog: "x")`) is never a
+positional's, with or without the options. `lower::route_param_recall`
+binds the call the same way, and gives the controller a
+`url_options_path_parameters` method: the request's path parameters
+with the options' segments laid over them, which the call reads and the
+controller hands its views in place of the request's. It is evaluated
+per call, in the controller, as Rails evaluates `url_options`.
+
+It reads a Hash literal (`path_params:` a Hash literal too), `super`,
+`merge` of those, and `if cond` around one with no segments on the
+other branch, and a `compact`, `reject`, `slice`, … of one that gives
+no segment; each controller its own definition or the one it inherits.
+A `def default_url_options(options = {})` is read as Rails'
+`url_options` calls it, with no arguments: a read of an optional param
+is its default when that is a literal. A required param raises there,
+and a bare `super` passes the optional ones on to Base's
+`default_url_options`, which takes none, so Rails raises for both; they
+are unread, as is a read of any other param.
+Any other shape, a record value, and a value or guard that reads the
+method's own context (`super`, `yield`, `binding`, `__method__`) keeps
+the helpers' positional binding, and `check` warns at its `def`. A nil
+value leaves its segment out of the overlay, so every call needing it
+raises, as Rails raises for a nil segment (a `KeyError` here, a
+`UrlGenerationError` there); an empty String builds `//`, as Rails'
+does. Where it differs from Rails:
+
+* **A plain key is not also a query.** `{ blog: current_blog }` fills
+  the segment, but Rails also appends it to a route without one
+  (`health_path` is `/health?blog=acme`), and we do not.
+* **A false guard reads the request's segment.** Under `if
+  current_blog`, a call Rails would bind from the first segment, and
+  raise for, reads the request's `:blog`; when the guard reads the same
+  parameter it is absent too, and the read raises.
+* **Without the options, a short call with an options Hash** still
+  binds the Hash to a segment: `edit_post_path(@post, tab: "x")` builds
+  `/1/posts/{tab: "x"}/edit` where Rails raises for the missing `:id`.
+* **The views of a controller's own directory** take its options, and
+  every other view (a layout, `shared/`) ApplicationController's.
+  App helper modules, `url_for(@post)`, `polymorphic_path`,
+  `redirect_to @post` and mailers do not take the segments yet.
 
 ### An exception reported to Sentry reaches stderr, and loses its detail
 

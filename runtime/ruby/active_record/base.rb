@@ -445,6 +445,11 @@ module ActiveRecord
       table_name
     end
 
+    # A concrete STI subclass overrides this with its descendant names.
+    def self._sti_type_names
+      []
+    end
+
     def self.schema_columns
       raise NotImplementedError, "#{name}.schema_columns must be overridden"
     end
@@ -670,6 +675,11 @@ module ActiveRecord
 
     # Subclasses override to return an attribute hash for adapter writes.
     def attributes
+      {}
+    end
+
+    # Not the answer a record gives: each model overrides it with its columns' readers (`synth_serializable_hash`).
+    def serializable_hash
       {}
     end
 

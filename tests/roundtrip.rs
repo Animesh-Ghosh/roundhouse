@@ -180,6 +180,7 @@ fn tiny_blog_round_trips() {
         seeds: None,
         boot_program: Vec::new(),
         importmap: None,
+        engine_importmaps: Vec::new(),
         inertia: None,
         vite_manifest: None,
         stylesheets: vec![],
@@ -197,6 +198,7 @@ fn tiny_blog_round_trips() {
         global_id_locate_signed_models: std::collections::BTreeSet::new(),
         unreachable_views: std::collections::BTreeSet::new(),
         helper_diagnostics: None,
+        unknown_association_targets: Vec::new(),
         helper_modules: Default::default(),
         job_plans: Vec::new(),
         queue_adapter: None,
@@ -208,6 +210,7 @@ fn tiny_blog_round_trips() {
         load_hook_class_macros: Vec::new(),
         load_hook_extended_macros: Vec::new(),
         spliced_class_methods: Default::default(),
+        time_tag_calls: Vec::new(),
         partial_local_types: roundhouse::det::HashMap::default(),
         view_ivar_types: roundhouse::det::HashMap::default(),
         html_safe_methods: std::collections::BTreeSet::new(),
@@ -223,6 +226,7 @@ fn tiny_blog_round_trips() {
         graphql_signatures: Vec::new(),
         concern_spliced_actions: roundhouse::det::HashMap::default(),
         concern_spliced_class_methods: roundhouse::det::HashMap::default(),
+        concern_class_side_spans: roundhouse::det::HashSet::default(),
         concern_model_items: roundhouse::det::HashMap::default(),
         concern_guarded_items: roundhouse::det::HashMap::default(),
         concern_included_redefs: roundhouse::det::HashMap::default(),
@@ -232,6 +236,7 @@ fn tiny_blog_round_trips() {
         controller_resolutions: roundhouse::det::HashMap::default(),
         sources: vec![],
         wrap_parameters_by_default: false,
+        active_job_retry_jitter: 0.0,
         ports_active_model_validator: false,
         each_validator_calls: Vec::new(),
         // Derived from `sources` and `serde(skip)`, like `binary_assets`.
@@ -239,6 +244,7 @@ fn tiny_blog_round_trips() {
         source_index_required: false,
         root: String::new(),
         app_roots: vec!["app".to_string()],
+        isolated_namespaces: Vec::new(),
         spinel_int_overflow: None,
     };
 
