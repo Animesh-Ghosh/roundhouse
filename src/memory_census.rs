@@ -8,8 +8,9 @@
 //! measured as the live bytes a clone allocates (or a field's drop frees),
 //! so they are exact for the data, not for allocator slack.
 //!
-//! Measuring clones briefly doubles the measured value; the census clones
-//! one unit at a time so its own peak stays small. Nothing here changes
+//! Measuring clones briefly doubles the measured value, so a clone made
+//! for measuring counts toward the live heap but not toward the peaks the
+//! timing lines and `scripts/memory-budget` read. Nothing here changes
 //! what the compiler produces.
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -22,9 +23,24 @@ static PEAK: AtomicIsize = AtomicIsize::new(0);
 /// The high-water mark since the open windows last took it (see
 /// [`open_window`]). Never above `PEAK`.
 static SINCE: AtomicIsize = AtomicIsize::new(0);
+/// The live bytes that are [`live_delta`]'s copies. Peaks leave them out,
+/// whichever thread's allocation reaches the peak.
+static COPIES: AtomicIsize = AtomicIsize::new(0);
 
-fn grew(by: isize) {
-    let now = LIVE.fetch_add(by, Ordering::Relaxed) + by;
+thread_local! {
+    /// Set while this thread runs [`live_delta`]: what it allocates
+    /// meanwhile is the census's own copy, not the compiler's.
+    static MEASURING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// This thread's share of `COPIES`.
+    static COPIED: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+/// The live bytes that count toward the peaks.
+fn counted() -> isize {
+    LIVE.load(Ordering::Relaxed) - COPIES.load(Ordering::Relaxed)
+}
+
+fn raise(now: isize) {
     if now > SINCE.load(Ordering::Relaxed) {
         SINCE.fetch_max(now, Ordering::Relaxed);
         if now > PEAK.load(Ordering::Relaxed) {
@@ -33,11 +49,32 @@ fn grew(by: isize) {
     }
 }
 
+/// The live heap changed by `by` bytes on this thread. A copy's bytes
+/// join `COPIES` before `LIVE` and leave it after, so no thread counts
+/// them toward a peak.
+fn changed(by: isize) {
+    if MEASURING.try_with(std::cell::Cell::get).unwrap_or(false) {
+        let _ = COPIED.try_with(|copied| copied.set(copied.get() + by));
+        if by > 0 {
+            COPIES.fetch_add(by, Ordering::Relaxed);
+            LIVE.fetch_add(by, Ordering::Relaxed);
+        } else {
+            LIVE.fetch_add(by, Ordering::Relaxed);
+            COPIES.fetch_add(by, Ordering::Relaxed);
+        }
+    } else {
+        LIVE.fetch_add(by, Ordering::Relaxed);
+        if by > 0 {
+            raise(counted());
+        }
+    }
+}
+
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() {
-            grew(layout.size() as isize);
+            changed(layout.size() as isize);
         }
         pointer
     }
@@ -45,20 +82,20 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         let pointer = unsafe { System.alloc_zeroed(layout) };
         if !pointer.is_null() {
-            grew(layout.size() as isize);
+            changed(layout.size() as isize);
         }
         pointer
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         unsafe { System.dealloc(pointer, layout) };
-        LIVE.fetch_sub(layout.size() as isize, Ordering::Relaxed);
+        changed(-(layout.size() as isize));
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let moved = unsafe { System.realloc(pointer, layout, new_size) };
         if !moved.is_null() {
-            grew(new_size as isize - layout.size() as isize);
+            changed(new_size as isize - layout.size() as isize);
         }
         moved
     }
@@ -86,7 +123,7 @@ static NEXT_WINDOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 /// start a new one from the live heap now. Windows can nest or overlap
 /// in any order, since each keeps its own maximum.
 fn take_since(windows: &mut [(u64, i64)]) {
-    let live = LIVE.load(Ordering::Relaxed);
+    let live = counted();
     let since = SINCE.swap(live, Ordering::Relaxed).max(live) as i64;
     for (_, peak) in windows {
         *peak = (*peak).max(since);
@@ -100,7 +137,7 @@ pub fn open_window() -> u64 {
     let mut windows = WINDOWS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     take_since(&mut windows);
     let id = NEXT_WINDOW.fetch_add(1, Ordering::Relaxed);
-    windows.push((id, live_bytes()));
+    windows.push((id, counted() as i64));
     id
 }
 
@@ -121,11 +158,20 @@ pub fn enabled() -> bool {
 }
 
 /// The live bytes `make` leaves allocated, released before returning.
+/// They count toward the live heap meanwhile, but not toward its peaks.
 pub fn live_delta<T>(make: impl FnOnce() -> T) -> i64 {
+    let outer = MEASURING.with(|measuring| measuring.replace(true));
     let before = live_bytes();
     let made = make();
     let delta = live_bytes() - before;
     drop(made);
+    MEASURING.with(|measuring| measuring.set(outer));
+    if !outer {
+        // What the copy left behind (a cache it filled) is the compiler's now.
+        let kept = COPIED.with(|copied| copied.replace(0));
+        COPIES.fetch_sub(kept, Ordering::Relaxed);
+        raise(counted());
+    }
     delta
 }
 
@@ -487,6 +533,12 @@ mod tests {
 
     const BLOCK: usize = 256 << 20;
 
+    /// The counters are process-wide, so the tests that move them by a
+    /// block take turns: one's block would land in the other's readings.
+    static BLOCKS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// What other test threads may free while a test reads the counters.
+    const SLACK: i64 = 1 << 20;
+
     fn hold_block() {
         let block = vec![1u8; BLOCK];
         std::hint::black_box(&block);
@@ -494,19 +546,34 @@ mod tests {
 
     #[test]
     fn a_window_reports_its_own_peak_and_not_an_earlier_one() {
+        let _turn = BLOCKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let outer = open_window();
         let started = live_bytes();
         let inner = open_window();
         hold_block();
         let inner_peak = close_window(inner);
         let outer_peak = close_window(outer);
-        assert!(inner_peak >= started + BLOCK as i64, "inner {inner_peak}, started {started}");
+        assert!(inner_peak >= started + BLOCK as i64 - SLACK, "inner {inner_peak}, started {started}");
         assert!(outer_peak >= inner_peak, "outer {outer_peak}, inner {inner_peak}");
 
         let later = open_window();
         let later_peak = close_window(later);
         assert!(later_peak < inner_peak - (BLOCK as i64) / 2, "later {later_peak}, inner {inner_peak}");
         assert!(peak_bytes() >= inner_peak);
+    }
+
+    #[test]
+    fn a_measuring_clone_raises_no_peak() {
+        const COPY: usize = 4 * BLOCK;
+        let _turn = BLOCKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let window = open_window();
+        let started = peak_bytes();
+        let measured = live_delta(|| std::hint::black_box(vec![0u8; COPY]));
+        let phase_peak = close_window(window);
+        assert!(measured >= COPY as i64 - SLACK, "measured {measured}");
+        // Tests elsewhere in the binary still allocate meanwhile.
+        assert!(peak_bytes() < started + (COPY as i64) / 2, "peak {}, started {started}", peak_bytes());
+        assert!(phase_peak < started + (COPY as i64) / 2, "phase peak {phase_peak}, started {started}");
     }
 
     #[test]

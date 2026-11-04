@@ -38,7 +38,7 @@ def measure(log_path):
     hold them), or, for a log without phase peaks, the first line to
     report it."""
     live_peak = 0
-    rss_anon = 0
+    rss_anon = None
     phase_at_peak = None
     phase_peaks = []
     with open(log_path, encoding="utf-8", errors="replace") as log:
@@ -56,11 +56,14 @@ def measure(log_path):
                 phase_peaks.append((int(own.group(1)), name))
             anon = RSS_ANON.search(line)
             if anon:
-                rss_anon = max(rss_anon, int(anon.group(1)))
+                rss_anon = max(rss_anon or 0, int(anon.group(1)))
     phase_at_peak = next((name for own, name in phase_peaks if own >= live_peak), phase_at_peak)
     if live_peak == 0:
         sys.exit(f"memory-budget: {log_path} has no `live peak` timing lines; "
                  "was it a `memory-census` build run with ROUNDHOUSE_TIMINGS=1?")
+    if rss_anon is None:
+        sys.exit(f"memory-budget: {log_path} has no `rss anon` timing samples; "
+                 "anonymous RSS is read from /proc, so the runs must be on Linux")
     return {"live_peak_mb": live_peak, "rss_anon_peak_mb": rss_anon, "phase_at_live_peak": phase_at_peak}
 
 
