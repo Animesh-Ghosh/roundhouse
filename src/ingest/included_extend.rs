@@ -36,6 +36,13 @@ enum Extend {
     Itself,
 }
 
+/// Every module a model or a controller includes, which this pass does not expand.
+fn app_class_includes(app: &App) -> HashSet<ClassId> {
+    let mut out: HashSet<ClassId> = app.models.iter().flat_map(crate::app::model_includes).collect();
+    out.extend(app.controllers.iter().flat_map(crate::analyze::controller_includes));
+    out
+}
+
 pub(super) fn splice_included_extends(app: &mut App) {
     let names: HashSet<String> = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
     let hooks: Vec<(ClassId, Vec<Extend>)> = app
@@ -44,7 +51,9 @@ pub(super) fn splice_included_extends(app: &mut App) {
         .filter(|lc| lc.is_module)
         .filter_map(|lc| Some((lc.name.clone(), instance_eval_extends(lc, &names)?)))
         .collect();
-    let included: HashSet<ClassId> = app.library_classes.iter().flat_map(|c| c.includes.iter().cloned()).collect();
+    let outside = app_class_includes(app);
+    let mut included = outside.clone();
+    included.extend(app.library_classes.iter().flat_map(|c| c.includes.iter().cloned()));
     let hook_extended: HashSet<ClassId> = hooks
         .iter()
         .flat_map(|(_, ex)| ex.iter().filter_map(|e| match e {
@@ -91,7 +100,8 @@ pub(super) fn splice_included_extends(app: &mut App) {
     }
     // A hook every includer took in is not run again: its `instance_eval` names the extends the includers now hold.
     for (id, _) in &hooks {
-        let pending = app.library_classes.iter().any(|c| c.includes.contains(id));
+        // Not library classes alone: a model or controller that includes the hook module still runs its hook.
+        let pending = outside.contains(id) || app.library_classes.iter().any(|c| c.includes.contains(id));
         if pending || !expanded_hooks.contains(id) {
             continue;
         }

@@ -3,7 +3,9 @@
 //! natural-language parsers) gives the includer M's methods and its own as
 //! module methods. What runs in them is grounded against the includer:
 //! `method_added` (raabro's last one-argument rule), `method(name).call(x)`
-//! (its rule dispatch) and `send("rewrite_#{name}", tree)`.
+//! (its rule dispatch) and `send("rewrite_#{name}", tree)`. A model that
+//! includes the grammar too keeps its instance methods: the module is not
+//! expanded out from under it.
 
 use super::emit_and_run;
 
@@ -94,6 +96,28 @@ end
 raise got.inspect unless got == ["digit", "word", "and", :word, "D", "W", "NameError", "NoMethodError"]
 puts "included instance_eval extend passed"
 "##;
+
+const COMMENT: &str = r##"class Comment < ApplicationRecord
+  include DigitGrammar
+
+  belongs_to :article
+
+  validates :commenter, presence: true
+  validates :body, presence: true
+end
+"##;
+
+const MODEL_SCRIPT: &str = r##"got = [Comment.new.digit("7"), Comment.new.word("ab"), DigitGrammar.run(:digit, "7")]
+raise got.inspect unless got == ["digit", "word", "digit"]
+puts "model includer kept passed"
+"##;
+
+#[test]
+fn a_model_that_includes_the_grammar_keeps_its_instance_methods() {
+    let run = app().write("app/models/comment.rb", COMMENT).run_ruby(MODEL_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("model includer kept passed"), "{}", run.stdout);
+}
 
 fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog().write("app/models/mini_rules.rb", RULES).write("app/models/digit_grammar.rb", GRAMMAR)

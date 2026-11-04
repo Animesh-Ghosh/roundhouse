@@ -1056,21 +1056,7 @@ impl App {
             direct.insert(lc.name.clone(), lc.includes.clone());
         }
         for model in &self.models {
-            let mut ids = Vec::new();
-            for item in &model.body {
-                if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item {
-                    if let crate::expr::ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
-                        if method.as_str() == "include" {
-                            for arg in args {
-                                if let crate::expr::ExprNode::Const { path } = &*arg.node {
-                                    ids.push(crate::analyze::mixin_path_id(path));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            direct.entry(model.name.clone()).or_default().extend(ids);
+            direct.entry(model.name.clone()).or_default().extend(model_includes(model));
         }
         // Controllers include concerns too, and a module shared between
         // a controller and a channel (campfire's
@@ -1479,4 +1465,23 @@ pub struct IngestDrop {
     /// noted one.
     pub span: crate::span::Span,
     pub message: String,
+}
+
+/// The modules a model's body includes, as `include X` sends it keeps
+/// until the concerns are spliced.
+pub(crate) fn model_includes(model: &Model) -> Vec<crate::ident::ClassId> {
+    let mut ids = Vec::new();
+    for item in &model.body {
+        if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item
+            && let crate::expr::ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node
+            && method.as_str() == "include"
+        {
+            for arg in args {
+                if let crate::expr::ExprNode::Const { path } = &*arg.node {
+                    ids.push(crate::analyze::mixin_path_id(path));
+                }
+            }
+        }
+    }
+    ids
 }
