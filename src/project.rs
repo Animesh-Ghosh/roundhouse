@@ -5359,24 +5359,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         .iter()
         .filter_map(|(p, _)| p.strip_prefix("app/").and_then(|p| p.strip_suffix(".rb")).map(str::to_string))
         .collect();
-    // `require "x"` from a gem file: the file of that feature under the
-    // requiring gem's lib/, then any gem's.
-    let resolve = |from: &str, feature: &str, relative: bool| -> Option<String> {
-        let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
-        if relative {
-            let dir = std::path::Path::new(from).parent()?;
-            return Some(normalize_source(&dir.join(&file).display().to_string()));
-        }
-        let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
-        let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
-        if let Some(own) = own.filter(|p| known.contains(p)) {
-            return Some(own);
-        }
-        let suffix = format!("/lib/{file}");
-        let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
-        found.sort();
-        found.first().map(|p| p.to_string())
-    };
+    let resolve = |from: &str, feature: &str, relative: bool| resolve_gem_require(&known, from, feature, relative);
     let site = |span: crate::span::Span| -> String {
         let Some(source) = (span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i)) else {
             return "(unknown)".to_string();
@@ -5787,6 +5770,76 @@ fn program_steps<'a>(items: &'a [crate::app::ProgramItem], depth: usize, out: &m
             other => out.push((depth, ProgramStep::Item(other))),
         }
     }
+}
+
+/// `require "x"` from a gem file: the file of that feature under the
+/// requiring gem's lib/, then any gem's.
+fn resolve_gem_require(known: &crate::det::HashSet<String>, from: &str, feature: &str, relative: bool) -> Option<String> {
+    let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
+    if relative {
+        let dir = std::path::Path::new(from).parent()?;
+        return Some(normalize_source(&dir.join(&file).display().to_string()));
+    }
+    let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
+    let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
+    if let Some(own) = own.filter(|p| known.contains(p)) {
+        return Some(own);
+    }
+    let suffix = format!("/lib/{file}");
+    let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
+    found.sort();
+    found.first().map(|p| p.to_string())
+}
+
+/// The model-tree anchors (`models/x`) of the classes the gem programs
+/// declare, in the order Ruby loads them: each boot gem entry as Bundler
+/// requires it, a required file's declarations ahead of the lines after
+/// its `require`. Both branches of a file-level `if` count; an autoload
+/// loads on first read, so it orders nothing.
+fn gem_declaration_order(app: &App) -> Vec<String> {
+    let programs: crate::det::HashMap<String, &crate::app::FileProgram> =
+        app.file_programs.iter().map(|p| (normalize_source(&p.source), p)).collect();
+    if programs.is_empty() {
+        return Vec::new();
+    }
+    let known: crate::det::HashSet<String> = app.sources.iter().map(|f| normalize_source(&f.path)).collect();
+    fn walk(
+        source: &str,
+        programs: &crate::det::HashMap<String, &crate::app::FileProgram>,
+        known: &crate::det::HashSet<String>,
+        app: &App,
+        seen: &mut crate::det::HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if !seen.insert(source.to_string()) {
+            return;
+        }
+        let Some(program) = programs.get(source) else { return };
+        for item in all_program_items(&program.items) {
+            match item {
+                crate::app::ProgramItem::Require { feature, relative, .. } => {
+                    if let Some(target) = resolve_gem_require(known, source, feature, *relative) {
+                        walk(&target, programs, known, app, seen, out);
+                    }
+                }
+                crate::app::ProgramItem::Declared(names) => {
+                    for name in names {
+                        let anchor = crate::emit::ruby::library_file_anchor(name.0.as_str(), app);
+                        if !out.contains(&anchor) {
+                            out.push(anchor);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut seen = Default::default();
+    let mut out = Vec::new();
+    for entry in &app.boot_gem_entries {
+        walk(&normalize_source(entry), &programs, &known, app, &mut seen, &mut out);
+    }
+    out
 }
 
 /// Every item of a program, those in its branches too.
@@ -7823,7 +7876,7 @@ fn apply_route_helpers_demand(files: &mut Vec<(String, String)>) {
     ));
 }
 
-fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
+fn apply_models_aggregator(files: &mut Vec<(String, String)>, app: &App) {
     use std::fmt::Write;
 
     let mut models: Vec<String> = files
@@ -7833,12 +7886,23 @@ fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
         .map(str::to_string)
         .collect();
     models.sort();
+    // Not alphabetical for a gem's files: a class body that runs one of its
+    // methods at load (et-orbi's `ZONES_OLSON = TZInfo::Timezone.all...`)
+    // needs what the gem's own requires loaded first, as Bundler loads it.
+    let gem_first: Vec<String> = gem_declaration_order(app)
+        .into_iter()
+        .map(|anchor| format!("app/{anchor}.rb"))
+        .filter(|path| models.contains(path))
+        .collect();
+    models.retain(|path| !gem_first.contains(path));
+    let models: Vec<String> = gem_first.into_iter().chain(models).collect();
 
     let mut body = String::from(
         "# Loads every model/support class under app/models/. Generated\n\
          # from the emitted tree (see apply_models_aggregator). Each file\n\
          # requires its own LOAD-time deps (superclass, includes, class-body\n\
-         # constants), so the order here is only for legibility; method-body\n\
+         # constants). A gem's files come first, in the order the gem's own\n\
+         # requires load them; the rest are alphabetical. Method-body\n\
          # references between these files rely on this aggregator having\n\
          # run by dispatch time.\n",
     );
@@ -10060,7 +10124,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_job_registry(&mut files, app);
     apply_job_registry_locate(&mut files, app);
     apply_views_aggregator(&mut files);
-    apply_models_aggregator(&mut files);
+    apply_models_aggregator(&mut files, app);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
     apply_boot_program(&mut files, app);
