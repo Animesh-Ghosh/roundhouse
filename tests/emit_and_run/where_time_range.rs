@@ -34,13 +34,17 @@ fn app() -> emit_and_run::Overlay {
     where(created_at: 7.days.ago.., title: title).first_or_initialize
   end
 
-  def self.month_titles(at)
-    month = at.all_month
+  def self.month_titles
+    month = Time.now.all_month
     where(created_at: month).order(:title).map(&:title)
   end
 
-  def self.this_month?(article, at)
-    at.all_month.cover?(article.created_at)
+  def self.this_month?(article)
+    Time.now.all_month.cover?(article.created_at)
+  end
+
+  def self.backdate_far(article)
+    article.update_column(:created_at, 40.days.ago)
   end
 ",
     )
@@ -54,10 +58,11 @@ raise "recent: #{Article.recent_titles.inspect}" unless Article.recent_titles ==
 raise "older: #{Article.older_titles(Article.cut).inspect}" unless Article.older_titles(Article.cut) == ["old"]
 raise "listed: #{Article.recent_listed_titles.inspect}" unless Article.recent_listed_titles == ["new"]
 fresh = Article.seeded("fresh")
-fresh_one = Article.find_by(title: "new")
-raise "month: #{Article.month_titles(fresh_one.created_at).inspect}" unless Article.month_titles(fresh_one.created_at).include?("new")
-raise "this month" unless Article.this_month?(fresh_one, fresh_one.created_at) && !Article.this_month?(fresh_one, fresh_one.created_at - 86400 * 40)
 raise "seeded: #{fresh.title.inspect} #{fresh.created_at.inspect}" unless fresh.title == "fresh" && fresh.created_at.nil? && !fresh.persisted?
+ancient = Article.create!(title: "ancient", body: "A sufficiently long body.")
+Article.backdate_far(ancient)
+raise "month: #{Article.month_titles.inspect}" unless Article.month_titles.include?("new") && !Article.month_titles.include?("ancient")
+raise "this month" unless Article.this_month?(Article.find_by(title: "new")) && !Article.this_month?(Article.find_by(title: "ancient"))
 puts "where time range passed"
 "#;
 
