@@ -7612,7 +7612,7 @@ const SPINEL_LACKS: &[&str] = &[
 fn apply_app_requires(files: &mut [(String, String)], app: &App, target: RequireTarget) {
     let provided_by_tree = |lib: &str| {
         let require_line = format!("require {lib:?}");
-        BUNDLED.iter().filter(|(_, feature)| *feature == lib && *feature != "did_you_mean").any(|(konst, _)| {
+        bundled_libraries().filter(|(konst, feature)| *feature == lib && !crate::gems::preloaded_constant(konst)).any(|(konst, _)| {
             files.iter().any(|(p, c)| {
                 p.ends_with(".rb") && defines_constant(c, konst) && !requires_feature(c, &require_line)
             })
@@ -8580,13 +8580,13 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         // rqrcode_core's / spinel-rqrcode's.
         | "RQRCodeCore::QRCodeRunTimeError" | "RQRCodeCore::QRCodeArgumentError"
         | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
-        | "DidYouMean" | "DidYouMean::SpellChecker"
         | "Enumerator::Product" | "Enumerator::Lazy" | "Enumerator::Chain"
         | "Monitor" | "ConditionVariable" | "Thread::ConditionVariable"
         | "UNIXServer" | "UNIXSocket" | "Open3" | "Find")
         // The rexml gem on the ruby family, spinel's `packages/rexml`.
         || name == "REXML"
-        || name.starts_with("REXML::");
+        || name.starts_with("REXML::")
+        || crate::gems::preloaded_constant(name);
     if !bundled {
         return None;
     }
@@ -12024,7 +12024,8 @@ fn names_constant(src: &str, konst: &str) -> bool {
                     && matches!(after, None | Some(b')' | b',' | b']')))
                     || (before.ends_with("#{") && after == Some(&b'}'))
             };
-            let tail_ok = (konst == "DidYouMean" && b.get(tail).is_none_or(|c| !ident(*c))) || value
+            let tail_ok = (crate::gems::PRELOADED.iter().any(|(_, namespace, _)| *namespace == konst)
+                && b.get(tail).is_none_or(|c| !ident(*c))) || value
                 || matches!(b.get(tail), Some(b'.' | b'[' | b'('))
                 || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'))
                 // Only right after the keyword or a rescue-list comma: `raise "Timeout waiting"` names no constant.
@@ -12192,7 +12193,7 @@ fn drop_facades_the_program_defines(files: &mut [(String, String)]) {
 /// Constant → bundled library that provides it. One table, read by
 /// both the pass that writes the requires and the gate that checks a
 /// tree for missing ones — a second copy is how the rule drifts.
-const BUNDLED: [(&str, &str); 31] = [
+const BUNDLED: [(&str, &str); 30] = [
     // INERT in our trees, and deliberately: `runtime/spinel/base64.rb`
     // defines `Base64` without requiring the library, which the second
     // condition below reads as "the program defines it" and drops the
@@ -12210,8 +12211,6 @@ const BUNDLED: [(&str, &str); 31] = [
     // app never writes this require itself.
     ("BigDecimal", "bigdecimal"),
     ("CSV", "csv"),
-    // Preloaded on CRuby; a pure-Ruby bundled package on Spinel.
-    ("DidYouMean", "did_you_mean"),
     ("Digest", "digest"),
     ("ERB", "erb"),
     ("JSON", "json"),
@@ -12301,6 +12300,10 @@ const BUNDLED: [(&str, &str); 31] = [
     ("Psych", "psych"),
 ];
 
+fn bundled_libraries() -> impl Iterator<Item = (&'static str, &'static str)> {
+    BUNDLED.into_iter().chain(crate::gems::PRELOADED.iter().map(|(feature, namespace, _)| (*namespace, *feature)))
+}
+
 /// Every gap in a tree, as `(file index, require line)`. One walk,
 /// read by both the pass that writes the requires and the gate that
 /// checks a tree for missing ones — a second copy is how the rule
@@ -12315,11 +12318,11 @@ const BUNDLED: [(&str, &str); 31] = [
 /// `require "stringio"` mask a missing one in `app/models/story.rb`.)
 fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
     let mut gaps = Vec::new();
-    for (konst, feature) in BUNDLED {
+    for (konst, feature) in bundled_libraries() {
         let require_line = format!("require {feature:?}");
-        // CRuby preloads did_you_mean, so an app's declaration reopens
-        // it. Load the package before that declaration on Spinel too.
-        let preloaded = feature == "did_you_mean";
+        // CRuby preloads these libraries, so an app's declaration reopens
+        // them. Load each package before that declaration on Spinel too.
+        let preloaded = crate::gems::preloaded_constant(konst);
         // The program defines the constant itself, so the bundled
         // library is not what the name refers to. A file that REQUIRES
         // the library and then opens the constant is not that: it is a

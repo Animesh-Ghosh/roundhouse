@@ -44,10 +44,11 @@ fn settled(cond: &crate::expr::Expr, known: &crate::det::HashSet<String>, resolv
         ExprNode::Defined { operand } => {
             let ExprNode::Const { path } = &*operand.node else { return None };
             let name = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
-            // CRuby preloads this default gem; project::BUNDLED loads its
+            // CRuby preloads these libraries; project assembly loads their
             // package on Spinel. Resolve the actual reference so a lexical
             // app constant with the same spelling does not select this arm.
-            (known.contains(&name) || resolver.is_runtime_class(operand.span, path, "DidYouMean::SpellChecker")).then_some(true)
+            (known.contains(&name) || crate::gems::PRELOADED.iter().flat_map(|(_, _, classes)| *classes)
+                .any(|class| resolver.is_runtime_class(operand.span, path, class))).then_some(true)
         }
         ExprNode::Send { recv: Some(r), method, args, .. } if method.as_str() == "!" && args.is_empty() => settled(r, known, resolver).map(|b| !b),
         ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "!" && args.len() == 1 => settled(&args[0], known, resolver).map(|b| !b),
