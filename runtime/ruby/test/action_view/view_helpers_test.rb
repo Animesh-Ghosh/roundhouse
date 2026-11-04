@@ -290,6 +290,12 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "<aside>direct</aside>", ViewHelpers.content_tag_html(:aside, "direct")
   end
 
+  # Rails writes a newline ahead of a textarea's content.
+  def test_content_tag_textarea_content_follows_a_newline
+    assert_equal "<textarea>\n\nhi</textarea>", ViewHelpers.content_tag(:textarea, "\nhi")
+    assert_equal "<textarea>\nhi</textarea>", ViewHelpers.content_tag_html(:textarea, "hi")
+  end
+
   # Every expectation below is the byte-for-byte output of Rails 8.1's
   # own `mail_to` for the same call, apart from attribute ORDER (Rails
   # puts the html options before the href; `link_to` above follows

@@ -19,6 +19,7 @@ fn app() -> emit_and_run::Overlay {
             "<%= content_tag :p, \"text\", class: \"x\" %>\n",
             "<%= content_tag :section do %>before<% cache \"k\" do %><%= content_tag :p do %>in<% end %><% end %>after<% end %>\n",
             "<% css = \"a\" %><%= content_tag :div, class: css do %><% css = \"b\" %>x<% end %>\n",
+            "<%= content_tag :textarea do %>hi<% end %>\n",
         ),
     )
 }
@@ -34,6 +35,7 @@ class ContentTagBlockControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.body, %(<p class="x">text</p>)
     assert_includes response.body, %(<section>before<p>in</p>after</section>)
     assert_includes response.body, %(<div class="a">x</div>)
+    assert_includes response.body, "<textarea>\nhi</textarea>"
   end
 end
 "#;
@@ -64,6 +66,7 @@ fn a_content_tag_block_is_its_content_on_spinel() {
             "raise body unless body.include?('<p class=\"x\">text</p>')\n",
             "raise body unless body.include?('<section>before<p>in</p>after</section>')\n",
             "raise body unless body.include?('<div class=\"a\">x</div>')\n",
+            "raise body unless body.include?(\"<textarea>\\nhi</textarea>\")\n",
             "puts \"content_tag block passed\"\n",
         ))
         .assert_passes();

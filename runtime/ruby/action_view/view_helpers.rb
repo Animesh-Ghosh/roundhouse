@@ -1206,7 +1206,7 @@ module ActionView
     # reference-typed parameter (CS1763); `to_s` maps nil → "".
     def self.content_tag(name, content = nil, opts = EMPTY_HTML_OPTS)
       n = name.to_s
-      "<#{n}#{render_attrs(opts.to_h)}>#{html_escape(content.to_s)}</#{n}>"
+      "<#{n}#{render_attrs(opts.to_h)}>#{content_tag_pre(n)}#{html_escape(content.to_s)}</#{n}>"
     end
 
     # `content_tag(name[, opts]) do … end` in a template: the block's
@@ -1214,7 +1214,14 @@ module ActionView
     # `capture`), so it is written as it is.
     def self.content_tag_html(name, html, opts = EMPTY_HTML_OPTS)
       n = name.to_s
-      "<#{n}#{render_attrs(opts.to_h)}>#{html}</#{n}>"
+      "<#{n}#{render_attrs(opts.to_h)}>#{content_tag_pre(n)}#{html}</#{n}>"
+    end
+
+    # Rails' `PRE_CONTENT_STRINGS`: a textarea's content follows a
+    # newline, which the HTML parser drops, so a leading newline of the
+    # content's own survives.
+    def self.content_tag_pre(name)
+      name == "textarea" ? "\n" : ""
     end
 
     # Emit the importmap script + per-pin modulepreload hints + a
