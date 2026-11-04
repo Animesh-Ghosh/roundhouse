@@ -1,6 +1,7 @@
 //! `type_for_attribute(name).serialize(value)` answers a `serialize …,
-//! coder: JSON` attribute's stored text and any other column's value as
-//! given, and `String#truncate_bytes` cuts as ActiveSupport does (solid_queue
+//! coder: JSON` attribute's stored text, encoded as Rails 8.1's JSON coder
+//! encodes it (ActiveSupport's as_json, unescaped), and any other column's
+//! value as given, and `String#truncate_bytes` cuts as ActiveSupport does (solid_queue
 //! 1.7.1's FailedExecution sizes its error column with both).
 
 use super::emit_and_run;
@@ -41,6 +42,10 @@ end
 check("json text", Note.payload_text({ "a" => [1, "x"] }), "{\"a\":[1,\"x\"]}")
 check("json size", Note.payload_text(["line"]).bytesize, 8)
 check("json nil", Note.payload_text(nil), nil)
+check("json unescaped", Note.payload_text({ "a" => "<b>&" }), "{\"a\":\"<b>&\"}")
+check("json symbol", Note.payload_text({ "s" => :x }), "{\"s\":\"x\"}")
+note = Note.create!(title: "t", payload: { "a" => "<b>" })
+check("stored", Note.find(note.id).payload, { "a" => "<b>" })
 check("plain column", Note.title_value("t"), "t")
 check("column type", Note.type_for_attribute(:payload).type, :text)
 check("default omission", Note.shorten_default("hello world", 5), "he…")
