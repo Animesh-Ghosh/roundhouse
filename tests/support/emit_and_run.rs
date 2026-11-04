@@ -673,8 +673,10 @@ pub mod bundle {
                 Edit::Remove { path } => serde_json::json!({"remove": path}),
             })
             .collect();
+        // The test's name, so the bundle's compile seconds can be charged to it (#1781).
         let case = serde_json::json!({
             "key": key,
+            "test": std::thread::current().name(),
             "base": base_tag(overlay),
             "flags": flags,
             "script": script,
@@ -712,6 +714,7 @@ pub mod bundle {
 
     struct Case {
         key: String,
+        test: Option<String>,
         base: PathBuf,
         flags: Vec<String>,
         script: String,
@@ -735,6 +738,7 @@ pub mod bundle {
             .collect::<Option<Vec<_>>>()?;
         Some(Case {
             key: v["key"].as_str()?.into(),
+            test: v["test"].as_str().map(String::from),
             base: PathBuf::from(v["base"].as_str()?),
             flags: v["flags"].as_array()?.iter().filter_map(|f| f.as_str().map(String::from)).collect(),
             script: v["script"].as_str()?.into(),
@@ -817,11 +821,33 @@ pub mod bundle {
         }
     }
 
-    fn build_split(cases: Vec<&Case>, out: &Path, name: &str, manifest: &std::sync::Mutex<BTreeMap<String, (String, usize)>>) {
+    type Seconds = std::sync::Mutex<BTreeMap<String, f64>>;
+
+    // Each case's share of the compiles it took part in, failed ones included: a bundled test runs
+    // in well under a second, so without this its recorded seconds hide what its shard paid (#1781).
+    fn charge(cases: &[&Case], elapsed: f64, seconds: &Seconds) {
+        let mut s = seconds.lock().unwrap();
+        for case in cases {
+            if let Some(test) = &case.test {
+                *s.entry(test.clone()).or_default() += elapsed / cases.len() as f64;
+            }
+        }
+    }
+
+    fn build_split(
+        cases: Vec<&Case>,
+        out: &Path,
+        name: &str,
+        manifest: &std::sync::Mutex<BTreeMap<String, (String, usize)>>,
+        seconds: &Seconds,
+    ) {
         if cases.len() < 2 {
             return;
         }
-        if let Some(tree) = build(&cases) {
+        let start = std::time::Instant::now();
+        let built = build(&cases);
+        charge(&cases, start.elapsed().as_secs_f64(), seconds);
+        if let Some(tree) = built {
             let dest = out.join(name);
             let _ = std::fs::remove_dir_all(&dest);
             copy_tree(&tree, &dest);
@@ -836,8 +862,8 @@ pub mod bundle {
         eprintln!("spinel bundle {name}: {} cases do not combine; halving", cases.len());
         let mid = cases.len() / 2;
         let (a, b) = cases.split_at(mid);
-        build_split(a.to_vec(), out, &format!("{name}a"), manifest);
-        build_split(b.to_vec(), out, &format!("{name}b"), manifest);
+        build_split(a.to_vec(), out, &format!("{name}a"), manifest, seconds);
+        build_split(b.to_vec(), out, &format!("{name}b"), manifest, seconds);
     }
 
     pub fn build_all(collected: &Path, out: &Path) {
@@ -854,6 +880,7 @@ pub mod bundle {
         }
         std::fs::create_dir_all(out).expect("bundle out dir");
         let manifest = std::sync::Mutex::new(BTreeMap::new());
+        let seconds = std::sync::Mutex::new(BTreeMap::new());
         let chunks: Vec<Vec<&Case>> = groups.values().flat_map(|g| g.chunks(GROUP).map(|c| c.to_vec())).collect();
         let workers = std::thread::available_parallelism().map_or(2, |n| n.get());
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -862,12 +889,15 @@ pub mod bundle {
                 s.spawn(|| loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let Some(chunk) = chunks.get(i) else { break };
-                    build_split(chunk.clone(), out, &format!("g{i}"), &manifest);
+                    build_split(chunk.clone(), out, &format!("g{i}"), &manifest, &seconds);
                 });
             }
         });
         let manifest = manifest.into_inner().unwrap();
         eprintln!("spinel bundle: {} of {} cases bundled", manifest.len(), cases.len());
         std::fs::write(out.join("manifest.json"), serde_json::to_string(&manifest).unwrap()).expect("write manifest");
+        // Read by ci-plan.py run-tests, which adds each test's share to the seconds it records.
+        let seconds = seconds.into_inner().unwrap();
+        std::fs::write(out.join("seconds.json"), serde_json::to_string(&seconds).unwrap()).expect("write bundle seconds");
     }
 }
