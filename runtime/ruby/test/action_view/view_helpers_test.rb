@@ -652,6 +652,15 @@ class ViewHelpersTest < Minitest::Test
     assert_equal %(<p aria-label_by="v">x</p>), out
   end
 
+  # A name that escapes to "" is NO attribute. Written as ` ="…"`, the
+  # HTML parser reads `="foo` as a name and the value's later words as
+  # attributes of their own. Stricter than Rails for a blank Symbol key,
+  # which Rails writes as ` ="…"`; a blank String key Rails skips.
+  def test_content_tag_drops_a_name_that_escapes_to_nothing
+    assert_equal %(<p>x</p>), ViewHelpers.content_tag(:p, "x", " ": "foo onmouseover=alert(1) x")
+    assert_equal "", ViewHelpers.render_attrs({ " ": "v" })
+  end
+
   def test_content_tag_keeps_valid_key_names
     assert_equal %(<p class="c">x</p>), ViewHelpers.content_tag(:p, "x", class: "c")
     assert_equal %(<p id="i">x</p>), ViewHelpers.content_tag(:p, "x", id: "i")

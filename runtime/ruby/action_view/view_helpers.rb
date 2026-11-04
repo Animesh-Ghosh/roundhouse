@@ -1734,13 +1734,17 @@ module ActionView
         # `tag_option` does: a key is data too, and unescaped it could
         # close the attribute and open another.
         name = xml_name_escape(k.to_s)
-        unless v.nil?
+        # A name that escapes to "" (a blank key) is NO attribute: written
+        # as ` ="…"`, the parser reads `="foo` as a name and the value's
+        # later words as attributes. Rails writes a blank Symbol key that
+        # way; this is stricter on purpose.
+        unless v.nil? || name == ""
           if v.is_a?(Hash)
             v.each do |inner_k, inner_v|
               # Rails escapes the whole `data-<inner>` name, prefix
               # included, after the dasherize.
               inner_name = xml_name_escape(k.to_s + "-" + inner_k.to_s.tr("_", "-"))
-              unless inner_v.nil?
+              unless inner_v.nil? || inner_name == ""
                 # Coerce untyped Hash values to String before
                 # html_escape; html_escape's contract is
                 # `(String) -> String` and the untyped values flowing

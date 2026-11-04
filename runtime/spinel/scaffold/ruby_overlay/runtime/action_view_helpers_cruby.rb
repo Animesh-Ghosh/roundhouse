@@ -47,10 +47,14 @@ module ActionView
       attrs.each do |k, v|
         next if v.nil?
         name = xml_name_escape(k.to_s)
+        # A blank name is no attribute, as in the shared body.
+        next if name.empty?
         if v.is_a?(Hash)
           v.each do |inner_k, inner_v|
             next if inner_v.nil?
-            out << " " << xml_name_escape(k.to_s + "-" + inner_k.to_s.tr("_", "-")) << "=\"" << html_escape(inner_v.to_s) << "\""
+            inner_name = xml_name_escape(k.to_s + "-" + inner_k.to_s.tr("_", "-"))
+            next if inner_name.empty?
+            out << " " << inner_name << "=\"" << html_escape(inner_v.to_s) << "\""
           end
         elsif boolean_attr?(name)
           out << " " << name << "=\"" << name << "\"" unless v.to_s == "false"

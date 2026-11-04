@@ -112,6 +112,15 @@ expect(submit, %( data-x_onmouseover_alert_1__z="v"))
 expect(submit, %( a_b_c="w"))
 form = VH.form_tag("/s", "a b=c": "w")
 expect(form, %( a_b_c="w"))
+
+# A name that escapes to "" is no attribute: ` ="foo onmouseover=…"`
+# would read as attributes of its own.
+def refute(out, bad)
+  raise "unexpected #{bad.inspect} in\n  #{out}" if out.include?(bad)
+end
+refute(VH.submit_tag("Go", " ": "foo onmouseover=alert(1) x"), %( ="))
+refute(VH.form_tag("/s", " ": "foo onmouseover=alert(1) x"), %( ="))
+raise "render_attrs kept a blank name" unless VH.render_attrs({ " ": "v" }) == ""
 puts "ALL OK"
 "##;
     let out = Command::new("ruby")

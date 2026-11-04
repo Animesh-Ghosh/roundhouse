@@ -1630,11 +1630,14 @@ fn emit_send(
         }
     }
 
-    // `recv.gsub(regex, "literal")` → `regex.Replace(recv, "literal")`.
-    // .NET reads `$` in a replacement as a substitution, so it is doubled.
+    // `recv.gsub(regexp, "literal")` → `regexp.Replace(recv, "literal")`.
+    // Only for a Regexp pattern (a String needle is not a `Regex`
+    // receiver), and only for a literal with no `\`: a Ruby `\1`/`\0`
+    // back-reference keeps the previous path rather than coming out as
+    // literal text. .NET reads `$` as a substitution, so it is doubled.
     if method == "gsub" && args.len() == 2 {
         if let (Some(r), ExprNode::Lit { value: Literal::Str { value: repl } }) = (recv, &*args[1].node) {
-            if !matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } }) {
+            if !repl.contains('\\') && crate::emit::shared::regex_literal::is_regexp_pattern(&args[0]) {
                 let repl_s = format!("\"{}\"", escape_str(&repl.replace('$', "$$")));
                 return format!("{}.Replace({}, {repl_s})", args_s[0], emit_expr(r));
             }
@@ -2492,21 +2495,44 @@ mod escape_tests {
 mod gsub_string_replacement_tests {
     use super::emit_expr;
     use crate::expr::{Expr, ExprNode, Literal};
-    use crate::ident::{Symbol, VarId};
+    use crate::ident::{ClassId, Symbol, VarId};
     use crate::span::Span;
+    use crate::ty::Ty;
 
-    fn gsub(repl: &str) -> Expr {
-        let node = |n| Expr::new(Span::synthetic(), n);
+    fn node(n: ExprNode) -> Expr {
+        Expr::new(Span::synthetic(), n)
+    }
+
+    /// A pattern constant, typed `Regexp` as the analyzer types one.
+    fn regexp_const() -> Expr {
+        let mut e = node(ExprNode::Const { path: vec![Symbol::from("PATTERN")] });
+        e.ty = Some(Ty::Class { id: ClassId(Symbol::from("Regexp")), args: vec![].into() });
+        e
+    }
+
+    fn regex_lit() -> Expr {
+        node(ExprNode::Lit { value: Literal::Regex { pattern: "[ab]".into(), flags: "".into() } })
+    }
+
+    /// A String-typed variable used as the pattern (a needle, not a Regex).
+    fn string_var() -> Expr {
+        let mut e = node(ExprNode::Var { id: VarId(1), name: Symbol::from("needle") });
+        e.ty = Some(Ty::Str);
+        e
+    }
+
+    fn gsub_with(pattern: Expr, repl: &str) -> Expr {
         node(ExprNode::Send {
             recv: Some(node(ExprNode::Var { id: VarId(0), name: Symbol::from("name") })),
             method: Symbol::from("gsub"),
-            args: vec![
-                node(ExprNode::Const { path: vec![Symbol::from("PATTERN")] }),
-                node(ExprNode::Lit { value: Literal::Str { value: repl.to_string() } }),
-            ],
+            args: vec![pattern, node(ExprNode::Lit { value: Literal::Str { value: repl.to_string() } })],
             block: None,
             parenthesized: true,
         })
+    }
+
+    fn gsub(repl: &str) -> Expr {
+        gsub_with(regexp_const(), repl)
     }
 
     /// A String replacement is the replacement, not a table to look the
@@ -2514,11 +2540,25 @@ mod gsub_string_replacement_tests {
     #[test]
     fn a_string_replacement_is_passed_to_regex_replace() {
         assert_eq!(emit_expr(&gsub("_")), "PATTERN.Replace(name, \"_\")");
+        assert!(emit_expr(&gsub_with(regex_lit(), "_")).ends_with(".Replace(name, \"_\")"));
     }
 
     /// `$` is a substitution to `Regex.Replace`; `$$` is a literal one.
     #[test]
     fn a_replacement_with_a_dollar_is_doubled() {
         assert_eq!(emit_expr(&gsub("a$b")), "PATTERN.Replace(name, \"a$$b\")");
+    }
+
+    /// A String-typed pattern is a needle: not this arm.
+    #[test]
+    fn a_string_pattern_does_not_take_the_regex_arm() {
+        assert!(!emit_expr(&gsub_with(string_var(), "_")).contains("needle.Replace(name, \"_\")"));
+    }
+
+    /// A Ruby back-reference (`\\1`) keeps the previous path.
+    #[test]
+    fn a_back_reference_does_not_take_the_regex_arm() {
+        let out = emit_expr(&gsub("(\\1)"));
+        assert!(!out.contains("PATTERN.Replace(name, \""), "{out}");
     }
 }
