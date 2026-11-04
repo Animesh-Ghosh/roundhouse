@@ -34,7 +34,7 @@ pub use table_prefix::{
 };
 
 mod validations;
-mod with_options;
+pub(in crate::ingest) mod with_options;
 use validations::{and_guard, context_guard, parse_validates_call, validation_items, ParsedValidates, ValidatesKind};
 pub(super) use validations::dropped_rule_note;
 
