@@ -123,6 +123,8 @@ mod model_callbacks;
 mod gem_class_macros;
 #[path = "emit_and_run/source_gem_autoload.rs"]
 mod source_gem_autoload;
+#[path = "emit_and_run/source_gem_load_order.rs"]
+mod source_gem_load_order;
 #[path = "emit_and_run/source_gem_facade.rs"]
 mod source_gem_facade;
 #[path = "support/for_loops.rs"]
@@ -20522,6 +20524,12 @@ mod i18n_config;
 mod computed_class_constants;
 #[path = "emit_and_run/guarded_absent_constant.rs"]
 mod guarded_absent_constant;
+#[path = "emit_and_run/concurrent_map_default.rs"]
+mod concurrent_map_default;
+#[path = "emit_and_run/time_subclass_constructor.rs"]
+mod time_subclass_constructor;
+#[path = "emit_and_run/included_instance_eval_extend.rs"]
+mod included_instance_eval_extend;
 #[path = "emit_and_run/settled_conditional_definition.rs"]
 mod settled_conditional_definition;
 #[path = "emit_and_run/append_features_bridge.rs"]
@@ -20692,6 +20700,28 @@ fn a_rust_model_calls_only_the_validate_and_fill_timestamps_it_has() {
         assert_eq!(model.contains("self.validate()"), validated, "validated: {validated}\n{model}");
         assert_eq!(model.contains("self.fill_timestamps(true)"), timestamped, "timestamped: {timestamped}\n{model}");
     }
+}
+
+#[path = "support/pluralize_escape.rs"]
+mod pluralize_escape;
+
+#[test]
+fn pluralize_in_a_template_is_escaped() {
+    pluralize_escape::app_with_app_escape()
+        .write("test/controllers/probes_controller_test.rb", &pluralize_escape::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn pluralize_in_a_template_is_escaped_on_spinel() {
+    pluralize_escape::app_with_app_escape()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"pluralize escaped\"\n",
+            pluralize_escape::body_checks()
+        ))
+        .assert_passes();
 }
 
 #[path = "emit_and_run/unknown_class_association.rs"]

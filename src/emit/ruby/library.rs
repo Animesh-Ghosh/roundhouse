@@ -7633,30 +7633,9 @@ fn widen_fk_zero_guards(expr: &mut Expr, fks: &BTreeSet<Symbol>) {
     );
 }
 
-/// `<time>.rfc2822` → `ActiveSupport.rfc2822(<time>)`.
-///
-/// `Time#rfc2822` is stdlib `time`, not core Ruby — `require "time"`
-/// installs it. CRuby has it because the overlay requires that stdlib;
-/// spinel has no `time` package, and the method cannot be supplied by
-/// reopening `Time` (a reopened built-in loses its own method table for
-/// self-calls, so even `self.strftime` inside the reopen is undefined).
-/// So the call grounds to the module function every ruby-family tree
-/// ships — the same posture `lower::duration` takes for `Integer#days`,
-/// and for the same reason: no built-in reopening.
-///
-/// Both trees satisfy the one `active_support_time_parsing.rbs`
-/// contract. The CRuby/JRuby overlay's implementation delegates
-/// straight back to `t.rfc2822`, so grounding the call site cannot move
-/// that lane's bytes; the spinel twin composes the same string from
-/// strftime.
-///
-/// Zero-arg receiver sends only. Ruby-emit-path pass: the module
-/// function it names is ruby-family runtime, so this must not run from
-/// shared `lower/`.
 pub(crate) fn apply_time_format_lowering(lcs: &mut [LibraryClass], app: &App) {
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
-            rewrite_rfc2822(&mut m.body);
             rewrite_time_parse(&mut m.body);
         }
     }
@@ -7720,7 +7699,7 @@ pub(crate) fn app_presents_time_zoned(app: &App) -> bool {
 /// offset is resolved per instant), and the one a model's own `as_json`
 /// writer uses (`PairEncoding::ZonedTime`).
 ///
-/// Ruby-emit-path pass, like `rewrite_rfc2822`: `json_time` ships in
+/// Ruby-emit-path pass: `json_time` ships in
 /// the ruby-family trees (the CRuby/JRuby overlay and the spinel
 /// subset), not on the strict targets, whose runtimes present UTC, so
 /// the shared lowerer keeps emitting `encode_datetime`.
@@ -7754,7 +7733,7 @@ fn rewrite_zoned_encode_datetime(expr: &mut Expr) {
     *args = vec![zoned];
 }
 
-// Not left as `Time.parse`: spinel ships no stdlib `time` (matz/spinel#1118), so it grounds like `rfc2822` above.
+// Not left as `Time.parse`: a time-only string takes its date from now, and `travel_to` moves only `ActiveSupport.now`.
 fn rewrite_time_parse(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut |c| rewrite_time_parse(c));
     let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else {
@@ -7784,27 +7763,6 @@ fn rewrite_time_parse(expr: &mut Expr) {
         )),
         method: Symbol::from(target),
         args: vec![arg],
-        block: None,
-        parenthesized: true,
-    };
-}
-
-fn rewrite_rfc2822(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut |c| rewrite_rfc2822(c));
-    let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *expr.node else {
-        return;
-    };
-    if method.as_str() != "rfc2822" || !args.is_empty() {
-        return;
-    }
-    let recv = r.clone();
-    *expr.node = ExprNode::Send {
-        recv: Some(Expr::new(
-            Span::synthetic(),
-            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
-        )),
-        method: Symbol::from("rfc2822"),
-        args: vec![recv],
         block: None,
         parenthesized: true,
     };
@@ -8887,7 +8845,19 @@ fn emit_library_class_decl_inner(
         .flat_map(|class| class.methods.iter())
         .collect();
     for m in &lc.methods {
-        body_requires.extend(resolve_all(&m.body, false));
+        // Not request-time for a hook: `self.included` runs while the includer's file loads, before the aggregator reaches its constants.
+        // Either side for method_added: a module that is extended carries it as an instance method (raabro's).
+        let hook = matches!(m.name.as_str(), "method_added" | "singleton_method_added")
+            || (m.receiver == MethodReceiver::Class
+                && matches!(m.name.as_str(), "included" | "extended" | "inherited" | "prepended"));
+        if hook {
+            // Not the hook body alone: an own method it calls runs at load too.
+            let mut paths = BTreeSet::new();
+            walk_load_time_paths_on(&m.body, lc, m.receiver, &mut BTreeSet::new(), &mut paths);
+            body_requires.extend(paths.iter().filter_map(|p| resolve(p, true)));
+        } else {
+            body_requires.extend(resolve_all(&m.body, false));
+        }
     }
     for m in factory_methods {
         body_requires.extend(resolve_all(&m.body, false));
