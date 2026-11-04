@@ -8733,8 +8733,10 @@ fn emit_library_class_decl_inner(
         .collect();
     for m in &lc.methods {
         // Not request-time for a hook: `self.included` runs while the includer's file loads, before the aggregator reaches its constants.
-        let hook = m.receiver == MethodReceiver::Class
-            && matches!(m.name.as_str(), "included" | "extended" | "inherited" | "prepended");
+        // Either side for method_added: a module that is extended carries it as an instance method (raabro's).
+        let hook = matches!(m.name.as_str(), "method_added" | "singleton_method_added")
+            || (m.receiver == MethodReceiver::Class
+                && matches!(m.name.as_str(), "included" | "extended" | "inherited" | "prepended"));
         body_requires.extend(resolve_all(&m.body, hook));
     }
     for m in factory_methods {
