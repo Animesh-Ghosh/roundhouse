@@ -1284,7 +1284,19 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     let mut bound = 0;
                     let args: Vec<Expr> = sa
                         .iter()
-                        .map(|a| bind_before_block(rewrite_helpers_in_expr(a, ctx), inner.span.start, &mut bound, &mut stmts))
+                        .map(|a| {
+                            // A literal `class:` Array is space-joined here, as
+                            // form_with's options are: strict targets render
+                            // an Array value with its `to_s`.
+                            let a = match &*a.node {
+                                ExprNode::Hash { entries, kwargs } => Expr::new(a.span, ExprNode::Hash {
+                                    entries: entries.iter().map(|(k, v)| (k.clone(), super::form_with::simplify_opts_value(k, v))).collect(),
+                                    kwargs: *kwargs,
+                                }),
+                                _ => a.clone(),
+                            };
+                            bind_before_block(rewrite_helpers_in_expr(&a, ctx), inner.span.start, &mut bound, &mut stmts)
+                        })
                         .collect();
                     let cap_ctx = ViewCtx { accumulator: cap.to_string(), ..ctx.with_locals(std::iter::empty()) };
                     stmts.push(assign_accumulator_string_new(cap));

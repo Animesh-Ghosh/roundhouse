@@ -1582,6 +1582,7 @@ pub(crate) fn insert_framework_stubs(
         ("link_to", &[("text", &untyped), ("href", &Ty::Str), ("opts", &any_hash)]),
         ("button_to", &[("text", &untyped), ("href", &Ty::Str), ("opts", &any_hash)]),
         ("stylesheet_link_tag", &[("name", &Ty::Str), ("opts", &any_hash)]),
+        ("content_tag_html", &[("name", &Ty::Sym), ("html", &Ty::Str), ("opts", &any_hash)]),
     ];
     for (name, params) in opts_hash_helpers {
         let param_pairs: Vec<(Symbol, Ty)> = params

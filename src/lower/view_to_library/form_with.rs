@@ -475,7 +475,7 @@ fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx, multipart: bool
 /// pass through unchanged. Matches the existing FormBuilder-side
 /// simplification so per-form-tag and per-input-attr behavior stay
 /// in sync.
-fn simplify_opts_value(k: &Expr, v: &Expr) -> Expr {
+pub(super) fn simplify_opts_value(k: &Expr, v: &Expr) -> Expr {
     let is_class_key = matches!(
         &*k.node,
         ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "class",

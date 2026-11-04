@@ -5,7 +5,8 @@
 //! attributes. A `content_tag` inside a `cache` block inside another keeps
 //! the outer content, and the name and options are read before the block
 //! runs, a call in them included, and a read the block's own block
-//! binds is that block's (`cr_oracle.rb`, `cr_oracle2.rb`).
+//! binds is that block's (`cr_oracle.rb`, `cr_oracle2.rb`). A literal
+//! `class:` Array is space-joined (`cr_oracle3.rb`).
 
 use super::emit_and_run;
 
@@ -23,6 +24,7 @@ fn app() -> emit_and_run::Overlay {
             "<%= content_tag :textarea do %>hi<% end %>\n",
             "<% seen = [] %><%= content_tag :em, class: seen.push(\"arg\").join(\",\") do %><% seen.push(\"block\") %>z<% end %>\n",
             "<% c = \"q\" %><%= content_tag :b, class: [\"pill\"].map { |c| c }.join do %><% c = \"r\" %>w<% end %>\n",
+            "<%= content_tag :div, class: [\"btn\", \"primary\"] do %>blk<% end %>\n",
         ),
     )
 }
@@ -41,6 +43,7 @@ class ContentTagBlockControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.body, "<textarea>\nhi</textarea>"
     assert_includes response.body, %(<em class="arg">z</em>)
     assert_includes response.body, %(<b class="pill">w</b>)
+    assert_includes response.body, %(<div class="btn primary">blk</div>)
   end
 end
 "#;
@@ -74,6 +77,7 @@ fn a_content_tag_block_is_its_content_on_spinel() {
             "raise body unless body.include?(\"<textarea>\\nhi</textarea>\")\n",
             "raise body unless body.include?('<em class=\"arg\">z</em>')\n",
             "raise body unless body.include?('<b class=\"pill\">w</b>')\n",
+            "raise body unless body.include?('<div class=\"btn primary\">blk</div>')\n",
             "puts \"content_tag block passed\"\n",
         ))
         .assert_passes();
