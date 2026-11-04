@@ -137,3 +137,43 @@ fn an_included_hooks_instance_eval_extends_run_on_spinel() {
     run.assert_passes();
     assert!(run.stdout.contains("included instance_eval extend passed"), "{}", run.stdout);
 }
+
+const STAMPED: &str = r##"module Stamped
+  def self.included(base)
+    install(base)
+  end
+
+  def self.install(base)
+    ::Stamped::Log.record(base.name)
+  end
+
+  module Log
+    ENTRIES = []
+
+    def self.record(name)
+      ENTRIES << name
+    end
+
+    def self.entries
+      ENTRIES
+    end
+  end
+end
+"##;
+
+const STAMPED_COMMENT: &str = r##"class Comment < ApplicationRecord
+  include Stamped
+
+  belongs_to :article
+end
+"##;
+
+#[test]
+fn an_included_hooks_helper_loads_what_it_names_before_the_includer_runs_it() {
+    let run = emit_and_run::real_blog()
+        .write("app/models/stamped.rb", STAMPED)
+        .write("app/models/comment.rb", STAMPED_COMMENT)
+        .run_ruby("raise Stamped::Log.entries.inspect unless Stamped::Log.entries == [\"Comment\"]\nputs \"hook helper passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("hook helper passed"), "{}", run.stdout);
+}

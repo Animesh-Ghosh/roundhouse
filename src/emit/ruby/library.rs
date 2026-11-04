@@ -8892,7 +8892,14 @@ fn emit_library_class_decl_inner(
         let hook = matches!(m.name.as_str(), "method_added" | "singleton_method_added")
             || (m.receiver == MethodReceiver::Class
                 && matches!(m.name.as_str(), "included" | "extended" | "inherited" | "prepended"));
-        body_requires.extend(resolve_all(&m.body, hook));
+        if hook {
+            // Not the hook body alone: an own method it calls runs at load too.
+            let mut paths = BTreeSet::new();
+            walk_load_time_paths_on(&m.body, lc, m.receiver, &mut BTreeSet::new(), &mut paths);
+            body_requires.extend(paths.iter().filter_map(|p| resolve(p, true)));
+        } else {
+            body_requires.extend(resolve_all(&m.body, false));
+        }
     }
     for m in factory_methods {
         body_requires.extend(resolve_all(&m.body, false));
