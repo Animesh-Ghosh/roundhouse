@@ -14,8 +14,45 @@ const PROBE: &str = r#"module BlankProbe
   def self.present(value)
     value.present?
   end
+
+  #: (String) -> bool
+  def self.typed_blank(value)
+    value.blank?
+  end
+
+  #: (String) -> bool
+  def self.typed_present(value)
+    value.present?
+  end
+
+  #: (String) -> String?
+  def self.typed_presence(value)
+    value.presence
+  end
+
+  #: (String?) -> bool
+  def self.nullable_blank(value)
+    value.blank?
+  end
+
 end
 "#;
+
+const STRING_CASES: &str = r##"
+values = ["\u00a0", "\0", " \t\n", "", "word"]
+values.each do |value|
+  puts "#{BlankProbe.typed_blank(value)},#{BlankProbe.blank(value)},#{BlankProbe.typed_present(value)},#{BlankProbe.present(value)},#{BlankProbe.typed_presence(value).nil?}"
+end
+raise "nil string" unless BlankProbe.nullable_blank(nil)
+"##;
+const STRING_EXPECTED: &str = "true,true,false,false,true\nfalse,false,true,true,false\ntrue,true,false,false,true\ntrue,true,false,false,true\nfalse,false,true,true,false\n";
+
+const ENCODED_STRING_CASES: &str = r##"
+["\u00a0".encode("UTF-16LE"), "word".encode("UTF-16BE")].each do |value|
+  puts "#{BlankProbe.typed_blank(value)},#{BlankProbe.blank(value)},#{BlankProbe.typed_present(value)},#{BlankProbe.present(value)},#{BlankProbe.typed_presence(value).nil?}"
+end
+"##;
+const ENCODED_STRING_EXPECTED: &str = "true,true,false,false,true\nfalse,false,true,true,false\n";
 
 const CASES: &str = r##"
 class NilString
@@ -124,6 +161,28 @@ fn encoded_strings_match_rails() {
     let run = overlay().run_ruby(ENCODED_CASES);
     run.assert_passes();
     assert_eq!(run.stdout, ENCODED_EXPECTED);
+}
+
+#[test]
+fn typed_and_untyped_strings_match_rails() {
+    assert_rails(STRING_CASES, STRING_EXPECTED);
+    assert_rails(ENCODED_STRING_CASES, ENCODED_STRING_EXPECTED);
+    let run = overlay().run_ruby(&format!("{STRING_CASES}\n{ENCODED_STRING_CASES}"));
+    run.assert_passes();
+    assert_eq!(
+        run.stdout,
+        format!("{STRING_EXPECTED}{ENCODED_STRING_EXPECTED}")
+    );
+    let source = std::fs::read_to_string(run.emitted.join("app/models/blank_probe.rb")).unwrap();
+    assert!(!source.contains("strip.empty?"), "{source}");
+}
+
+#[test]
+#[ignore = "requires the native Spinel toolchain"]
+fn native_typed_and_untyped_strings_match_rails() {
+    let run = overlay().run_spinel(STRING_CASES);
+    run.assert_passes();
+    assert_eq!(run.stdout, STRING_EXPECTED);
 }
 
 #[test]

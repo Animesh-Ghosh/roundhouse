@@ -668,6 +668,8 @@ class Routing(unittest.TestCase):
         for path in [
             "runtime/ruby/active_support_ext.rb",
             "src/lower/blank.rs",
+            "src/lower/mod.rs",
+            "src/lower/jbuilder_to_library/mod.rs",
             "tests/object_blank.rs",
         ]:
             with self.subTest(path=path):
