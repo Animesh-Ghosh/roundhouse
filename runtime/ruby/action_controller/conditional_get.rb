@@ -91,7 +91,7 @@ module ActionController
       since = conditional_get_http_time(if_modified_since)
       return false if since.nil?
       modified = conditional_get_http_time(last_modified)
-      # Whole seconds, not Time#>=: an HTTP date carries no fraction, and the shared runtime types an Integer compare.
+      # Whole seconds, not Time#>=: an HTTP date carries no fraction, so a Last-Modified with one would never match.
       unmodified = !modified.nil? && since.to_i >= modified.to_i
       unmodified
     end
