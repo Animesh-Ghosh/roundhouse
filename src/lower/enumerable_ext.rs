@@ -731,9 +731,12 @@ fn ground_string_truncate_words(expr: &mut Expr, default_omission: Option<&str>)
     let ExprNode::Send { recv, args, parenthesized, .. } = &mut *expr.node else {
         return false;
     };
-    if !matches!(recv.as_ref().and_then(|r| r.ty.as_ref()), Some(Ty::Str)) {
-        return false;
-    }
+    // Not only a typed String: no other class answers these names, so an untyped receiver that runs at all is one.
+    let untyped = match recv.as_ref().map(|r| r.ty.as_ref()) {
+        Some(Some(Ty::Str)) => false,
+        Some(None | Some(Ty::Untyped | Ty::Var { .. })) => true,
+        _ => return false,
+    };
     let omission = match args.as_slice() {
         [_] => {
             let mut lit = match default_omission {
@@ -757,7 +760,12 @@ fn ground_string_truncate_words(expr: &mut Expr, default_omission: Option<&str>)
         _ => return false,
     };
     let words_count = args[0].clone();
-    let receiver = recv.take().expect("checked above");
+    let mut receiver = recv.take().expect("checked above");
+    if untyped {
+        let rspan = receiver.span;
+        receiver = Expr::new(rspan, ExprNode::Cast { value: receiver, target_ty: Ty::Str });
+        receiver.ty = Some(Ty::Str);
+    }
     *recv = Some(Expr::new(
         span,
         ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
@@ -1343,9 +1351,15 @@ mod tests {
         assert!(rewrite_node(&mut omission));
         assert_eq!(arg_kinds(&omission), ["text", "27", "~"]);
 
-        // Not proven a String, or a separator: left as written.
+        // An untyped receiver is the String no other class answers this for: grounded through a Cast.
         let mut untyped = on(vec![], None);
-        assert!(!rewrite_node(&mut untyped));
+        assert!(rewrite_node(&mut untyped));
+        let ExprNode::Send { args, .. } = &*untyped.node else { panic!() };
+        assert!(matches!(&*args[0].node, ExprNode::Cast { target_ty: Ty::Str, .. }));
+        assert_eq!(args[0].ty, Some(Ty::Str));
+        // A typed non-String, or a separator: left as written.
+        let mut integer = on(vec![], Some(Ty::Int));
+        assert!(!rewrite_node(&mut integer));
         let mut separator = on(vec![("separator", str_lit(" "))], Some(Ty::Str));
         assert!(!rewrite_node(&mut separator));
     }
