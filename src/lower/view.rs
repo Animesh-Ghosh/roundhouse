@@ -68,6 +68,9 @@ pub enum ViewHelperKind<'a> {
     /// `<%= javascript_importmap_tags %>`, or with an explicit entry
     /// point (`javascript_importmap_tags "user"` — lobsters' layout).
     JavascriptImportmapTags { entry: Option<&'a Expr> },
+    /// `javascript_importmap_tags "application", importmap: M.importmap`:
+    /// an engine's own import map (`App::engine_importmaps`).
+    EngineImportmapTags { entry: &'a Expr, module: String },
     /// `<%= turbo_stream_from "channel" %>` and the multi-streamable
     /// form campfire writes (`turbo_stream_from room, :messages`). The
     /// stream NAME is spelled by `lower::broadcasts::stream_name`,
@@ -672,6 +675,17 @@ pub fn classify_view_helper<'a>(
         }
         ("javascript_importmap_tags", 1) => {
             Some(ViewHelperKind::JavascriptImportmapTags { entry: Some(&args[0]) })
+        }
+        ("javascript_importmap_tags", 2) => {
+            let ExprNode::Hash { entries, .. } = &*args[1].node else { return None };
+            let [(key, value)] = entries.as_slice() else { return None };
+            let is_importmap_key = matches!(&*key.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == "importmap");
+            let ExprNode::Send { recv: Some(recv), method, args: margs, block: None, .. } = &*value.node else { return None };
+            let ExprNode::Const { path } = &*recv.node else { return None };
+            (is_importmap_key && method.as_str() == "importmap" && margs.is_empty()).then(|| ViewHelperKind::EngineImportmapTags {
+                entry: &args[0],
+                module: path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"),
+            })
         }
         ("turbo_stream_from", n) if n >= 1 => {
             Some(ViewHelperKind::TurboStreamFrom { streamables: args })

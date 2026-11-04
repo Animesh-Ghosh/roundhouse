@@ -242,6 +242,8 @@ const MIXINS_WITHOUT_CONSTRUCTOR_HOOK: &[(&str, bool)] = &[
     ("ActiveModel::Validations", false),
     ("ActiveModel::Attributes", true),
     ("Sidekiq::Worker", false),
+    ("Enumerable", false),
+    ("Comparable", false),
 ];
 
 /// Whether `name` is a catalog mixin that leaves `question` unaffected.

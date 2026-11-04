@@ -468,6 +468,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // genuinely a statement (the prior TODO-append swallowed the
         // side effect and broke stack-walking templates).
         ExprNode::Send { recv: Some(_), block: None, .. } => vec![stmt.clone()],
+        ExprNode::Raise { .. } => vec![stmt.clone()],
         // A bare literal — most often the synthesized `nil` arm `<% unless
         // %>` lowers to — renders nothing and does nothing: nothing is
         // dropped, so no residue line.
@@ -1952,6 +1953,7 @@ mod tests {
             record_carries_yield: false,
             view_name: "messages/_message".to_string(),
             ivar_models: Default::default(),
+            nilable_ivar_models: Default::default(),
             record_classes: Default::default(),
             str_ivars: Default::default(),
             ivar_locals: Default::default(),
@@ -2807,7 +2809,9 @@ fn key_element(el: &Expr, ctx: &ViewCtx) -> Option<KeyPart> {
 ///
 /// `ivar_models` covers the other spelling: a view's `@story` is
 /// rewritten to a local by the time it gets here, and that map holds
-/// only names whose type IS a known model.
+/// only names whose type IS a known model. An ivar that may be nil
+/// (`@comment = Comment.first`) is not a record here, under either
+/// spelling: its key would call `cache_key_with_version` on nil.
 ///
 /// The type check stays first for the day these carry one.
 fn is_record(el: &Expr, ctx: &ViewCtx) -> bool {
@@ -2821,6 +2825,9 @@ fn is_record(el: &Expr, ctx: &ViewCtx) -> bool {
         }
         _ => return false,
     };
+    if ctx.nilable_ivar_models.contains(name) {
+        return false;
+    }
     if ctx.ivar_models.contains_key(name) {
         return true;
     }

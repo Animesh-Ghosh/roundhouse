@@ -309,6 +309,10 @@ module ActiveSupport
     value.is_a?(String) && list.include?(value) ? value : nil
   end
 
+  def self.symbol_presence_in(value, list)
+    value.is_a?(Symbol) && list.include?(value) ? value : nil
+  end
+
   # Rails' `ActiveModel::Errors#to_hash`: each attribute with errors, in
   # the order of its first error, to its messages
   # (`{ title: ["can't be blank"] }`). Reached from
@@ -666,6 +670,25 @@ module ActiveSupport
       i = k
     end
     text.dup
+  end
+
+  # AS `String#truncate_bytes(truncate_to, omission: "…")`
+  # (core_ext/string/filters.rb), with the omission positional: the
+  # lowerer passes Rails' default when the call names none.
+  def self.truncate_bytes(text, truncate_to, omission)
+    mark = omission || ""
+    return text.dup if text.bytesize <= truncate_to
+    if mark.bytesize > truncate_to
+      raise ArgumentError, "Omission #{mark.inspect} is #{mark.bytesize}, larger than the truncation length of #{truncate_to} bytes"
+    end
+    return mark.dup if mark.bytesize == truncate_to
+    cut_at = truncate_to - mark.bytesize
+    cut = +""
+    text.grapheme_clusters.each do |grapheme|
+      break if cut.bytesize + grapheme.bytesize > cut_at
+      cut << grapheme
+    end
+    cut + mark
   end
 
   # AS `Enumerable#sole`: THE one element, and a raise for any other
