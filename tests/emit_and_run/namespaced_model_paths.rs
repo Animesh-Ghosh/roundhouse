@@ -59,6 +59,31 @@ fn rust_refuses_a_namespaced_model_named_as_a_synthesized_row() {
     );
 }
 
+/// A model with the same name as a synthesized class shares its one file,
+/// which kept only the synthesized class: `ArticleRow` against `Article`'s
+/// row.
+#[test]
+fn rust_refuses_a_model_named_as_another_model_s_row() {
+    assert_refused(
+        ("app/models/article_row.rb", "class ArticleRow < ApplicationRecord\nend\n", "article_rows"),
+        "`ArticleRow` (the model) and `ArticleRow` (`Article`'s row)",
+    );
+}
+
+/// The same for a model named as the articles controller's params class.
+#[test]
+fn rust_refuses_a_model_named_as_a_params_class() {
+    assert_refused(
+        ("app/models/article_params.rb", "class ArticleParams < ApplicationRecord\nend\n", "article_params"),
+        "`ArticleParams` (the model) and `ArticleParams` (the params class)",
+    );
+}
+
+fn assert_refused(model: (&str, &str, &str), want: &str) {
+    let (_, errors) = with_models(&[model]).emit(BuildTarget::Rust);
+    assert!(errors.iter().any(|e| e.contains("not supported (rust)") && e.contains(want)), "{want}: {errors:?}");
+}
+
 /// With no diagnostic scope to collect into (`build_archives`), the
 /// collision still stops the target.
 #[test]
