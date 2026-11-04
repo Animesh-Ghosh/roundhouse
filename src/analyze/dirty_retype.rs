@@ -120,6 +120,16 @@ pub(super) fn dirty_classes_for_retype(
         qi += 1;
         let names = moved_by_class.get(&id).cloned().unwrap_or_default();
         for child in children.get(&id).cloned().unwrap_or_default() {
+            // A `super` records no call site, so a child's own method of a
+            // moved name, which may read the moved one through it, is no
+            // caller of it: the child is dirty itself. The spread below
+            // reaches a subclass anyway, but not a model or plain class
+            // that includes a module.
+            if classes.get(&child).is_some_and(|c| {
+                names.iter().any(|n| c.source_instance_methods.contains(n) || c.source_class_methods.contains(n))
+            }) {
+                dirty.insert(child.clone());
+            }
             let entry = moved_by_class.entry(child.clone()).or_default();
             let before = entry.len();
             entry.extend(names.iter().cloned());

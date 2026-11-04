@@ -39,11 +39,22 @@ pub(super) enum Mode {
 }
 
 impl Mode {
+    /// A value it does not know stops the analysis: a mistyped `check`
+    /// that ran unchecked would read as a check that passed.
     fn from_env() -> Self {
-        match std::env::var("ROUNDHOUSE_INCREMENTAL").as_deref() {
-            Ok("0") | Ok("off") | Ok("false") => Mode::Off,
-            Ok("check") => Mode::Check,
-            _ => Mode::On,
+        match std::env::var("ROUNDHOUSE_INCREMENTAL") {
+            Err(std::env::VarError::NotPresent) => Mode::On,
+            Ok(value) => match value.as_str() {
+                "" | "1" | "on" | "true" => Mode::On,
+                "0" | "off" | "false" => Mode::Off,
+                "check" => Mode::Check,
+                other => panic!(
+                    "ROUNDHOUSE_INCREMENTAL={other:?} is not one of 0, off, false, 1, on, true, check"
+                ),
+            },
+            Err(std::env::VarError::NotUnicode(value)) => {
+                panic!("ROUNDHOUSE_INCREMENTAL={value:?} is not one of 0, off, false, 1, on, true, check")
+            }
         }
     }
 }
