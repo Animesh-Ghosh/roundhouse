@@ -20525,6 +20525,8 @@ mod i18n_config;
 mod computed_class_constants;
 #[path = "emit_and_run/guarded_absent_constant.rs"]
 mod guarded_absent_constant;
+#[path = "emit_and_run/concurrent_map_default.rs"]
+mod concurrent_map_default;
 #[path = "emit_and_run/settled_conditional_definition.rs"]
 mod settled_conditional_definition;
 #[path = "emit_and_run/append_features_bridge.rs"]
