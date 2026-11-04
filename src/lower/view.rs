@@ -739,7 +739,11 @@ pub fn classify_view_helper<'a>(
         ("content_tag", 2) if !matches!(&*args[1].node, ExprNode::Hash { .. }) => {
             Some(ViewHelperKind::ContentTag { name: &args[0], content: &args[1], opts: None })
         }
-        ("content_tag", 3) if matches!(&*args[2].node, ExprNode::Hash { .. }) => {
+        // The options as a Hash literal, or a value typed as a Hash (an
+        // `attrs` local), which the runtime takes the same way.
+        ("content_tag", 3)
+            if matches!(&*args[2].node, ExprNode::Hash { .. }) || matches!(args[2].ty, Some(crate::ty::Ty::Hash { .. })) =>
+        {
             Some(ViewHelperKind::ContentTag { name: &args[0], content: &args[1], opts: Some(&args[2]) })
         }
         ("content_for", 1) => {

@@ -248,7 +248,8 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
         // space-joined.
         ContentTag { name, content, opts } => {
             // Rails escapes the content unless it is html-safe: an
-            // `x.html_safe` or `raw(x)` (`x.to_s.html_safe`), or a helper
+            // `x.html_safe` or `raw(x)` (`x.to_s.html_safe`), an escape the
+            // template applied (`h(x)`), or a helper
             // whose call here is markup (`link_to`, a nested `content_tag`),
             // or already escaped (`truncate`, `word_wrap`). The other kinds
             // (`pluralize`'s text, `dom_id`) are escaped like any String.
@@ -269,10 +270,31 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                 }
                 _ => None,
             };
+            // An escape the template already applied (`h(x)`,
+            // `ERB::Util.html_escape(x)`) is html-safe in Rails too: escaped
+            // here once, through the view helpers' `html_escape`.
+            let escaped_value = match &*content.node {
+                ExprNode::Send { recv: None, method, args, block: None, .. }
+                    if method.as_str() == "h" && args.len() == 1 && !ctx.is_local("h") =>
+                {
+                    Some(&args[0])
+                }
+                ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                    if matches!(method.as_str(), "html_escape" | "h")
+                        && args.len() == 1
+                        && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ERB", "Util"])) =>
+                {
+                    Some(&args[0])
+                }
+                _ => None,
+            };
             let content = match raw_value.or_else(|| super::walker::html_safe_value(content, ctx)) {
                 Some(safe) => lit_str_coerce(rewrite_helpers_in_expr(&safe, ctx)),
                 None if helper_markup => lit_str_coerce(rewrite_helpers_in_expr(content, ctx)),
-                None => view_helpers_call("html_escape", vec![lit_str_coerce(rewrite_helpers_in_expr(content, ctx))]),
+                None => {
+                    let text = lit_str_coerce(rewrite_helpers_in_expr(escaped_value.unwrap_or(content), ctx));
+                    view_helpers_call("html_escape", vec![text])
+                }
             };
             let mut args = vec![rewrite_helpers_in_expr(name, ctx), content];
             if let Some(o) = opts {
