@@ -1770,7 +1770,7 @@ mod runtime_stats {
     // stay valid Ruby with it.
     #[test]
     fn emitted_runtime_has_an_opt_in_stats_block_and_stays_valid_ruby() {
-        let dir = crate::scratch::dir("roundhouse-futamura-stats");
+        let dir = super::scratch::dir("roundhouse-futamura-stats");
         let src = dir.join("src");
         let out = dir.join("out");
         fs::create_dir_all(src.join("app/models")).unwrap();

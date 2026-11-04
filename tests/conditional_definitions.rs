@@ -128,7 +128,6 @@ end
 }
 
 fn app(root: &Path, files: &[(&str, &str)]) {
-    let _ = std::fs::remove_dir_all(root);
     for (path, text) in [
         ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),

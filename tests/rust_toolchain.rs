@@ -366,7 +366,7 @@ async fn articles_index_is_two_queries_not_n_plus_one() {
 #[test]
 #[ignore]
 fn filters_that_read_action_name_compile() {
-    let app_dir = scratch_dir("action-name-app");
+    let app_dir = scratch_dir("action-name-app").join("app");
     let copied = Command::new("cp")
         .arg("-R")
         .arg(roundhouse::fixtures::real_blog())

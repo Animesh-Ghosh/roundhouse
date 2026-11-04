@@ -50,7 +50,6 @@ end
 fn emit() -> (String, String) {
     let root: PathBuf =
         scratch::dir("rh_dup_nilable");
-    let _ = std::fs::remove_dir_all(&root);
     for (path, text) in FILES {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();

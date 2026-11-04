@@ -44,7 +44,6 @@ fn copy_tree(from: &Path, to: &Path) {
 fn probe_app(tag: &str) -> Dir {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/tiny-blog");
     let dir = Dir(scratch::dir(&format!("roundhouse-relocatable-{tag}")));
-    let _ = std::fs::remove_dir_all(&dir.0);
     copy_tree(&fixture, &dir.0);
     let write = |rel: &str, text: &str| {
         let path = dir.0.join(rel);
