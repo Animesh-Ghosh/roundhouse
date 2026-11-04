@@ -86,6 +86,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // renders `article.title`, whose model isn't the class being
     // emitted). Per-class tables are set by `emit_library_class`.
     expr::set_all_nullable_columns(nullable_column_go_tys(app));
+    expr::set_all_model_methods(model_instance_methods(app));
     expr::reset_error_classes();
 
     // Hand-written runtime — copied verbatim under `app/v2/`.
@@ -1173,6 +1174,24 @@ pub(super) fn nullable_column_pairs(app: &crate::App) -> Vec<(String, String)> {
 /// `(Model, column, Go pointer type)` for every nullable column: the
 /// type a read of it from another class has (`*int64` for an integer
 /// column), as the model's own struct field declares it.
+/// Every model's own instance methods, as `(Model, method)`: a view's
+/// 0-arg read of one is a call, not a field read.
+fn model_instance_methods(app: &crate::App) -> Vec<(String, String)> {
+    app.models
+        .iter()
+        .flat_map(|m| {
+            m.body.iter().filter_map(move |item| match item {
+                crate::dialect::ModelBodyItem::Method { method, .. }
+                    if method.receiver == crate::dialect::MethodReceiver::Instance =>
+                {
+                    Some((m.name.0.as_str().to_string(), method.name.as_str().to_string()))
+                }
+                _ => None,
+            })
+        })
+        .collect()
+}
+
 pub(super) fn nullable_column_go_tys(app: &crate::App) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     for m in &app.models {

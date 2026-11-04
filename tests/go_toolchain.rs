@@ -20,6 +20,8 @@ use std::process::Command;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
+#[path = "support/go_view_predicate.rs"]
+mod go_view_predicate;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -348,4 +350,21 @@ fn a_model_test_with_a_persisted_override_runs() {
         .expect("run go test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("--- PASS: TestTheOverrideAnswers"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1802: a view's call to a model's own predicate builds and renders.
+#[test]
+#[ignore]
+fn a_views_model_predicate_call_runs() {
+    let (emitted, errors) = go_view_predicate::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/assert_includes_test.go"), go_view_predicate::GO_ASSERT_INCLUDES).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheIndexRenders", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheIndexRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }

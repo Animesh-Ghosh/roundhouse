@@ -20686,6 +20686,24 @@ mod concern_with_options;
 #[path = "emit_and_run/content_tag_block.rs"]
 mod content_tag_block;
 
+#[path = "support/go_view_predicate.rs"]
+mod go_view_predicate;
+
+/// #1802's view on the ruby target: `F:true` is what it renders.
+#[test]
+fn a_views_model_predicate_call_renders_on_ruby() {
+    go_view_predicate::app().run_test("test/controllers/articles_featured_controller_test.rb").assert_passes();
+}
+
+/// The Go view calls the model's own predicate as its method.
+#[test]
+fn a_views_model_predicate_call_is_a_go_method_call() {
+    let (emitted, errors) = go_view_predicate::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let view = std::fs::read_to_string(emitted.join("app/v2/views_articles.go")).unwrap();
+    assert!(view.contains("a.FeaturedPred()") && !view.contains("a.Featured)"), "{view}");
+}
+
 #[path = "emit_and_run/unknown_class_association.rs"]
 mod unknown_class_association;
 
