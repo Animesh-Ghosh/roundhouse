@@ -1730,18 +1730,23 @@ module ActionView
         # as a bare (undeclared) assignment — to `name`, which in DOM
         # scope is a const global (TS2588), and to an `inner_name` the
         # sibling lines then couldn't find (TS2304).
-        name = k.to_s
+        # Every NAME written goes through `xml_name_escape`, as Rails'
+        # `tag_option` does: a key is data too, and unescaped it could
+        # close the attribute and open another.
+        name = xml_name_escape(k.to_s)
         unless v.nil?
           if v.is_a?(Hash)
             v.each do |inner_k, inner_v|
-              inner_name = inner_k.to_s.tr("_", "-")
+              # Rails escapes the whole `data-<inner>` name, prefix
+              # included, after the dasherize.
+              inner_name = xml_name_escape(k.to_s + "-" + inner_k.to_s.tr("_", "-"))
               unless inner_v.nil?
                 # Coerce untyped Hash values to String before
                 # html_escape; html_escape's contract is
                 # `(String) -> String` and the untyped values flowing
                 # through Hash[String, untyped] need explicit
                 # stringification.
-                out = out + " #{name}-#{inner_name}=\"#{html_escape(inner_v.to_s)}\""
+                out = out + " #{inner_name}=\"#{html_escape(inner_v.to_s)}\""
               end
             end
           elsif boolean_attr?(name)
@@ -1766,6 +1771,66 @@ module ActionView
         end
       end
       out
+    end
+
+    # Rails' `ERB::Util.xml_name_escape` (activesupport 8.1.4,
+    # core_ext/erb/util.rb), which `tag_option` applies to every
+    # attribute name: a blank name is "", a valid XML name is itself,
+    # and otherwise a first character outside the name-START set and
+    # each later character outside the name set become "_".
+    #
+    # The ASCII part of those sets is exact: start is `@ : A-Z _ a-z`,
+    # and a later character may also be `- . 0-9`. NON-ASCII is
+    # conservative: Rails keeps most characters from U+00C0 up (`é`
+    # stays `é`), and here EVERY non-ASCII character becomes one "_"
+    # (`é` → `_`). Keeping one would mean copying a multi-byte
+    # character out of the String, which this byte walk cannot spell
+    # on every target (Rust indexes no `str` by an Integer, and
+    # `printable[b - 32, 1]` covers ASCII only); a lone "_" is always
+    # a safe name. Likewise "blank" is ASCII whitespace only: a name of
+    # Unicode spaces renders "_" per character where Rails gives "".
+    # The walk counts characters by their UTF-8 lead bytes (< 128 or
+    # >= 192) and skips continuation bytes.
+    #
+    # Same byte-walk shape as `erb_url_encode`, for the same reasons
+    # (no Regexp with these classes, `b.chr` or `str[i]` on every
+    # target). The first loop only checks, so a valid name — every name
+    # a template writes by hand — comes back without a new String.
+    def self.xml_name_escape(name)
+      printable = " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+      bytes = name.bytes
+      blank = true
+      safe = true
+      i = 0
+      while i < bytes.length
+        b = erb_url_byte(bytes, i)
+        blank = false unless b == 32 || (b >= 9 && b <= 13)
+        safe = false unless xml_name_byte?(b, i == 0)
+        i += 1
+      end
+      return "" if blank
+      return name if safe
+      out = ""
+      i = 0
+      while i < bytes.length
+        b = erb_url_byte(bytes, i)
+        if xml_name_byte?(b, i == 0)
+          out = out + printable[b - 32, 1].to_s
+        elsif b < 128 || b >= 192
+          out = out + "_"
+        end
+        i += 1
+      end
+      out
+    end
+
+    # One byte of `xml_name_escape`'s ASCII rule: may byte `b` stand in
+    # an XML name, as its first character when `first`? Any non-ASCII
+    # byte answers false (see `xml_name_escape`).
+    def self.xml_name_byte?(b, first)
+      return true if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95 || b == 58 || b == 64
+      return false if first
+      (b >= 48 && b <= 57) || b == 45 || b == 46
     end
 
     # The TEXT of one attribute value, before escaping: `to_s` here,

@@ -627,6 +627,33 @@ class ViewHelpersTest < Minitest::Test
     assert_equal %( data-turbo="false"), ViewHelpers.render_attrs({ "data-turbo": false })
   end
 
+  # Attribute NAMES go through Rails' `ERB::Util.xml_name_escape`, as
+  # `tag_option` does: a first character that cannot start an XML name
+  # and any later one that cannot continue it become `_`, so a key never
+  # closes the attribute or opens another one. Expected strings MEASURED
+  # against actionview 8.1.4 with these exact calls.
+  def test_content_tag_escapes_a_data_key_name
+    out = ViewHelpers.content_tag(:p, "x", data: { "x onmouseover=alert(1) z": "v" })
+    assert_equal %(<p data-x_onmouseover_alert_1__z="v">x</p>), out
+  end
+
+  def test_content_tag_escapes_a_top_level_key_name
+    out = ViewHelpers.content_tag(:p, "x", "a b=c": "v", "1st": "w", "x\"y": "z")
+    assert_equal %(<p a_b_c="v" _st="w" x_y="z">x</p>), out
+  end
+
+  def test_content_tag_escapes_an_aria_key_name
+    out = ViewHelpers.content_tag(:p, "x", aria: { "label by": "v" })
+    assert_equal %(<p aria-label_by="v">x</p>), out
+  end
+
+  def test_content_tag_keeps_valid_key_names
+    out = ViewHelpers.content_tag(:p, "x", class: "c", id: "i", data: { turbo_confirm: "ok" }, aria: { labelledby: "l" })
+    assert_equal %(<p class="c" id="i" data-turbo-confirm="ok" aria-labelledby="l">x</p>), out
+    out = ViewHelpers.content_tag(:p, "x", "@a:b-c.d_9": "v", ":x": "w", "-a": "y", "a>b": "z")
+    assert_equal %(<p @a:b-c.d_9="v" :x="w" _a="y" a_b="z">x</p>), out
+  end
+
   # FormBuilder + form_with tests retired alongside the runtime
   # classes themselves — the lowerer macro-inlines form_with and
   # form.label/text_field/text_area/submit at lower time (Stages 1a

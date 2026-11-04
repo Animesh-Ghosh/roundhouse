@@ -1,12 +1,12 @@
 # frozen_string_literal: true
-# CRuby-only spellings of three shared ViewHelpers hot paths.
+# CRuby-only spellings of four shared ViewHelpers hot paths.
 #
 # The shared bodies are written in the one shape every target emitter
 # lowers (see the comments on `boolean_attr?` and `needs_url_escape?`
 # in action_view/view_helpers.rb): `||` chains of `==` / `include?`, and
 # `out = out + ...` concatenation. Under CRuby those are 45 comparisons
 # per attribute, 32 scans per URL value, and a new String per attribute
-# appended; every sidebar room link goes through all three. Same output.
+# appended; every sidebar room link goes through them all. Same output.
 module ActionView
   module ViewHelpers
     # Rails' BOOLEAN_ATTRIBUTES — the shared `boolean_attr?` chain, as a set.
@@ -29,16 +29,30 @@ module ActionView
       s.match?(URL_ESCAPE_PATTERN)
     end
 
+    # The shared `xml_name_escape`'s rule with regexps: the ASCII name
+    # sets exact, every non-ASCII character one "_", "blank" ASCII
+    # whitespace only. A valid name answers after one scan.
+    XML_NAME_SAFE = /\A[@:A-Z_a-z][@:A-Z_a-z\-.0-9]*\z/
+    XML_NAME_BLANK = /\A[\t\n\v\f\r ]*\z/
+    XML_NAME_INVALID_START = /[^@:A-Z_a-z]/
+    XML_NAME_INVALID_FOLLOWING = /[^@:A-Z_a-z\-.0-9]/
+
+    def self.xml_name_escape(name)
+      return name if name.match?(XML_NAME_SAFE)
+      return "" if name.match?(XML_NAME_BLANK)
+      name[0].gsub(XML_NAME_INVALID_START, "_") + name[1..].gsub(XML_NAME_INVALID_FOLLOWING, "_")
+    end
+
     def self.render_attrs(attrs)
       return "" if attrs.empty?
       out = +""
       attrs.each do |k, v|
         next if v.nil?
-        name = k.to_s
+        name = xml_name_escape(k.to_s)
         if v.is_a?(Hash)
           v.each do |inner_k, inner_v|
             next if inner_v.nil?
-            out << " " << name << "-" << inner_k.to_s.tr("_", "-") << "=\"" << html_escape(inner_v.to_s) << "\""
+            out << " " << xml_name_escape(k.to_s + "-" + inner_k.to_s.tr("_", "-")) << "=\"" << html_escape(inner_v.to_s) << "\""
           end
         elsif boolean_attr?(name)
           out << " " << name << "=\"" << name << "\"" unless v.to_s == "false"
