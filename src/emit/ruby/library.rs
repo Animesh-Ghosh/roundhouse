@@ -1796,9 +1796,22 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // `ActionText::Attachable` (campfire declares it one level down,
     // through `User::Mentionable`). Ruby-family only, like the
     // `MessageVerifier` the mint runs through.
+    let _span = crate::timings::begin("scope lowering: preload");
     let attachable = crate::lower::attachable::attachable_models(app);
+    // Per-class lookups by name, indexed once: a scan of `app.models`
+    // (and, for the STI walk below, of `app.library_classes`) per class
+    // made this pass quadratic in the class count. First entry wins, as
+    // the scans' `find` did.
+    let mut model_named: HashMap<&ClassId, &crate::dialect::Model> = HashMap::default();
+    for m in &app.models {
+        model_named.entry(&m.name).or_insert(m);
+    }
+    let mut library_parent: HashMap<&ClassId, Option<&ClassId>> = HashMap::default();
+    for other in &app.library_classes {
+        library_parent.entry(&other.name).or_insert(other.parent.as_ref());
+    }
     for lc in lcs.iter_mut() {
-        if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
+        if let Some(model) = model_named.get(&lc.name).copied() {
             crate::lower::rich_text::push_preload_scope_methods(&mut lc.methods, model);
             if crate::lower::plain_text_attr::record_table_present(&app.schema) {
                 crate::lower::plain_text_attr::push_preload_scope_methods(&mut lc.methods, model);
@@ -1812,6 +1825,8 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // `broadcasts_to` on `:sidekiq`: the create and update broadcasts
     // enqueue Turbo::Streams::ActionBroadcastJob, as turbo-rails does.
     crate::lower::broadcast_job::apply_ruby(lcs, app);
+    drop(_span);
+    let _span = crate::timings::begin("scope lowering: registries");
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
     let assocs = crate::lower::scope_chain::build_assoc_registry_for_app(app);
     let query_arguments = crate::lower::scope_chain::query_arguments::QueryArguments::build(app);
@@ -1824,6 +1839,8 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // has to be inserted on the MODEL.
     let (assoc_class_methods, declined) =
         crate::lower::scope_chain::survey_assoc_class_methods(app, &assocs, &scopes);
+    drop(_span);
+    let _span = crate::timings::begin("scope lowering: ground");
     for lc in lcs.iter_mut() {
         for method in &mut lc.methods {
             crate::lower::scope_chain::ground_literal_model_dispatch(&mut method.body, app, &assocs);
@@ -1877,6 +1894,8 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     {
         return;
     }
+    drop(_span);
+    let _span = crate::timings::begin("scope lowering: setup");
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
     let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
     let unique_keys = crate::lower::scope_chain::build_unique_keys(&app.models, &app.schema);
@@ -1892,9 +1911,11 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     };
     query_arguments.rewrite(lcs, &regs);
     let sole_includers = app.sole_includer_of_modules();
+    drop(_span);
+    let _span = crate::timings::begin("scope lowering: bodies");
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).
-        let is_model = app.models.iter().any(|m| m.name == lc.name);
+        let is_model = model_named.contains_key(&lc.name);
         // A model CONCERN is a model body too — the third family
         // `lower::for_each_model_body` names. `module User::Bannable`'s
         // instance methods run on a `User`, so a bare `bans.create!` in
@@ -1912,7 +1933,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             .then(|| lc.name.0.as_str().rsplit_once("::").map(|(ns, _)| ns.to_string()))
             .flatten()
             .map(|ns| crate::ident::ClassId(crate::ident::Symbol::from(ns.as_str())))
-            .filter(|ns| app.models.iter().any(|m| &m.name == ns))
+            .filter(|ns| model_named.contains_key(ns))
             // An STI SUBCLASS is the same fact by inheritance rather
             // than by namespace: `Rooms::Open < Room` declares no table,
             // so it is not a model, but its instance methods run on a
@@ -1928,14 +1949,10 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 let mut cursor = lc.parent.clone();
                 for _ in 0..8 {
                     let parent = cursor?;
-                    if app.models.iter().any(|m| m.name == parent) {
+                    if model_named.contains_key(&parent) {
                         return Some(parent);
                     }
-                    cursor = app
-                        .library_classes
-                        .iter()
-                        .find(|other| other.name == parent)
-                        .and_then(|other| other.parent.clone());
+                    cursor = library_parent.get(&parent).copied().flatten().cloned();
                 }
                 None
             })
@@ -1944,9 +1961,9 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 (lc.is_module && !is_model)
                     .then(|| sole_includers.get(&lc.name).cloned())
                     .flatten()
-                    .filter(|owner| app.models.iter().any(|m| &m.name == owner))
+                    .filter(|owner| model_named.contains_key(owner))
             });
-        if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
+        if let Some(model) = model_named.get(&lc.name).copied() {
             crate::lower::model_to_library::push_scope_methods(
                 &mut lc.methods,
                 model,
@@ -2134,6 +2151,8 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             }
         }
     }
+    drop(_span);
+    let _span = crate::timings::begin("scope lowering: variants");
     // Fixed-arity relation entry points, generated AFTER every body
     // rewrite above: their forward bodies mention scope names on model
     // constants, which `rewrite_call_site` would re-thread if it saw
@@ -3695,7 +3714,8 @@ fn rewrite_helper_ivars(e: &mut Expr, names: &std::collections::BTreeSet<Symbol>
         method,
         args,
         block: None,
-        parenthesized: false,
+        // `a == controller.instance_variable_get :@x` is not Ruby.
+        parenthesized: shadows_object,
     };
 }
 
@@ -5000,6 +5020,65 @@ fn rewrite_helper_calls(
         };
     }
 
+    // `RouteHelpers.<x>_path(…, params: h)` → `RouteHelpers.<x>_path(…) +
+    // RouteHelpers.query_suffix(h)`. `params:` is the query itself
+    // (Rails' `url_for` merges it into the query string) and the
+    // generated helper has no parameter for it. Controllers and tests
+    // render it where they qualify the call; a helper module reaches
+    // the receiver here, so the same rendering is owed here.
+    let params_query = match &*expr.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str().ends_with("_path")
+                && matches!(&*r.node, ExprNode::Const { path }
+                    if path.last().map(|s| s.as_str() == "RouteHelpers").unwrap_or(false)) =>
+        {
+            match args.last().map(|a| &*a.node) {
+                Some(ExprNode::Hash { entries, kwargs: true }) if entries.len() == 1 => {
+                    match &*entries[0].0.node {
+                        ExprNode::Lit { value: crate::expr::Literal::Sym { value } }
+                            if value.as_str() == "params" =>
+                        {
+                            Some(entries[0].1.clone())
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(query) = params_query {
+        let span = expr.span;
+        let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+        let ExprNode::Send { recv, method, mut args, block, parenthesized } = node else {
+            unreachable!()
+        };
+        args.pop();
+        let call = Expr::new(span, ExprNode::Send { recv, method, args, block, parenthesized });
+        let suffix = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
+                )),
+                method: Symbol::from("query_suffix"),
+                args: vec![query],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        *expr.node = ExprNode::Send {
+            recv: Some(call),
+            method: Symbol::from("+"),
+            args: vec![suffix],
+            block: None,
+            parenthesized: false,
+        };
+        expr.ty = Some(crate::ty::Ty::Str);
+    }
+
     // `RouteHelpers.<x>_path(format: :rss)` → `RouteHelpers.<x>_path +
     // ".rss"`. Rails path helpers accept `format:` whether or not the
     // route spells `(.:format)`; the IR has no keyword params, so the
@@ -5789,6 +5868,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
             .filter_map(|c| c.name.0.as_str().rsplit("::").next().map(str::to_string))
             .collect(),
         self_returns: crate::det::HashMap::default(),
+        own_methods: None,
         local_records: crate::det::HashMap::default(),
         self_model: None,
         next_local: std::cell::Cell::new(0),
@@ -5864,7 +5944,16 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
             }
         }
     }
-    for lc in lcs.iter_mut() {
+    let controller_classes: crate::det::HashSet<String> =
+        app.controllers.iter().map(|c| c.name.0.as_str().to_string()).collect();
+    let class_index: crate::det::HashMap<String, usize> =
+        lcs.iter().enumerate().map(|(i, lc)| (lc.name.0.as_str().to_string(), i)).collect();
+    let scopes: Vec<Option<crate::det::HashSet<String>>> = lcs
+        .iter()
+        .map(|lc| ancestry_methods(lc, lcs, &class_index, &controller_classes))
+        .collect();
+    for (lc, scope) in lcs.iter_mut().zip(scopes) {
+        sig.own_methods = scope;
         sig.self_model = Some(lc.name.0.as_str().to_string())
             .filter(|n| all_models.contains(n));
         for m in &mut lc.methods {
@@ -6199,6 +6288,13 @@ pub(crate) struct RecordSignals<'a> {
     /// recognized as the controller-method read it is.
     controller_names: crate::det::HashSet<String>,
     self_returns: crate::det::HashMap<String, String>,
+    /// The instance method names the class being rewritten and its
+    /// ancestors in the slice define. `None` when the class sits under a
+    /// controller, which reads methods the slice does not carry. A bare
+    /// call to a name outside it is not a call to `self_returns`' method
+    /// of that name: it is a gem's macro-defined reader (query_layer's
+    /// `delegate_field :token`) that merely shares the name.
+    own_methods: Option<crate::det::HashSet<String>>,
     /// Locals THE BODY BEING REWRITTEN binds to a resolvable record —
     /// campfire's `if last_room = last_room_visited` puts the record
     /// behind a name no other signal can read. Rebuilt per method;
@@ -6454,6 +6550,39 @@ fn to_s_keeping_nil(value: Expr, sig: &RecordSignals<'_>) -> Expr {
     typed(ExprNode::Let { id: crate::ident::VarId(0), name, value, body: check }, opt_str)
 }
 
+/// The instance method names `lc` and its ancestors (parents and
+/// includes, as far as the slice carries them) define; `None` when an
+/// ancestor is a controller.
+fn ancestry_methods(
+    lc: &LibraryClass,
+    lcs: &[LibraryClass],
+    index: &crate::det::HashMap<String, usize>,
+    controllers: &crate::det::HashSet<String>,
+) -> Option<crate::det::HashSet<String>> {
+    let mut names = crate::det::HashSet::default();
+    let mut seen: crate::det::HashSet<String> = crate::det::HashSet::default();
+    let mut pending = vec![lc.name.0.as_str().to_string()];
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if controllers.contains(&name) {
+            return None;
+        }
+        let Some(&i) = index.get(&name) else { continue };
+        let class = &lcs[i];
+        names.extend(
+            class
+                .methods
+                .iter()
+                .filter(|m| m.receiver == MethodReceiver::Instance)
+                .map(|m| m.name.as_str().to_string()),
+        );
+        pending.extend(class.parent.iter().chain(class.includes.iter()).map(|p| p.0.as_str().to_string()));
+    }
+    Some(names)
+}
+
 /// A record in a route helper's argument, as Rails renders it: the
 /// model's own `to_param` (a slug model), else its id — as text when
 /// the slot is declared `String`.
@@ -6705,6 +6834,9 @@ fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
             // resolved through what that method's body answers.
             // `redirect_to room_path(last_room_visited)` is the shape:
             // the name is not a model's, and nothing upstream typed it.
+            if sig.own_methods.as_ref().is_some_and(|own| !own.contains(method.as_str())) {
+                return None;
+            }
             sig.self_returns.get(method.as_str()).cloned()
         }
         _ => None,
@@ -7402,7 +7534,7 @@ pub(crate) fn apply_zoned_json_time_lowering(lcs: &mut [LibraryClass], app: &App
 /// `London` is `+00:00`, not `Z` — so the offset cannot be fixed here.
 /// Ingest lifts the zone into a `config_time_zone` method on the
 /// `Rails::Application` reopen; an app with none presents UTC.
-fn app_presents_time_zoned(app: &App) -> bool {
+pub(crate) fn app_presents_time_zoned(app: &App) -> bool {
     const UTC_ZONES: [&str; 8] =
         ["UTC", "Etc/UTC", "Universal", "Etc/Universal", "Zulu", "Etc/Zulu", "UCT", "Etc/UCT"];
     let Some(application) = &app.rails_application else { return false };
@@ -8857,6 +8989,13 @@ fn emit_library_class_decl_inner(
             let (cname, value) = &lc.constants[i];
             nested.borrow_mut().write_expr(s, depth, lc, value);
             let rendered = super::emit_expr(&top_level(value));
+            // Not the statements written after `NAME =`: only the first would be the constant's, the rest would run as the body's own.
+            let rendered = if matches!(&*value.node, ExprNode::Seq { exprs } if exprs.len() > 1) {
+                let inner: String = rendered.lines().map(|l| format!("  {l}\n")).collect();
+                format!("begin\n{inner}end")
+            } else {
+                rendered
+            };
             if let Some(factory) = lifted_data_factory(lc, cname.as_str(), classes, factories) {
                 writeln!(s, "{body_pad}{} = {rendered} do", cname.as_str()).unwrap();
                 for method in &factory.methods {
