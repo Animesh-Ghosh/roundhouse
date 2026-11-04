@@ -92,14 +92,16 @@ module ActionController
       return false if since.nil?
       modified = conditional_get_http_time(last_modified)
       # Whole seconds, not Time#>=: an HTTP date carries no fraction, and the shared runtime types an Integer compare.
-      !modified.nil? && since.to_i >= modified.to_i
+      unmodified = !modified.nil? && since.to_i >= modified.to_i
+      unmodified
     end
 
     # Not a raise for a malformed date: Rack reads one as no header at all.
     def conditional_get_http_time(text)
       # Not Time.rfc2822 on a shorter one: the shortest valid date is 16 characters, as Rack checks first.
       return nil if text.nil? || text.length < 16
-      Time.rfc2822(text)
+      parsed = Time.rfc2822(text)
+      parsed
     rescue StandardError
       nil
     end

@@ -261,6 +261,7 @@ module CgiIo
       # Not retagged when the bytes are not UTF-8: a cookie name so tagged would raise at `to_sym`.
       return utf8.valid_encoding? ? utf8 : s
     end
-    CGI.unescape(s)
+    # Retagged, not taken as CGI.unescape tags it: CRuby's follows CGI.accept_charset, which an app may set to binary.
+    CGI.unescape(s).force_encoding(Encoding::UTF_8)
   end
 end
