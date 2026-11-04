@@ -9,6 +9,8 @@
 //! is not one of those callers. It has to join the frontier itself, or
 //! the production loop settles with the override's old return.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::process::Command;
 
 /// The chain's length: its last class's Integer reaches the first one
@@ -55,7 +57,7 @@ fn files() -> Vec<(String, String)> {
 /// Compile the app with the fixpoint canary and the timings on, and
 /// answer stderr.
 fn compile() -> String {
-    let root = std::env::temp_dir().join(format!("rh_dirty_retype_super_{}", std::process::id()));
+    let root = scratch::dir("rh_dirty_retype_super");
     for (path, text) in files() {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
