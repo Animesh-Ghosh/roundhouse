@@ -5574,7 +5574,12 @@ fn walk_concern_dsl<'pr>(
             && super::model::with_options::is_with_options(&call)
             && call.block().and_then(|b| b.as_block_node()).is_some()
         {
-            let merged = super::survey::without_recording(|| super::model::with_options::expand(&call, &[], owner, file, consts));
+            // A gap `expand` records (a `validates` option it drops) stays
+            // recorded when its items are taken, as the model walk keeps
+            // it; the flattened walk ingests the same calls again, so the
+            // fallback rewinds them.
+            let mark = super::survey::mark();
+            let merged = super::model::with_options::expand(&call, &[], owner, file, consts);
             match merged {
                 Ok(items)
                     if !items.is_empty()
@@ -5587,6 +5592,7 @@ fn walk_concern_dsl<'pr>(
                     out.push(ConcernDsl::Merged(items));
                 }
                 _ => {
+                    super::survey::rewind(mark);
                     let mut flat = Vec::new();
                     walk_dsl_stmts(stmt, &mut flat);
                     out.extend(flat.into_iter().map(ConcernDsl::Stmt));

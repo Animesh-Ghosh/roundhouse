@@ -28,3 +28,51 @@ fn a_concern_with_options_association_reads_its_class() {
     let test = "require \"test_helper\"\n\nclass NotesTest < ActiveSupport::TestCase\n  test \"notes are the article's comments\" do\n    article = articles(:one)\n    assert_equal article.comments.map(&:id).sort, article.notes.map(&:id).sort\n    assert_operator article.notes.size, :>, 0\n  end\nend\n";
     app().write("test/models/notes_test.rb", test).run_test("test/models/notes_test.rb").assert_passes();
 }
+
+const GAPPED_BLOCK: &str = "with_options if: :title? do\n  validates :title, presence: true, strict: true\n  validates :body, presence: true\nend\n";
+
+/// The `--survey` gaps ingest records for an app whose `Article` has
+/// `block` written in its own body, or in a concern's `included do`.
+fn survey_gaps(block: &str, in_concern: bool) -> Vec<String> {
+    let indent = |s: &str, n: usize| s.lines().map(|l| format!("{}{l}\n", " ".repeat(n))).collect::<String>();
+    let mut tree = roundhouse::vfs::FileTree::default();
+    let schema = "ActiveRecord::Schema.define(version: 1) do\n  create_table :articles do |t|\n    t.string :title\n    t.text :body\n  end\nend\n";
+    tree.insert("db/schema.rb".into(), schema.as_bytes().to_vec());
+    tree.insert("app/models/application_record.rb".into(), b"class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n".to_vec());
+    let article = if in_concern {
+        let concern = format!("module Checked\n  extend ActiveSupport::Concern\n\n  included do\n{}  end\nend\n", indent(block, 4));
+        tree.insert("app/models/concerns/checked.rb".into(), concern.into_bytes());
+        "class Article < ApplicationRecord\n  include Checked\nend\n".to_string()
+    } else {
+        format!("class Article < ApplicationRecord\n{}end\n", indent(block, 2))
+    };
+    tree.insert("app/models/article.rb".into(), article.into_bytes());
+    roundhouse::ingest::survey::activate();
+    let result = roundhouse::ingest::ingest_app_from_tree(tree);
+    let gaps = roundhouse::ingest::survey::drain();
+    result.expect("survey ingest recovers");
+    gaps.into_iter()
+        .map(|g| match g {
+            roundhouse::ingest::IngestError::Unsupported { message, .. } => message,
+            other => other.to_string(),
+        })
+        .collect()
+}
+
+/// A `validates` option the block's merge drops (`strict:`) is a survey
+/// gap in a concern as in the model; its sibling is still merged.
+#[test]
+fn a_gap_in_a_concern_with_options_block_is_recorded() {
+    let model = survey_gaps(GAPPED_BLOCK, false);
+    assert!(model.iter().any(|g| g.contains("validates :title, strict: not supported")), "{model:?}");
+    assert_eq!(survey_gaps(GAPPED_BLOCK, true), model);
+}
+
+/// A block the merge declines (a call with a block of its own) is walked
+/// flat, which records its gap once, not once more for the merge.
+#[test]
+fn a_gap_in_a_declined_concern_with_options_block_is_recorded_once() {
+    let block = "with_options if: :title? do\n  validates :title, presence: true, strict: true\n  after_save do\n    title\n  end\nend\n";
+    let gaps = survey_gaps(block, true);
+    assert_eq!(gaps.iter().filter(|g| g.contains("validates :title, strict: not supported")).count(), 1, "{gaps:?}");
+}
