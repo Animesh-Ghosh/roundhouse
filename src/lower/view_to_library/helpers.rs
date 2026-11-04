@@ -206,10 +206,14 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             }
             Some(view_helpers_call("dom_id", args))
         }
+        // Rails' `pluralize` returns a String that isn't html-safe (the
+        // word is the caller's), so the template escapes it, as it does
+        // `truncate`'s.
         Pluralize { count, word } => {
-            Some(crate::lower::view::pluralize_helper_call(
+            let pluralized = crate::lower::view::pluralize_helper_call(
                 (*count).clone(), (*word).clone(),
-            ))
+            );
+            Some(view_helpers_call("html_escape", vec![pluralized]))
         }
         Truncate { text, opts } => {
             // Spinel-blog convention: `truncate` returns a plain
