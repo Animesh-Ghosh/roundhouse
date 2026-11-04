@@ -598,6 +598,26 @@ pub(super) fn try_recv_typed_method(
                  {{ (*{table_s}.get(&__caps[0]).unwrap_or(&\"\")).to_string() }}).into_owned()"
             ));
         }
+        // `s.gsub(pattern, replacement)` with a `Regexp` first arg and a
+        // String second one (`view_helpers.xml_name_escape`):
+        // `pattern.replace_all(&s, NoExpand(repl))`. `NoExpand`, because
+        // the regex crate reads `$` in a replacement as a group.
+        if method == "gsub"
+            && args.len() == 2
+            && matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Str))
+            && matches!(
+                args[0].ty.as_ref().map(peel_nil),
+                Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+            )
+            && matches!(args[1].ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Str))
+        {
+            let recv_s = emit_expr(r);
+            let pat_s = emit_expr(&args[0]);
+            let repl_s = emit_expr(&args[1]);
+            return Some(format!(
+                "{pat_s}.replace_all(&{recv_s}, regex::NoExpand(&*{repl_s})).into_owned()"
+            ));
+        }
         // `s.gsub(needle, replacement)` — both String args. Ruby
         // returns a new string with all occurrences substituted;
         // Rust's `str::replace(needle, replacement)` is the direct

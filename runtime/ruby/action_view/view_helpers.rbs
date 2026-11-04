@@ -282,9 +282,8 @@ module ActionView
     def self.render_attrs: (Hash[Symbol, untyped] attrs) -> String
     def self.attr_value_text: (String name, untyped v) -> String
     # Rails' ERB::Util.xml_name_escape on an attribute name (ASCII
-    # rule exact; each non-ASCII character becomes "_").
+    # rule exact; a non-ASCII character becomes "_").
     def self.xml_name_escape: (String name) -> String
-    def self.xml_name_byte?: (Integer b, bool first) -> bool
     def self.haml_class: (String static_classes, untyped value) -> String
 
     # Rails' BOOLEAN_ATTRIBUTES membership — presence-is-the-value

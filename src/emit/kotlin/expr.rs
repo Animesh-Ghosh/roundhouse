@@ -1918,6 +1918,22 @@ fn emit_send(
         }
     }
 
+    // `recv.gsub(pattern, "literal")` → `pattern.replace(recv, "literal")`.
+    // Kotlin reads `$` and `\` in a replacement as group references, so a
+    // literal holding either goes through `Regex.escapeReplacement`.
+    if method == "gsub" && args.len() == 2 {
+        if let (Some(r), ExprNode::Lit { value: Literal::Str { value: repl } }) = (recv, &*args[1].node) {
+            if !matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } }) {
+                let repl_s = if repl.contains('$') || repl.contains('\\') {
+                    format!("Regex.escapeReplacement({})", args_s[1])
+                } else {
+                    args_s[1].clone()
+                };
+                return format!("{}.replace({}, {repl_s})", args_s[0], emit_expr(r));
+            }
+        }
+    }
+
     // `recv.gsub(pattern, hash)` → regex replace with a map lookup.
     if method == "gsub" && args.len() == 2 {
         if let Some(r) = recv {
@@ -2529,5 +2545,41 @@ pub(super) fn kotlin_exception_class(name: &str) -> String {
         "ArgumentError" => "IllegalArgumentException".to_string(),
         "IndexError" => "IndexOutOfBoundsException".to_string(),
         other => type_name(other),
+    }
+}
+
+#[cfg(test)]
+mod gsub_string_replacement_tests {
+    use super::emit_expr;
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+
+    fn gsub(repl: &str) -> Expr {
+        let node = |n| Expr::new(Span::synthetic(), n);
+        node(ExprNode::Send {
+            recv: Some(node(ExprNode::Var { id: VarId(0), name: Symbol::from("name") })),
+            method: Symbol::from("gsub"),
+            args: vec![
+                node(ExprNode::Const { path: vec![Symbol::from("PATTERN")] }),
+                node(ExprNode::Lit { value: Literal::Str { value: repl.to_string() } }),
+            ],
+            block: None,
+            parenthesized: true,
+        })
+    }
+
+    /// A String replacement is the replacement, not a table to look the
+    /// match up in (`("_")[it.value]` does not compile).
+    #[test]
+    fn a_string_replacement_is_passed_to_regex_replace() {
+        assert_eq!(emit_expr(&gsub("_")), "PATTERN.replace(name, \"_\")");
+    }
+
+    /// `$` and `\` are group references to `Regex.replace`.
+    #[test]
+    fn a_replacement_with_a_dollar_is_escaped() {
+        assert!(emit_expr(&gsub("$")).starts_with("PATTERN.replace(name, Regex.escapeReplacement("));
+        assert!(emit_expr(&gsub("a\\b")).starts_with("PATTERN.replace(name, Regex.escapeReplacement("));
     }
 }

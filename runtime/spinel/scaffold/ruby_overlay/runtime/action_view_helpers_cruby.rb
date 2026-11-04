@@ -29,18 +29,16 @@ module ActionView
       s.match?(URL_ESCAPE_PATTERN)
     end
 
-    # The shared `xml_name_escape`'s rule with regexps: the ASCII name
-    # sets exact, every non-ASCII character one "_", "blank" ASCII
-    # whitespace only. A valid name answers after one scan.
-    XML_NAME_SAFE = /\A[@:A-Z_a-z][@:A-Z_a-z\-.0-9]*\z/
-    XML_NAME_BLANK = /\A[\t\n\v\f\r ]*\z/
-    XML_NAME_INVALID_START = /[^@:A-Z_a-z]/
-    XML_NAME_INVALID_FOLLOWING = /[^@:A-Z_a-z\-.0-9]/
+    # The shared `xml_name_escape`'s rule, with anchored regexps the
+    # shared body cannot use (its patterns are the shared constants): a
+    # valid name answers after one `match?` and no new String.
+    XML_NAME_SAFE = /\A[@:A-Z_a-z][@:A-Z_a-z.0-9-]*\z/
+    XML_NAME_BLANK = /\A[\t\n\x0b\f\r ]*\z/
 
     def self.xml_name_escape(name)
       return name if name.match?(XML_NAME_SAFE)
       return "" if name.match?(XML_NAME_BLANK)
-      name[0].gsub(XML_NAME_INVALID_START, "_") + name[1..].gsub(XML_NAME_INVALID_FOLLOWING, "_")
+      name[0].gsub(XML_NAME_INVALID_START, "_") + name[1..].gsub(XML_NAME_INVALID_CHAR, "_")
     end
 
     def self.render_attrs(attrs)

@@ -1630,6 +1630,17 @@ fn emit_send(
         }
     }
 
+    // `recv.gsub(regex, "literal")` → `regex.Replace(recv, "literal")`.
+    // .NET reads `$` in a replacement as a substitution, so it is doubled.
+    if method == "gsub" && args.len() == 2 {
+        if let (Some(r), ExprNode::Lit { value: Literal::Str { value: repl } }) = (recv, &*args[1].node) {
+            if !matches!(&*args[0].node, ExprNode::Lit { value: Literal::Str { .. } }) {
+                let repl_s = format!("\"{}\"", escape_str(&repl.replace('$', "$$")));
+                return format!("{}.Replace({}, {repl_s})", args_s[0], emit_expr(r));
+            }
+        }
+    }
+
     // `recv.gsub(regex, hash)` → `regex.Replace(recv, m => hash[m] ?? m)`.
     // The pattern is a `Regex` (constant/literal), so dispatch off it.
     if method == "gsub" && args.len() == 2 {
@@ -2474,5 +2485,40 @@ mod escape_tests {
     fn line_terminators_are_escaped_in_string_literals() {
         assert_eq!(escape_str("a\u{85}b\u{2028}c\u{2029}d"), "a\\u0085b\\u2028c\\u2029d");
         assert_eq!(escape_interp_text("a\u{2028}{b}"), "a\\u2028{{b}}");
+    }
+}
+
+#[cfg(test)]
+mod gsub_string_replacement_tests {
+    use super::emit_expr;
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+
+    fn gsub(repl: &str) -> Expr {
+        let node = |n| Expr::new(Span::synthetic(), n);
+        node(ExprNode::Send {
+            recv: Some(node(ExprNode::Var { id: VarId(0), name: Symbol::from("name") })),
+            method: Symbol::from("gsub"),
+            args: vec![
+                node(ExprNode::Const { path: vec![Symbol::from("PATTERN")] }),
+                node(ExprNode::Lit { value: Literal::Str { value: repl.to_string() } }),
+            ],
+            block: None,
+            parenthesized: true,
+        })
+    }
+
+    /// A String replacement is the replacement, not a table to look the
+    /// match up in (`"_".GetValueOrDefault(…)` does not compile).
+    #[test]
+    fn a_string_replacement_is_passed_to_regex_replace() {
+        assert_eq!(emit_expr(&gsub("_")), "PATTERN.Replace(name, \"_\")");
+    }
+
+    /// `$` is a substitution to `Regex.Replace`; `$$` is a literal one.
+    #[test]
+    fn a_replacement_with_a_dollar_is_doubled() {
+        assert_eq!(emit_expr(&gsub("a$b")), "PATTERN.Replace(name, \"a$$b\")");
     }
 }

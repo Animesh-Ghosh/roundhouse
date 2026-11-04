@@ -1782,55 +1782,35 @@ module ActionView
     # The ASCII part of those sets is exact: start is `@ : A-Z _ a-z`,
     # and a later character may also be `- . 0-9`. NON-ASCII is
     # conservative: Rails keeps most characters from U+00C0 up (`é`
-    # stays `é`), and here EVERY non-ASCII character becomes one "_"
-    # (`é` → `_`). Keeping one would mean copying a multi-byte
-    # character out of the String, which this byte walk cannot spell
-    # on every target (Rust indexes no `str` by an Integer, and
-    # `printable[b - 32, 1]` covers ASCII only); a lone "_" is always
-    # a safe name. Likewise "blank" is ASCII whitespace only: a name of
-    # Unicode spaces renders "_" per character where Rails gives "".
-    # The walk counts characters by their UTF-8 lead bytes (< 128 or
-    # >= 192) and skips continuation bytes.
+    # stays `é`), and here a non-ASCII character becomes "_" — one per
+    # character on CRuby, and on a target whose regexps match bytes or
+    # UTF-16 units, one per unit. Either way the name is plain ASCII.
+    # Keeping one would need Rails' Unicode ranges in a character class,
+    # which not every target's regexp engine reads the same. Likewise
+    # "blank" is ASCII whitespace only: a name of Unicode spaces renders
+    # "_"s where Rails gives "".
     #
-    # Same byte-walk shape as `erb_url_encode`, for the same reasons
-    # (no Regexp with these classes, `b.chr` or `str[i]` on every
-    # target). The first loop only checks, so a valid name — every name
-    # a template writes by hand — comes back without a new String.
-    def self.xml_name_escape(name)
-      printable = " !\"\#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
-      bytes = name.bytes
-      blank = true
-      safe = true
-      i = 0
-      while i < bytes.length
-        b = erb_url_byte(bytes, i)
-        blank = false unless b == 32 || (b >= 9 && b <= 13)
-        safe = false unless xml_name_byte?(b, i == 0)
-        i += 1
-      end
-      return "" if blank
-      return name if safe
-      out = ""
-      i = 0
-      while i < bytes.length
-        b = erb_url_byte(bytes, i)
-        if xml_name_byte?(b, i == 0)
-          out = out + printable[b - 32, 1].to_s
-        elsif b < 128 || b >= 192
-          out = out + "_"
-        end
-        i += 1
-      end
-      out
-    end
+    # The SHAPE is Rails' own (a gsub over the name, then the first
+    # character), spelled with what every target emits and runs on every
+    # page: a constant pattern, `gsub` with a String replacement, and
+    # `[i, n]` slices of an ASCII String. Not a byte walk: elixir has no
+    # `while`, and swift marks a call that can raise (`erb_url_byte`)
+    # `throws`, which an attribute loop's closure cannot call. No `\A`
+    # anchor either (JavaScript has none): the first character is
+    # sliced out and checked on its own. A valid name — every name a
+    # template writes by hand — is one scan and comes back as itself.
+    XML_NAME_INVALID_CHAR = /[^@:A-Z_a-z.0-9-]/.freeze
+    XML_NAME_INVALID_START = /[^@:A-Z_a-z]/.freeze
+    XML_NAME_BLANK_CHAR = /[\t\n\x0b\f\r ]/.freeze
 
-    # One byte of `xml_name_escape`'s ASCII rule: may byte `b` stand in
-    # an XML name, as its first character when `first`? Any non-ASCII
-    # byte answers false (see `xml_name_escape`).
-    def self.xml_name_byte?(b, first)
-      return true if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b == 95 || b == 58 || b == 64
-      return false if first
-      (b >= 48 && b <= 57) || b == 45 || b == 46
+    def self.xml_name_escape(name)
+      escaped = name.gsub(XML_NAME_INVALID_CHAR, "_")
+      return "" if escaped != name && name.gsub(XML_NAME_BLANK_CHAR, "") == ""
+      return escaped if escaped == ""
+      head = escaped[0, 1].to_s
+      fixed = head.gsub(XML_NAME_INVALID_START, "_")
+      return name if fixed == head && escaped == name
+      fixed + escaped[1, escaped.length - 1].to_s
     end
 
     # The TEXT of one attribute value, before escaping: `to_s` here,
