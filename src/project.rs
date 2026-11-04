@@ -13393,14 +13393,24 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
         // single-target driver, with the target's own pre-analysis
         // choices (`session::analyze_and_lower_for`). What it refused or
         // left behind is printed per target, as the CLI prints it.
+        // What `target_files`' own checks report (the `report_*` passes)
+        // is printed the same way: they push into a diagnostics scope,
+        // and without one each finding was dropped.
+        let emit_files = |target_app: &App| {
+            let (files, diags) = emit::diagnostics::scope(|| target_files(target_app, fixture, *target));
+            for d in diags {
+                eprintln!("roundhouse: {}: {}", target.as_str(), d.render(&target_app.sources));
+            }
+            files
+        };
         let files = match (target, &analyzed) {
-            (BuildTarget::Futamura, Some(analyzed)) => target_files(analyzed, fixture, *target)?,
+            (BuildTarget::Futamura, Some(analyzed)) => emit_files(analyzed)?,
             _ => {
                 let mut target_app = app.clone();
                 for d in crate::session::analyze_and_lower_for(&mut target_app, *target) {
                     eprintln!("roundhouse: {}: {}", target.as_str(), d.render(&target_app.sources));
                 }
-                target_files(&target_app, fixture, *target)?
+                emit_files(&target_app)?
             }
         };
         let name = target.as_str();
