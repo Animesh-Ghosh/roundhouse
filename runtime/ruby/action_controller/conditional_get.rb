@@ -91,7 +91,8 @@ module ActionController
       since = conditional_get_http_time(if_modified_since)
       return false if since.nil?
       modified = conditional_get_http_time(last_modified)
-      !modified.nil? && since >= modified
+      # Whole seconds, not Time#>=: an HTTP date carries no fraction, and the shared runtime types an Integer compare.
+      !modified.nil? && since.to_i >= modified.to_i
     end
 
     # Not a raise for a malformed date: Rack reads one as no header at all.
