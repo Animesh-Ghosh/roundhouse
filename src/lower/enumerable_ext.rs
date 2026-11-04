@@ -720,23 +720,30 @@ fn ground_string_truncate(expr: &mut Expr) -> bool {
     true
 }
 
+const TRUNCATE_RECV: &str = "__truncate_recv";
+
 /// `text.truncate_words(n)` and `text.truncate_words(n, omission: o)` on
 /// a String become `ActiveSupport.truncate_words(text, n, o_or_nil)`.
 /// The default separator only: Rails builds a Regexp from `separator:`,
 /// which the runtime does not do at run time, so that call stays as
 /// written.
 /// Not nil for an omitted `truncate_bytes` omission: Rails' default is `"…"`, and an explicit nil means none.
+/// An untyped receiver is bound and tested: a String takes the module
+/// function, anything else (nil, a program object) its own dispatch.
 fn ground_string_truncate_words(expr: &mut Expr, default_omission: Option<&str>) -> bool {
     let span = expr.span;
     let ExprNode::Send { recv, args, parenthesized, .. } = &mut *expr.node else {
         return false;
     };
-    // Not only a typed String: no other class answers these names, so an untyped receiver that runs at all is one.
     let untyped = match recv.as_ref().map(|r| r.ty.as_ref()) {
         Some(Some(Ty::Str)) => false,
         Some(None | Some(Ty::Untyped | Ty::Var { .. })) => true,
         _ => return false,
     };
+    // Not again: the fallback arm a guard left is this send on the guard's own binding.
+    if untyped && matches!(recv.as_ref().map(|r| &*r.node), Some(ExprNode::Var { name, .. }) if name.as_str() == TRUNCATE_RECV) {
+        return false;
+    }
     let omission = match args.as_slice() {
         [_] => {
             let mut lit = match default_omission {
@@ -761,11 +768,16 @@ fn ground_string_truncate_words(expr: &mut Expr, default_omission: Option<&str>)
     };
     let words_count = args[0].clone();
     let mut receiver = recv.take().expect("checked above");
+    // Not a bare cast: a nil or a program object that answers the name must keep its own dispatch, as in Rails.
+    let mut bound = None;
     if untyped {
+        let b = bind_once_as(receiver.span, &receiver, TRUNCATE_RECV, false);
         let rspan = receiver.span;
-        receiver = Expr::new(rspan, ExprNode::Cast { value: receiver, target_ty: Ty::Str });
+        receiver = Expr::new(rspan, ExprNode::Cast { value: b.read.clone(), target_ty: Ty::Str });
         receiver.ty = Some(Ty::Str);
+        bound = Some(b);
     }
+    let kept_args = args.clone();
     *recv = Some(Expr::new(
         span,
         ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
@@ -773,6 +785,30 @@ fn ground_string_truncate_words(expr: &mut Expr, default_omission: Option<&str>)
     *args = vec![receiver, words_count, omission];
     *parenthesized = true;
     expr.ty = Some(Ty::Str);
+    let Some(bound) = bound else { return true };
+    let mut fallback = expr.clone();
+    if let ExprNode::Send { recv, args, .. } = &mut *fallback.node {
+        *recv = Some(bound.read.clone());
+        *args = kept_args;
+    }
+    fallback.ty = Some(Ty::Untyped);
+    let string = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("String")] });
+    let mut test = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(bound.read),
+            method: Symbol::from("is_a?"),
+            args: vec![string],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    test.ty = Some(Ty::Bool);
+    let grounded = std::mem::replace(expr, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
+    let mut branch = Expr::new(span, ExprNode::If { cond: test, then_branch: grounded, else_branch: fallback });
+    branch.ty = Some(Ty::Untyped);
+    *expr = Expr::new(span, ExprNode::Seq { exprs: vec![bound.assign, branch] });
+    expr.ty = Some(Ty::Untyped);
     true
 }
 
@@ -1351,12 +1387,18 @@ mod tests {
         assert!(rewrite_node(&mut omission));
         assert_eq!(arg_kinds(&omission), ["text", "27", "~"]);
 
-        // An untyped receiver is the String no other class answers this for: grounded through a Cast.
+        // An untyped receiver: bound, a String to the module function through a Cast, else its own send.
         let mut untyped = on(vec![], None);
         assert!(rewrite_node(&mut untyped));
-        let ExprNode::Send { args, .. } = &*untyped.node else { panic!() };
+        let ExprNode::Seq { exprs } = &*untyped.node else { panic!() };
+        let ExprNode::If { then_branch, else_branch, .. } = &*exprs[1].node else { panic!() };
+        let ExprNode::Send { args, .. } = &*then_branch.node else { panic!() };
         assert!(matches!(&*args[0].node, ExprNode::Cast { target_ty: Ty::Str, .. }));
         assert_eq!(args[0].ty, Some(Ty::Str));
+        let mut kept = else_branch.clone();
+        assert!(matches!(&*kept.node, ExprNode::Send { method, .. } if method.as_str() == "truncate_words"));
+        // and the kept send is not guarded again.
+        assert!(!rewrite_node(&mut kept));
         // A typed non-String, or a separator: left as written.
         let mut integer = on(vec![], Some(Ty::Int));
         assert!(!rewrite_node(&mut integer));
