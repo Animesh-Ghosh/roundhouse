@@ -23,21 +23,23 @@ static PEAK: AtomicIsize = AtomicIsize::new(0);
 /// The high-water mark since the open windows last took it (see
 /// [`open_window`]). Never above `PEAK`.
 static SINCE: AtomicIsize = AtomicIsize::new(0);
-/// The live bytes that are [`live_delta`]'s copies. Peaks leave them out,
-/// whichever thread's allocation reaches the peak.
-static COPIES: AtomicIsize = AtomicIsize::new(0);
+/// The live bytes that count toward the peaks: `LIVE` without
+/// [`live_delta`]'s copies. One counter, so no reader combines two that
+/// another thread is between updating.
+static COUNTED: AtomicIsize = AtomicIsize::new(0);
 
 thread_local! {
     /// Set while this thread runs [`live_delta`]: what it allocates
     /// meanwhile is the census's own copy, not the compiler's.
     static MEASURING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// This thread's share of `COPIES`.
+    /// The bytes this thread's measuring copies hold, which `COUNTED`
+    /// leaves out until the outermost [`live_delta`] returns.
     static COPIED: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
 }
 
 /// The live bytes that count toward the peaks.
 fn counted() -> isize {
-    LIVE.load(Ordering::Relaxed) - COPIES.load(Ordering::Relaxed)
+    COUNTED.load(Ordering::Relaxed)
 }
 
 fn raise(now: isize) {
@@ -49,23 +51,17 @@ fn raise(now: isize) {
     }
 }
 
-/// The live heap changed by `by` bytes on this thread. A copy's bytes
-/// join `COPIES` before `LIVE` and leave it after, so no thread counts
-/// them toward a peak.
+/// The live heap changed by `by` bytes on this thread. A measuring
+/// copy's bytes stay out of `COUNTED`; any other change moves it, and a
+/// peak is raised from that one update's own result.
 fn changed(by: isize) {
+    LIVE.fetch_add(by, Ordering::Relaxed);
     if MEASURING.try_with(std::cell::Cell::get).unwrap_or(false) {
         let _ = COPIED.try_with(|copied| copied.set(copied.get() + by));
-        if by > 0 {
-            COPIES.fetch_add(by, Ordering::Relaxed);
-            LIVE.fetch_add(by, Ordering::Relaxed);
-        } else {
-            LIVE.fetch_add(by, Ordering::Relaxed);
-            COPIES.fetch_add(by, Ordering::Relaxed);
-        }
     } else {
-        LIVE.fetch_add(by, Ordering::Relaxed);
+        let now = COUNTED.fetch_add(by, Ordering::Relaxed) + by;
         if by > 0 {
-            raise(counted());
+            raise(now);
         }
     }
 }
@@ -169,8 +165,8 @@ pub fn live_delta<T>(make: impl FnOnce() -> T) -> i64 {
     if !outer {
         // What the copy left behind (a cache it filled) is the compiler's now.
         let kept = COPIED.with(|copied| copied.replace(0));
-        COPIES.fetch_sub(kept, Ordering::Relaxed);
-        raise(counted());
+        let now = COUNTED.fetch_add(kept, Ordering::Relaxed) + kept;
+        raise(now);
     }
     delta
 }
