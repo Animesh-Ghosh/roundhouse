@@ -31,6 +31,13 @@ pub struct KeyTable {
 }
 
 impl KeyTable {
+    /// The bytes the table and its `Arc` allocation hold.
+    #[cfg(feature = "memory-census")]
+    pub(crate) fn census_bytes(&self) -> i64 {
+        let arc = 2 * std::mem::size_of::<usize>() + std::mem::size_of::<KeyTable>();
+        (arc + self.text.capacity() + self.ends.capacity() * std::mem::size_of::<u32>()) as i64
+    }
+
     /// A table of `keys`, which must be sorted and unique.
     pub fn new<'a>(keys: impl IntoIterator<Item = &'a str>) -> KeyTable {
         let mut table = KeyTable::default();
@@ -125,6 +132,15 @@ impl Default for Entries {
 }
 
 impl Entries {
+    /// The shared key table, once frozen.
+    #[cfg(feature = "memory-census")]
+    pub(crate) fn key_table(&self) -> Option<&Arc<KeyTable>> {
+        match self {
+            Entries::Building(_) => None,
+            Entries::Frozen(frozen) => Some(&frozen.keys),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match self {
             Entries::Building(map) => map.is_empty(),
@@ -310,6 +326,15 @@ impl Default for Order {
 }
 
 impl Order {
+    /// The shared key table, once frozen.
+    #[cfg(feature = "memory-census")]
+    pub(crate) fn key_table(&self) -> Option<&Arc<KeyTable>> {
+        match self {
+            Order::Building(_) => None,
+            Order::Frozen(frozen) => Some(&frozen.keys),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match self {
             Order::Building(map) => map.is_empty(),

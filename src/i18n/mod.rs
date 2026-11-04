@@ -327,6 +327,22 @@ impl Catalog {
         self.fallbacks = fallbacks;
     }
 
+    /// The bytes this catalog and the other locales' catalogs hold. A
+    /// clone shares the frozen locales' key table rather than copying it,
+    /// so each distinct table is added once on top of the clone.
+    #[cfg(feature = "memory-census")]
+    pub(crate) fn census_bytes(&self) -> i64 {
+        let mut tables: Vec<&std::sync::Arc<table::KeyTable>> = Vec::new();
+        for catalog in std::iter::once(self).chain(self.others.iter()) {
+            for keys in catalog.entries.key_table().into_iter().chain(catalog.order.key_table()) {
+                if !tables.iter().any(|seen| std::sync::Arc::ptr_eq(seen, keys)) {
+                    tables.push(keys);
+                }
+            }
+        }
+        crate::memory_census::live_delta(|| self.clone()) + tables.iter().map(|keys| keys.census_bytes()).sum::<i64>()
+    }
+
     /// Packs this catalog and the other locales' catalogs against one
     /// shared, sorted table of their keys, once loading is done: the
     /// locales repeat nearly every key and node, and only the values

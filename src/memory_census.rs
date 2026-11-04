@@ -342,7 +342,7 @@ pub fn census(stage: &str, app: &crate::App) {
         ("content_helper_allowed_tags", live_delta(|| content_helper_allowed_tags.clone())),
         ("inferred_method_params", live_delta(|| inferred_method_params.clone())),
         ("binary_assets", live_delta(|| binary_assets.clone())),
-        ("i18n", live_delta(|| i18n.clone())),
+        ("i18n", i18n.census_bytes()),
         ("i18n_table", live_delta(|| i18n_table.clone())),
         ("i18n_runtime_sites", live_delta(|| i18n_runtime_sites.clone())),
         ("i18n_table_sites", live_delta(|| i18n_table_sites.clone())),

@@ -1544,6 +1544,7 @@ end
             }
             _ => panic!("ActiveRecord::SignedId::SALT must resolve to the runtime value"),
         }
+    }
 
     #[test]
     fn class_ancestry_keeps_prepended_modules_ahead_of_the_class() {
@@ -1564,7 +1565,6 @@ end
         let names: Vec<&str> = ancestry.iter().map(|class| class.0.as_str()).take(4).collect();
         assert_eq!(names, ["Loud", "Wrapped", "Quiet", "Speaker"]);
     }
-}
 
     /// A superclass or mixin path is one Rubydex reference spanning the
     /// whole `A::B`. Its answer is where an IR span covering that path
