@@ -1,0 +1,86 @@
+//! #1780: a non-block `content_tag name, content[, opts]` in a template,
+//! shared by the targets' runners. Strict targets kept it as a bare call
+//! the view module has no method for; it now reaches the runtime's
+//! `content_tag_html` with the content escaped, and is appended unescaped.
+//! `RENDERS` is what Rails 8.1.4 renders for each line of `VIEW`.
+
+use super::emit_and_run;
+
+pub const VIEW: &str = concat!(
+    "<%= content_tag :p, \"<b>x</b>\" %>\n",
+    "<% s = \"<i>\" + \"y\" %><%= content_tag :span, s, class: \"c\" %>\n",
+    "<%= content_tag :p, \"y\", class: [\"btn\", \"primary\"] %>\n",
+    "<%= content_tag :p, \"t\", id: \"a&b\" %>\n",
+    "<%= content_tag \"em\", \"e\" %>\n",
+    "<%= content_tag :p, \"y\", { \"data x\" => \"1\" } %>\n",
+    "<%= content_tag :p, link_to(\"a\", \"/x\") %>\n",
+    "<%= content_tag :p, \"<b>s</b>\".html_safe %>\n",
+    "<%= content_tag :p, raw(\"<i>r</i>\") %>\n",
+    "<%= content_tag :p, content_tag(:b, \"<n>\") %>\n",
+    "<%= content_tag :div, class: \"x\" do %>b<% end %>\n",
+);
+
+/// What Rails 8.1.4 renders for each line of `VIEW`: the content escaped
+/// unless it is html-safe (a helper's markup, `html_safe`, `raw`). The last
+/// line is #1771's block form with options, which Go didn't compile.
+pub const RENDERS: &[&str] = &[
+    "<p>&lt;b&gt;x&lt;/b&gt;</p>",
+    "<span class=\"c\">&lt;i&gt;y</span>",
+    "<p class=\"btn primary\">y</p>",
+    "<p id=\"a&amp;b\">t</p>",
+    "<em>e</em>",
+    "<p data_x=\"1\">y</p>",
+    "<p><a href=\"/x\">a</a></p>",
+    "<p><b>s</b></p>",
+    "<p><i>r</i></p>",
+    "<p><b>&lt;n&gt;</b></p>",
+    "<div class=\"x\">b</div>",
+];
+
+/// real-blog with `GET /probe` rendering `view`, and an integration test
+/// asserting each of `RENDERS` in its body.
+pub fn app(view: &str) -> emit_and_run::Overlay {
+    app_rendering(view, RENDERS)
+}
+
+/// `app` with the integration test asserting `renders` instead.
+pub fn app_rendering(view: &str, renders: &[&str]) -> emit_and_run::Overlay {
+    let asserts: String = renders
+        .iter()
+        .map(|r| format!("    assert_includes response.body, {}\n", ruby_str(r)))
+        .collect();
+    emit_and_run::real_blog()
+        .write("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n  def show\n  end\nend\n")
+        .write("app/views/probes/show.html.erb", view)
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe\", to: \"probes#show\", as: :probe\n")
+        .write(
+            "test/controllers/probes_controller_test.rb",
+            &format!(
+                "require \"test_helper\"\n\nclass ProbesControllerTest < ActionDispatch::IntegrationTest\n  test \"content tag renders\" do\n    get probe_url\n    assert_response :success\n{asserts}  end\nend\n"
+            ),
+        )
+}
+
+/// A script rendering `GET /probe` in the process and raising unless the
+/// body holds each of `RENDERS`, for a runner with no test framework
+/// (the Spinel binary).
+pub fn render_script() -> String {
+    let mut script = String::from(concat!(
+        "Db.configure(\":memory:\")\n",
+        "Schema.statements.each { |sql| Db.exec(sql) }\n",
+        "ActiveRecord.adapter = SqliteAdapter\n",
+        "controller = ProbesController.new\n",
+        "controller.request_method = \"GET\"\n",
+        "controller.process_action(:show)\n",
+        "body = controller.body\n",
+    ));
+    for r in RENDERS {
+        script.push_str(&format!("raise body unless body.include?({})\n", ruby_str(r)));
+    }
+    script.push_str("puts \"content_tag options rendered\"\n");
+    script
+}
+
+fn ruby_str(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
