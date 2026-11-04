@@ -3301,14 +3301,6 @@ fn target_files_inner(
         }
         None => app,
     };
-    let with_where_bounds;
-    let app = match crate::lower::where_bounds::lower_for_target(app, target) {
-        Some(lowered) => {
-            with_where_bounds = lowered;
-            &with_where_bounds
-        }
-        None => app,
-    };
     let with_eager_loads;
     let app = match crate::lower::eager_load::lower_for_target(app, target) {
         Some(lowered) => {

@@ -1,9 +1,9 @@
 use super::emit_and_run;
 
 /// A `where` value that is a Range of Times (lobsters' Link scope reads
-/// `created_at: 7.days.ago..`) is lowered to `ActiveRecord::Bounds` on the
-/// ruby family: Spinel keeps a Range's bounds in integer slots. The SQL is
-/// a Range's: `>=` for the start, `<` for an exclusive end.
+/// `created_at: 7.days.ago..`) stays the Range it is written as: Spinel
+/// builds a Range of Times. The SQL is a Range's: `>=` for the start, `<`
+/// for an exclusive end.
 fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog().edit(
         "app/models/article.rb",
@@ -54,7 +54,7 @@ fn a_time_range_condition_selects_like_rails() {
     let (emitted, errors) = app().emit(roundhouse::project::BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:#?}");
     let model = std::fs::read_to_string(emitted.join("app/models/article.rb")).expect("article.rb");
-    assert!(model.contains("ActiveRecord::Bounds.new("), "{model}");
+    assert!(!model.contains("Bounds"), "{model}");
     let run = app().run_ruby(ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("where time range passed"));

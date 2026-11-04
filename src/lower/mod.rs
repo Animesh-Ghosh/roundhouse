@@ -29,7 +29,6 @@ pub mod chain;
 pub mod controller;
 pub mod controller_test;
 pub mod nil_operand;
-pub mod where_bounds;
 pub mod fixtures;
 pub(crate) mod forwarding;
 pub mod functionalize;
