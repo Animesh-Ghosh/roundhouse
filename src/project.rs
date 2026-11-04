@@ -8695,6 +8695,23 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         }
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
+        // type_toolkit's `not_nil!` is a Kernel/NilClass reopen only the
+        // CRuby overlay carries (`ruby_overlay/runtime/type_toolkit.rb`).
+        // The assertion ingest synthesizes for `#: as !nil` already
+        // carries its own refusal.
+        if target != "jruby"
+            && let crate::expr::ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &*expr.node
+            && method.as_str() == "not_nil!"
+            && args.is_empty()
+            && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "not_nil!",
+                format!("`not_nil!` is type_toolkit's Kernel/NilClass extension, which only the CRuby tree carries, not {target}"),
+            );
+        }
         // Not the whole constant: spinel answers `Method` as a value, and refuses only a class test against it.
         if target == "spinel" {
             let names_method = |e: &crate::expr::Expr| matches!(&*e.node, crate::expr::ExprNode::Const { path }
