@@ -70,6 +70,7 @@ mod fixpoint_rounds;
 pub use fixpoint_rounds::{FixpointRounds, LoopEnd, Restamp};
 mod dirty_retype;
 mod typing_mode;
+mod unify_memo;
 mod parallel;
 mod inferred_types;
 pub mod inquiry;
@@ -144,7 +145,7 @@ pub struct Analyzer {
     /// `content_type.attachment?` as Bool on a `Str` receiver.
     inquirers: crate::det::HashSet<Symbol>,
     /// The app's translations, for `t` / `I18n.t` (see `crate::i18n`).
-    i18n: crate::i18n::Catalog,
+    i18n: std::sync::Arc<crate::i18n::Catalog>,
     /// `app/helpers` modules, whose bodies run in a view and take
     /// ActionView's `t`.
     helper_modules: crate::det::HashSet<ClassId>,
@@ -200,6 +201,8 @@ pub struct Analyzer {
     fixpoint_rounds: FixpointRounds,
     /// What the opt-in fixpoint canaries saw (`fixpoint_check`).
     fixpoint_checks: fixpoint_check::Checks,
+    /// Parameter rows and tables kept across fixpoint rounds (see `unify_memo`).
+    unify_memo: unify_memo::UnifyMemo,
 }
 
 use dirty_retype::{DirtyHints, InferenceSig, dirty_classes_for_retype};
@@ -1335,7 +1338,7 @@ impl Analyzer {
             host_folded: HashMap::default(),
             refined_action_bindings: HashMap::default(),
             inquirers: inquiry::inquirer_methods(app),
-            i18n: app.i18n.clone(),
+            i18n: std::sync::Arc::clone(&app.i18n),
             helper_modules: app.helper_method_index.values().cloned().collect(),
             helper_index: helper_instance_index(app),
             open_classes: open_classes::OpenClasses::of(app),
@@ -1350,6 +1353,7 @@ impl Analyzer {
             controller_action_meta_cache: HashMap::default(),
             fixpoint_rounds: FixpointRounds::default(),
             fixpoint_checks: fixpoint_check::Checks::default(),
+            unify_memo: unify_memo::UnifyMemo::default(),
         }
     }
 
@@ -1376,6 +1380,13 @@ impl Analyzer {
     /// completion) can *enumerate* what dispatch can *resolve*.
     pub fn class_registry(&self) -> &HashMap<ClassId, ClassInfo> {
         &self.classes
+    }
+
+    /// The class registry, with everything else the analysis kept
+    /// dropped: the lowerings read only the registry, and the rest (the
+    /// call-site, constant and signature caches) grows with the app.
+    pub fn into_class_registry(self) -> HashMap<ClassId, ClassInfo> {
+        self.classes
     }
 
     /// Parameter types unified from call sites for `class#method`
@@ -1427,6 +1438,7 @@ impl Analyzer {
     fn analyze_cached(&mut self, app: &mut App) {
         self.upload_array_fields = Some(crate::lower::controller_to_library::params::upload_array_fields(&app.controllers));
         self.fixpoint_checks = fixpoint_check::Checks::start();
+        self.unify_memo.reset();
         // Before any signature is copied. Anonymous `**` / `...` cannot
         // survive flattened keywords, and `check` does not lower.
         forwarding::restore_anonymous_forward_contracts(app, &self.const_resolver);
@@ -1581,6 +1593,10 @@ impl Analyzer {
             // returns. `dirty_classes_for_retype` is that handful plus
             // everything that reads it.
             let dirty = self.dirty_classes_for_retype(app, &prev_hints);
+            crate::timings::note(match &dirty {
+                Some(dirty) => format!("round {round}: retype frontier {} classes", dirty.len()),
+                None => format!("round {round}: retype frontier everything"),
+            });
             prev_hints = self.capture_dirty_hints();
             crate::timings::phase(format_args!("round {round}: typing passes"), || {
                 self.run_typing_passes(
@@ -6010,8 +6026,8 @@ impl Analyzer {
             owner: Option<&'a ClassId>, roots: Vec<(&'a Expr, bool)>,
         }
         let mut work = Vec::new();
-        let params_by_method = Self::param_shapes(app);
-        let defined = Self::defined_methods(app);
+        let tables = self.unify_memo.tables(|| (Self::param_shapes(app), Self::defined_methods(app)));
+        let (params_by_method, defined) = (&tables.0, &tables.1);
         // Class-level reverse call graph, rebuilt alongside the param
         // table off the same walk — each `collect_send_sites` call
         // already knows the class it is walking, so the edges are the
@@ -6120,7 +6136,10 @@ impl Analyzer {
             sites.extend(item_sites);
         }
         }
-        self.apply_param_sites(sites, &params_by_method, &defined);
+        let observations = self.param_observations(sites, params_by_method, defined);
+        let mut rows = std::mem::take(&mut self.inferred_params);
+        self.unify_memo.fold(scope, &mut rows, observations);
+        self.inferred_params = rows;
         // Production signatures keep their production callers' shape.
         // Fold before adding test-owned observations: a same-named test
         // helper must not feed an included production concern either.
@@ -6177,33 +6196,61 @@ impl Analyzer {
         params_by_method: &HashMap<ParamKey, ParamShape>,
         defined: &BTreeSet<ParamKey>,
     ) {
-        let mut observations = Vec::new();
+        let observations = self.param_observations(sites, params_by_method, defined);
+        fold_param_observations(&mut self.inferred_params, observations);
+    }
+
+    /// Each site placed on the `def` it reaches, in site order. Where a
+    /// site lands depends only on its class, method and receiver kind,
+    /// so that is worked out once per distinct triple.
+    fn param_observations(
+        &self,
+        sites: Vec<SendSite>,
+        params_by_method: &HashMap<ParamKey, ParamShape>,
+        defined: &BTreeSet<ParamKey>,
+    ) -> Vec<(ParamKey, Vec<Ty>)> {
+        let mut placed: HashMap<(ClassId, Symbol, SiteRecv), Option<ParamKey>> = HashMap::default();
+        let mut observations = Vec::with_capacity(sites.len());
         for (class_id, method, arg_tys, kw_tys, recv) in sites {
-            // `Job.perform_later(x)` runs `Job#perform(x)`: ActiveJob serializes the arguments and hands them back as they were.
-            let method = match method.as_str() {
-                "perform_later" | "perform_now"
-                    if recv == SiteRecv::Class
-                        && !defined.contains(&(class_id.clone(), method.clone(), MethodReceiver::Class))
-                        && self.classes.get(&class_id).is_some_and(|c| c.class_methods.contains_key(&method)) =>
-                {
-                    Symbol::from("perform")
+            let site = (class_id, method, recv);
+            let key = match placed.get(&site) {
+                Some(key) => key.clone(),
+                None => {
+                    let key = self.param_key(defined, site.0.clone(), site.1.clone(), recv);
+                    placed.insert(site, key.clone());
+                    key
                 }
-                _ => method,
             };
-            let want = if recv == SiteRecv::Instance { MethodReceiver::Instance } else { MethodReceiver::Class };
-            let on_side = self.inherited_param_owner(defined, class_id.clone(), &method, Some(want));
-            // Not the nearest `def` of either side: `Child.fetch` reaches `Grand.fetch` past a `Base#fetch`.
-            let class_id = if defined.contains(&(on_side.clone(), method.clone(), want)) {
-                on_side
-            } else {
-                self.inherited_param_owner(defined, class_id, &method, None)
-            };
-            let Some(side) = Self::param_side(defined, &class_id, &method, recv) else { continue };
-            let key = (class_id, method, side);
+            let Some(key) = key else { continue };
             let arg_tys = Self::place_keyword_args(params_by_method.get(&key), arg_tys, kw_tys);
             observations.push((key, arg_tys));
         }
-        fold_param_observations(&mut self.inferred_params, observations);
+        observations
+    }
+
+    /// The parameter row a call of `method` on `class_id` records under.
+    fn param_key(&self, defined: &BTreeSet<ParamKey>, class_id: ClassId, method: Symbol, recv: SiteRecv) -> Option<ParamKey> {
+        // `Job.perform_later(x)` runs `Job#perform(x)`: ActiveJob serializes the arguments and hands them back as they were.
+        let method = match method.as_str() {
+            "perform_later" | "perform_now"
+                if recv == SiteRecv::Class
+                    && !defined.contains(&(class_id.clone(), method.clone(), MethodReceiver::Class))
+                    && self.classes.get(&class_id).is_some_and(|c| c.class_methods.contains_key(&method)) =>
+            {
+                Symbol::from("perform")
+            }
+            _ => method,
+        };
+        let want = if recv == SiteRecv::Instance { MethodReceiver::Instance } else { MethodReceiver::Class };
+        let on_side = self.inherited_param_owner(defined, class_id.clone(), &method, Some(want));
+        // Not the nearest `def` of either side: `Child.fetch` reaches `Grand.fetch` past a `Base#fetch`.
+        let class_id = if defined.contains(&(on_side.clone(), method.clone(), want)) {
+            on_side
+        } else {
+            self.inherited_param_owner(defined, class_id, &method, None)
+        };
+        let side = Self::param_side(defined, &class_id, &method, recv)?;
+        Some((class_id, method, side))
     }
 
     /// Every `(class, method)` the app defines, by name.
@@ -8147,22 +8194,41 @@ pub(crate) fn fold_param_observations(
 ) {
     let mut touched: BTreeSet<ParamKey> = BTreeSet::new();
     for (key, tys) in observations {
-        let entry = rows.entry(key.clone()).or_default();
-        if entry.len() < tys.len() {
-            entry.resize(tys.len(), Ty::Var { var: crate::ident::TyVar(0) });
-        }
-        for (slot, observed) in entry.iter_mut().zip(tys.into_iter()) {
-            *slot = unify_param_ty(std::mem::replace(slot, Ty::Bottom), observed);
-        }
+        join_param_observation(rows.entry(key.clone()).or_default(), tys);
         touched.insert(key);
     }
     for key in touched {
         if let Some(row) = rows.get_mut(&key) {
-            for slot in row.iter_mut() {
-                *slot = fixpoint_bound::bound(std::mem::replace(slot, Ty::Bottom));
-            }
+            bound_param_row(row);
         }
     }
+}
+
+/// Join one call's argument types into a parameter row.
+fn join_param_observation(entry: &mut Vec<Ty>, tys: Vec<Ty>) {
+    if entry.len() < tys.len() {
+        entry.resize(tys.len(), Ty::Var { var: crate::ident::TyVar(0) });
+    }
+    for (slot, observed) in entry.iter_mut().zip(tys) {
+        *slot = unify_param_ty(std::mem::replace(slot, Ty::Bottom), observed);
+    }
+}
+
+fn bound_param_row(row: &mut [Ty]) {
+    for slot in row.iter_mut() {
+        *slot = fixpoint_bound::bound(std::mem::replace(slot, Ty::Bottom));
+    }
+}
+
+/// The row [`fold_param_observations`] gives one key with these
+/// observations and no row before them.
+fn fold_param_row(observations: &[Vec<Ty>]) -> Vec<Ty> {
+    let mut row = Vec::new();
+    for tys in observations {
+        join_param_observation(&mut row, tys.clone());
+    }
+    bound_param_row(&mut row);
+    row
 }
 
 /// Join a stored param type with a freshly observed argument type.
@@ -9078,7 +9144,7 @@ fn keyword_splat(value: &Expr) -> Option<(Vec<(Symbol, Ty)>, Ty)> {
 // Keyed by side, not by `(class, name)`: `def self.get` and `def get` are two methods whose rows must not mix.
 pub(super) type ParamKey = (ClassId, Symbol, MethodReceiver);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum SiteRecv {
     Instance,
     Class,
@@ -11196,4 +11262,51 @@ mod finder_reopening_tests {
     fn source_finder_reopenings_are_ambiguous_in_both_model_orders() { check(false); }
     #[test]
     fn source_finder_reopenings_are_ambiguous_in_both_library_orders() { check(true); }
+}
+
+#[cfg(feature = "memory-census")]
+impl Analyzer {
+    /// Drop the analyzer one field at a time and report what each held
+    /// (`ROUNDHOUSE_MEMORY_CENSUS=1`), keeping the class registry the
+    /// lowerings read, as [`Analyzer::into_class_registry`] does; its size
+    /// is measured on a copy. Destructured without `..`, so a new field has
+    /// to be listed here; `Copy` fields own no heap.
+    pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
+        let Analyzer { classes, upload_array_fields, materialized_associations, inferred_params, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, unify_memo } = self;
+        let mut freed: Vec<(&str, i64)> = vec![
+            ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
+            ("upload_array_fields", crate::memory_census::freed_by(|| drop(upload_array_fields))),
+            ("materialized_associations", crate::memory_census::freed_by(|| drop(materialized_associations))),
+            ("inferred_params", crate::memory_census::freed_by(|| drop(inferred_params))),
+            ("declared_signatures", crate::memory_census::freed_by(|| drop(declared_signatures))),
+            ("adapter", crate::memory_census::freed_by(|| drop(adapter))),
+            ("concern_folded", crate::memory_census::freed_by(|| drop(concern_folded))),
+            ("host_folded", crate::memory_census::freed_by(|| drop(host_folded))),
+            ("inquirers", crate::memory_census::freed_by(|| drop(inquirers))),
+            ("i18n", crate::memory_census::freed_by(|| drop(i18n))),
+            ("helper_modules", crate::memory_census::freed_by(|| drop(helper_modules))),
+            ("helper_index", crate::memory_census::freed_by(|| drop(helper_index))),
+            ("open_classes", crate::memory_census::freed_by(|| drop(open_classes))),
+            ("refined_action_bindings", crate::memory_census::freed_by(|| drop(refined_action_bindings))),
+            ("const_resolver", crate::memory_census::freed_by(|| drop(const_resolver))),
+            ("source_indexed", crate::memory_census::freed_by(|| drop(source_indexed))),
+            ("typed_constants", crate::memory_census::freed_by(|| drop(typed_constants))),
+            ("data_factories", crate::memory_census::freed_by(|| drop(data_factories))),
+            ("class_factories", crate::memory_census::freed_by(|| drop(class_factories))),
+            ("data_factories_without_custom_initialize", crate::memory_census::freed_by(|| drop(data_factories_without_custom_initialize))),
+            ("view_seeds", crate::memory_census::freed_by(|| drop(view_seeds))),
+            ("callers_by_target", crate::memory_census::freed_by(|| drop(callers_by_target))),
+            ("controller_action_meta_cache", crate::memory_census::freed_by(|| drop(controller_action_meta_cache))),
+            ("fixpoint_rounds", crate::memory_census::freed_by(|| drop(fixpoint_rounds))),
+            ("fixpoint_checks", crate::memory_census::freed_by(|| drop(fixpoint_checks))),
+            ("unify_memo", crate::memory_census::freed_by(|| drop(unify_memo))),
+        ];
+        let total: i64 = freed.iter().map(|(_, bytes)| bytes).sum();
+        freed.sort_by_key(|(name, bytes)| (-bytes, *name));
+        for (name, bytes) in freed.iter().filter(|(_, bytes)| *bytes >= 1_000_000) {
+            crate::memory_census::note("analyzer", format_args!("field {name}: {:.1}MB", *bytes as f64 / 1e6));
+        }
+        crate::memory_census::note("analyzer", format_args!("total {:.1}MB", total as f64 / 1e6));
+        classes
+    }
 }
