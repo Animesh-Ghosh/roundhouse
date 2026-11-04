@@ -806,6 +806,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         Some(taken) => out.extend(taken.iter().cloned()),
         None => out.extend(diagnose_helper_modules(app)),
     }
+    out.extend(app.unknown_association_targets.iter().cloned());
     for class in &app.library_classes {
         for initializer in &class.class_ivar_initializers {
             diagnose_expr(initializer, &mut out);

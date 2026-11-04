@@ -10,6 +10,8 @@
 //! Every answer in the tables is actionpack 8.1.4's for the same app
 //! (`rails_answers_the_tables`), except the one `DIVERGENT` lists.
 
+#[path = "support/scratch.rs"]
+mod scratch;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
@@ -382,8 +384,7 @@ fn rails_answers_the_tables() {
         return;
     }
     for variant in [Variant::PathParams, Variant::PlainKey, Variant::None] {
-        let root = std::env::temp_dir().join(format!("roundhouse-default-url-options-{}-{}", std::process::id(), variant.name()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = scratch::dir(&format!("roundhouse-default-url-options-{}", variant.name()));
         for (path, body) in files(variant) {
             let p = root.join(path);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
