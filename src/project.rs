@@ -8627,25 +8627,46 @@ fn unrolled_define(app: &App, name: crate::span::Span) -> bool {
     app.models.iter().flat_map(|m| m.methods()).chain(app.library_classes.iter().flat_map(|lc| lc.methods.iter())).any(|m| m.name_span == name)
 }
 
+/// A call of `not_nil!` with no arguments, no block and no diagnostic
+/// already on it: its receiver, `None` for a call with none.
+fn not_nil_call(expr: &crate::expr::Expr) -> Option<Option<&crate::expr::Expr>> {
+    match &*expr.node {
+        crate::expr::ExprNode::Send { recv, method, args, block: None, .. }
+            if method.as_str() == "not_nil!"
+                && args.is_empty()
+                && crate::expr::ExprCold::diagnostic(&expr.cold).is_none() =>
+        {
+            Some(recv.as_ref())
+        }
+        _ => None,
+    }
+}
+
 /// type_toolkit's `not_nil!` is a Kernel/NilClass reopen only the CRuby
 /// overlay carries (`ruby_overlay/runtime/type_toolkit.rb`), so `target`
-/// refuses a call of it. The assertion ingest synthesizes for
-/// `#: as !nil` already carries its own refusal. A receiver whose class
-/// defines its own `not_nil!` calls that, which every tree carries.
+/// refuses a call of it.
+fn refuse_not_nil(expr: &crate::expr::Expr, target: &str) {
+    emit::diagnostics::report_unsupported(
+        expr.span,
+        target,
+        "not_nil!",
+        format!("`not_nil!` is type_toolkit's Kernel/NilClass extension, which only the CRuby tree carries, not {target}"),
+    );
+}
+
+/// Refuse a typed `x.not_nil!`, unless `x` is an instance of a class that
+/// defines its own, which every tree carries; a class object does not
+/// answer an instance method. A union of such classes stays refused: the
+/// TypeScript emit reads a no-argument call on a union as a property. A
+/// call with no receiver is analysis's to refuse. The assertion ingest
+/// synthesizes for `#: as !nil` already carries its own refusal.
 fn report_not_nil(expr: &crate::expr::Expr, app: &App, target: &str) {
-    if let crate::expr::ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node
-        && method.as_str() == "not_nil!"
-        && args.is_empty()
-        && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
-        && !matches!(&recv.ty, Some(crate::ty::Ty::Class { id, .. })
-            if crate::analyze::source_instance_method(app, id, "not_nil!"))
+    if let Some(Some(recv)) = not_nil_call(expr)
+        && !(recv.decisions & crate::expr::CLASS_OBJECT_VALUE == 0
+            && matches!(&recv.ty, Some(crate::ty::Ty::Class { id, .. })
+                if crate::analyze::source_instance_method(app, id, "not_nil!")))
     {
-        emit::diagnostics::report_unsupported(
-            expr.span,
-            target,
-            "not_nil!",
-            format!("`not_nil!` is type_toolkit's Kernel/NilClass extension, which only the CRuby tree carries, not {target}"),
-        );
+        refuse_not_nil(expr, target);
     }
 }
 
@@ -8691,13 +8712,39 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         }
     }
     if target == BuildTarget::Roda {
-        // Roda copies method bodies over verbatim but carries no CRuby
-        // overlay, so nothing in its tree defines `not_nil!` either.
-        fn not_nil_calls(expr: &crate::expr::Expr, app: &App) {
-            report_not_nil(expr, app, "roda");
-            expr.node.for_each_child(&mut |child| not_nil_calls(child, app));
+        // Roda copies model methods, plain action statements and views
+        // over verbatim but carries no CRuby overlay, so nothing in its
+        // tree defines `not_nil!` either. It runs no analysis, so no
+        // receiver is typed: only a call on `self` (or with no receiver)
+        // in an instance method of a class that defines its own is known
+        // to reach that one.
+        fn not_nil_calls(expr: &crate::expr::Expr, owns: bool) {
+            if let Some(recv) = not_nil_call(expr)
+                && !(owns && recv.is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef)))
+            {
+                refuse_not_nil(expr, "roda");
+            }
+            expr.node.for_each_child(&mut |child| not_nil_calls(child, owns));
         }
-        crate::lower::for_each_emit_body_ref(app, &mut |expr| not_nil_calls(expr, app));
+        for model in &app.models {
+            let owns = crate::analyze::source_instance_method(app, &model.name, "not_nil!");
+            for method in model.methods() {
+                let owns = owns && method.receiver == crate::dialect::MethodReceiver::Instance;
+                not_nil_calls(&method.body, owns);
+                for default in method.params.iter().filter_map(|param| param.default.as_ref()) {
+                    not_nil_calls(default, owns);
+                }
+            }
+        }
+        for controller in &app.controllers {
+            let owns = crate::analyze::source_instance_method(app, &controller.name, "not_nil!");
+            for action in controller.actions() {
+                not_nil_calls(&action.body, owns);
+            }
+        }
+        for view in &app.views {
+            not_nil_calls(&view.body, false);
+        }
     }
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
         return;

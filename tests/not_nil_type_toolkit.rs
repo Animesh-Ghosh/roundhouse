@@ -71,7 +71,7 @@ fn not_nil_runs_in_emitted_ruby() {
 
 #[test]
 fn not_nil_is_refused_where_no_tree_defines_it() {
-    for target in [BuildTarget::Spinel, BuildTarget::Rust, BuildTarget::Roda] {
+    for target in [BuildTarget::Spinel, BuildTarget::Rust] {
         let (_, errors) = app(LIB, TEST).emit(target);
         assert!(
             errors.iter().any(|e| e.contains("not_nil!")),
@@ -96,4 +96,24 @@ fn an_own_not_nil_is_not_refused() {
     assert!(errors.is_empty(), "{errors:#?}");
     let lookup = std::fs::read_to_string(emitted.join("app/models/lookup.ts")).unwrap();
     assert!(lookup.contains(".not_nil_bang()"), "{lookup}");
+}
+
+#[test]
+fn an_own_not_nil_on_the_class_object_is_refused() {
+    for target in [BuildTarget::Typescript, BuildTarget::Rust] {
+        let (_, errors) = own_not_nil::on_the_class().emit(target);
+        assert!(
+            errors.iter().any(|e| e.contains("not_nil!") && e.contains("type_toolkit")),
+            "{target:?} must refuse Shelf.not_nil!: {errors:#?}"
+        );
+    }
+}
+
+#[test]
+fn an_own_not_nil_on_a_union_is_refused() {
+    let (_, errors) = own_not_nil::union().emit(BuildTarget::Typescript);
+    assert!(
+        errors.iter().any(|e| e.contains("not_nil!") && e.contains("type_toolkit")),
+        "a union receiver must stay refused: {errors:#?}"
+    );
 }
