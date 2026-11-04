@@ -581,16 +581,18 @@ fn emit_link_to_inline(
 /// A `link_to` / `button_to` label, escaped once. Its helpers are lowered
 /// as the template's own are, so a `pluralize(…)` or `truncate(…)` label
 /// reaches its runtime call on every target; one that lowers to
-/// `html_escape(…)` already is escape-correct and is taken as it is. Else
-/// the same `.to_s` the bare-interpolation path applies: the label can be
-/// a nullable column read (`link_to article.title, …`), and `html_escape`
-/// is deliberately monomorphic `(String) -> String`. `nil.to_s == ""` is
-/// what Rails renders.
+/// `ActionView::ViewHelpers.html_escape(…)` already is escape-correct and is
+/// taken as it is. Only that receiver: an app's own `html_escape` may not
+/// escape. Else the same `.to_s` the bare-interpolation path applies: the
+/// label can be a nullable column read (`link_to article.title, …`), and
+/// `html_escape` is deliberately monomorphic `(String) -> String`.
+/// `nil.to_s == ""` is what Rails renders.
 fn escaped_label(text: &Expr, ctx: &ViewCtx) -> Expr {
     let lowered = rewrite_helpers_in_expr(text, ctx);
     let pre_escaped = matches!(&*lowered.node,
         ExprNode::Send { recv: Some(r), method, args, .. }
-            if method.as_str() == "html_escape" && args.len() == 1 && matches!(&*r.node, ExprNode::Const { .. }));
+            if method.as_str() == "html_escape" && args.len() == 1
+                && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"])));
     if pre_escaped {
         lowered
     } else {
