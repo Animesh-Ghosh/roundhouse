@@ -1,7 +1,9 @@
 //! `klass.at(...)` on a subclass of `Time` builds that subclass, as
 //! tzinfo's `Timestamp#new_time(klass = Time)` does with `TimeWithOffset`.
 //! Typed as a plain Time, the method's RBS seed said `-> Time` and Spinel
-//! refused the subclass the body returns.
+//! refused the subclass the body returns. The other constructors
+//! (`utc`, `local`) and the methods that answer the receiver (`utc`,
+//! `localtime`) keep the subclass too, so its own methods still resolve.
 
 use super::emit_and_run;
 
@@ -20,11 +22,17 @@ const PROBE: &str = r##"module StampProbe
   def self.both
     [make.utc.year, make(StampTime).utc.year, make(StampTime).is_a?(StampTime), make.is_a?(StampTime)]
   end
+
+  def self.kept
+    [make(StampTime).utc.stamped?, StampTime.utc(1970, 1, 2).stamped?, StampTime.utc(1970, 1, 2).day, StampTime.at(0).localtime.stamped?]
+  end
 end
 "##;
 
 const SCRIPT: &str = r##"got = StampProbe.both
 raise got.inspect unless got == [1970, 1970, true, false]
+kept = StampProbe.kept
+raise kept.inspect unless kept == [true, true, 2, true]
 puts "time subclass constructor passed"
 "##;
 
