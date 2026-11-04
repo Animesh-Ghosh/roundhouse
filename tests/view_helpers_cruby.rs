@@ -85,3 +85,46 @@ puts "ALL OK"
     );
     assert!(out.status.success(), "driver exited {:?}", out.status.code());
 }
+
+/// The overlay's `submit_tag` and `form_tag` (action_view_form_builder_extras.rb)
+/// write option names through `xml_name_escape`, as Rails' `tag_option`
+/// does. The attribute texts are MEASURED against actionview 8.1.4
+/// (`submit_tag("Go", data: { "x onmouseover=alert(1) z": "v" }, "a b=c":
+/// "w")`, `form_tag("/s", "a b=c": "w")`); the overlay orders the attributes
+/// differently from Rails, so each is checked on its own.
+#[test]
+fn cruby_submit_tag_and_form_tag_escape_attribute_names() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r##"
+require_relative "runtime/ruby/action_view/view_helpers"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/action_view_helpers_cruby"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/action_view_form_builder_extras"
+VH = ActionView::ViewHelpers
+# form_tag's CSRF input reads the controller layer, which is not loaded here.
+VH.define_singleton_method(:csrf_token_hidden_input) { "" }
+
+def expect(out, want)
+  raise "missing #{want.inspect} in\n  #{out}" unless out.include?(want)
+end
+
+submit = VH.submit_tag("Go", data: { "x onmouseover=alert(1) z": "v" }, "a b=c": "w")
+expect(submit, %( data-x_onmouseover_alert_1__z="v"))
+expect(submit, %( a_b_c="w"))
+form = VH.form_tag("/s", "a b=c": "w")
+expect(form, %( a_b_c="w"))
+puts "ALL OK"
+"##;
+    let out = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(root)
+        .output()
+        .expect("ruby is on PATH");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "attribute names were not escaped\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}
