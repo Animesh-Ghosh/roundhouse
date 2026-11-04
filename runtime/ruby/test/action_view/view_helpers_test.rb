@@ -283,6 +283,32 @@ class ViewHelpersTest < Minitest::Test
     assert_equal %(<span class="badge">hi</span>), out
   end
 
+  # A template's `content_tag … do … end`: the captured markup is written
+  # as it is (Rails 8.1.4 renders `<section class="boxed">inside2</section>`).
+  def test_content_tag_html_writes_the_captured_markup
+    assert_equal %(<section class="boxed"><b>inside</b></section>), ViewHelpers.content_tag_html(:section, "<b>inside</b>", class: "boxed")
+    assert_equal "<aside>direct</aside>", ViewHelpers.content_tag_html(:aside, "direct")
+  end
+
+  # Rails writes a newline ahead of a textarea's content.
+  def test_content_tag_textarea_content_follows_a_newline
+    assert_equal "<textarea>\n\nhi</textarea>", ViewHelpers.content_tag(:textarea, "\nhi")
+    assert_equal "<textarea>\nhi</textarea>", ViewHelpers.content_tag_html(:textarea, "hi")
+  end
+
+  # Rails' `ensure_valid_html5_tag_name`: a name that is not a letter and
+  # then no whitespace, `/` or `>` raises rather than writing past the tag.
+  def test_content_tag_rejects_a_name_that_is_not_a_tag
+    assert_raises(ArgumentError) { ViewHelpers.content_tag(:_p, "y") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_html(:_p, "y") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_name("p onclick=x") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_name("a/b") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_name("a>b") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_name("1p") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_name("") }
+    assert_equal "my-el", ViewHelpers.content_tag_name("my-el")
+  end
+
   # Every expectation below is the byte-for-byte output of Rails 8.1's
   # own `mail_to` for the same call, apart from attribute ORDER (Rails
   # puts the html options before the href; `link_to` above follows
