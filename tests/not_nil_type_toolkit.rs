@@ -8,6 +8,8 @@
 //! so the test reads it by name.
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/own_not_nil.rs"]
+mod own_not_nil;
 
 use roundhouse::project::BuildTarget;
 
@@ -76,4 +78,22 @@ fn not_nil_is_refused_where_no_tree_defines_it() {
             "{target:?} must refuse not_nil!: {errors:#?}"
         );
     }
+}
+
+/// A class's own `not_nil!` is not refused (the run is
+/// `typescript_toolchain::real_blog_own_not_nil_runs_under_tsx`).
+#[test]
+fn an_own_not_nil_runs_in_emitted_ruby() {
+    let run = own_not_nil::overlay()
+        .run_ruby("require \"json\"\nputs JSON.generate([Lookup.read(\"ada\"), Lookup.read(nil)])\n");
+    run.assert_passes();
+    assert_eq!(run.stdout.trim(), own_not_nil::SUMMARY);
+}
+
+#[test]
+fn an_own_not_nil_is_not_refused() {
+    let (emitted, errors) = own_not_nil::overlay().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let lookup = std::fs::read_to_string(emitted.join("app/models/lookup.ts")).unwrap();
+    assert!(lookup.contains(".not_nil_bang()"), "{lookup}");
 }
