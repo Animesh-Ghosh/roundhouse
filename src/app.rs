@@ -625,6 +625,11 @@ pub struct App {
     /// computed from the bodies as they stand.
     #[serde(skip)]
     pub helper_diagnostics: Option<Vec<crate::diagnostic::Diagnostic>>,
+    /// Associations whose class nothing in the program defines (a gem's
+    /// model: `has_many :widgets, class_name: "Vendor::Widget"`), refused
+    /// as naming that constant is; set by analysis.
+    #[serde(skip)]
+    pub unknown_association_targets: Vec<crate::diagnostic::Diagnostic>,
     /// Every `app/helpers/**/*_helper.rb` module, including one whose
     /// method names a later helper all redefines (and so owns in
     /// `helper_method_index`).
@@ -1294,6 +1299,7 @@ impl App {
             concern_spliced_actions: HashMap::default(),
             unreachable_views: BTreeSet::new(),
             helper_diagnostics: None,
+            unknown_association_targets: Vec::new(),
             helper_modules: BTreeSet::new(),
             concern_spliced_class_methods: HashMap::default(),
             concern_class_side_spans: crate::det::HashSet::default(),
