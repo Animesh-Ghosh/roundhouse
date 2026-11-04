@@ -69,7 +69,7 @@ fn not_nil_runs_in_emitted_ruby() {
 
 #[test]
 fn not_nil_is_refused_where_no_tree_defines_it() {
-    for target in [BuildTarget::Spinel, BuildTarget::Rust] {
+    for target in [BuildTarget::Spinel, BuildTarget::Rust, BuildTarget::Roda] {
         let (_, errors) = app(LIB, TEST).emit(target);
         assert!(
             errors.iter().any(|e| e.contains("not_nil!")),

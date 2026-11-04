@@ -8627,6 +8627,25 @@ fn unrolled_define(app: &App, name: crate::span::Span) -> bool {
     app.models.iter().flat_map(|m| m.methods()).chain(app.library_classes.iter().flat_map(|lc| lc.methods.iter())).any(|m| m.name_span == name)
 }
 
+/// type_toolkit's `not_nil!` is a Kernel/NilClass reopen only the CRuby
+/// overlay carries (`ruby_overlay/runtime/type_toolkit.rb`), so `target`
+/// refuses a call of it. The assertion ingest synthesizes for
+/// `#: as !nil` already carries its own refusal.
+fn report_not_nil(expr: &crate::expr::Expr, target: &str) {
+    if let crate::expr::ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &*expr.node
+        && method.as_str() == "not_nil!"
+        && args.is_empty()
+        && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
+    {
+        emit::diagnostics::report_unsupported(
+            expr.span,
+            target,
+            "not_nil!",
+            format!("`not_nil!` is type_toolkit's Kernel/NilClass extension, which only the CRuby tree carries, not {target}"),
+        );
+    }
+}
+
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     // Column readers are synthesized inside the emitter, after this walk,
     // so a Send match never sees them. The schema column is the fact.
@@ -8668,6 +8687,15 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             }
         }
     }
+    if target == BuildTarget::Roda {
+        // Roda copies method bodies over verbatim but carries no CRuby
+        // overlay, so nothing in its tree defines `not_nil!` either.
+        fn not_nil_calls(expr: &crate::expr::Expr) {
+            report_not_nil(expr, "roda");
+            expr.node.for_each_child(&mut |child| not_nil_calls(child));
+        }
+        crate::lower::for_each_emit_body_ref(app, &mut |expr| not_nil_calls(expr));
+    }
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
         return;
     }
@@ -8695,22 +8723,8 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         }
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
-        // type_toolkit's `not_nil!` is a Kernel/NilClass reopen only the
-        // CRuby overlay carries (`ruby_overlay/runtime/type_toolkit.rb`).
-        // The assertion ingest synthesizes for `#: as !nil` already
-        // carries its own refusal.
-        if target != "jruby"
-            && let crate::expr::ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &*expr.node
-            && method.as_str() == "not_nil!"
-            && args.is_empty()
-            && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
-        {
-            emit::diagnostics::report_unsupported(
-                expr.span,
-                target,
-                "not_nil!",
-                format!("`not_nil!` is type_toolkit's Kernel/NilClass extension, which only the CRuby tree carries, not {target}"),
-            );
+        if target != "jruby" {
+            report_not_nil(expr, target);
         }
         // Not the whole constant: spinel answers `Method` as a value, and refuses only a class test against it.
         if target == "spinel" {

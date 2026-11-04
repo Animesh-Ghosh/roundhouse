@@ -25,7 +25,7 @@ fn refusals(action: &str, target: BuildTarget) -> Vec<String> {
 
 #[test]
 fn universal_not_nil_bang_is_refused() {
-    for target in [BuildTarget::Spinel, BuildTarget::Rust, BuildTarget::Typescript] {
+    for target in [BuildTarget::Spinel, BuildTarget::Rust, BuildTarget::Typescript, BuildTarget::Roda] {
         let diags = refusals("    name = User.first.name\n    name.not_nil!.upcase\n    [name].compact.first.not_nil!.strip", target);
         assert!(diags.iter().any(|d| d.contains("not_nil!")), "{target:?}: {diags:?}");
     }

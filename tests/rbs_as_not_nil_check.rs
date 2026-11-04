@@ -16,6 +16,25 @@ fn app() -> emit_and_run::Overlay {
         .write("lib/roster.rb", r#"class Roster
   def initialize(names)
     @names = names
+    @calls = 0
+  end
+
+  def calls
+    @calls
+  end
+
+  def next_name
+    @calls += 1
+    @names.first
+  end
+
+  def counted_first
+    name = next_name #: as !nil
+    name
+  end
+
+  def counted_value
+    next_name #: as !nil
   end
 
   def first_name
@@ -39,6 +58,16 @@ class RosterTest < ActiveSupport::TestCase
     assert_nil Roster.new(["ada"]).lookup("bob")
     error = assert_raises(NoMethodError) { Roster.new([]).first_name }
     assert_match(/undefined method 'upcase' for nil/, error.message)
+  end
+  test "the asserted value is evaluated once" do
+    [["ada"], []].each do |names|
+      written = Roster.new(names)
+      assert_equal names.first, written.counted_first
+      assert_equal 1, written.calls
+      value = Roster.new(names)
+      assert_equal names.first, value.counted_value
+      assert_equal 1, value.calls
+    end
   end
 end
 "#)
