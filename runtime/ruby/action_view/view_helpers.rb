@@ -1205,7 +1205,7 @@ module ActionView
     # lands as C# `object`, and C# rejects any non-null default on a
     # reference-typed parameter (CS1763); `to_s` maps nil → "".
     def self.content_tag(name, content = nil, opts = EMPTY_HTML_OPTS)
-      n = name.to_s
+      n = content_tag_name(name.to_s)
       "<#{n}#{render_attrs(opts.to_h)}>#{content_tag_pre(n)}#{html_escape(content.to_s)}</#{n}>"
     end
 
@@ -1213,8 +1213,29 @@ module ActionView
     # captured markup, already escaped, is the content (Rails'
     # `capture`), so it is written as it is.
     def self.content_tag_html(name, html, opts = EMPTY_HTML_OPTS)
-      n = name.to_s
+      n = content_tag_name(name.to_s)
       "<#{n}#{render_attrs(opts.to_h)}>#{content_tag_pre(n)}#{html}</#{n}>"
+    end
+
+    # Rails' `ensure_valid_html5_tag_name` (`/\A[a-zA-Z][^\s\/>]*\z/`):
+    # a letter, then no whitespace, `/` or `>`, else ArgumentError, so a
+    # dynamic name never writes past the tag. Bytes, not the Regexp (no
+    # portable match?).
+    def self.content_tag_name(name)
+      bytes = name.bytes
+      ok = bytes.length > 0
+      i = 0
+      while i < bytes.length
+        b = erb_url_byte(bytes, i)
+        if i == 0
+          ok = (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+        elsif b == 32 || (b >= 9 && b <= 13) || b == 47 || b == 62
+          ok = false
+        end
+        i += 1
+      end
+      raise ArgumentError, "Invalid HTML5 tag name: #{name}" unless ok
+      name
     end
 
     # Rails' `PRE_CONTENT_STRINGS`: a textarea's content follows a

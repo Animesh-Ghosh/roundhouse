@@ -4,7 +4,8 @@
 //! (`oracle.rb`): the block's markup is the content, the options its
 //! attributes. A `content_tag` inside a `cache` block inside another keeps
 //! the outer content, and the name and options are read before the block
-//! runs (`cr_oracle.rb`).
+//! runs, a call in them included, and a read the block's own block
+//! binds is that block's (`cr_oracle.rb`, `cr_oracle2.rb`).
 
 use super::emit_and_run;
 
@@ -20,6 +21,8 @@ fn app() -> emit_and_run::Overlay {
             "<%= content_tag :section do %>before<% cache \"k\" do %><%= content_tag :p do %>in<% end %><% end %>after<% end %>\n",
             "<% css = \"a\" %><%= content_tag :div, class: css do %><% css = \"b\" %>x<% end %>\n",
             "<%= content_tag :textarea do %>hi<% end %>\n",
+            "<% seen = [] %><%= content_tag :em, class: seen.push(\"arg\").join(\",\") do %><% seen.push(\"block\") %>z<% end %>\n",
+            "<% c = \"q\" %><%= content_tag :b, class: [\"pill\"].map { |c| c }.join do %><% c = \"r\" %>w<% end %>\n",
         ),
     )
 }
@@ -36,6 +39,8 @@ class ContentTagBlockControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.body, %(<section>before<p>in</p>after</section>)
     assert_includes response.body, %(<div class="a">x</div>)
     assert_includes response.body, "<textarea>\nhi</textarea>"
+    assert_includes response.body, %(<em class="arg">z</em>)
+    assert_includes response.body, %(<b class="pill">w</b>)
   end
 end
 "#;
@@ -67,6 +72,8 @@ fn a_content_tag_block_is_its_content_on_spinel() {
             "raise body unless body.include?('<section>before<p>in</p>after</section>')\n",
             "raise body unless body.include?('<div class=\"a\">x</div>')\n",
             "raise body unless body.include?(\"<textarea>\\nhi</textarea>\")\n",
+            "raise body unless body.include?('<em class=\"arg\">z</em>')\n",
+            "raise body unless body.include?('<b class=\"pill\">w</b>')\n",
             "puts \"content_tag block passed\"\n",
         ))
         .assert_passes();

@@ -1276,34 +1276,23 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     // the name is per site, as `emit_cached_fragment`'s are.
                     let cap_owned = format!("__ctag_io_{}", inner.span.start);
                     let cap = cap_owned.as_str();
-                    // Rails evaluates the name and options before the
-                    // block runs: a local the block reassigns is read as
-                    // it was at the call.
+                    // Rails evaluates the name and options, in order,
+                    // before the block runs: each is read into a local
+                    // first, so the block neither reassigns what they read
+                    // nor runs ahead of a call in them.
                     let mut stmts = Vec::new();
-                    let mut sa = sa.clone();
-                    let reassigned = assigned_locals(body);
-                    for arg in sa.iter_mut() {
-                        let mut read = Vec::new();
-                        local_reads(arg, &reassigned, &mut read);
-                        for name in read {
-                            let at = Symbol::from(format!("__ctag_{}_{name}", inner.span.start));
-                            if !stmts.iter().any(|s: &Expr| matches!(&*s.node, ExprNode::Assign { target: LValue::Var { name: n, .. }, .. } if *n == at)) {
-                                stmts.push(Expr::new(Span::synthetic(), ExprNode::Assign {
-                                    target: LValue::Var { id: VarId(0), name: at.clone() },
-                                    value: var_ref(Symbol::from(name.as_str())),
-                                }));
-                            }
-                            replace_local_read(arg, &name, &at);
-                        }
-                    }
+                    let mut bound = 0;
+                    let args: Vec<Expr> = sa
+                        .iter()
+                        .map(|a| bind_before_block(rewrite_helpers_in_expr(a, ctx), inner.span.start, &mut bound, &mut stmts))
+                        .collect();
                     let cap_ctx = ViewCtx { accumulator: cap.to_string(), ..ctx.with_locals(std::iter::empty()) };
                     stmts.push(assign_accumulator_string_new(cap));
                     stmts.extend(walk_body(body, &cap_ctx));
-                    let mut args = vec![rewrite_helpers_in_expr(&sa[0], ctx), accumulator_result_ref(cap)];
-                    if let Some(opts) = sa.get(1) {
-                        args.push(rewrite_helpers_in_expr(opts, ctx));
-                    }
-                    stmts.push(accumulator_append_call(view_helpers_call("content_tag_html", args), ctx));
+                    let mut args = args.into_iter();
+                    let mut call_args = vec![args.next().expect("a content_tag name"), accumulator_result_ref(cap)];
+                    call_args.extend(args);
+                    stmts.push(accumulator_append_call(view_helpers_call("content_tag_html", call_args), ctx));
                     return stmts;
                 }
                 // Every parameter the block binds is a local in its body, the
@@ -1810,50 +1799,39 @@ fn next_capture_name(outer: &str) -> String {
     }
 }
 
-/// The locals a template block assigns (`<% css = "b" %>`).
-fn assigned_locals(body: &Expr) -> Vec<String> {
-    fn walk(e: &Expr, out: &mut Vec<String>) {
-        if let ExprNode::Assign { target: LValue::Var { name, .. }, .. }
-        | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } = &*e.node
-            && name.as_str() != "_buf"
-            && !out.iter().any(|n| n == name.as_str())
-        {
-            out.push(name.as_str().to_string());
-        }
-        e.node.for_each_child(&mut |c| walk(c, out));
-    }
-    let mut out = Vec::new();
-    walk(body, &mut out);
-    out
-}
-
-/// A local read: a `Var`, or a template local still a bare call (`css`).
-fn local_read_name(e: &Expr) -> Option<&str> {
+/// `e`, evaluated ahead of a `content_tag` block into
+/// `__ctag_<site>_<n>` locals pushed on `stmts`. A literal stays inline,
+/// and so does a Hash or Array literal, whose parts are bound in order:
+/// the options keep the shape the runtime's typed parameter reads.
+fn bind_before_block(e: Expr, site: u32, bound: &mut usize, stmts: &mut Vec<Expr>) -> Expr {
     match &*e.node {
-        ExprNode::Var { name, .. } => Some(name.as_str()),
-        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => Some(method.as_str()),
-        _ => None,
+        ExprNode::Lit { .. } => e,
+        ExprNode::Hash { entries, kwargs } => {
+            let kwargs = *kwargs;
+            let entries = entries
+                .iter()
+                .map(|(k, v)| {
+                    let k = bind_before_block(k.clone(), site, bound, stmts);
+                    (k, bind_before_block(v.clone(), site, bound, stmts))
+                })
+                .collect();
+            Expr::new(e.span, ExprNode::Hash { entries, kwargs })
+        }
+        ExprNode::Array { elements, style } => {
+            let style = *style;
+            let elements = elements.iter().map(|x| bind_before_block(x.clone(), site, bound, stmts)).collect();
+            Expr::new(e.span, ExprNode::Array { elements, style })
+        }
+        _ => {
+            *bound += 1;
+            let at = Symbol::from(format!("__ctag_{site}_{bound}"));
+            stmts.push(Expr::new(Span::synthetic(), ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: at.clone() },
+                value: e,
+            }));
+            var_ref(at)
+        }
     }
-}
-
-/// The names in `among` that `e` reads.
-fn local_reads(e: &Expr, among: &[String], out: &mut Vec<String>) {
-    if let Some(name) = local_read_name(e)
-        && among.iter().any(|n| n == name)
-        && !out.iter().any(|n| n == name)
-    {
-        out.push(name.to_string());
-    }
-    e.node.for_each_child(&mut |c| local_reads(c, among, out));
-}
-
-/// Read `at` wherever `e` reads the local `name`.
-fn replace_local_read(e: &mut Expr, name: &str, at: &Symbol) {
-    if local_read_name(e) == Some(name) {
-        *e = var_ref(at.clone());
-        return;
-    }
-    e.node.for_each_child_mut(&mut |c| replace_local_read(c, name, at));
 }
 
 fn block_body_is_template(body: &Expr) -> bool {
