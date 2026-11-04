@@ -43,6 +43,8 @@ mod stylesheet_helper;
 mod stylesheet_source;
 #[path = "emit_and_run/time_tag.rs"]
 mod time_tag;
+#[path = "emit_and_run/attribute_name_escape.rs"]
+mod attribute_name_escape;
 #[path = "emit_and_run/multiparameter_params.rs"]
 mod multiparameter_params;
 #[path = "emit_and_run/session_options_key.rs"]
