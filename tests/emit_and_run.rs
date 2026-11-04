@@ -20686,6 +20686,28 @@ mod concern_with_options;
 #[path = "emit_and_run/content_tag_block.rs"]
 mod content_tag_block;
 
+#[path = "support/block_control_flow.rs"]
+mod block_control_flow;
+
+#[test]
+fn a_block_starting_with_control_flow_renders() {
+    block_control_flow::app()
+        .write("test/controllers/probes_controller_test.rb", &block_control_flow::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_block_starting_with_control_flow_renders_on_spinel() {
+    block_control_flow::app()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"rendered\"\n",
+            block_control_flow::body_checks()
+        ))
+        .assert_passes();
+}
+
 #[path = "emit_and_run/unknown_class_association.rs"]
 mod unknown_class_association;
 
