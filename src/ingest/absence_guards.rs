@@ -167,3 +167,50 @@ fn absence_return_guard(stmt: &Expr) -> Option<Vec<Symbol>> {
     let ExprNode::Const { path } = &*tested.node else { return None };
     Some(path.iter().filter(|p| !p.as_str().is_empty()).cloned().collect())
 }
+
+/// `fail ArgumentError("…")` in a source gem (et-orbi's `EoTime#_to_f`): a
+/// call of a capitalized method nothing defines, which Ruby raises
+/// NoMethodError for when it is reached. Kernel's conversions answer their
+/// own names, and an app's own method of the name is a call as written.
+// Not run with `mark`: by then a source gem's methods no longer resolve their file, which tells them from the app's own.
+pub(super) fn raise_undefined_capitalized_calls(app: &mut App) {
+    const KERNEL: &[&str] = &["Array", "Complex", "Float", "Hash", "Integer", "Rational", "String", "BigDecimal", "Pathname", "URI", "JSON"];
+    let defined: crate::det::HashSet<String> = app
+        .library_classes
+        .iter()
+        .flat_map(|c| c.methods.iter().map(|m| m.name.as_str().to_string()))
+        .chain(app.models.iter().flat_map(|m| m.methods().map(|d| d.name.as_str().to_string())))
+        .collect();
+    fn visit(e: &mut Expr, owner: &str, class_side: Option<&str>, defined: &crate::det::HashSet<String>) {
+        e.node.for_each_child_mut(&mut |c| visit(c, owner, class_side, defined));
+        let ExprNode::Send { recv: None, method, args, block: None, .. } = &*e.node else { return };
+        let name = method.as_str();
+        if args.is_empty() || !name.starts_with(|c: char| c.is_ascii_uppercase()) || KERNEL.contains(&name) || defined.contains(name) {
+            return;
+        }
+        let span = e.span;
+        let mut cls = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("NoMethodError")] });
+        cls.decisions |= crate::expr::GENERATED_CONST_REF;
+        let whom = match class_side {
+            Some(kind) => format!("{kind} {owner}"),
+            None => format!("an instance of {owner}"),
+        };
+        let text = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Str { value: format!("undefined method '{name}' for {whom}") } });
+        let error = Expr::new(span, ExprNode::Send { recv: Some(cls), method: Symbol::from("new"), args: vec![text], block: None, parenthesized: true });
+        *e.node = ExprNode::Raise { value: error };
+    }
+    for lc in app.library_classes.iter_mut() {
+        let owner = lc.name.0.as_str().to_string();
+        let gem = lc.methods.iter().any(|m| {
+            super::sources::path_of(m.name_span.file).is_some_and(|p| p.contains("/.roundhouse/source_gems/") || p.starts_with(".roundhouse/source_gems/"))
+        });
+        if !gem {
+            continue;
+        }
+        let kind = if lc.is_module { "module" } else { "class" };
+        for m in lc.methods.iter_mut() {
+            let class_side = (m.receiver == crate::dialect::MethodReceiver::Class).then_some(kind);
+            visit(&mut m.body, &owner, class_side, &defined);
+        }
+    }
+}

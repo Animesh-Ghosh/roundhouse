@@ -3067,6 +3067,8 @@ end
     super::model_callbacks::expand_model_callbacks(&mut app);
     // After the macros: an expanded `has_ancestry` is what writes the `extend`.
     super::extend_splice::splice_sole_extended_modules(&mut app);
+    super::included_extend::splice_included_extends(&mut app);
+    super::absence_guards::raise_undefined_capitalized_calls(&mut app);
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.

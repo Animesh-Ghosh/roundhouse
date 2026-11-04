@@ -1,0 +1,115 @@
+//! A module whose `self.included(base)` runs `base.instance_eval { extend
+//! M; extend self }` (raabro, under fugit's cron, duration and
+//! natural-language parsers) gives the includer M's methods and its own as
+//! module methods. What runs in them is grounded against the includer:
+//! `method_added` (raabro's last one-argument rule), `method(name).call(x)`
+//! (its rule dispatch) and `send("rewrite_#{name}", tree)`.
+
+use super::emit_and_run;
+
+const RULES: &str = r##"module MiniRules
+  module Methods
+    def run(name, input)
+      _narrow(name).call(input)
+    end
+
+    def _narrow(name)
+      method(name.to_sym)
+    end
+
+    def method_added(name)
+      m = method(name)
+      return unless m.arity == 1
+      return unless m.parameters[0][1] == :i
+      @last = name.to_sym
+    end
+
+    def last
+      @last
+    end
+
+    def rewrite(tree)
+      send("rewrite_#{tree}", tree)
+    end
+  end
+
+  def self.included(target)
+    target.instance_eval do
+      extend ::MiniRules::Methods
+      extend self
+    end
+  end
+end
+"##;
+
+const GRAMMAR: &str = r##"module DigitGrammar
+  include MiniRules
+
+  def digit(i)
+    i.to_s.match?(/\A\d\z/) ? "digit" : "none"
+  end
+
+  def and?(i)
+    i.to_s == "&" ? "and" : "none"
+  end
+
+  def word(i)
+    i.to_s.match?(/\A[a-z]+\z/) ? "word" : "none"
+  end
+
+  def helper(a, b)
+    a
+  end
+
+  def rewrite_digit(t)
+    "D"
+  end
+
+  def rewrite_word(t)
+    "W"
+  end
+end
+"##;
+
+const SCRIPT: &str = r##"got = [
+  DigitGrammar.run(:digit, "7"),
+  DigitGrammar.run("word", "ab"),
+  DigitGrammar.run(:and?, "&"),
+  DigitGrammar.last,
+  DigitGrammar.rewrite("digit"),
+  DigitGrammar.rewrite("word"),
+]
+begin
+  DigitGrammar.run(:nope, "x")
+  got << "no error"
+rescue NameError => e
+  got << e.class.name
+end
+begin
+  DigitGrammar.rewrite("nope")
+  got << "no error"
+rescue NoMethodError => e
+  got << e.class.name
+end
+raise got.inspect unless got == ["digit", "word", "and", :word, "D", "W", "NameError", "NoMethodError"]
+puts "included instance_eval extend passed"
+"##;
+
+fn app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().write("app/models/mini_rules.rb", RULES).write("app/models/digit_grammar.rb", GRAMMAR)
+}
+
+#[test]
+fn an_included_hooks_instance_eval_extends_run_as_ruby_runs_them() {
+    let run = app().run_ruby(SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("included instance_eval extend passed"), "{}", run.stdout);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_included_hooks_instance_eval_extends_run_on_spinel() {
+    let run = app().run_spinel(SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("included instance_eval extend passed"), "{}", run.stdout);
+}

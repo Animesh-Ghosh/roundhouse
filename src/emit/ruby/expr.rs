@@ -1460,7 +1460,9 @@ pub(super) fn emit_send_base(
         // A method whose name is a Ruby keyword (`self.class`, `self.then`)
         // can't drop to the implicit form — bare `class` parses as the
         // keyword. Keep the explicit `self.class` (falls to the Some(r) arm).
+        // Not only the keyword itself: prism reads a bare `and?(x)` as `and`.
         && !is_ruby_keyword(m)
+        && !is_ruby_keyword(m.trim_end_matches(['?', '!']))
         // A ZERO-ARG bare name is the one form Ruby resolves lexically:
         // after `comments = self.comments.x`, a bare `comments` on the
         // RHS is the just-declared (nil) local, not the method. Args or
