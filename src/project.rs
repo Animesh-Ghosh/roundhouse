@@ -5417,24 +5417,7 @@ fn apply_file_programs(files: &mut Vec<(String, String)>, app: &App) {
         .iter()
         .filter_map(|(p, _)| p.strip_prefix("app/").and_then(|p| p.strip_suffix(".rb")).map(str::to_string))
         .collect();
-    // `require "x"` from a gem file: the file of that feature under the
-    // requiring gem's lib/, then any gem's.
-    let resolve = |from: &str, feature: &str, relative: bool| -> Option<String> {
-        let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
-        if relative {
-            let dir = std::path::Path::new(from).parent()?;
-            return Some(normalize_source(&dir.join(&file).display().to_string()));
-        }
-        let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
-        let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
-        if let Some(own) = own.filter(|p| known.contains(p)) {
-            return Some(own);
-        }
-        let suffix = format!("/lib/{file}");
-        let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
-        found.sort();
-        found.first().map(|p| p.to_string())
-    };
+    let resolve = |from: &str, feature: &str, relative: bool| resolve_gem_require(&known, from, feature, relative);
     let site = |span: crate::span::Span| -> String {
         let Some(source) = (span.file.0 as usize).checked_sub(1).and_then(|i| app.sources.get(i)) else {
             return "(unknown)".to_string();
@@ -5845,6 +5828,76 @@ fn program_steps<'a>(items: &'a [crate::app::ProgramItem], depth: usize, out: &m
             other => out.push((depth, ProgramStep::Item(other))),
         }
     }
+}
+
+/// `require "x"` from a gem file: the file of that feature under the
+/// requiring gem's lib/, then any gem's.
+fn resolve_gem_require(known: &crate::det::HashSet<String>, from: &str, feature: &str, relative: bool) -> Option<String> {
+    let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
+    if relative {
+        let dir = std::path::Path::new(from).parent()?;
+        return Some(normalize_source(&dir.join(&file).display().to_string()));
+    }
+    let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
+    let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
+    if let Some(own) = own.filter(|p| known.contains(p)) {
+        return Some(own);
+    }
+    let suffix = format!("/lib/{file}");
+    let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
+    found.sort();
+    found.first().map(|p| p.to_string())
+}
+
+/// The model-tree anchors (`models/x`) of the classes the gem programs
+/// declare, in the order Ruby loads them: each boot gem entry as Bundler
+/// requires it, a required file's declarations ahead of the lines after
+/// its `require`. Both branches of a file-level `if` count; an autoload
+/// loads on first read, so it orders nothing.
+fn gem_declaration_order(app: &App) -> Vec<String> {
+    let programs: crate::det::HashMap<String, &crate::app::FileProgram> =
+        app.file_programs.iter().map(|p| (normalize_source(&p.source), p)).collect();
+    if programs.is_empty() {
+        return Vec::new();
+    }
+    let known: crate::det::HashSet<String> = app.sources.iter().map(|f| normalize_source(&f.path)).collect();
+    fn walk(
+        source: &str,
+        programs: &crate::det::HashMap<String, &crate::app::FileProgram>,
+        known: &crate::det::HashSet<String>,
+        app: &App,
+        seen: &mut crate::det::HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if !seen.insert(source.to_string()) {
+            return;
+        }
+        let Some(program) = programs.get(source) else { return };
+        for item in all_program_items(&program.items) {
+            match item {
+                crate::app::ProgramItem::Require { feature, relative, .. } => {
+                    if let Some(target) = resolve_gem_require(known, source, feature, *relative) {
+                        walk(&target, programs, known, app, seen, out);
+                    }
+                }
+                crate::app::ProgramItem::Declared(names) => {
+                    for name in names {
+                        let anchor = crate::emit::ruby::library_file_anchor(name.0.as_str(), app);
+                        if !out.contains(&anchor) {
+                            out.push(anchor);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut seen = Default::default();
+    let mut out = Vec::new();
+    for entry in &app.boot_gem_entries {
+        walk(&normalize_source(entry), &programs, &known, app, &mut seen, &mut out);
+    }
+    out
 }
 
 /// Every item of a program, those in its branches too.
@@ -7881,7 +7934,7 @@ fn apply_route_helpers_demand(files: &mut Vec<(String, String)>) {
     ));
 }
 
-fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
+fn apply_models_aggregator(files: &mut Vec<(String, String)>, app: &App) {
     use std::fmt::Write;
 
     let mut models: Vec<String> = files
@@ -7891,12 +7944,23 @@ fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
         .map(str::to_string)
         .collect();
     models.sort();
+    // Not alphabetical for a gem's files: a class body that runs one of its
+    // methods at load (et-orbi's `ZONES_OLSON = TZInfo::Timezone.all...`)
+    // needs what the gem's own requires loaded first, as Bundler loads it.
+    let gem_first: Vec<String> = gem_declaration_order(app)
+        .into_iter()
+        .map(|anchor| format!("app/{anchor}.rb"))
+        .filter(|path| models.contains(path))
+        .collect();
+    models.retain(|path| !gem_first.contains(path));
+    let models: Vec<String> = gem_first.into_iter().chain(models).collect();
 
     let mut body = String::from(
         "# Loads every model/support class under app/models/. Generated\n\
          # from the emitted tree (see apply_models_aggregator). Each file\n\
          # requires its own LOAD-time deps (superclass, includes, class-body\n\
-         # constants), so the order here is only for legibility; method-body\n\
+         # constants). A gem's files come first, in the order the gem's own\n\
+         # requires load them; the rest are alphabetical. Method-body\n\
          # references between these files rely on this aggregator having\n\
          # run by dispatch time.\n",
     );
@@ -8685,6 +8749,49 @@ fn unrolled_define(app: &App, name: crate::span::Span) -> bool {
     app.models.iter().flat_map(|m| m.methods()).chain(app.library_classes.iter().flat_map(|lc| lc.methods.iter())).any(|m| m.name_span == name)
 }
 
+/// A call of `not_nil!` with no arguments, no block and no diagnostic
+/// already on it: its receiver, `None` for a call with none.
+fn not_nil_call(expr: &crate::expr::Expr) -> Option<Option<&crate::expr::Expr>> {
+    match &*expr.node {
+        crate::expr::ExprNode::Send { recv, method, args, block: None, .. }
+            if method.as_str() == "not_nil!"
+                && args.is_empty()
+                && crate::expr::ExprCold::diagnostic(&expr.cold).is_none() =>
+        {
+            Some(recv.as_ref())
+        }
+        _ => None,
+    }
+}
+
+/// type_toolkit's `not_nil!` is a Kernel/NilClass reopen only the CRuby
+/// overlay carries (`ruby_overlay/runtime/type_toolkit.rb`), so `target`
+/// refuses a call of it.
+fn refuse_not_nil(expr: &crate::expr::Expr, target: &str) {
+    emit::diagnostics::report_unsupported(
+        expr.span,
+        target,
+        "not_nil!",
+        format!("`not_nil!` is type_toolkit's Kernel/NilClass extension, which only the CRuby tree carries, not {target}"),
+    );
+}
+
+/// Refuse a typed `x.not_nil!`, unless `x` is an instance of a class that
+/// defines its own, which every tree carries; a class object does not
+/// answer an instance method. A union of such classes stays refused: the
+/// TypeScript emit reads a no-argument call on a union as a property. A
+/// call with no receiver is analysis's to refuse. The assertion ingest
+/// synthesizes for `#: as !nil` already carries its own refusal.
+fn report_not_nil(expr: &crate::expr::Expr, app: &App, target: &str) {
+    if let Some(Some(recv)) = not_nil_call(expr)
+        && !(recv.decisions & crate::expr::CLASS_OBJECT_VALUE == 0
+            && matches!(&recv.ty, Some(crate::ty::Ty::Class { id, .. })
+                if crate::analyze::source_instance_method(app, id, "not_nil!")))
+    {
+        refuse_not_nil(expr, target);
+    }
+}
+
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     // Column readers are synthesized inside the emitter, after this walk,
     // so a Send match never sees them. The schema column is the fact.
@@ -8726,6 +8833,42 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             }
         }
     }
+    if target == BuildTarget::Roda {
+        // Roda copies model methods, plain action statements and views
+        // over verbatim but carries no CRuby overlay, so nothing in its
+        // tree defines `not_nil!` either. It runs no analysis, so no
+        // receiver is typed: only a call on `self` (or with no receiver)
+        // in an instance method of a model whose own body defines
+        // `not_nil!` is known to reach that one. Roda emits each model
+        // directly under `Sequel::Model`, without its ancestors, so an
+        // inherited definition is not in its tree.
+        fn not_nil_calls(expr: &crate::expr::Expr, owns: bool) {
+            if let Some(recv) = not_nil_call(expr)
+                && !(owns && recv.is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef)))
+            {
+                refuse_not_nil(expr, "roda");
+            }
+            expr.node.for_each_child(&mut |child| not_nil_calls(child, owns));
+        }
+        for model in &app.models {
+            let owns = model.methods().any(|method| {
+                method.name.as_str() == "not_nil!" && method.receiver == crate::dialect::MethodReceiver::Instance
+            });
+            for method in model.methods() {
+                let owns = owns && method.receiver == crate::dialect::MethodReceiver::Instance;
+                not_nil_calls(&method.body, owns);
+                for default in method.params.iter().filter_map(|param| param.default.as_ref()) {
+                    not_nil_calls(default, owns);
+                }
+            }
+        }
+        for action in app.controllers.iter().flat_map(|controller| controller.actions()) {
+            not_nil_calls(&action.body, false);
+        }
+        for view in &app.views {
+            not_nil_calls(&view.body, false);
+        }
+    }
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
         return;
     }
@@ -8753,6 +8896,9 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         }
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
+        if target != "jruby" {
+            report_not_nil(expr, app, target);
+        }
         // Not the whole constant: spinel answers `Method` as a value, and refuses only a class test against it.
         if target == "spinel" {
             let names_method = |e: &crate::expr::Expr| matches!(&*e.node, crate::expr::ExprNode::Const { path }
@@ -10118,7 +10264,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_job_registry(&mut files, app);
     apply_job_registry_locate(&mut files, app);
     apply_views_aggregator(&mut files);
-    apply_models_aggregator(&mut files);
+    apply_models_aggregator(&mut files, app);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
     apply_boot_program(&mut files, app);
@@ -13393,14 +13539,24 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
         // single-target driver, with the target's own pre-analysis
         // choices (`session::analyze_and_lower_for`). What it refused or
         // left behind is printed per target, as the CLI prints it.
+        // What `target_files`' own checks report (the `report_*` passes)
+        // is printed the same way: they push into a diagnostics scope,
+        // and without one each finding was dropped.
+        let emit_files = |target_app: &App| {
+            let (files, diags) = emit::diagnostics::scope(|| target_files(target_app, fixture, *target));
+            for d in diags {
+                eprintln!("roundhouse: {}: {}", target.as_str(), d.render(&target_app.sources));
+            }
+            files
+        };
         let files = match (target, &analyzed) {
-            (BuildTarget::Futamura, Some(analyzed)) => target_files(analyzed, fixture, *target)?,
+            (BuildTarget::Futamura, Some(analyzed)) => emit_files(analyzed)?,
             _ => {
                 let mut target_app = app.clone();
                 for d in crate::session::analyze_and_lower_for(&mut target_app, *target) {
                     eprintln!("roundhouse: {}: {}", target.as_str(), d.render(&target_app.sources));
                 }
-                target_files(&target_app, fixture, *target)?
+                emit_files(&target_app)?
             }
         };
         let name = target.as_str();
