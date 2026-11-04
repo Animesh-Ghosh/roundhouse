@@ -500,16 +500,16 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 if primitive_kind(&left.ty) || primitive_kind(&right.ty) {
                     return format!(
                         "cmp.Or({}, {})",
-                        emit_expr(ctx, left),
-                        emit_expr(ctx, right)
+                        emit_expr_as_value(ctx, left),
+                        emit_expr_as_value(ctx, right)
                     );
                 }
                 let left_go = super::ty::go_ty_stub(left.ty.as_ref());
                 if left_go.starts_with("map[") || left_go.starts_with("[]") {
                     return format!(
                         "func() {left_go} {{ if v := {}; v != nil {{ return v }}; return {} }}()",
-                        emit_expr(ctx, left),
-                        emit_expr(ctx, right)
+                        emit_expr_as_value(ctx, left),
+                        emit_expr_as_value(ctx, right)
                     );
                 }
             }
@@ -518,10 +518,12 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 BoolOpKind::And => "&&",
             };
             // `&&` binds tighter than `||` here as in Ruby, so an `||`
-            // operand under `&&` keeps its parentheses.
+            // operand under `&&` keeps its parentheses. A conditional
+            // operand (`(x ? a : b) && c`) is a value, which Go writes as
+            // a func literal: its `if` is a statement.
             let operand = |e: &Expr| match &*e.node {
                 ExprNode::BoolOp { op: BoolOpKind::Or, .. } if matches!(op, BoolOpKind::And) => format!("({})", emit_expr(ctx, e)),
-                _ => emit_expr(ctx, e),
+                _ => emit_expr_as_value(ctx, e),
             };
             format!("{} {} {}", operand(left), op_s, operand(right))
         }
