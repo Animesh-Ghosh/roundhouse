@@ -8716,8 +8716,10 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         // over verbatim but carries no CRuby overlay, so nothing in its
         // tree defines `not_nil!` either. It runs no analysis, so no
         // receiver is typed: only a call on `self` (or with no receiver)
-        // in an instance method of a class that defines its own is known
-        // to reach that one.
+        // in an instance method of a model whose own body defines
+        // `not_nil!` is known to reach that one. Roda emits each model
+        // directly under `Sequel::Model`, without its ancestors, so an
+        // inherited definition is not in its tree.
         fn not_nil_calls(expr: &crate::expr::Expr, owns: bool) {
             if let Some(recv) = not_nil_call(expr)
                 && !(owns && recv.is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef)))
@@ -8727,7 +8729,9 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             expr.node.for_each_child(&mut |child| not_nil_calls(child, owns));
         }
         for model in &app.models {
-            let owns = crate::analyze::source_instance_method(app, &model.name, "not_nil!");
+            let owns = model.methods().any(|method| {
+                method.name.as_str() == "not_nil!" && method.receiver == crate::dialect::MethodReceiver::Instance
+            });
             for method in model.methods() {
                 let owns = owns && method.receiver == crate::dialect::MethodReceiver::Instance;
                 not_nil_calls(&method.body, owns);
@@ -8736,11 +8740,8 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 }
             }
         }
-        for controller in &app.controllers {
-            let owns = crate::analyze::source_instance_method(app, &controller.name, "not_nil!");
-            for action in controller.actions() {
-                not_nil_calls(&action.body, owns);
-            }
+        for action in app.controllers.iter().flat_map(|controller| controller.actions()) {
+            not_nil_calls(&action.body, false);
         }
         for view in &app.views {
             not_nil_calls(&view.body, false);

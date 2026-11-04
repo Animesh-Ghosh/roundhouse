@@ -82,6 +82,20 @@ fn roda_keeps_a_model_s_own_not_nil_bang_on_self() {
     assert!(model.contains("def not_nil!") && model.contains("not_nil!.upcase + self.not_nil!"), "{model}");
 }
 
+/// Roda emits each model directly under `Sequel::Model`, without
+/// ApplicationRecord, so a `not_nil!` the model inherits from there is not
+/// in its tree.
+#[test]
+fn roda_refuses_an_inherited_not_nil_bang_on_self() {
+    let base = "class ApplicationRecord < ActiveRecord::Base\n  def not_nil!\n    self\n  end\nend\n";
+    let (refused, model) = roda(
+        "class User < ApplicationRecord\n  def checked\n    self.not_nil!\n  end\nend\n",
+        &[("app/models/application_record.rb", base)],
+    );
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(!model.contains("def not_nil!"), "{model}");
+}
+
 /// Roda emits no tests, so a test's `not_nil!` is not its to refuse.
 #[test]
 fn roda_reads_no_not_nil_bang_from_tests_it_does_not_emit() {
