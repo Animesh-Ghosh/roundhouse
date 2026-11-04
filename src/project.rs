@@ -1284,34 +1284,50 @@ fn is_plain_ruby_class(app: &App, lc: &crate::dialect::LibraryClass) -> bool {
 
 /// Rust re-exports each model from `src/models/mod.rs` by its struct name
 /// (the last segment of the class name) from a module named by its
-/// flattened stem (`Admin::Note` → `admin_note::Note`). Two models with
-/// one struct name (`Note` and `Admin::Note`) or one stem (`AdminNote`
-/// and `Admin::Note`) would be declared twice; refused, naming both,
-/// rather than renamed.
-fn report_rust_model_name_collisions(app: &App, target: BuildTarget) {
+/// flattened stem (`Admin::Note` → `admin_note::Note`). The synthesized
+/// `<Model>Row` and `<Resource>Params` classes are declared there too.
+/// Two of them with one struct name (`Note` and `Admin::Note`, or
+/// `Admin::ArticleRow` and `Article`'s row `ArticleRow`) or one stem
+/// (`AdminNote` and `Admin::Note`) would be declared twice; refused,
+/// naming both, rather than renamed. An `Err`, so a caller with no
+/// diagnostic scope (`build_archives`) stops too.
+fn reject_rust_model_name_collisions(app: &App, target: BuildTarget) -> Result<(), String> {
     if target != BuildTarget::Rust {
-        return;
+        return Ok(());
     }
-    let mut seen: Vec<(String, String, &crate::dialect::Model)> = Vec::new();
-    for model in &app.models {
-        let name = model.name.0.as_str();
+    // (class name, the span to report it at), models first.
+    let mut names: Vec<(String, crate::span::Span)> =
+        app.models.iter().map(|m| (m.name.0.as_str().to_string(), m.parent_span)).collect();
+    for model in app.models.iter().filter(|m| app.schema.tables.contains_key(&m.table.0)) {
+        let row = crate::lower::model_to_library::row::row_class_id(&model.name);
+        names.push((row.0.as_str().to_string(), model.parent_span));
+    }
+    for spec in crate::lower::controller_to_library::params::collect_specs(&app.controllers).iter() {
+        names.push((spec.class_id.0.as_str().to_string(), spec.span));
+    }
+    let mut seen: Vec<(String, String, &str, crate::span::Span)> = Vec::new();
+    let mut messages: Vec<String> = Vec::new();
+    for (name, span) in &names {
         let stem = crate::emit::rust::rust_model_stem(name);
         let strukt = crate::emit::rust::rust_struct_name(name).to_string();
-        if let Some((_, _, other)) = seen.iter().find(|(s, n, _)| *s == stem || *n == strukt) {
-            let span = if model.parent_span.is_synthetic() { other.parent_span } else { model.parent_span };
-            emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+        // The same class twice (a model `ArticleRow` and `Article`'s row)
+        // is one declaration, not this collision.
+        if let Some((_, _, other, other_span)) =
+            seen.iter().find(|(s, n, o, _)| *o != name.as_str() && (*s == stem || *n == strukt))
+        {
+            let span = if span.is_synthetic() { *other_span } else { *span };
+            let diagnostic = crate::diagnostic::Diagnostic::unsupported(
                 span,
                 Some(crate::ident::Symbol::from(target.as_str())),
                 "model name",
-                format!(
-                    "`{}` and `{}` would both be declared as `src/models/{stem}.rs` or as struct `{strukt}`",
-                    other.name.0.as_str(),
-                    name
-                ),
-            ));
+                format!("`{other}` and `{name}` would both be declared as `src/models/{stem}.rs` or as struct `{strukt}`"),
+            );
+            messages.push(diagnostic.message.clone());
+            emit::diagnostics::push(diagnostic);
         }
-        seen.push((stem, strukt, model));
+        seen.push((stem, strukt, name.as_str(), *span));
     }
+    if messages.is_empty() { Ok(()) } else { Err(messages.join("\n")) }
 }
 
 /// Roda converts views from their ERB, and its translator writes plain
@@ -3341,7 +3357,7 @@ fn target_files_inner(
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
-    report_rust_model_name_collisions(app, target);
+    reject_rust_model_name_collisions(app, target)?;
     report_datetime_local_reads(app, target);
     report_roda_form_fields(app, target);
     report_tzinfo_reads(app, target);

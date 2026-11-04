@@ -47,6 +47,28 @@ fn rust_refuses_two_models_with_one_struct_or_module_name() {
     }
 }
 
+/// `Article`'s synthesized row is the struct `ArticleRow`, which a
+/// namespaced `Admin::ArticleRow` is exported as too.
+#[test]
+fn rust_refuses_a_namespaced_model_named_as_a_synthesized_row() {
+    let admin_row = ("app/models/admin/article_row.rb", "module Admin\n  class ArticleRow < ApplicationRecord\n  end\nend\n", "admin_article_rows");
+    let (_, errors) = with_models(&[admin_row]).emit(BuildTarget::Rust);
+    assert!(
+        errors.iter().any(|e| e.contains("not supported (rust)") && e.contains("`Admin::ArticleRow` and `ArticleRow`")),
+        "{errors:?}"
+    );
+}
+
+/// With no diagnostic scope to collect into (`build_archives`), the
+/// collision still stops the target.
+#[test]
+fn rust_refuses_a_model_name_collision_outside_a_diagnostic_scope() {
+    let (_, app, _) = with_models(&[ADMIN_NOTE, ("app/models/note.rb", "class Note < ApplicationRecord\nend\n", "notes")])
+        .emit_with_app(BuildTarget::Rust);
+    let result = roundhouse::project::target_files(&app, roundhouse::fixtures::real_blog(), BuildTarget::Rust);
+    assert!(result.as_ref().is_err_and(|m| m.contains("Admin::Note")), "{:?}", result.map(|f| f.len()));
+}
+
 #[test]
 fn crystal_requires_application_record_before_the_models_that_extend_it() {
     let (out, errors) = with_models(&[ADMIN_NOTE, ("app/models/account.rb", "class Account < ApplicationRecord\nend\n", "accounts")])
