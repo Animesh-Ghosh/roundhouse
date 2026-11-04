@@ -292,8 +292,23 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                 Some(safe) => lit_str_coerce(rewrite_helpers_in_expr(&safe, ctx)),
                 None if helper_markup => lit_str_coerce(rewrite_helpers_in_expr(content, ctx)),
                 None => {
-                    let text = lit_str_coerce(rewrite_helpers_in_expr(escaped_value.unwrap_or(content), ctx));
-                    view_helpers_call("html_escape", vec![text])
+                    // `h` leaves an html-safe argument as it is
+                    // (`h(x.html_safe)`, `h(raw(x))`).
+                    let safe_arg = escaped_value.and_then(|v| match &*v.node {
+                        ExprNode::Send { recv: None, method, args, block: None, .. }
+                            if method.as_str() == "raw" && args.len() == 1 && !ctx.is_local("raw") =>
+                        {
+                            Some(args[0].clone())
+                        }
+                        _ => super::walker::html_safe_value(v, ctx),
+                    });
+                    match safe_arg {
+                        Some(safe) => lit_str_coerce(rewrite_helpers_in_expr(&safe, ctx)),
+                        None => {
+                            let text = lit_str_coerce(rewrite_helpers_in_expr(escaped_value.unwrap_or(content), ctx));
+                            view_helpers_call("html_escape", vec![text])
+                        }
+                    }
                 }
             };
             let mut args = vec![rewrite_helpers_in_expr(name, ctx), content];
