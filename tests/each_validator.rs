@@ -186,9 +186,7 @@ fn an_acceptance_rule_beside_a_custom_key_keeps_its_accessor_on_ruby() {
 
 #[test]
 fn a_strict_target_keeps_the_accessor_of_an_acceptance_rule() {
-    let root = std::env::temp_dir().join(format!("roundhouse-each-validator-terms-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).unwrap();
+    let root = scratch::dir("roundhouse-each-validator-terms");
     let source = root.join("app");
     assert!(std::process::Command::new("cp").args(["-a"]).arg(roundhouse::fixtures::real_blog()).arg(&source).status().unwrap().success());
     let schema = std::fs::read_to_string(source.join("db/schema.rb")).unwrap().replacen(SCHEMA_ANCHOR, SCHEMA, 1);
