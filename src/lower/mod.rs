@@ -945,7 +945,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("try_guard");
     record_snapshot::apply_record_snapshot_lowering(app);
     ran!("record_snapshot");
-    diags.extend(where_range_split::apply_where_range_split(app));
+    diags.extend(where_range_split::apply_where_range_split(app, target));
     ran!("where_range_split");
     for_each_hook_body(app, &mut |body| {
         fn walk(body: &mut crate::expr::Expr, registry: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>, diags: &mut Vec<crate::diagnostic::Diagnostic>) {

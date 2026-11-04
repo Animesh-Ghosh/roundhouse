@@ -148,7 +148,7 @@ fn a_controller_where_on_all_month_renders_sql_bounds() {
     );
 }
 
-fn time_range_residue(body: &str) -> usize {
+fn time_range_residue(body: &str, target: roundhouse::project::BuildTarget) -> usize {
     let tree = [
         ("db/schema.rb", SCHEMA.to_string()),
         (
@@ -160,7 +160,7 @@ fn time_range_residue(body: &str) -> usize {
     .map(|(p, s)| (std::path::PathBuf::from(p), s.into_bytes()))
     .collect();
     let mut app = ingest_app_from_tree(tree).expect("ingest");
-    roundhouse::session::analyze_and_lower(&mut app)
+    roundhouse::session::analyze_and_lower_for(&mut app, target)
         .iter()
         .filter(|d| matches!(&d.kind,
             roundhouse::diagnostic::DiagnosticKind::LowerResidue { construct, .. } if construct.as_str() == "time_range"))
@@ -168,9 +168,14 @@ fn time_range_residue(body: &str) -> usize {
 }
 
 #[test]
-fn an_all_month_outside_a_condition_is_ledgered() {
-    assert_eq!(time_range_residue("month = starts_at.all_month\n    Event.where(starts_at: month).count"), 1);
-    assert_eq!(time_range_residue("Event.where(name: name, starts_at: starts_at.all_month).count"), 0);
+fn an_all_month_outside_a_condition_is_ledgered_on_a_strict_target() {
+    use roundhouse::project::BuildTarget;
+    let stray = "month = starts_at.all_month\n    Event.where(starts_at: month).count";
+    assert_eq!(time_range_residue(stray, BuildTarget::Rust), 1);
+    assert_eq!(time_range_residue("Event.where(name: name, starts_at: starts_at.all_month).count", BuildTarget::Rust), 0);
+    for target in [BuildTarget::Ruby, BuildTarget::Jruby, BuildTarget::Spinel] {
+        assert_eq!(time_range_residue(stray, target), 0, "{target:?}");
+    }
 }
 
 #[test]

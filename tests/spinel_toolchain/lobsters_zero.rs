@@ -56,6 +56,15 @@ const ARTICLE_METHODS: &str = "  validates :title, presence: true
   def self.backdate(article)
     article.update_column(:created_at, 10.days.ago)
   end
+
+  def self.month_titles(at)
+    month = at.all_month
+    where(created_at: month).order(:title).map(&:title)
+  end
+
+  def self.this_month?(article, at)
+    at.all_month.cover?(article.created_at)
+  end
 ";
 
 const ROUTES: &str = "class Routes\n  class << self\n    include Rails.application.routes.url_helpers\n\n    def default_url_options\n      { host: \"example.com\" }\n    end\n\n    def title_url(article)\n      article_url(article)\n    end\n  end\nend\n";
@@ -102,6 +111,8 @@ raise "builder: #{LinkBuilder.new(a).url}" unless LinkBuilder.new(a).url == "htt
 old = Article.create!(title: "Old", body: "A sufficiently long body.")
 Article.backdate(old)
 raise "recent: #{Article.recent_titles.inspect}" unless Article.recent_titles == ["Hello"]
+raise "month: #{Article.month_titles(a.created_at).inspect}" unless Article.month_titles(a.created_at).include?("Hello")
+raise "this month" unless Article.this_month?(a, a.created_at) && !Article.this_month?(a, a.created_at - 86400 * 40)
 raise "logged: #{Article.logged.inspect}" unless Article.logged == ["Hello", "Old"]
 puts "lobsters-zero contract passed"
 "#;
