@@ -185,7 +185,7 @@ jobs:
           restore-keys: fixture-gems-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-
       # The tests assume this exact Rails (tests/boot_wiring.rs, the
       # activerecord probes); bump it here and in the tests together.
-      # `--rails` also pins the app's Gemfile, so a newer 8.1.4.x in the
+      # `--rails` also pins the app's lock, so a newer 8.1.4.x in the
       # gem cache is not locked instead.
       - name: Install Rails
         if: steps.fixture.outputs.generate == 'true'
