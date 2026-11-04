@@ -8732,7 +8732,10 @@ fn emit_library_class_decl_inner(
         .flat_map(|class| class.methods.iter())
         .collect();
     for m in &lc.methods {
-        body_requires.extend(resolve_all(&m.body, false));
+        // Not request-time for a hook: `self.included` runs while the includer's file loads, before the aggregator reaches its constants.
+        let hook = m.receiver == MethodReceiver::Class
+            && matches!(m.name.as_str(), "included" | "extended" | "inherited" | "prepended");
+        body_requires.extend(resolve_all(&m.body, hook));
     }
     for m in factory_methods {
         body_requires.extend(resolve_all(&m.body, false));
