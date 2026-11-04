@@ -2,7 +2,9 @@
 //! `content_tag(name, content, opts)` took no block, so the block was
 //! dropped and the options hash rendered as the content. Rails 8.1.4
 //! (`oracle.rb`): the block's markup is the content, the options its
-//! attributes.
+//! attributes. A `content_tag` inside a `cache` block inside another keeps
+//! the outer content, and the name and options are read before the block
+//! runs (`cr_oracle.rb`).
 
 use super::emit_and_run;
 
@@ -15,6 +17,8 @@ fn app() -> emit_and_run::Overlay {
             "<%= content_tag :section, class: \"boxed\" do %>inside<%= 1 + 1 %><% end %>\n",
             "<%= content_tag :aside do %>direct<% end %>\n",
             "<%= content_tag :p, \"text\", class: \"x\" %>\n",
+            "<%= content_tag :section do %>before<% cache \"k\" do %><%= content_tag :p do %>in<% end %><% end %>after<% end %>\n",
+            "<% css = \"a\" %><%= content_tag :div, class: css do %><% css = \"b\" %>x<% end %>\n",
         ),
     )
 }
@@ -28,6 +32,8 @@ class ContentTagBlockControllerTest < ActionDispatch::IntegrationTest
     assert_includes response.body, %(<section class="boxed">inside2</section>)
     assert_includes response.body, %(<aside>direct</aside>)
     assert_includes response.body, %(<p class="x">text</p>)
+    assert_includes response.body, %(<section>before<p>in</p>after</section>)
+    assert_includes response.body, %(<div class="a">x</div>)
   end
 end
 "#;
@@ -56,6 +62,8 @@ fn a_content_tag_block_is_its_content_on_spinel() {
             "raise body unless body.include?('<section class=\"boxed\">inside2</section>')\n",
             "raise body unless body.include?('<aside>direct</aside>')\n",
             "raise body unless body.include?('<p class=\"x\">text</p>')\n",
+            "raise body unless body.include?('<section>before<p>in</p>after</section>')\n",
+            "raise body unless body.include?('<div class=\"a\">x</div>')\n",
             "puts \"content_tag block passed\"\n",
         ))
         .assert_passes();
