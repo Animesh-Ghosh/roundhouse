@@ -32,8 +32,8 @@ module ActiveJob
   def self.adapter_name(adapter)
     return adapter.queue_adapter_name if adapter.respond_to?(:queue_adapter_name)
 
-    adapter_class = adapter.is_a?(Module) ? adapter : adapter.class
-    adapter_class.name.to_s.split("::").last.to_s.delete_suffix("Adapter")
+    # Not Rails' `adapter.is_a?(Module) ? adapter : adapter.class`: that untyped-or-Class value makes Spinel send every untyped `.new` (Relation's `@model.new`) to every class, Flash's included.
+    adapter.class.name.to_s.split("::").last.to_s.delete_suffix("Adapter")
   end
 
   module Arguments
