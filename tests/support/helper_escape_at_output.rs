@@ -2,7 +2,7 @@
 //! marks `truncate`'s and `word_wrap`'s result html-safe and `pluralize`'s
 //! not; `safe + x` stays safe and escapes `x`; interpolation drops the mark.
 //! Each line of `VIEW` is tagged `L<n>:`, and `RENDERS` is what Rails 8.1.4
-//! renders after the tag. `content_tag`'s content is left to its own arm.
+//! renders after the tag, `content_tag`'s content among them.
 
 use super::emit_and_run;
 
@@ -25,6 +25,9 @@ pub const VIEW: &str = concat!(
     "L15:<%= tag.p(truncate(\"<b>xx</b>\", length: 5)) %>\n",
     "L16:<% w = \"<b>x</b>\" %><%= tag.p(pluralize(1, w)) %>\n",
     "L17:<%= tag.p(truncate(\"<b>xx</b>\", length: 5) + \"!\") %>\n",
+    "L18:<% w = \"<b>x</b>\" %><%= content_tag(:p, pluralize(1, w)) %>\n",
+    "L19:<%= content_tag(:p, truncate(\"<b>xx</b>\", length: 5)) %>\n",
+    "L20:<%= content_tag(:p, truncate(\"<b>xx</b>\", length: 5) + \"!\") %>\n",
 );
 
 pub const RENDERS: &[&str] = &[
@@ -46,6 +49,9 @@ pub const RENDERS: &[&str] = &[
     "L15:<p>&lt;b...</p>",
     "L16:<p>1 &lt;b&gt;x&lt;/b&gt;</p>",
     "L17:<p>&lt;b...!</p>",
+    "L18:<p>1 &lt;b&gt;x&lt;/b&gt;</p>",
+    "L19:<p>&lt;b...</p>",
+    "L20:<p>&lt;b...!</p>",
 ];
 
 /// real-blog with `GET /probe` rendering `view`.
