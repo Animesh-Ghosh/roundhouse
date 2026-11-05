@@ -17,7 +17,7 @@ use super::attr_parts::{
     append_attr_parts, default_form_class, default_method_sym, lit_str_coerce, string_interp,
     take_opt,
 };
-use super::walker::rewrite_helpers_in_expr;
+use super::walker::{html_safe_value, rewrite_helpers_in_expr};
 use super::{
     bare_record_name, lit_str, lit_sym, route_helpers_call, send, var_ref,
     view_helpers_call, ViewCtx,
@@ -354,17 +354,39 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             // The label as the template's own helpers lower it: a
             // `truncate(…)` arrives as `html_escape(truncate(…))`,
             // already escape-correct, which the two branches below
-            // each take exactly once.
-            let lowered = rewrite_helpers_in_expr(text, ctx);
-            let pre_escaped = match &*lowered.node {
-                ExprNode::Send { recv: Some(r), method, args, .. }
-                    if method.as_str() == "html_escape"
+            // each take exactly once. Only the view helpers' own
+            // `html_escape`: an app's may not escape. `ERB::Util`'s
+            // escape (that exact constant) is the same escape, and is
+            // written as the view helpers' one.
+            // Its argument is kept as the pre-escaped text before the
+            // escape is built, since a literal's escape folds to text that
+            // no longer looks escaped.
+            let erb_util_arg = match &*text.node {
+                ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                    if matches!(method.as_str(), "html_escape" | "h")
                         && args.len() == 1
-                        && matches!(&*r.node, ExprNode::Const { .. }) =>
+                        && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ERB", "Util"])) =>
                 {
-                    Some(args[0].clone())
+                    Some(lit_str_coerce(rewrite_helpers_in_expr(&args[0], ctx)))
                 }
                 _ => None,
+            };
+            let (lowered, pre_escaped) = match erb_util_arg {
+                Some(arg) => (view_helpers_call("html_escape", vec![arg.clone()]), Some(arg)),
+                None => {
+                    let lowered = rewrite_helpers_in_expr(text, ctx);
+                    let pre_escaped = match &*lowered.node {
+                        ExprNode::Send { recv: Some(r), method, args, .. }
+                            if method.as_str() == "html_escape"
+                                && args.len() == 1
+                                && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"])) =>
+                        {
+                            Some(args[0].clone())
+                        }
+                        _ => None,
+                    };
+                    (lowered, pre_escaped)
+                }
             };
             let linked = match emit_link_to_inline(text, url, *opts, ctx) {
                 Some(inline) => inline,
@@ -377,8 +399,12 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                     view_helpers_call("link_to", args)
                 }
             };
+            // A marked label (`x.html_safe`, or an app method whose body
+            // returns one) is shown as it is, as a bare `<%= %>` shows it.
             let bare = if pre_escaped.is_some() {
                 lowered
+            } else if let Some(safe) = html_safe_value(&lowered, ctx) {
+                lit_str_coerce(safe)
             } else {
                 view_helpers_call("html_escape", vec![lit_str_coerce(lowered)])
             };

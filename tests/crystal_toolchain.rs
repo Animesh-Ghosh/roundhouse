@@ -32,6 +32,9 @@ mod ts_controller_ivars;
 #[path = "support/content_tag_options.rs"]
 #[allow(dead_code)]
 mod content_tag_options;
+#[path = "support/link_to_if_escape.rs"]
+#[allow(dead_code)]
+mod link_to_if_escape;
 #[path = "support/block_control_flow.rs"]
 #[allow(dead_code)]
 mod block_control_flow;
@@ -362,6 +365,35 @@ fn content_tag_with_a_bad_dynamic_name_raises() {
     let (ok, stdout, stderr) = render_probe(content_tag_options::app(view));
     assert!(!ok && stderr.contains("Invalid HTML5 tag name"), "{stdout}\n{stderr}");
     assert!(!stdout.contains("onclick"), "{stdout}");
+}
+
+/// `link_to_if`'s label is escaped in both branches, as Rails 8.1.4
+/// renders it.
+#[test]
+#[ignore]
+fn link_to_if_escapes_its_label() {
+    let (emitted, errors) = link_to_if_escape::app_with_truncate().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    shards_install(&emitted);
+    std::fs::write(
+        emitted.join("probe.cr"),
+        "require \"./src/app\"\nc = ProbesController.new\nc.request_method = \"GET\"\nc.process_action(:show)\nputs c.body\n",
+    )
+    .unwrap();
+    let run = Command::new("crystal")
+        .args(["run", "probe.cr"])
+        .current_dir(&emitted)
+        .env("CRYSTAL_CACHE_DIR", emitted.join(".crystal-cache"))
+        .output()
+        .expect("run crystal");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+    for want in link_to_if_escape::RENDERS.iter().chain([&link_to_if_escape::TRUNCATE_RENDERS]) {
+        assert!(stdout.contains(want), "expected {want} in\n{stdout}");
+    }
+    for absent in link_to_if_escape::ABSENT.iter().chain([&link_to_if_escape::TRUNCATE_ABSENT]) {
+        assert!(!stdout.contains(absent), "unexpected {absent} in\n{stdout}");
+    }
 }
 
 /// #1774: a block helper whose template body starts with control flow
