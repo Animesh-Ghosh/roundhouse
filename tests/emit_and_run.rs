@@ -20734,6 +20734,15 @@ fn link_to_if_shows_an_html_safe_app_label_once_on_spinel() {
         .assert_passes();
 }
 
+#[path = "support/go_test_literal_receiver.rs"]
+mod go_test_literal_receiver;
+
+/// #1803's model test on the ruby target: the answers it asserts are Ruby's.
+#[test]
+fn an_assertion_on_a_new_records_method_passes_on_ruby() {
+    go_test_literal_receiver::app().run_test("test/models/featured_test.rb").assert_passes();
+}
+
 #[path = "support/go_action_controller_api.rs"]
 mod go_action_controller_api;
 
