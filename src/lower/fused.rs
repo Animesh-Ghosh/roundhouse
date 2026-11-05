@@ -491,6 +491,7 @@ fn rewrite_hook_node(
     super::destroy_by::rewrite_node(e);
     super::literal_append::rewrite_node(e);
     super::byte_size::rewrite_node(e);
+    super::ruby2_keywords_hash::rewrite_node(e);
     super::dirty_predicate_kwargs::rewrite_node(e);
     super::relation_select_block::rewrite_node(e);
     super::arel_attribute::rewrite_node(e);
@@ -551,6 +552,7 @@ fn rewrite_test_node(e: &mut Expr, full_messages: &super::errors_full_messages::
     super::range_enumerable::rewrite_node(e);
     super::enumerable_ext::rewrite_node(e);
     super::byte_size::rewrite_node(e);
+    super::ruby2_keywords_hash::rewrite_node(e);
     super::dirty_predicate_kwargs::rewrite_node(e);
     super::errors_full_messages::rewrite_node(e, full_messages);
 }

@@ -768,6 +768,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("encode", Ty::Str),
         ("encode_without_escape", Ty::Str),
         ("decode", Ty::Untyped),
+        ("load", Ty::Untyped),
+        ("dump", Ty::Str),
         ("time_json", Ty::Str),
         ("time_fragment", Ty::Str),
         ("written", Ty::Str),
