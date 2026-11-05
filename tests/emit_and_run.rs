@@ -125,6 +125,8 @@ mod gem_class_macros;
 mod source_gem_autoload;
 #[path = "emit_and_run/source_gem_load_order.rs"]
 mod source_gem_load_order;
+#[path = "emit_and_run/unresolved_param_rbs.rs"]
+mod unresolved_param_rbs;
 #[path = "emit_and_run/source_gem_facade.rs"]
 mod source_gem_facade;
 #[path = "support/for_loops.rs"]
@@ -20404,6 +20406,10 @@ mod format_once;
 mod condition_lambda_record;
 #[path = "emit_and_run/where_time_range.rs"]
 mod where_time_range;
+#[path = "support/untyped_calendar.rs"]
+mod untyped_calendar_contract;
+#[path = "emit_and_run/untyped_calendar.rs"]
+mod untyped_calendar;
 #[path = "emit_and_run/route_record_to_param.rs"]
 mod route_record_to_param;
 #[path = "emit_and_run/module_factory.rs"]
@@ -20693,6 +20699,15 @@ mod go_test_literal_receiver;
 #[test]
 fn an_assertion_on_a_new_records_method_passes_on_ruby() {
     go_test_literal_receiver::app().run_test("test/models/featured_test.rb").assert_passes();
+}
+
+#[path = "support/go_action_controller_api.rs"]
+mod go_action_controller_api;
+
+/// #1804's API controller on the ruby target.
+#[test]
+fn an_api_controller_answers_on_ruby() {
+    go_action_controller_api::app().run_test("test/controllers/ping_controller_test.rb").assert_passes();
 }
 
 #[path = "support/block_control_flow.rs"]
