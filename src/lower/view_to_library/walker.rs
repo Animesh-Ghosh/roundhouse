@@ -1379,6 +1379,11 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     if let Some(safe) = html_safe_value(&rewritten, ctx) {
         return vec![accumulator_append_call(coerce_to_s(safe), ctx)];
     }
+    // `truncate(x) + "!"`: Rails' SafeBuffer `+` stays html-safe, escaping
+    // only what it appends, so the whole is written as it is.
+    if let Some(safe) = safe_buffer_value(&rewritten) {
+        return vec![accumulator_append_call(coerce_to_s(safe), ctx)];
+    }
     // Not left to each emitter: only the Ruby one unwrapped the escape around `raw`, and TypeScript shipped `html_escape(raw(x))`
     if let ExprNode::Send { recv, method, args, block: None, .. } = &*rewritten.node
         && method.as_str() == "raw"
@@ -1556,6 +1561,48 @@ fn html_safe_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     None
 }
 
+/// The value of a lowered expression that Rails holds as an html-safe
+/// buffer, ready to write unescaped, or `None` when it has to be escaped
+/// as a whole. A buffer is an escape the view helpers applied
+/// (`ActionView::ViewHelpers.html_escape(…)`, which is how `truncate`,
+/// `word_wrap` and `h` lower), an explicit `x.html_safe`, or
+/// a buffer `+` anything: SafeBuffer's `+` stays safe and escapes the
+/// operand unless that is a buffer too. A String on the left (`"!" +
+/// truncate(x)`) is a plain String in Rails, so it isn't one.
+///
+/// Methods recorded in `App::html_safe_methods` are left out: they are
+/// matched by name only, and the bare output answers them itself
+/// ([`html_safe_value`]).
+pub(super) fn safe_buffer_value(e: &Expr) -> Option<Expr> {
+    let ExprNode::Send { recv: Some(r), method, args, block: None, parenthesized } = &*e.node else {
+        return None;
+    };
+    match (method.as_str(), args.len()) {
+        ("html_escape", 1) if matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"])) => {
+            Some(e.clone())
+        }
+        ("html_safe", 0) => Some((*r).clone()),
+        ("+", 1) => {
+            let left = safe_buffer_value(r)?;
+            let right = safe_buffer_value(&args[0])
+                .unwrap_or_else(|| view_helpers_call("html_escape", vec![coerce_to_s(args[0].clone())]));
+            let mut sum = Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(left),
+                    method: method.clone(),
+                    args: vec![right],
+                    block: None,
+                    parenthesized: *parenthesized,
+                },
+            );
+            sum.ty = Some(crate::ty::Ty::Str);
+            Some(sum)
+        }
+        _ => None,
+    }
+}
+
 /// Re-add the `.to_s` coercion that `unwrap_to_s` stripped, so the
 /// auto-escape `html_escape(...)` wrap always feeds a String. The ERB
 /// compiler wraps every `<%= expr %>` as `(expr).to_s`; we strip that
@@ -1661,6 +1708,16 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
             parenthesized,
         } => {
             if let Some(kind) = classify_template_helper(method.as_str(), args, *parenthesized, ctx) {
+                // Rails' `pluralize` returns a String that isn't html-safe,
+                // so inside a larger expression (`pluralize(n, w) + "!"`,
+                // `"#{pluralize(n, w)}"`, a `link_to` label) it is plain
+                // text, escaped once where the whole is written. Only a
+                // whole `<%= pluralize(…) %>` takes the arm's escape.
+                if let ViewHelperKind::Pluralize { count, word } = &kind {
+                    let mut call = crate::lower::view::pluralize_helper_call((*count).clone(), (*word).clone());
+                    call.inherit_span(e.span);
+                    return call;
+                }
                 if let Some(mut call) = emit_view_helper_call(&kind, ctx) {
                     call.inherit_span(e.span);
                     return call;

@@ -609,15 +609,14 @@ fn escaped_label(text: &Expr, ctx: &ViewCtx) -> Expr {
     if let Some(arg) = escaped_arg {
         return view_helpers_call("html_escape", vec![lit_str_coerce(rewrite_helpers_in_expr(arg, ctx))]);
     }
+    // A label Rails holds as an html-safe buffer (an escape the view helpers
+    // applied, `truncate(x) + "!"`, `x.html_safe`) is written as it is.
     let lowered = rewrite_helpers_in_expr(text, ctx);
-    let pre_escaped = matches!(&*lowered.node,
-        ExprNode::Send { recv: Some(r), method, args, .. }
-            if method.as_str() == "html_escape" && args.len() == 1
-                && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"])));
-    if pre_escaped {
-        lowered
-    } else {
-        view_helpers_call("html_escape", vec![lit_str_coerce(lowered)])
+    match super::walker::safe_buffer_value(&lowered) {
+        // The view helpers' escape and a `+` of buffers are Strings already.
+        Some(safe) if matches!(&*safe.node, ExprNode::Send { method, .. } if matches!(method.as_str(), "html_escape" | "+")) => safe,
+        Some(safe) => lit_str_coerce(safe),
+        None => view_helpers_call("html_escape", vec![lit_str_coerce(lowered)]),
     }
 }
 
