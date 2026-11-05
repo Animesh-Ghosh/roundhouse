@@ -366,10 +366,12 @@ module Main
 
   def self.dispatch_app(req, res)
     started = ActionDispatch::Runtime.clock_time
-    Main.dispatch_request(req, res)
+    request_obj = ActionDispatch::Request.new
+    request_obj.request_id = ActionDispatch::RequestId.make(req.req_headers.fetch("x-request-id", ""))
+    Main.dispatch_request(req, res, request_obj)
     return nil if res.file_path.length > 0 || res.upgrading_ws
     res.headers[ActionDispatch::RequestId::HEADER] =
-      ActionDispatch::RequestId.make(req.req_headers.fetch("x-request-id", ""))
+      request_obj.request_id.to_s
     # Rack::Runtime leaves a value the app set itself.
     unless res.headers.keys.any? { |k| k.downcase == "x-runtime" }
       res.headers[ActionDispatch::Runtime::HEADER] = ActionDispatch::Runtime.header_value(started)
@@ -379,7 +381,7 @@ module Main
 
   # Serve static files or dispatch the complete request path through Router,
   # preserving literal suffix routes while negotiating the response format.
-  def self.dispatch_request(req, res)
+  def self.dispatch_request(req, res, request_obj)
     ActionView::ViewHelpers.reset_slots!
     Broadcasts.reset_log!
     # Under RH_SQL_TRACE the request line brackets its queries, so a
@@ -510,7 +512,6 @@ module Main
     # module functions with no controller in scope; the emit rewrites
     # their bare `request` reads to `ActionController::Current.request`
     # and the layout reaches flash through `Current.controller`.
-    request_obj = ActionDispatch::Request.new
     request_obj.request_method = verb
     request_obj.path = request_path
     qm = req.raw_path.index("?")
