@@ -1942,6 +1942,26 @@ fn reject_file_blob_fixtures(app: &App, target: BuildTarget) -> Result<(), Strin
     Ok(())
 }
 
+/// A file of top-level constants with no class or module
+/// (`LibraryClassOrigin::FileConstants`) is written as those constants,
+/// which only the CRuby and JRuby trees do; another target would have
+/// to invent a class for it.
+fn refuse_file_constants(app: &App, target: BuildTarget) -> Result<(), String> {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Futamura) {
+        return Ok(());
+    }
+    let Some(holder) = app.library_classes.iter().find(|lc| lc.is_file_constants()) else {
+        return Ok(());
+    };
+    let span = holder.constants.first().map(|(_, value)| value.span).unwrap_or_default();
+    let message = format!(
+        "{} is a file of top-level constants with no class or module, which this target has no representation for; use Ruby or JRuby",
+        holder.name.0.as_str()
+    );
+    emit::diagnostics::report_unsupported(span, target.as_str(), "file constants", &message);
+    Err(format!("{}: {message}", target.as_str()))
+}
+
 /// Keep admitted Data factories outside unverified target emitters.
 fn reject_unsupported_data_factories(app: &App, target: BuildTarget) -> Result<(), String> {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Spinel) {
@@ -3421,6 +3441,7 @@ fn target_files_inner(
     reject_unsupported_pattern_matches(app, target)?;
     reject_file_blob_fixtures(app, target)?;
     reject_unsupported_data_factories(app, target)?;
+    refuse_file_constants(app, target)?;
     reject_unsupported_dates(app, target)?;
     reject_unsupported_forwarded_procs(app, target)?;
     report_unsupported_keys(app, target);
