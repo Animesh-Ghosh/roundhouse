@@ -2,6 +2,16 @@ use std::path::Path;
 use std::process::Command;
 
 #[test]
+fn response_read_has_one_deadline_until_close() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = Command::new("ruby")
+        .arg(root.join("tests/spinel_stream_error_io.rb"))
+        .output()
+        .expect("ruby is on PATH");
+    assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
 fn failed_stream_closes_and_the_next_request_serves() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let out = Command::new("ruby")

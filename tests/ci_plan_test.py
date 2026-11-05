@@ -141,6 +141,7 @@ class Routing(unittest.TestCase):
             "tests/spinel_stream_error.rs", "tests/spinel_stream_error.rb",
             "tests/spinel_stream_error_native.rb", "tests/spinel_stream_error_native_check.rb",
             "tests/spinel_stream_error_puma.rb",
+            "tests/spinel_stream_error_io.rb", "tests/support/server_check_io.rb",
         ]:
             with self.subTest(path=path):
                 plan = ci.select([path])

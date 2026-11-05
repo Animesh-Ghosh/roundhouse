@@ -1,11 +1,11 @@
 require "socket"
 require "tempfile"
+require_relative "support/server_check_io"
 
 def exchange(port, path)
   TCPSocket.open("127.0.0.1", port) do |socket|
     socket.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    raise "response timeout" unless socket.wait_readable(10)
-    socket.read
+    ServerCheckIO.read_to_close(socket)
   end
 end
 

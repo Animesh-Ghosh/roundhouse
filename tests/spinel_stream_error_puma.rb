@@ -1,5 +1,6 @@
 # Puma confirms the literal wire contract used by the Tep harness.
 require_relative "support/rails_oracle"
+require_relative "support/server_check_io"
 unless RailsOracle.available?("railties", "actionpack", puma: "~> 8.0")
   puts "skip: #{RailsOracle.label} and Puma 8 are required"
   exit
@@ -47,7 +48,7 @@ server.run
 def exchange(port, path)
   TCPSocket.open("127.0.0.1", port) do |socket|
     socket.write("GET #{path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-    socket.read
+    ServerCheckIO.read_to_close(socket)
   end
 end
 begin

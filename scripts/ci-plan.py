@@ -539,6 +539,7 @@ def native_coverage(path):
     if path in {"tests/spinel_net_http_transport.rb", "tests/spinel_net_http_stream.rb", "tests/spinel_net_http_raise.rb"}:
         suites.add("spinel_net_http_start")
     if path.startswith("tests/spinel_stream_error") or path in {
+        "tests/support/server_check_io.rb",
         "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
         "runtime/spinel/tep/server_scheduled.rb", "runtime/spinel/tep/streamer.rb",
     }:
