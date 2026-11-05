@@ -441,6 +441,12 @@ module ActionCable
         nil
       end
 
+      def stop_all_streams
+        @connection.stop_streams(@identifier) unless @connection.nil?
+        @streams.clear
+        nil
+      end
+
       def transmit(data)
         @connection.transmit({ identifier: @identifier, message: data })
         nil
@@ -705,6 +711,12 @@ module ActionCable
       # the socket, and so does this: what a test asserts is what the
       # socket was told.
       attr_accessor :transport
+
+      def stop_streams(identifier)
+        live = @transport
+        live.stop_streams(identifier) unless live.nil?
+        nil
+      end
 
       def transmit(data)
         @transport.transmit(data) unless @transport.nil?
