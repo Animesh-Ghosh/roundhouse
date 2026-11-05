@@ -467,6 +467,8 @@ pub(in crate::analyze) fn register(
     for m in ["request_http_basic_authentication", "request_http_token_authentication"] {
         app_ctrl.class_methods.insert(Symbol::from(m), Ty::Nil);
     }
+    // The verdict, or nil once the challenge is rendered (runtime/spinel/http_authentication.rb).
+    app_ctrl.class_methods.insert(Symbol::from("http_basic_authenticate_or_request_with"), Ty::Untyped);
     app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
     // The controller delegates this writer to its response. Its assignment
     // value is the RHS, which need not have a concrete type yet. Register
