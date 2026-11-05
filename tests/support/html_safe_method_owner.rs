@@ -26,19 +26,23 @@ pub const VIEW: &str = concat!(
     "G:<%= @delegating.label %>\n",
     "K:<% @article.body = \"<k>\" %><%= @article.body %>\n",
     "Q:<% @comment.note_html = \"<q>\" %><%= @comment.note_html %>\n",
+    "N:<%= @shelf.first %>\n",
+    "O:<%= Loud.badge %>\n",
+    "V:<%= Fmt.badge %>\n",
 );
 
 pub const RENDERS: &[&str] = &[
     "A:<b>a</b>", "C:&lt;c&gt;", "F:<s>", "P:&lt;p&gt;", "U:<u>", "X:&lt;c&gt;", "Z:<u>",
     "B:<b>", "S:&lt;x&gt;", "M:&lt;m&gt;", "Y:<y>", "T:&lt;t1&gt;", "W:<t2>", "I:&lt;i2&gt;",
     "R:&lt;f&gt;", "E:&lt;r&gt;", "G:&lt;d&gt;", "Q:&lt;q&gt;",
+    "N:&lt;e&gt;", "O:&lt;o&gt;", "V:<v>",
 ];
 
 /// What trusting a mark too widely wrote: another class's `label`,
 /// another module's `badge`, `label` on an `Article | Comment` receiver
 /// (only `Article` has the marked one), and each value whose closer
 /// definition shadows a marked one, unescaped.
-pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>"];
+pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>"];
 
 /// real-blog with `GET /probe` rendering `VIEW`:
 /// - `Article#label` and `ApplicationRecord#tag_html` return html-safe
@@ -59,6 +63,10 @@ pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t
 ///   `Delegating < Base` with a `delegate` to an `InnerLabel`;
 /// - `ApplicationRecord#note_html` is html-safe, and `Comment` overrides
 ///   it with an `attr_accessor`;
+/// - `Base#first` is html-safe, and `Shelf < Base` includes `Enumerable`,
+///   whose `first` comes first; `Loud < Twin2` extends `Quiet`, whose
+///   plain `badge` answers `Loud.badge` ahead of `Twin2.badge`;
+/// - `Fmt.badge` is an `extend self` module's html-safe method;
 /// - `ApplicationRecord#body` is html-safe, and `articles.body` is a
 ///   column. Rails 8.1.4 renders `K:<j>`: Active Record doesn't generate
 ///   a reader that a class between the model and `ActiveRecord::Base`
@@ -84,7 +92,7 @@ pub fn app() -> emit_and_run::Overlay {
         )
         .write("lib/formatting.rb", "module Formatting\n  def self.badge\n    \"<s>\".html_safe\n  end\nend\n")
         .write("lib/plain.rb", "module Plain\n  def self.badge\n    \"<p>\"\n  end\nend\n")
-        .write("lib/base.rb", "class Base\n  def label\n    \"<b>\".html_safe\n  end\nend\n")
+        .write("lib/base.rb", "class Base\n  def label\n    \"<b>\".html_safe\n  end\n\n  def first\n    \"<w>\".html_safe\n  end\nend\n")
         .write("lib/special.rb", "class Special < Base\n  def label\n    \"<x>\"\n  end\nend\n")
         .write("lib/plainer.rb", "module Plainer\n  def label\n    \"<m>\"\n  end\nend\n")
         .write("lib/mixed.rb", "class Mixed < Base\n  include Plainer\nend\n")
@@ -95,10 +103,14 @@ pub fn app() -> emit_and_run::Overlay {
         .write("lib/readered.rb", "class Readered < Base\n  attr_reader :label\n\n  def initialize\n    @label = \"<r>\"\n  end\nend\n")
         .write("lib/inner_label.rb", "class InnerLabel\n  def label\n    \"<d>\"\n  end\nend\n")
         .write("lib/delegating.rb", "class Delegating < Base\n  delegate :label, to: :inner\n\n  def inner\n    InnerLabel.new\n  end\nend\n")
+        .write("lib/shelf.rb", "class Shelf < Base\n  include Enumerable\n\n  def each\n    yield \"<e>\"\n  end\nend\n")
+        .write("lib/quiet.rb", "module Quiet\n  def badge\n    \"<o>\"\n  end\nend\n")
+        .write("lib/loud.rb", "class Loud < Twin2\n  extend Quiet\nend\n")
+        .write("lib/fmt.rb", "module Fmt\n  extend self\n\n  def badge\n    \"<v>\".html_safe\n  end\nend\n")
         .write("app/models/concerns/labelled.rb", "module Labelled\n  extend ActiveSupport::Concern\n\n  def shiny\n    \"<y>\".html_safe\n  end\nend\n")
         .write(
             "app/controllers/probes_controller.rb",
-            "class ProbesController < ApplicationController\n  def show\n    @article = Article.new\n    @comment = Comment.new\n    @base = Base.new\n    @special = Special.new\n    @mixed = Mixed.new\n    @twin2 = Twin2.new\n    @fronted = Fronted.new\n    @readered = Readered.new\n    @delegating = Delegating.new\n  end\nend\n",
+            "class ProbesController < ApplicationController\n  def show\n    @article = Article.new\n    @comment = Comment.new\n    @base = Base.new\n    @special = Special.new\n    @mixed = Mixed.new\n    @twin2 = Twin2.new\n    @fronted = Fronted.new\n    @readered = Readered.new\n    @delegating = Delegating.new\n    @shelf = Shelf.new\n  end\nend\n",
         )
         .write("app/views/probes/show.html.erb", VIEW)
         .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe\", to: \"probes#show\", as: :probe\n")

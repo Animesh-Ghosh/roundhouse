@@ -5357,38 +5357,80 @@ struct MarkClass {
     /// `alias_method`, `define_method`, `store_accessor`, an association's
     /// readers. Read from the call's literal arguments, on either side.
     shadows: crate::det::HashSet<String>,
-    /// The class prepends a module, or calls `define_method` with a name
-    /// that isn't a literal: which definition it answers with isn't
-    /// known here.
+    /// Modules the class `extend`s, in source order: their instance
+    /// methods are the class's singleton methods, ahead of its parent's.
+    extends: Vec<String>,
+    /// The class prepends a module, mixes in one it computes, evaluates
+    /// code into itself (`class_eval`), or defines a method under a name
+    /// that isn't a literal: which definition it answers with isn't known
+    /// here.
     opaque: bool,
 }
 
-/// What a class-body call (`attr_reader :label`, `prepend Front`)
-/// defines: its literal symbol or string arguments, with `delegate`'s
-/// `prefix:` applied and `store`'s `accessors:` read, added to
-/// `shadows`. True when the call prepends a module or names a method
-/// that can't be read.
-fn macro_shadows(e: &crate::expr::Expr, shadows: &mut crate::det::HashSet<String>) -> bool {
+/// What a class-body call (`attr_reader :label`, `extend Helpers`) adds
+/// to `c`: its literal symbol or string arguments to `shadows`, with
+/// `delegate`'s `prefix:` applied and `store`'s `accessors:` read; an
+/// extended module to `extends`. A call whose effect can't be read
+/// (`prepend`, `include` of a computed module, `class_eval`, a
+/// `define_method` or `send` with a computed name) sets `opaque`.
+fn macro_shadows(e: &crate::expr::Expr, c: &mut MarkClass) {
     use crate::expr::{ExprNode, Literal};
-    let ExprNode::Send { recv, method, args, .. } = &*e.node else { return false };
+    let ExprNode::Send { recv, method, args, .. } = &*e.node else { return };
     if recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
-        return false;
+        return;
     }
     let name = |a: &crate::expr::Expr| match &*a.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
         ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
         _ => None,
     };
+    let is_const = |a: &crate::expr::Expr| matches!(&*a.node, ExprNode::Const { .. });
     match method.as_str() {
-        "prepend" => return true,
-        "include" | "extend" => return false,
-        "define_method" | "define_singleton_method" if args.first().and_then(name).is_none() => return true,
+        "send" | "public_send" | "__send__" => {
+            // `send(:attr_reader, :label)` is the call it names.
+            match args.split_first() {
+                Some((m, rest)) if name(m).is_some() => {
+                    let node = ExprNode::Send {
+                        recv: None,
+                        method: crate::ident::Symbol::from(name(m).unwrap().as_str()),
+                        args: rest.to_vec(),
+                        block: None,
+                        parenthesized: true,
+                    };
+                    macro_shadows(&crate::expr::Expr::new(e.span, node), c);
+                }
+                _ => c.opaque = true,
+            }
+            return;
+        }
+        "prepend" | "class_eval" | "class_exec" | "module_eval" | "module_exec" | "instance_eval" | "instance_exec" => {
+            c.opaque = true;
+            return;
+        }
+        "include" => {
+            c.opaque |= !args.iter().all(is_const);
+            return;
+        }
+        "extend" => {
+            for a in args {
+                match &*a.node {
+                    ExprNode::Const { path } => c.extends.push(path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::")),
+                    ExprNode::SelfRef => {}
+                    _ => c.opaque = true,
+                }
+            }
+            return;
+        }
+        "define_method" | "define_singleton_method" if args.first().and_then(name).is_none() => {
+            c.opaque = true;
+            return;
+        }
         "has_secure_password" => {
             let attr = args.first().and_then(name).unwrap_or_else(|| "password".to_string());
             if attr == "password" {
-                shadows.insert("authenticate".to_string());
+                c.shadows.insert("authenticate".to_string());
             }
-            shadows.extend([format!("authenticate_{attr}"), format!("{attr}_confirmation"), format!("{attr}_challenge")]);
+            c.shadows.extend([format!("authenticate_{attr}"), format!("{attr}_confirmation"), format!("{attr}_challenge")]);
         }
         _ => {}
     }
@@ -5399,7 +5441,7 @@ fn macro_shadows(e: &crate::expr::Expr, shadows: &mut crate::det::HashSet<String
             match name(k).as_deref() {
                 Some("accessors") => {
                     if let ExprNode::Array { elements, .. } = &*v.node {
-                        shadows.extend(elements.iter().filter_map(name));
+                        c.shadows.extend(elements.iter().filter_map(name));
                     }
                 }
                 Some("prefix") => match &*v.node {
@@ -5408,12 +5450,18 @@ fn macro_shadows(e: &crate::expr::Expr, shadows: &mut crate::det::HashSet<String
                         let to = entries.iter().find(|(k, _)| name(k).as_deref() == Some("to")).and_then(|(_, v)| name(v));
                         match to {
                             Some(to) => prefix = Some(to),
-                            None => return true,
+                            None => {
+                                c.opaque = true;
+                                return;
+                            }
                         }
                     }
                     _ => match name(v) {
                         Some(p) => prefix = Some(p),
-                        None => return true,
+                        None => {
+                            c.opaque = true;
+                            return;
+                        }
                     },
                 },
                 _ => {}
@@ -5422,11 +5470,10 @@ fn macro_shadows(e: &crate::expr::Expr, shadows: &mut crate::det::HashSet<String
     }
     for n in args.iter().filter_map(name) {
         if let Some(p) = &prefix {
-            shadows.insert(format!("{p}_{n}"));
+            c.shadows.insert(format!("{p}_{n}"));
         }
-        shadows.insert(n);
+        c.shadows.insert(n);
     }
-    false
 }
 
 /// The readers an association declares on its model: Rails defines them
@@ -5462,7 +5509,7 @@ impl HtmlSafeMarks {
             c.shadows.extend(m.attributes.fields.keys().map(|k| k.as_str().to_string()));
             for item in &m.body {
                 match item {
-                    crate::dialect::ModelBodyItem::Unknown { expr, .. } => c.opaque |= macro_shadows(expr, &mut c.shadows),
+                    crate::dialect::ModelBodyItem::Unknown { expr, .. } => macro_shadows(expr, c),
                     crate::dialect::ModelBodyItem::Association { assoc, .. } => association_shadows(assoc, &mut c.shadows),
                     crate::dialect::ModelBodyItem::Alias { new, .. } => {
                         c.shadows.insert(new.as_str().to_string());
@@ -5479,7 +5526,7 @@ impl HtmlSafeMarks {
             c.includes.extend(lc.includes.iter().map(|i| i.0.as_str().to_string()));
             c.defines.extend(lc.methods.iter().map(|d| (d.name.as_str().to_string(), singleton(d))));
             for e in &lc.unknown_calls {
-                c.opaque |= macro_shadows(e, &mut c.shadows);
+                macro_shadows(e, c);
             }
         }
         HtmlSafeMarks { classes, marked: app.html_safe_method_defs.iter().cloned().collect() }
@@ -5496,17 +5543,33 @@ impl HtmlSafeMarks {
     /// lookup takes Ruby's order, and the first class or module that
     /// defines the method decides: an instance call looks in the class,
     /// then its included modules, last included first, then its parent;
-    /// a singleton call looks in the class, then its parent. A method no
-    /// known class defines isn't trusted, and neither is one that a class
-    /// on the way gets from a call rather than a `def` (`attr_reader
-    /// :label`), or that a class answers through a prepended module.
+    /// a singleton call looks in the class, then the modules it extends,
+    /// last extended first, then its parent. A method no known class
+    /// defines isn't trusted, and neither is one that a class on the way
+    /// gets from a call rather than a `def` (`attr_reader :label`), that
+    /// a class answers through a prepended module, or that an included
+    /// or extended module this app doesn't have could define. An
+    /// extended module's own method isn't trusted either.
     pub(super) fn resolves_marked(&self, class: &str, method: &str, singleton: bool) -> bool {
         let mut order = Vec::new();
-        self.lookup_order(class, singleton, &mut order);
-        for c in &order {
-            let Some(k) = self.classes.get(c) else { continue };
+        self.lookup_order(class, singleton, Via::Class, &mut order);
+        for (c, via) in &order {
+            let Some(k) = self.classes.get(c) else {
+                if *via == Via::Class {
+                    // A parent this app doesn't have (`ActiveRecord::Base`)
+                    // ends the chain.
+                    continue;
+                }
+                return false;
+            };
             if k.opaque || k.shadows.contains(method) {
                 return false;
+            }
+            if *via == Via::Extend {
+                if k.defines.contains(&(method.to_string(), false)) {
+                    return false;
+                }
+                continue;
             }
             if k.defines.contains(&(method.to_string(), singleton)) {
                 return self.marked.contains(&(c.clone(), method.to_string(), singleton));
@@ -5515,21 +5578,39 @@ impl HtmlSafeMarks {
         false
     }
 
-    fn lookup_order(&self, class: &str, singleton: bool, out: &mut Vec<String>) {
-        if out.iter().any(|c| c == class) {
+    fn lookup_order(&self, class: &str, singleton: bool, via: Via, out: &mut Vec<(String, Via)>) {
+        if out.iter().any(|(c, v)| c == class && *v == via) {
             return;
         }
-        out.push(class.to_string());
+        out.push((class.to_string(), via));
         let Some(k) = self.classes.get(class) else { return };
-        if !singleton {
+        if via == Via::Extend || !singleton {
             for inc in k.includes.iter().rev() {
-                self.lookup_order(inc, false, out);
+                self.lookup_order(inc, false, if via == Via::Extend { Via::Extend } else { Via::Include }, out);
+            }
+        }
+        if via != Via::Class {
+            return;
+        }
+        if singleton {
+            for ext in k.extends.iter().rev() {
+                self.lookup_order(ext, false, Via::Extend, out);
             }
         }
         if let Some(p) = &k.parent {
-            self.lookup_order(p, singleton, out);
+            self.lookup_order(p, singleton, Via::Class, out);
         }
     }
+}
+
+/// How the lookup reached a class or module: as the receiver's class or
+/// one of its parents, as an included module, or as an extended one
+/// (whose instance methods answer singleton calls).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Via {
+    Class,
+    Include,
+    Extend,
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models
@@ -6162,6 +6243,41 @@ pub(super) fn noop_io_append() -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn class_call(method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Send { recv: None, method: Symbol::from(method), args, block: None, parenthesized: true })
+    }
+
+    fn read_class_call(e: Expr) -> MarkClass {
+        let mut c = MarkClass::default();
+        macro_shadows(&e, &mut c);
+        c
+    }
+
+    #[test]
+    fn a_class_body_call_whose_effect_cant_be_read_makes_the_class_opaque() {
+        let computed = || class_call("computed_name", vec![]);
+        assert!(read_class_call(class_call("send", vec![lit_sym(Symbol::from("define_method")), computed()])).opaque);
+        assert!(read_class_call(class_call("send", vec![computed(), lit_sym(Symbol::from("label"))])).opaque);
+        for m in ["class_eval", "class_exec", "module_eval", "module_exec", "instance_eval", "instance_exec"] {
+            assert!(read_class_call(class_call(m, vec![])).opaque, "{m}");
+        }
+        assert!(read_class_call(class_call("include", vec![computed()])).opaque);
+        assert!(read_class_call(class_call("extend", vec![computed()])).opaque);
+    }
+
+    #[test]
+    fn a_class_body_call_with_literal_names_shadows_them() {
+        let c = read_class_call(class_call("send", vec![lit_sym(Symbol::from("attr_reader")), lit_sym(Symbol::from("label"))]));
+        assert!(!c.opaque && c.shadows.contains("label"));
+        let c = read_class_call(class_call("send", vec![lit_sym(Symbol::from("define_method")), lit_sym(Symbol::from("label"))]));
+        assert!(!c.opaque && c.shadows.contains("label"));
+        let helpers = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("Helpers")] });
+        let c = read_class_call(class_call("extend", vec![helpers.clone()]));
+        assert!(!c.opaque && c.extends == vec!["Helpers".to_string()]);
+        let c = read_class_call(class_call("include", vec![helpers]));
+        assert!(!c.opaque && c.shadows.is_empty());
+    }
 
     #[test]
     fn module_id_for_articles_dir() {
