@@ -20708,6 +20708,22 @@ fn a_block_starting_with_control_flow_renders_on_spinel() {
         .assert_passes();
 }
 
+#[path = "support/rust_bare_model.rs"]
+mod rust_bare_model;
+
+/// #1711: the Rust model's `save` and `_insert_row` call `validate` and
+/// `fill_timestamps` only when the model has them.
+#[test]
+fn a_rust_model_calls_only_the_validate_and_fill_timestamps_it_has() {
+    for (validated, timestamped) in rust_bare_model::VARIANTS {
+        let (emitted, errors) = rust_bare_model::app(validated, timestamped).emit(roundhouse::project::BuildTarget::Rust);
+        assert!(errors.is_empty(), "{errors:?}");
+        let model = std::fs::read_to_string(emitted.join("src/models/account.rs")).unwrap();
+        assert_eq!(model.contains("self.validate()"), validated, "validated: {validated}\n{model}");
+        assert_eq!(model.contains("self.fill_timestamps(true)"), timestamped, "timestamped: {timestamped}\n{model}");
+    }
+}
+
 #[path = "support/pluralize_escape.rs"]
 mod pluralize_escape;
 
