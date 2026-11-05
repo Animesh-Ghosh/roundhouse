@@ -891,9 +891,27 @@ pub mod bundle {
         Some(emitted)
     }
 
-    // The edits that change a file of the base app rather than add one beside it. Not an insertion
-    // (a method added after `class Article`): it changes nothing another case's script calls, and
-    // a case that fails in the shared build is run again alone (`Overlay::run_spinel_with_flags`).
+    // Not any insertion: an added `validates`, or the rest of a kept line, changes what another case's script sees.
+    pub fn adds_only_methods(find: &str, replace: &str) -> bool {
+        let added = match (replace.strip_prefix(find), replace.strip_suffix(find)) {
+            (Some(after), _) if find.ends_with('\n') || after.starts_with('\n') => after,
+            (_, Some(before)) if before.ends_with('\n') => before,
+            _ => return false,
+        };
+        let indent = |l: &str| l.len() - l.trim_start().len();
+        let lines: Vec<&str> = added.lines().filter(|l| !l.trim().is_empty()).collect();
+        let Some(outer) = lines.iter().map(|l| indent(l)).min() else {
+            return false;
+        };
+        lines.iter().filter(|l| indent(l) == outer).all(|l| {
+            let l = l.trim_start();
+            l.starts_with("def ") || l == "end" || l.starts_with('#')
+        })
+    }
+
+    // The edits that change a file of the base app rather than add one beside it. Not one that only
+    // adds methods (`adds_only_methods`): it changes nothing another case's script calls, and a
+    // case that fails in the shared build is run again alone (`Overlay::run_spinel_with_flags`).
     fn base_edits(case: &Case) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let in_base = |path: &str| case.base.as_os_str() != EMPTY && case.base.join(path).exists();
@@ -901,7 +919,7 @@ pub mod bundle {
             match edit {
                 Edit::Write { path, content } if in_base(path) => ("w", path, content).hash(&mut h),
                 Edit::Write { .. } => {}
-                Edit::Replace { find, replace, .. } if replace.starts_with(find.as_str()) || replace.ends_with(find.as_str()) => {}
+                Edit::Replace { find, replace, .. } if adds_only_methods(find, replace) => {}
                 Edit::Replace { path, find, replace } => ("r", path, find, replace).hash(&mut h),
                 Edit::Remove { path } => ("d", path).hash(&mut h),
             }
@@ -911,7 +929,7 @@ pub mod bundle {
 
     const ROUTES: &str = "config/routes.rb";
 
-    // `base_edits` but for a route a case adds, which changes nothing another case's requests reach.
+    // `base_edits` but for routes a case inserts, which change nothing another case's requests reach.
     fn http_base_edits(case: &Case) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let in_base = |path: &str| case.base.as_os_str() != EMPTY && case.base.join(path).exists();
@@ -919,7 +937,8 @@ pub mod bundle {
             match edit {
                 Edit::Write { path, content } if in_base(path) => ("w", path, content).hash(&mut h),
                 Edit::Write { .. } => {}
-                Edit::Replace { path, .. } if path == ROUTES => {}
+                Edit::Replace { path, find, replace }
+                    if path == ROUTES && (replace.starts_with(find.as_str()) || replace.ends_with(find.as_str())) => {}
                 Edit::Replace { path, find, replace } => ("r", path, find, replace).hash(&mut h),
                 Edit::Remove { path } => ("d", path).hash(&mut h),
             }
