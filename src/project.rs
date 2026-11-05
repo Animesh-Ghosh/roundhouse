@@ -7179,7 +7179,8 @@ fn apply_job_registry_locate(files: &mut [(String, String)], app: &App) {
         return;
     }
     let mut generated = format!("{HEAD}  def self.locate(model_name, id)\n    case model_name\n");
-    for model in app.models.iter().filter(|m| !crate::lower::model_to_library::markers::is_abstract_class(m)) {
+    // Not a tableless one (a gem's `include ActiveModel::Model` class, MissionControl::Jobs::RecurringTask): it has no `find`, and Rails' locator raises for it too.
+    for model in app.models.iter().filter(|m| m.parent.is_some() && !crate::lower::model_to_library::markers::is_abstract_class(m)) {
         let name = model.name.0.as_str();
         generated.push_str(&format!(
             "    when \"{name}\"\n      {name}.find(GlobalID::Locator.cast_id(id))\n"

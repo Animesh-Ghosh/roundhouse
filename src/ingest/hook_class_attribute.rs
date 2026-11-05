@@ -75,6 +75,68 @@ pub(super) fn expand(app: &mut App) {
     expand_class_bodies(app);
     expand_model_bodies(app);
     expand_hooks(app);
+    expand_included_blocks(app);
+}
+
+/// A library Concern's `included do class_attribute :default_page_size,
+/// default: 1000 end` (mission_control-jobs' `ActiveJob::Querying`, which
+/// an on_load hook includes into `ActiveJob::Base`): each library class
+/// that includes the module declares it, as if written in its own body.
+/// Only a block of declarations alone; anything else in it keeps the
+/// block as it was.
+fn expand_included_blocks(app: &mut App) {
+    let names: Vec<String> = app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()).collect();
+    for mi in 0..app.library_classes.len() {
+        let module = &app.library_classes[mi];
+        if !module.is_module || module.origin.is_some() {
+            continue;
+        }
+        let Some((ci, decls)) = module.unknown_calls.iter().enumerate().find_map(|(ci, call)| {
+            let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*call.node else { return None };
+            if method.as_str() != "included" || !args.is_empty() {
+                return None;
+            }
+            let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
+            if !params.is_empty() {
+                return None;
+            }
+            let stmts: Vec<&Expr> = match &*body.node {
+                ExprNode::Seq { exprs } => exprs.iter().collect(),
+                _ => vec![body],
+            };
+            let decls: Option<Vec<Decl>> = stmts
+                .iter()
+                .map(|stmt| declaration(stmt, None).filter(|d| matches!(d.kind, Kind::ClassAttribute { .. })))
+                .collect();
+            decls.filter(|d| !d.is_empty()).map(|d| (ci, d))
+        }) else {
+            continue;
+        };
+        let module_name = module.name.0.as_str().to_string();
+        let includers: Vec<usize> = app
+            .library_classes
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.is_module)
+            .filter(|(_, c)| {
+                c.includes.iter().any(|inc| resolve(&names, inc.0.as_str(), c.name.0.as_str()).as_deref() == Some(module_name.as_str()))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if includers.is_empty() {
+            continue;
+        }
+        for &i in &includers {
+            let lc = &mut app.library_classes[i];
+            let mut added = Vec::new();
+            for decl in &decls {
+                added.extend(methods(&lc.name, Some("superclass"), &lc.methods, &added, decl, decl.span));
+                lc.class_ivar_initializers.extend(class_body_seeds(decl));
+            }
+            lc.methods.splice(0..0, added);
+        }
+        app.library_classes[mi].unknown_calls.remove(ci);
+    }
 }
 
 /// `class_attribute :live` written in a library class's own body.

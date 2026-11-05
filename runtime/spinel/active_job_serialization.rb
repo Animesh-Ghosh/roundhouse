@@ -27,6 +27,15 @@ require "time"
 # run a payload on, so this is where it belongs anyway — the same split
 # as GlobalID's mint (ruby/) and locator (spinel/).
 module ActiveJob
+  # Rails' `ActiveJob.adapter_name` (activejob queue_adapter.rb):
+  # mission_control-jobs names the adapter through it.
+  def self.adapter_name(adapter)
+    return adapter.queue_adapter_name if adapter.respond_to?(:queue_adapter_name)
+
+    adapter_class = adapter.is_a?(Module) ? adapter : adapter.class
+    adapter_class.name.to_s.split("::").last.to_s.delete_suffix("Adapter")
+  end
+
   module Arguments
     GLOBALID_KEY = "_aj_globalid"
     SERIALIZER_KEY = "_aj_serialized"

@@ -2,6 +2,7 @@
 # the parsed `arguments` array, which is `JSON.parse` output and so
 # `untyped`, the same contract as `RoundhouseJsonColumn.load`.
 module ActiveJob
+  def self.adapter_name: (untyped adapter) -> String
   module Arguments
     GLOBALID_KEY: String
     SERIALIZER_KEY: String
