@@ -249,7 +249,7 @@ pub struct ViewLowerCtx<'a> {
     reference_targets: std::rc::Rc<crate::det::HashMap<String, String>>,
     nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
     nilable_scalar_reads: std::rc::Rc<crate::det::HashSet<String>>,
-    html_safe_methods: std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
+    html_safe_methods: std::rc::Rc<HtmlSafeMarks>,
     model_singulars: std::rc::Rc<crate::det::HashSet<String>>,
     slug_models: std::rc::Rc<crate::det::HashSet<String>>,
     bool_readers: std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
@@ -331,7 +331,7 @@ impl<'a> ViewLowerCtx<'a> {
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
             nested_record_classes: std::rc::Rc::new(nested_record_classes(app)),
             nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
-            html_safe_methods: std::rc::Rc::new(html_safe_method_classes(app)),
+            html_safe_methods: std::rc::Rc::new(HtmlSafeMarks::of(app)),
             model_singulars: std::rc::Rc::new(
                 app.models
                     .iter()
@@ -5131,14 +5131,13 @@ pub(super) struct ViewCtx {
         std::rc::Rc<crate::det::HashMap<String, String>>,
     /// Proven singular association targets, keyed by owner class and reader.
     pub(super) nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
-    /// Methods whose result is html-safe by construction — their body
-    /// ends in `.html_safe` (`App::html_safe_method_owners`, recorded by
-    /// `lower::html_safe`) — each with the classes that have the marked
-    /// definition: its owner, and the classes that inherit or include it.
-    /// A bare interpolation of one on such a receiver skips the
-    /// auto-escape wrap; escaping it would ship literal `&lt;span&gt;`
-    /// markup, which is what `hat.to_html_label` does.
-    pub(super) html_safe_methods: std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
+    /// Definitions whose result is html-safe by construction — their
+    /// body ends in `.html_safe` (`App::html_safe_method_defs`, recorded
+    /// by `lower::html_safe`). A bare interpolation of a call that
+    /// resolves to one skips the auto-escape wrap; escaping it would ship
+    /// literal `&lt;span&gt;` markup, which is what `hat.to_html_label`
+    /// does.
+    pub(super) html_safe_methods: std::rc::Rc<HtmlSafeMarks>,
     /// Nilable-scalar reader names through a record: typed_store
     /// attributes with no default (nil when unset). Emptiness
     /// predicates on these get the nil-safe forms (see
@@ -5337,45 +5336,84 @@ pub(super) struct ViewCtx {
     pub(super) held_ivars: Vec<String>,
 }
 
-/// Each html-safe-marked method with the classes that have the marked
-/// definition: the class or module that defines it
-/// (`App::html_safe_method_owners`), and every class whose parents or
-/// included modules reach that owner. Another class's method of the same
-/// name isn't in the set, so its result is escaped.
-fn html_safe_method_classes(app: &App) -> crate::det::HashMap<String, crate::det::HashSet<String>> {
-    let mut direct: crate::det::HashMap<String, Vec<String>> = crate::det::HashMap::default();
-    for m in &app.models {
-        direct.entry(m.name.0.as_str().to_string()).or_default().extend(m.parent.iter().map(|p| p.0.as_str().to_string()));
-    }
-    for lc in &app.library_classes {
-        let e = direct.entry(lc.name.0.as_str().to_string()).or_default();
-        e.extend(lc.parent.iter().map(|p| p.0.as_str().to_string()));
-        e.extend(lc.includes.iter().map(|i| i.0.as_str().to_string()));
-    }
-    let reaches = |class: &str, owner: &str| {
-        let mut stack = vec![class.to_string()];
-        let mut seen = crate::det::HashSet::default();
-        while let Some(c) = stack.pop() {
-            if c == owner {
-                return true;
+/// The app's html-safe-marked definitions (`App::html_safe_method_defs`)
+/// with what is needed to find which definition a call resolves to:
+/// each class's or module's parent, included modules and own methods.
+#[derive(Default)]
+pub(super) struct HtmlSafeMarks {
+    classes: crate::det::HashMap<String, MarkClass>,
+    marked: crate::det::HashSet<(String, String, bool)>,
+}
+
+#[derive(Default)]
+struct MarkClass {
+    parent: Option<String>,
+    includes: Vec<String>,
+    /// `(method, singleton)` for every method the class defines itself.
+    defines: crate::det::HashSet<(String, bool)>,
+}
+
+impl HtmlSafeMarks {
+    fn of(app: &App) -> Self {
+        let mut classes: crate::det::HashMap<String, MarkClass> = crate::det::HashMap::default();
+        let singleton = |m: &crate::dialect::MethodDef| m.receiver == crate::dialect::MethodReceiver::Class;
+        for m in &app.models {
+            let c = classes.entry(m.name.0.as_str().to_string()).or_default();
+            c.parent = m.parent.as_ref().map(|p| p.0.as_str().to_string());
+            c.includes.extend(crate::analyze::model_includes(m).iter().map(|i| i.0.as_str().to_string()));
+            c.defines.extend(m.methods().map(|d| (d.name.as_str().to_string(), singleton(d))));
+        }
+        for lc in &app.library_classes {
+            let c = classes.entry(lc.name.0.as_str().to_string()).or_default();
+            if c.parent.is_none() {
+                c.parent = lc.parent.as_ref().map(|p| p.0.as_str().to_string());
             }
-            if seen.insert(c.clone()) {
-                stack.extend(direct.get(&c).into_iter().flatten().cloned());
+            c.includes.extend(lc.includes.iter().map(|i| i.0.as_str().to_string()));
+            c.defines.extend(lc.methods.iter().map(|d| (d.name.as_str().to_string(), singleton(d))));
+        }
+        HtmlSafeMarks { classes, marked: app.html_safe_method_defs.iter().cloned().collect() }
+    }
+
+    /// Whether any definition of `method` is marked: the cheap test
+    /// before a receiver is resolved.
+    pub(super) fn names(&self, method: &str) -> bool {
+        self.marked.iter().any(|(_, m, _)| m == method)
+    }
+
+    /// Whether `method` on an instance of `class` (or, with `singleton`,
+    /// on the constant `class`) resolves to a marked definition. The
+    /// lookup takes Ruby's order, and the first class or module that
+    /// defines the method decides: an instance call looks in the class,
+    /// then its included modules, last included first, then its parent;
+    /// a singleton call looks in the class, then its parent. A method no
+    /// known class defines isn't trusted.
+    pub(super) fn resolves_marked(&self, class: &str, method: &str, singleton: bool) -> bool {
+        let mut order = Vec::new();
+        self.lookup_order(class, singleton, &mut order);
+        for c in &order {
+            let defines = self.classes.get(c).is_some_and(|k| k.defines.contains(&(method.to_string(), singleton)));
+            if defines {
+                return self.marked.contains(&(c.clone(), method.to_string(), singleton));
             }
         }
         false
-    };
-    let mut out: crate::det::HashMap<String, crate::det::HashSet<String>> = crate::det::HashMap::default();
-    for (owner, method) in &app.html_safe_method_owners {
-        let classes = out.entry(method.clone()).or_default();
-        classes.insert(owner.clone());
-        for class in direct.keys() {
-            if reaches(class, owner) {
-                classes.insert(class.clone());
+    }
+
+    fn lookup_order(&self, class: &str, singleton: bool, out: &mut Vec<String>) {
+        if out.iter().any(|c| c == class) {
+            return;
+        }
+        out.push(class.to_string());
+        let Some(k) = self.classes.get(class) else { return };
+        if !singleton {
+            for inc in k.includes.iter().rev() {
+                self.lookup_order(inc, false, out);
             }
         }
+        if let Some(p) = &k.parent {
+            self.lookup_order(p, singleton, out);
+        }
     }
-    out
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models

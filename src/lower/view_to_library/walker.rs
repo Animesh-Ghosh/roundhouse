@@ -1551,19 +1551,25 @@ fn html_safe_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     if method.as_str() == "html_safe" && args.is_empty() {
         return recv.clone();
     }
-    let (Some(r), Some(classes)) = (recv, ctx.html_safe_methods.get(method.as_str())) else {
+    let Some(r) = recv else { return None };
+    if !ctx.html_safe_methods.names(method.as_str()) {
         return None;
-    };
-    receiver_classes(r).filter(|cs| cs.iter().all(|c| classes.contains(c))).map(|_| e.clone())
+    }
+    let (classes, singleton) = receiver_classes(r)?;
+    classes
+        .iter()
+        .all(|c| ctx.html_safe_methods.resolves_marked(c, method.as_str(), singleton))
+        .then(|| e.clone())
 }
 
-/// The classes a receiver can be, when they are all known: a constant
-/// (`Formatting.label`) is that class, and a typed receiver its class or
-/// the non-nil classes of a union (`Hat | nil`). `None` for anything
-/// else, an untyped receiver among them.
-fn receiver_classes(r: &Expr) -> Option<Vec<String>> {
+/// The classes a receiver can be, when they are all known, and whether
+/// the call is on the class itself: a constant (`Formatting.label`) is
+/// that class, singleton; a typed receiver is its class, or the non-nil
+/// classes of a union (`Hat | nil`). `None` for anything else, an
+/// untyped receiver among them.
+fn receiver_classes(r: &Expr) -> Option<(Vec<String>, bool)> {
     if let ExprNode::Const { path } = &*r.node {
-        return Some(vec![path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::")]);
+        return Some((vec![path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::")], true));
     }
     fn of(ty: &crate::ty::Ty, out: &mut Vec<String>) -> bool {
         match ty {
@@ -1577,7 +1583,7 @@ fn receiver_classes(r: &Expr) -> Option<Vec<String>> {
         }
     }
     let mut out = Vec::new();
-    (of(r.ty.as_ref()?, &mut out) && !out.is_empty()).then_some(out)
+    (of(r.ty.as_ref()?, &mut out) && !out.is_empty()).then_some((out, false))
 }
 
 /// Re-add the `.to_s` coercion that `unwrap_to_s` stripped, so the
@@ -2387,9 +2393,16 @@ mod tests {
 
     fn producer_ctx() -> ViewCtx {
         let mut ctx = test_ctx();
-        ctx.html_safe_methods = std::rc::Rc::new(
-            [("to_html_label".to_string(), ["Hat".to_string()].into_iter().collect())].into_iter().collect(),
-        );
+        let class = |defines: &[&str]| super::super::MarkClass {
+            defines: defines.iter().map(|m| (m.to_string(), false)).collect(),
+            ..Default::default()
+        };
+        ctx.html_safe_methods = std::rc::Rc::new(super::super::HtmlSafeMarks {
+            classes: [("Hat".to_string(), class(&["to_html_label"])), ("Badge".to_string(), class(&["to_html_label"]))]
+                .into_iter()
+                .collect(),
+            marked: [("Hat".to_string(), "to_html_label".to_string(), false)].into_iter().collect(),
+        });
         ctx
     }
     fn class_ty(name: &str) -> crate::ty::Ty {

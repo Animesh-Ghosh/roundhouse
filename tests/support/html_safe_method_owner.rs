@@ -14,14 +14,24 @@ pub const VIEW: &str = concat!(
     "U:<%= @article.tag_html %>\n",
     "X:<% x = @comment.nil? ? @article : @comment %><%= x.label %>\n",
     "Z:<% z = @comment.nil? ? @article : @comment %><%= z.tag_html %>\n",
+    "B:<%= @base.label %>\n",
+    "S:<%= @special.label %>\n",
+    "M:<%= @mixed.label %>\n",
+    "Y:<%= @article.shiny %>\n",
+    "T:<%= Twin1.badge %>\n",
+    "W:<%= Twin2.badge %>\n",
+    "I:<%= @twin2.badge %>\n",
 );
 
-pub const RENDERS: &[&str] = &["A:<b>a</b>", "C:&lt;c&gt;", "F:<s>", "P:&lt;p&gt;", "U:<u>", "X:&lt;c&gt;", "Z:<u>"];
+pub const RENDERS: &[&str] = &[
+    "A:<b>a</b>", "C:&lt;c&gt;", "F:<s>", "P:&lt;p&gt;", "U:<u>", "X:&lt;c&gt;", "Z:<u>",
+    "B:<b>", "S:&lt;x&gt;", "M:&lt;m&gt;", "Y:<y>", "T:&lt;t1&gt;", "W:<t2>", "I:&lt;i2&gt;",
+];
 
 /// What a name-only match wrote: another class's `label`, another
 /// module's `badge`, and `label` on an `Article | Comment` receiver
 /// (only `Article` has the marked one), unescaped.
-pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>"];
+pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>"];
 
 /// real-blog with `GET /probe` rendering `VIEW`:
 /// - `Article#label` and `ApplicationRecord#tag_html` return html-safe
@@ -30,7 +40,12 @@ pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>"];
 /// - `x` and `z` are typed `Article | Comment`: `label` is marked only
 ///   on `Article`, so it is escaped; `tag_html` is marked on both
 ///   classes' parent, so it is trusted (which shows the receiver's
-///   classes are known, not untyped).
+///   classes are known, not untyped);
+/// - `Base#label` is html-safe; `Special < Base` overrides it with a
+///   plain String, and so does `Plainer`, which `Mixed < Base` includes;
+/// - `Labelled`, a concern `Article` includes, defines html-safe `shiny`;
+/// - `Twin1`'s instance `badge` is html-safe and its `self.badge` isn't;
+///   `Twin2`'s `self.badge` is html-safe and its instance `badge` isn't.
 pub fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .edit(
@@ -41,7 +56,7 @@ pub fn app() -> emit_and_run::Overlay {
         .edit(
             "app/models/article.rb",
             "  validates :title, presence: true\n",
-            "  validates :title, presence: true\n\n  def label\n    \"<b>a</b>\".html_safe\n  end\n",
+            "  include Labelled\n\n  validates :title, presence: true\n\n  def label\n    \"<b>a</b>\".html_safe\n  end\n",
         )
         .edit(
             "app/models/comment.rb",
@@ -50,9 +65,16 @@ pub fn app() -> emit_and_run::Overlay {
         )
         .write("lib/formatting.rb", "module Formatting\n  def self.badge\n    \"<s>\".html_safe\n  end\nend\n")
         .write("lib/plain.rb", "module Plain\n  def self.badge\n    \"<p>\"\n  end\nend\n")
+        .write("lib/base.rb", "class Base\n  def label\n    \"<b>\".html_safe\n  end\nend\n")
+        .write("lib/special.rb", "class Special < Base\n  def label\n    \"<x>\"\n  end\nend\n")
+        .write("lib/plainer.rb", "module Plainer\n  def label\n    \"<m>\"\n  end\nend\n")
+        .write("lib/mixed.rb", "class Mixed < Base\n  include Plainer\nend\n")
+        .write("lib/twin1.rb", "module Twin1\n  def self.badge\n    \"<t1>\"\n  end\n\n  def badge\n    \"<i1>\".html_safe\n  end\nend\n")
+        .write("lib/twin2.rb", "class Twin2\n  def self.badge\n    \"<t2>\".html_safe\n  end\n\n  def badge\n    \"<i2>\"\n  end\nend\n")
+        .write("app/models/concerns/labelled.rb", "module Labelled\n  extend ActiveSupport::Concern\n\n  def shiny\n    \"<y>\".html_safe\n  end\nend\n")
         .write(
             "app/controllers/probes_controller.rb",
-            "class ProbesController < ApplicationController\n  def show\n    @article = Article.new\n    @comment = Comment.new\n  end\nend\n",
+            "class ProbesController < ApplicationController\n  def show\n    @article = Article.new\n    @comment = Comment.new\n    @base = Base.new\n    @special = Special.new\n    @mixed = Mixed.new\n    @twin2 = Twin2.new\n  end\nend\n",
         )
         .write("app/views/probes/show.html.erb", VIEW)
         .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe\", to: \"probes#show\", as: :probe\n")
