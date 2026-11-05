@@ -29,6 +29,9 @@ mod record_slice_app;
 #[path = "support/ts_controller_ivars.rs"]
 #[allow(dead_code)]
 mod ts_controller_ivars;
+#[path = "support/block_control_flow.rs"]
+#[allow(dead_code)]
+mod block_control_flow;
 #[path = "support/pluralize_escape.rs"]
 #[allow(dead_code)]
 mod pluralize_escape;
@@ -310,6 +313,32 @@ fn content_tag_blocks_render() {
     let stderr = String::from_utf8_lossy(&run.stderr);
     assert!(run.status.success(), "{stdout}\n{stderr}");
     for want in [r#"<section class="boxed">inside</section>"#, r#"<div class="btn primary">blk</div>"#] {
+        assert!(stdout.contains(want), "expected {want} in\n{stdout}");
+    }
+}
+
+/// #1774: a block helper whose template body starts with control flow
+/// renders its markup, as Rails 8.1.4 does.
+#[test]
+#[ignore]
+fn a_block_starting_with_control_flow_renders() {
+    let (emitted, errors) = block_control_flow::app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    shards_install(&emitted);
+    std::fs::write(
+        emitted.join("probe.cr"),
+        "require \"./src/app\"\nc = ProbesController.new\nc.request_method = \"GET\"\nc.process_action(:show)\nputs c.body\n",
+    )
+    .unwrap();
+    let run = Command::new("crystal")
+        .args(["run", "probe.cr"])
+        .current_dir(&emitted)
+        .env("CRYSTAL_CACHE_DIR", emitted.join(".crystal-cache"))
+        .output()
+        .expect("run crystal");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+    for want in block_control_flow::RENDERS {
         assert!(stdout.contains(want), "expected {want} in\n{stdout}");
     }
 }

@@ -20695,6 +20695,28 @@ fn an_assertion_on_a_new_records_method_passes_on_ruby() {
     go_test_literal_receiver::app().run_test("test/models/featured_test.rb").assert_passes();
 }
 
+#[path = "support/block_control_flow.rs"]
+mod block_control_flow;
+
+#[test]
+fn a_block_starting_with_control_flow_renders() {
+    block_control_flow::app()
+        .write("test/controllers/probes_controller_test.rb", &block_control_flow::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_block_starting_with_control_flow_renders_on_spinel() {
+    block_control_flow::app()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"rendered\"\n",
+            block_control_flow::body_checks()
+        ))
+        .assert_passes();
+}
+
 #[path = "support/go_conditional_operand.rs"]
 mod go_conditional_operand;
 
