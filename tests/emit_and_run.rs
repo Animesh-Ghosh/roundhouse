@@ -20640,6 +20640,10 @@ mod concern_define_loop;
 mod mutated_loop_constant;
 #[path = "support/solid_queue_worker.rs"]
 mod solid_queue_worker_contract;
+#[path = "emit_and_run/solid_queue_surface.rs"]
+mod solid_queue_surface;
+#[path = "emit_and_run/controller_surface.rs"]
+mod controller_surface;
 #[path = "emit_and_run/solid_queue_worker.rs"]
 mod solid_queue_worker;
 #[path = "emit_and_run/route_helper_segment_escape.rs"]
