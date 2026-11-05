@@ -12,6 +12,11 @@
 //!
 //! A file with ERB is left alone, with `eval` and its refusal intact: its
 //! commands are not known until Rails renders it.
+//!
+//! Only the default path is read. A schedule chosen when the app starts
+//! (`SOLID_QUEUE_RECURRING_SCHEDULE`, `--recurring_schedule_file`) is not
+//! known at build time, and its commands raise unless this file names them
+//! too: a known gap.
 
 use std::path::Path;
 

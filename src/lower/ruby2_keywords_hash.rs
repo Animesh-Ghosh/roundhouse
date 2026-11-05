@@ -1,12 +1,13 @@
 //! `Hash.ruby2_keywords_hash(hash)` → `hash.dup`.
 //!
 //! The method answers a copy of the Hash flagged so that a later `*args`
-//! splat passes it as keywords, a shim for code written across the Ruby
-//! 2.x-to-3.0 keyword change. Every target speaks modern keyword
-//! semantics, where the flag toggles nothing, and Spinel refuses the call
-//! by name. solid_queue's `RecurringTask#arguments_with_kwargs` splats it
-//! into `job_class.new(*args)`, whose `initialize(*arguments)` takes it
-//! positionally either way.
+//! splat passes it as keywords. Spinel refuses the call by name and no
+//! target carries the flag, so the copy is all that is kept: a flagged
+//! Hash splatted into a method with keyword parameters arrives
+//! positionally. solid_queue's `RecurringTask#arguments_with_kwargs`
+//! flags a recurring task's last Hash argument; `ActiveJob::Arguments.serialize`
+//! then writes `_aj_symbol_keys` where Rails writes `_aj_ruby2_keywords`,
+//! and a job whose `perform` takes keywords from it is a known gap.
 
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;

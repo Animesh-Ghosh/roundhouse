@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use roundhouse::dialect::{MethodDef, MethodReceiver, MethodVisibility, ModelBodyItem};
 use roundhouse::ingest::{
-    ingest_app_from_tree, ingest_library_class, ingest_library_classes, ingest_model,
+    ingest_app_from_tree, ingest_library_class, ingest_library_classes, ingest_model, ingest_schema,
 };
 use roundhouse::schema::Schema;
 
@@ -426,6 +426,9 @@ fn nonpublic_model_readers_are_private_methods_and_writers_are_refused() {
         let source = format!("class Thing < ApplicationRecord\n{body}\nend");
         assert_eq!(visibility(&methods(&source, true), "value", MethodReceiver::Instance), MethodVisibility::Private, "{source}");
     }
+    let both = methods("class Thing < ApplicationRecord\n attr_reader :value, :shown\n private :value\nend", true);
+    assert_eq!(visibility(&both, "value", MethodReceiver::Instance), MethodVisibility::Private);
+    assert_eq!(visibility(&both, "shown", MethodReceiver::Instance), MethodVisibility::Public);
     for body in ["private\n attr_writer :value", "attr_accessor :value\n private :value"] {
         let source = format!("class Thing < ApplicationRecord\n{body}\nend");
         assert!(
@@ -433,6 +436,10 @@ fn nonpublic_model_readers_are_private_methods_and_writers_are_refused() {
             "{source}"
         );
     }
+    // Over a column, Rails' private reader reads an ivar the record never sets.
+    let schema = ingest_schema(b"ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :things do |t|\n    t.string :value\n  end\nend\n", "db/schema.rb").unwrap();
+    let source = "class Thing < ApplicationRecord\n private\n attr_reader :value\nend";
+    assert!(ingest_model(source.as_bytes(), "thing.rb", &schema, &Default::default()).is_err());
 }
 
 /// A model aliases a private def under `private` with `alias_method`. The

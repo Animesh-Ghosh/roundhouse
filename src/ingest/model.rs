@@ -447,7 +447,10 @@ pub(super) fn ingest_model_with_enum_constants(
                 if let ModelBodyItem::Method { method, .. } = &mut item {
                     visibility.apply(&statement, method);
                 } else if let ModelBodyItem::Unknown { expr, .. } = &item {
-                    if let Some(methods) = visibility.restricted_at(&statement).and_then(|v| restricted_attr_methods(expr, &owner, v)) {
+                    if let Some(mut methods) = visibility.restricted_at(&statement).then(|| restricted_attr_methods(expr, &owner, &attributes)).flatten() {
+                        for method in &mut methods {
+                            visibility.apply(&statement, method);
+                        }
                         for (j, method) in methods.into_iter().enumerate() {
                             body.push(ModelBodyItem::Method {
                                 method,
@@ -849,37 +852,23 @@ fn expand_mattr_cattr(
 }
 
 /// `private` then `attr_reader :queue_adapter` (MissionControl::Jobs::RecurringTask): the
-/// readers as methods carrying that visibility, which a class-body `attr_*`
+/// readers as methods, each to carry its own visibility, which a class-body `attr_*`
 /// statement has nowhere to hold.
-fn restricted_attr_methods(
-    expr: &Expr,
-    owner: &ClassId,
-    visibility: crate::dialect::MethodVisibility,
-) -> Option<Vec<crate::dialect::MethodDef>> {
+fn restricted_attr_methods(expr: &Expr, owner: &ClassId, columns: &Row) -> Option<Vec<crate::dialect::MethodDef>> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { return None };
     // Not a writer: mass assignment refuses a private writer's key in Rails, which the model lowering does not model, so `check_model_item` still refuses one.
-    let (reader, writer) = match method.as_str() {
-        "attr_reader" => (true, false),
-        _ => return None,
-    };
-    let mut names = Vec::new();
-    for arg in args.iter() {
-        let ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*arg.node else { return None };
-        names.push(value.clone());
+    if method.as_str() != "attr_reader" {
+        return None;
     }
-    let mut methods = Vec::new();
-    for name in &names {
-        if reader {
-            methods.push(super::library_class::synth_attr_reader(owner, name, crate::dialect::MethodReceiver::Instance));
-        }
-        if writer {
-            methods.push(super::library_class::synth_attr_writer(owner, name, crate::dialect::MethodReceiver::Instance));
-        }
-    }
-    for m in &mut methods {
-        m.visibility = visibility;
-    }
-    Some(methods)
+    args.iter()
+        .map(|arg| match &*arg.node {
+            // Not over a column: Rails' reader then reads an ivar the record never sets, which the column reader the lowering keeps would not.
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if !columns.fields.contains_key(value) => {
+                Some(super::library_class::synth_attr_reader(owner, value, crate::dialect::MethodReceiver::Instance))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn synth_mattr_instance_reader(owner: &ClassId, name: &Symbol) -> crate::dialect::MethodDef {

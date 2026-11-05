@@ -530,10 +530,10 @@ impl Visibility {
         }
     }
 
-    /// The visibility other than public a statement's names were given, if any.
-    pub(super) fn restricted_at(&self, statement: &Node<'_>) -> Option<MethodVisibility> {
+    /// Whether any name a statement declares was given a visibility other than public.
+    pub(super) fn restricted_at(&self, statement: &Node<'_>) -> bool {
         let offset = statement.location().start_offset();
-        self.values.iter().find(|((at, _), value)| *at == offset && **value != MethodVisibility::Public).map(|(_, value)| *value)
+        self.values.iter().any(|((at, _), value)| *at == offset && *value != MethodVisibility::Public)
     }
 
     pub(super) fn check_model_item(&self, statement: &Node<'_>, file: &str) -> IngestResult<()> {

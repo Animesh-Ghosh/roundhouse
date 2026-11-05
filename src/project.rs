@@ -7211,8 +7211,13 @@ fn apply_job_registry_locate(files: &mut [(String, String)], app: &App) {
         return;
     }
     let mut generated = format!("{HEAD}  def self.locate(model_name, id)\n    case model_name\n");
-    // Not a tableless one (a gem's `include ActiveModel::Model` class, MissionControl::Jobs::RecurringTask): it has no `find`, and Rails' locator raises for it too.
-    for model in app.models.iter().filter(|m| m.parent.is_some() && !crate::lower::model_to_library::markers::is_abstract_class(m)) {
+    // Not a model with neither a table nor its own `self.find` (MissionControl::Jobs::RecurringTask): Rails' locator raises for it too.
+    let finds = |m: &crate::dialect::Model| {
+        !m.attributes.fields.is_empty()
+            || m.body.iter().any(|item| matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
+                if method.name.as_str() == "find" && method.receiver == crate::dialect::MethodReceiver::Class))
+    };
+    for model in app.models.iter().filter(|m| finds(m) && !crate::lower::model_to_library::markers::is_abstract_class(m)) {
         let name = model.name.0.as_str();
         generated.push_str(&format!(
             "    when \"{name}\"\n      {name}.find(GlobalID::Locator.cast_id(id))\n"
@@ -8670,6 +8675,7 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport", "error_template"),
     ("ActiveSupport", "errors_import"),
     ("ActiveSupport", "errors_merge"),
+    ("ActiveJob::Arguments", "serialize"),
 ];
 
 /// Instance methods only the ruby family and spinel can answer: a model's

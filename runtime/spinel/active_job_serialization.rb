@@ -296,6 +296,17 @@ module ActiveJob
       arguments.map { |argument| serialize_argument(argument) }
     end
 
+    def self.serialize_hash_key(key)
+      unless key.is_a?(String) || key.is_a?(Symbol)
+        raise ActiveJob::SerializationError, "Only string and symbol hash keys may be serialized as job arguments, but " + key.inspect + " is a " + key.class.name.to_s
+      end
+      name = key.to_s
+      if [GLOBALID_KEY, SERIALIZER_KEY, SYMBOL_KEYS_KEY, RUBY2_KEYWORDS_KEY, WITH_INDIFFERENT_ACCESS_KEY].include?(name)
+        raise ActiveJob::SerializationError, "Can't serialize a Hash with reserved key " + key.inspect
+      end
+      name
+    end
+
     def self.serialize_argument(argument)
       case argument
       when nil, true, false, Integer, Float, String
@@ -310,12 +321,14 @@ module ActiveJob
         symbol_keys = []
         result = {}
         argument.each do |key, value|
-          symbol_keys << key.to_s if key.is_a?(Symbol)
-          result[key.to_s] = serialize_argument(value)
+          name = serialize_hash_key(key)
+          symbol_keys << name if key.is_a?(Symbol)
+          result[name] = serialize_argument(value)
         end
         result[SYMBOL_KEYS_KEY] = symbol_keys
         result
       else
+        # Not Date, Duration or an app's own serializer, which Rails writes: `deserialize` reads none of them either.
         if argument.respond_to?(:to_gid_uri)
           { GLOBALID_KEY => argument.to_gid_uri }
         else

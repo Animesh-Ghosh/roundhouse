@@ -56,6 +56,13 @@ k = SurfaceProbe.keywords(h)
 raise "keywords: #{k.inspect}" unless k == h && !k.equal?(h)
 raise "json" unless SurfaceProbe.round_trip({ "a" => [1, "x"] }) == { "a" => [1, "x"] }
 raise "page_size" unless SurfaceProbe.page_size == 1000
+raise "serialize" unless ActiveJob::Arguments.serialize([{ a: 1, "b" => :c }]) == [{ "a" => 1, "b" => { "_aj_serialized" => "ActiveJob::Serializers::SymbolSerializer", "value" => "c" }, "_aj_symbol_keys" => ["a"] }]
+begin
+  ActiveJob::Arguments.serialize([{ "_aj_globalid" => 1 }])
+  raise "a reserved key was serialized"
+rescue ActiveJob::SerializationError => e
+  raise "reserved: #{e.message}" unless e.message.include?("reserved key")
+end
 article = Article.new(title: "Surface", body: "A body long enough")
 raise "secret is public" if article.respond_to?(:secret)
 article.remember("kept")

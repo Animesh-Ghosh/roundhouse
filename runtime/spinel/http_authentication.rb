@@ -81,9 +81,14 @@ module ActionController
     # authentication calls: both names compared, then both answers.
     def http_basic_authenticate_or_request_with(name:, password:, realm: nil, message: nil)
       authenticate_or_request_with_http_basic(realm.nil? ? "Application" : realm, message) do |given_name, given_password|
-        name_ok = MessageDigest.secure_compare(given_name.to_s, name.to_s)
-        password_ok = MessageDigest.secure_compare(given_password.to_s, password.to_s)
-        name_ok && password_ok
+        # Not `nil.to_s`: an unset credential would admit an empty one, where Rails' compare raises.
+        if name.nil? || password.nil?
+          false
+        else
+          name_ok = MessageDigest.secure_compare(given_name.to_s, name.to_s)
+          password_ok = MessageDigest.secure_compare(given_password.to_s, password.to_s)
+          name_ok && password_ok
+        end
       end
     end
 

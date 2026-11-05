@@ -169,7 +169,7 @@ pub(super) fn emit_form_with_blockless(args: &[Expr], ctx: &ViewCtx) -> Option<V
         return None;
     }
     let url = value_for("url")?;
-    let method = value_for("method").unwrap_or_else(|| lit_sym(Symbol::from("post")));
+    let method = tag_option(&entries, "method").unwrap_or_else(|| lit_sym(Symbol::from("post")));
 
     let route_helpers = || {
         Expr::new(
@@ -188,10 +188,10 @@ pub(super) fn emit_form_with_blockless(args: &[Expr], ctx: &ViewCtx) -> Option<V
     let mut out: Vec<Expr> = form_with_entry(ctx).into_iter().collect();
     out.push(emit_open_form_tag(&comps, ctx, false));
     if !is_get(&comps.method) {
-        out.extend([
-            accumulator_append_call(view_helpers_call("method_override_input", vec![method]), ctx),
-            accumulator_append_call(view_helpers_call("csrf_token_hidden_input", Vec::new()), ctx),
-        ]);
+        out.push(accumulator_append_call(view_helpers_call("method_override_input", vec![method]), ctx));
+        if sends_token(&comps.opts_entries) {
+            out.push(accumulator_append_call(view_helpers_call("csrf_token_hidden_input", Vec::new()), ctx));
+        }
     }
     Some(out)
 }
@@ -295,10 +295,12 @@ pub(super) fn emit_form_with_inline(
             view_helpers_call("method_override_input", vec![method_var_ref]),
             ctx,
         ));
-        out.push(accumulator_append_call(
-            view_helpers_call("csrf_token_hidden_input", Vec::new()),
-            ctx,
-        ));
+        if sends_token(&comps.opts_entries) {
+            out.push(accumulator_append_call(
+                view_helpers_call("csrf_token_hidden_input", Vec::new()),
+                ctx,
+            ));
+        }
     }
 
     // 4. Walk the block body against the OUTER accumulator. The
@@ -373,6 +375,9 @@ fn form_tag_attributes(opts: &[(Expr, Expr)]) -> Vec<(Expr, Expr)> {
     // `merge!`: an existing key keeps its position and takes html's
     // value; a new key appends.
     for (hk, hv) in html {
+        if matches!(key_of(&hk).as_deref(), Some("method" | "authenticity_token" | "multipart")) {
+            continue;
+        }
         match (key_of(&hk), out.iter().position(|(k, _)| key_of(k) == key_of(&hk))) {
             (Some(_), Some(i)) => out[i].1 = hv,
             _ => out.push((hk, hv)),
@@ -432,6 +437,21 @@ fn block_has_file_field(body: &Expr, form_param: &str, ctx: &ViewCtx) -> bool {
 /// `_method` or authenticity token (mission_control-jobs' job filters).
 fn is_get(method: &Expr) -> bool {
     str_or_sym_literal(method).is_some_and(|m| m.eq_ignore_ascii_case("get"))
+}
+
+/// A `<form>` option as Rails takes it: `html:`'s entry over the top-level one (`options.slice(...).merge!(html)`).
+fn tag_option(entries: &[(Expr, Expr)], name: &str) -> Option<Expr> {
+    let key_is = |k: &Expr, want: &str| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == want);
+    let html = entries.iter().find(|(k, _)| key_is(k, "html")).and_then(|(_, v)| match &*v.node {
+        ExprNode::Hash { entries, .. } => entries.iter().find(|(k, _)| key_is(k, name)).map(|(_, v)| v.clone()),
+        _ => None,
+    });
+    html.or_else(|| entries.iter().find(|(k, _)| key_is(k, name)).map(|(_, v)| v.clone()))
+}
+
+/// `authenticity_token: false` drops Rails' token input (a form posting to another site).
+fn sends_token(entries: &[(Expr, Expr)]) -> bool {
+    !matches!(tag_option(entries, "authenticity_token").map(|v| v.node), Some(n) if matches!(&*n, ExprNode::Lit { value: Literal::Bool { value: false } }))
 }
 
 fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx, multipart: bool) -> Expr {
@@ -852,6 +872,9 @@ fn classify_form_with_components(
         }
     }
 
+    if let Some(method) = tag_option(&opts_entries, "method") {
+        method_expr = Some(method);
+    }
     // form_with's POST default when no explicit `method:` was given.
     let default_post = || lit_sym(Symbol::from("post"));
 
