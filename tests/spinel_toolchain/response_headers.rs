@@ -4,7 +4,7 @@
 //!
 //! The ruby-lane twin is `tests/environment_flags.rs`.
 
-use super::{emit_and_run, native_http};
+use super::emit_and_run;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command};
@@ -37,7 +37,7 @@ impl Drop for Running {
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn responses_carry_rails_headers_and_absolute_redirects() {
-    let (tree, errors) = emit_and_run::real_blog()
+    let tree = emit_and_run::real_blog()
         .edit(
             "config/environments/production.rb",
             "# config.assume_ssl = true",
@@ -53,9 +53,7 @@ fn responses_carry_rails_headers_and_absolute_redirects() {
             "  # GET /articles or /articles.json\n",
             "  def go\n    redirect_to \"/articles\"\n  end\n\n  # GET /articles or /articles.json\n",
         )
-        .emit(roundhouse::project::BuildTarget::Spinel);
-    assert!(errors.is_empty(), "{errors:?}");
-    native_http::build(&tree);
+        .native_http_tree();
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let log_path = tree.join("server.log");
     let log = std::fs::File::create(&log_path).unwrap();

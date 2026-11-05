@@ -350,6 +350,24 @@ impl Overlay {
         (Emitted(dir), errors)
     }
 
+    /// The Spinel tree with its server built (`spin build blog`), for a
+    /// test driven over HTTP (`tests/support/native_http.rs`); one that
+    /// combines with other tests' overlays is built once for all of them
+    /// (`bundle::build_all`), and this answers a copy of that tree.
+    pub fn native_http_tree(self) -> Emitted {
+        if let Some(dir) = bundle::collect_dir() {
+            bundle::record(&dir, &self, "", &[bundle::HTTP]);
+            panic!("spinel bundle collect: recorded, not run");
+        }
+        if let Some(tree) = bundle::http_shared(&self) {
+            return Emitted(tree);
+        }
+        let (tree, errors) = self.emit(BuildTarget::Spinel);
+        assert!(errors.is_empty(), "analysis/emission errors:\n{}", errors.join("\n"));
+        bundle::spin_build(&tree).unwrap_or_else(|log| panic!("`spin build blog` failed in {}\n{log}", tree.display()));
+        tree
+    }
+
     pub fn emit_target_neutral(self, target: BuildTarget) -> (Emitted, Vec<String>) {
         let (dir, _app, errors) = self.emit_app_tree_with_lowering(target, false);
         let errors = errors.into_iter().map(|d| format!("{:?}: {}", d.span, d.message)).collect();
@@ -625,6 +643,101 @@ pub mod bundle {
 
     const GROUP: usize = 8;
 
+    /// The flag a case recorded by `Overlay::native_http_tree` carries: a
+    /// server built with `spin build`, not a contract compiled by spinel.
+    pub const HTTP: &str = "<native-http>";
+
+    pub fn spin_build(tree: &Path) -> Result<(), String> {
+        let output = Command::new("spin").args(["build", "blog"]).current_dir(tree).output().map_err(|e| format!("spawn spin: {e}"))?;
+        if output.status.success() && tree.join("build/bin/blog").is_file() {
+            return Ok(());
+        }
+        Err(format!(
+            "=== stdout ===\n{}\n=== stderr ===\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
+    }
+
+    // Not the group's tree itself: each test writes its database and its log into the tree, and tests run in parallel.
+    pub fn http_shared(overlay: &Overlay) -> Option<PathBuf> {
+        let (dir, map) = manifest()?;
+        let (group, _) = map.get(&key(overlay, "", &[HTTP])?)?;
+        let emitted = scratch_dir().join("emitted");
+        copy_tree(&dir.join(group), &emitted);
+        Some(emitted)
+    }
+
+    /// Every case's edits in one list when they compose on the base: a
+    /// file written alike by each case that writes it, and replacements
+    /// that each still find their text exactly once, in order, with the
+    /// others applied (routes added after one `draw do` line). None when
+    /// two cases disagree about a file.
+    fn merged_edits(cases: &[&Case]) -> Option<Vec<Edit>> {
+        let empty = cases[0].base.as_os_str() == EMPTY;
+        let mut files: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut written: BTreeMap<&str, &[u8]> = BTreeMap::new();
+        let mut removed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut seen: std::collections::BTreeSet<(&str, &str, &str)> = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for case in cases {
+            for edit in &case.edits {
+                match edit {
+                    Edit::Write { path, content } => {
+                        if removed.contains(path.as_str()) || files.contains_key(path.as_str()) {
+                            return None;
+                        }
+                        match written.insert(path.as_str(), content.as_slice()) {
+                            Some(before) if before != content.as_slice() => return None,
+                            Some(_) => continue,
+                            None => out.push(clone_edit(edit)),
+                        }
+                    }
+                    Edit::Replace { path, find, replace } => {
+                        if empty || written.contains_key(path.as_str()) || removed.contains(path.as_str()) {
+                            return None;
+                        }
+                        // Once: the grouping gives every case the same edits to the app's other files (`http_base_edits`).
+                        if path != ROUTES && seen.contains(&(path.as_str(), find.as_str(), replace.as_str())) {
+                            continue;
+                        }
+                        seen.insert((path.as_str(), find.as_str(), replace.as_str()));
+                        let text = files
+                            .entry(path.clone())
+                            .or_insert_with(|| std::fs::read_to_string(case.base.join(path)).ok())
+                            .as_mut()?;
+                        if text.matches(find.as_str()).count() != 1 {
+                            return None;
+                        }
+                        *text = text.replacen(find.as_str(), replace, 1);
+                        out.push(clone_edit(edit));
+                    }
+                    Edit::Remove { path } => {
+                        if written.contains_key(path.as_str()) || files.contains_key(path.as_str()) {
+                            return None;
+                        }
+                        if removed.insert(path.as_str()) {
+                            out.push(clone_edit(edit));
+                        }
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
+    fn build_http(cases: &[&Case]) -> Option<PathBuf> {
+        let edits = merged_edits(cases)?;
+        let empty = cases[0].base.as_os_str() == EMPTY;
+        let overlay = Overlay { base: if empty { scratch_dir() } else { cases[0].base.clone() }, scratch_base: empty, edits };
+        let (emitted, errors) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| overlay.emit_tree(BuildTarget::Spinel))).ok()?;
+        if !errors.is_empty() || spin_build(&emitted).is_err() {
+            remove_scratch(&emitted);
+            return None;
+        }
+        Some(emitted)
+    }
+
     pub fn collect_dir() -> Option<PathBuf> {
         std::env::var_os("RH_SPINEL_BUNDLE_COLLECT").map(PathBuf::from)
     }
@@ -813,6 +926,24 @@ pub mod bundle {
         h.finish()
     }
 
+    const ROUTES: &str = "config/routes.rb";
+
+    // `base_edits` but for a route a case adds, which changes nothing another case's requests reach.
+    fn http_base_edits(case: &Case) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let in_base = |path: &str| case.base.as_os_str() != EMPTY && case.base.join(path).exists();
+        for edit in &case.edits {
+            match edit {
+                Edit::Write { path, content } if in_base(path) => ("w", path, content).hash(&mut h),
+                Edit::Write { .. } => {}
+                Edit::Replace { path, .. } if path == ROUTES => {}
+                Edit::Replace { path, find, replace } => ("r", path, find, replace).hash(&mut h),
+                Edit::Remove { path } => ("d", path).hash(&mut h),
+            }
+        }
+        h.finish()
+    }
+
     fn clone_edit(e: &Edit) -> Edit {
         match e {
             Edit::Write { path, content } => Edit::Write { path: path.clone(), content: content.clone() },
@@ -845,7 +976,7 @@ pub mod bundle {
             return;
         }
         let start = std::time::Instant::now();
-        let built = build(&cases);
+        let built = if cases[0].flags.iter().any(|f| f == HTTP) { build_http(&cases) } else { build(&cases) };
         charge(&cases, start.elapsed().as_secs_f64(), seconds);
         if let Some(tree) = built {
             let dest = out.join(name);
@@ -876,7 +1007,9 @@ pub mod bundle {
         // make the same such edits share one.
         let mut groups: BTreeMap<(PathBuf, Vec<String>, u64), Vec<&Case>> = BTreeMap::new();
         for case in &cases {
-            groups.entry((case.base.clone(), case.flags.clone(), base_edits(case))).or_default().push(case);
+            // Not apart on the routes they add: an HTTP case's assertions are its own requests, and `merged_edits` refuses what does not compose.
+            let edits = if case.flags.iter().any(|f| f == HTTP) { http_base_edits(case) } else { base_edits(case) };
+            groups.entry((case.base.clone(), case.flags.clone(), edits)).or_default().push(case);
         }
         std::fs::create_dir_all(out).expect("bundle out dir");
         let manifest = std::sync::Mutex::new(BTreeMap::new());
