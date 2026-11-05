@@ -2118,6 +2118,23 @@ impl Analyzer {
     ///   fallback renders, so skipping keeps the output byte-identical
     ///   rather than routing it through a second code path.
     fn stamp_inferred_method_signatures(&self, app: &mut App) {
+        let declared_sigs = app.rbs_signatures.clone();
+        let declared = |owner: &ClassId, method: &crate::dialect::MethodDef| -> Option<Ty> {
+            let sig @ Ty::Fn { params, .. } = declared_sigs.get(owner)?.get(&method.name)? else { return None };
+            (params.len() == method.params.len() && params.iter().zip(&method.params).all(|(d, p)| d.kind == p.ty_kind()))
+                .then(|| sig.clone())
+        };
+        // Not left to the model lowering, which types only a method's return: an author's `sig/` declaration of a model method names its parameters too.
+        for model in &mut app.models {
+            for item in &mut model.body {
+                if let crate::dialect::ModelBodyItem::Method { method, .. } = item
+                    && method.signature.is_none()
+                    && let Some(sig) = declared(&model.name, method)
+                {
+                    method.signature = Some(sig);
+                }
+            }
+        }
         for (owner, methods) in app.library_classes.iter_mut().map(|lc| (&lc.name, &mut lc.methods))
             .chain(app.test_modules.iter_mut().map(|module| (&module.name, &mut module.helpers))) {
             let registered = self.classes.get(owner);
@@ -2126,6 +2143,15 @@ impl Analyzer {
                     continue;
                 }
                 if method.name.as_str() == "initialize" {
+                    continue;
+                }
+                let table = registered.map(|ci| match method.receiver {
+                    crate::dialect::MethodReceiver::Instance => &ci.instance_methods,
+                    crate::dialect::MethodReceiver::Class => &ci.class_methods,
+                });
+                // Not the call sites' types over an author's `sig/` declaration: a method no site reaches would read `untyped` where the author wrote the type.
+                if let Some(sig) = declared(owner, method) {
+                    method.signature = Some(sig);
                     continue;
                 }
                 let key = (owner.clone(), method.name.clone(), method.receiver);
@@ -2139,10 +2165,6 @@ impl Analyzer {
                 // the fallback for a method the harvest skipped (a
                 // scope-shaped class method takes an early `continue`
                 // there).
-                let table = registered.map(|ci| match method.receiver {
-                    crate::dialect::MethodReceiver::Instance => &ci.instance_methods,
-                    crate::dialect::MethodReceiver::Class => &ci.class_methods,
-                });
                 let ret = table
                     .and_then(|t| t.get(&method.name))
                     .filter(|t| !matches!(t, Ty::Fn { .. }))

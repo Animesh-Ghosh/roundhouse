@@ -127,6 +127,8 @@ mod source_gem_autoload;
 mod source_gem_load_order;
 #[path = "emit_and_run/unresolved_param_rbs.rs"]
 mod unresolved_param_rbs;
+#[path = "emit_and_run/declared_sig_rbs.rs"]
+mod declared_sig_rbs;
 #[path = "emit_and_run/unknown_receiver_param_rbs.rs"]
 mod unknown_receiver_param_rbs;
 #[path = "emit_and_run/is_a_self_narrowing.rs"]
