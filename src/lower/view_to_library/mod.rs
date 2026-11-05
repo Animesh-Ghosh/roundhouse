@@ -249,7 +249,7 @@ pub struct ViewLowerCtx<'a> {
     reference_targets: std::rc::Rc<crate::det::HashMap<String, String>>,
     nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
     nilable_scalar_reads: std::rc::Rc<crate::det::HashSet<String>>,
-    html_safe_methods: std::rc::Rc<crate::det::HashSet<String>>,
+    html_safe_methods: std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
     model_singulars: std::rc::Rc<crate::det::HashSet<String>>,
     slug_models: std::rc::Rc<crate::det::HashSet<String>>,
     bool_readers: std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
@@ -331,9 +331,7 @@ impl<'a> ViewLowerCtx<'a> {
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
             nested_record_classes: std::rc::Rc::new(nested_record_classes(app)),
             nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
-            html_safe_methods: std::rc::Rc::new(
-                app.html_safe_methods.iter().map(|m| m.as_str().to_string()).collect(),
-            ),
+            html_safe_methods: std::rc::Rc::new(html_safe_method_classes(app)),
             model_singulars: std::rc::Rc::new(
                 app.models
                     .iter()
@@ -5133,12 +5131,14 @@ pub(super) struct ViewCtx {
         std::rc::Rc<crate::det::HashMap<String, String>>,
     /// Proven singular association targets, keyed by owner class and reader.
     pub(super) nested_record_classes: std::rc::Rc<crate::det::HashMap<(String, String), String>>,
-    /// Method names whose result is html-safe by construction —
-    /// their body ends in `.html_safe` (`App::html_safe_methods`,
-    /// recorded by `lower::html_safe`). A bare interpolation of one
-    /// skips the auto-escape wrap; escaping it would ship literal
-    /// `&lt;span&gt;` markup, which is what `hat.to_html_label` does.
-    pub(super) html_safe_methods: std::rc::Rc<crate::det::HashSet<String>>,
+    /// Methods whose result is html-safe by construction — their body
+    /// ends in `.html_safe` (`App::html_safe_method_owners`, recorded by
+    /// `lower::html_safe`) — each with the classes that have the marked
+    /// definition: its owner, and the classes that inherit or include it.
+    /// A bare interpolation of one on such a receiver skips the
+    /// auto-escape wrap; escaping it would ship literal `&lt;span&gt;`
+    /// markup, which is what `hat.to_html_label` does.
+    pub(super) html_safe_methods: std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
     /// Nilable-scalar reader names through a record: typed_store
     /// attributes with no default (nil when unset). Emptiness
     /// predicates on these get the nil-safe forms (see
@@ -5335,6 +5335,47 @@ pub(super) struct ViewCtx {
     /// these may stand for the ivar a partial it renders reads
     /// (`caller_record_ivar`).
     pub(super) held_ivars: Vec<String>,
+}
+
+/// Each html-safe-marked method with the classes that have the marked
+/// definition: the class or module that defines it
+/// (`App::html_safe_method_owners`), and every class whose parents or
+/// included modules reach that owner. Another class's method of the same
+/// name isn't in the set, so its result is escaped.
+fn html_safe_method_classes(app: &App) -> crate::det::HashMap<String, crate::det::HashSet<String>> {
+    let mut direct: crate::det::HashMap<String, Vec<String>> = crate::det::HashMap::default();
+    for m in &app.models {
+        direct.entry(m.name.0.as_str().to_string()).or_default().extend(m.parent.iter().map(|p| p.0.as_str().to_string()));
+    }
+    for lc in &app.library_classes {
+        let e = direct.entry(lc.name.0.as_str().to_string()).or_default();
+        e.extend(lc.parent.iter().map(|p| p.0.as_str().to_string()));
+        e.extend(lc.includes.iter().map(|i| i.0.as_str().to_string()));
+    }
+    let reaches = |class: &str, owner: &str| {
+        let mut stack = vec![class.to_string()];
+        let mut seen = crate::det::HashSet::default();
+        while let Some(c) = stack.pop() {
+            if c == owner {
+                return true;
+            }
+            if seen.insert(c.clone()) {
+                stack.extend(direct.get(&c).into_iter().flatten().cloned());
+            }
+        }
+        false
+    };
+    let mut out: crate::det::HashMap<String, crate::det::HashSet<String>> = crate::det::HashMap::default();
+    for (owner, method) in &app.html_safe_method_owners {
+        let classes = out.entry(method.clone()).or_default();
+        classes.insert(owner.clone());
+        for class in direct.keys() {
+            if reaches(class, owner) {
+                classes.insert(class.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models

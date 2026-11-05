@@ -1542,7 +1542,8 @@ fn emit_turbo_frame_tag(args: &[Expr], block: Option<&Expr>, ctx: &ViewCtx) -> O
 /// The value behind an html-safe interpolation, or `None` when the
 /// expression has to be escaped. `<e>.html_safe` yields `<e>` (the mark
 /// is answered here rather than left for a runtime that has no
-/// safe-string type); a call to a recorded producer yields itself.
+/// safe-string type); a call to a recorded producer yields itself, when
+/// its receiver is one of the classes that have the marked definition.
 fn html_safe_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else {
         return None;
@@ -1550,10 +1551,33 @@ fn html_safe_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     if method.as_str() == "html_safe" && args.is_empty() {
         return recv.clone();
     }
-    if recv.is_some() && ctx.html_safe_methods.contains(method.as_str()) {
-        return Some(e.clone());
+    let (Some(r), Some(classes)) = (recv, ctx.html_safe_methods.get(method.as_str())) else {
+        return None;
+    };
+    receiver_classes(r).filter(|cs| cs.iter().all(|c| classes.contains(c))).map(|_| e.clone())
+}
+
+/// The classes a receiver can be, when they are all known: a constant
+/// (`Formatting.label`) is that class, and a typed receiver its class or
+/// the non-nil classes of a union (`Hat | nil`). `None` for anything
+/// else, an untyped receiver among them.
+fn receiver_classes(r: &Expr) -> Option<Vec<String>> {
+    if let ExprNode::Const { path } = &*r.node {
+        return Some(vec![path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::")]);
     }
-    None
+    fn of(ty: &crate::ty::Ty, out: &mut Vec<String>) -> bool {
+        match ty {
+            crate::ty::Ty::Class { id, .. } => {
+                out.push(id.0.as_str().to_string());
+                true
+            }
+            crate::ty::Ty::Nil => true,
+            crate::ty::Ty::Union { variants } => variants.iter().all(|v| of(v, out)),
+            _ => false,
+        }
+    }
+    let mut out = Vec::new();
+    (of(r.ty.as_ref()?, &mut out) && !out.is_empty()).then_some(out)
 }
 
 /// Re-add the `.to_s` coercion that `unwrap_to_s` stripped, so the
@@ -2336,16 +2360,45 @@ mod tests {
 
     #[test]
     fn interpolating_a_recorded_producer_skips_the_escape() {
-        // One level down: `hat.to_html_label` ends in `.html_safe`, so
-        // `lower::html_safe` recorded the method name and this side
-        // must not escape the element it returns.
+        // One level down: `Hat#to_html_label` ends in `.html_safe`, so
+        // `lower::html_safe` recorded it and this side must not escape
+        // the element it returns on a `Hat` receiver, nilable or not.
+        let ctx = producer_ctx();
+        for ty in [class_ty("Hat"), crate::ty::Ty::Union { variants: vec![class_ty("Hat"), crate::ty::Ty::Nil].into() }] {
+            let stmts = walk_body(&buf_append(send_to_s(send0(typed_var("hat", ty), "to_html_label"))), &ctx);
+            let emitted = stmts.iter().map(crate::emit::ruby::emit_expr).collect::<Vec<_>>().join("\n");
+            assert!(!emitted.contains("html_escape"), "recorded producer must not be escaped:\n{emitted}");
+            assert!(emitted.contains("hat.to_html_label"), "call preserved:\n{emitted}");
+        }
+    }
+
+    #[test]
+    fn another_classs_method_of_a_marked_name_is_escaped() {
+        // `Badge#to_html_label` isn't marked: only `Hat`'s is. Neither is
+        // a `Hat | Badge` receiver, nor one whose class isn't known.
+        let ctx = producer_ctx();
+        let either = crate::ty::Ty::Union { variants: vec![class_ty("Hat"), class_ty("Badge")].into() };
+        for recv in [typed_var("badge", class_ty("Badge")), typed_var("item", either), var("hat")] {
+            let stmts = walk_body(&buf_append(send_to_s(send0(recv, "to_html_label"))), &ctx);
+            let emitted = stmts.iter().map(crate::emit::ruby::emit_expr).collect::<Vec<_>>().join("\n");
+            assert!(emitted.contains("html_escape"), "unmarked definition must be escaped:\n{emitted}");
+        }
+    }
+
+    fn producer_ctx() -> ViewCtx {
         let mut ctx = test_ctx();
-        ctx.html_safe_methods =
-            std::rc::Rc::new(["to_html_label".to_string()].into_iter().collect());
-        let stmts = walk_body(&buf_append(send_to_s(send0(var("hat"), "to_html_label"))), &ctx);
-        let emitted = stmts.iter().map(crate::emit::ruby::emit_expr).collect::<Vec<_>>().join("\n");
-        assert!(!emitted.contains("html_escape"), "recorded producer must not be escaped:\n{emitted}");
-        assert!(emitted.contains("hat.to_html_label"), "call preserved:\n{emitted}");
+        ctx.html_safe_methods = std::rc::Rc::new(
+            [("to_html_label".to_string(), ["Hat".to_string()].into_iter().collect())].into_iter().collect(),
+        );
+        ctx
+    }
+    fn class_ty(name: &str) -> crate::ty::Ty {
+        crate::ty::Ty::Class { id: crate::ident::ClassId(Symbol::from(name)), args: Vec::new().into() }
+    }
+    fn typed_var(name: &str, ty: crate::ty::Ty) -> Expr {
+        let mut e = var(name);
+        e.ty = Some(ty);
+        e
     }
 
     #[test]
