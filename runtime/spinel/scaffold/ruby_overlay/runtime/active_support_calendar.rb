@@ -105,6 +105,7 @@ class Time
 end
 
 if defined?(::Date)
+  date_own = Date.instance_methods(false)
   class Date
     ActiveSupport::CalendarDispatch::DATE.each do |name, target|
       define_method(name) { ActiveSupport.public_send(target, self) }
@@ -150,6 +151,14 @@ if defined?(::Date)
 
     def on_weekday?
       ActiveSupport.on_weekday?(ActiveSupport.date_at_midnight(self))
+    end
+  end
+
+  if defined?(::DateTime)
+    calendar = Date.instance_methods(false) - date_own
+    # Not inherited from the Date wrappers: the date_* helpers build a Date, dropping the clock and offset.
+    calendar.each do |name|
+      DateTime.define_method(name) { |*, **| raise NotImplementedError, "DateTime##{name} is not supported yet" }
     end
   end
 end
