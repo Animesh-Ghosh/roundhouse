@@ -20406,6 +20406,10 @@ mod format_once;
 mod condition_lambda_record;
 #[path = "emit_and_run/where_time_range.rs"]
 mod where_time_range;
+#[path = "support/untyped_calendar.rs"]
+mod untyped_calendar_contract;
+#[path = "emit_and_run/untyped_calendar.rs"]
+mod untyped_calendar;
 #[path = "emit_and_run/route_record_to_param.rs"]
 mod route_record_to_param;
 #[path = "emit_and_run/module_factory.rs"]
@@ -20728,6 +20732,15 @@ fn link_to_if_shows_an_html_safe_app_label_once_on_spinel() {
             link_to_if_escape::safe_body_checks()
         ))
         .assert_passes();
+}
+
+#[path = "support/go_action_controller_api.rs"]
+mod go_action_controller_api;
+
+/// #1804's API controller on the ruby target.
+#[test]
+fn an_api_controller_answers_on_ruby() {
+    go_action_controller_api::app().run_test("test/controllers/ping_controller_test.rb").assert_passes();
 }
 
 #[path = "support/block_control_flow.rs"]
