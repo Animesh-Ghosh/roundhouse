@@ -4385,9 +4385,9 @@ pub(super) fn set_all_nullable_columns(columns: Vec<(String, String, String)>) {
 }
 
 thread_local! {
-    /// Every model's own instance methods, app-wide: `(Model, method)`.
-    /// A view reads another record's method (`article.featured?`), and a
-    /// bare 0-arg read of one is a field read unless the model defines it.
+    /// Every model's Go methods, app-wide: `(Model path, method)`. A view
+    /// reads another record's method (`article.featured?`), and a bare
+    /// 0-arg read of one is a field read unless the model's type has it.
     static ALL_MODEL_METHODS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -4395,10 +4395,12 @@ pub(super) fn set_all_model_methods(methods: Vec<(String, String)>) {
     ALL_MODEL_METHODS.with(|c| *c.borrow_mut() = methods);
 }
 
-/// Does the model this receiver resolves to define `method` itself?
+/// Does the model this receiver resolves to have `method` as a Go
+/// method? A nilable receiver (`Article | nil`) is its model's; the
+/// model is matched by its full class path.
 fn recv_model_defines(recv: &Expr, method: &str) -> bool {
-    let Some(Ty::Class { id, .. }) = recv.ty.as_ref() else { return false };
-    let model = id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str());
+    let Some(Ty::Class { id, .. }) = recv.ty.as_ref().and_then(union_non_nil_core) else { return false };
+    let model = id.0.as_str();
     ALL_MODEL_METHODS.with(|c| c.borrow().iter().any(|(m, name)| m == model && name == method))
 }
 

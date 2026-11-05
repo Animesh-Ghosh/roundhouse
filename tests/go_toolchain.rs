@@ -371,6 +371,25 @@ fn a_views_model_predicate_call_runs() {
     assert!(output.status.success() && stdout.contains("--- PASS: TestTheIndexRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
 
+/// A view's 0-arg reads of a model's own methods build and render: a
+/// trivial `attr_accessor` reader, an `Article | nil` receiver and a
+/// namespaced model.
+#[test]
+#[ignore]
+fn a_views_model_method_shapes_run() {
+    let (emitted, errors) = go_view_predicate::shapes_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/assert_includes_test.go"), go_view_predicate::GO_ASSERT_INCLUDES).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheIndexRenders", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheIndexRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
 /// #1696: the issue's reduction parses: its conditional operand of `&&`
 /// is a func literal, not an `if` in expression position.
 #[test]

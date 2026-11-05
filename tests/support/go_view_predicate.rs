@@ -26,3 +26,35 @@ const TEST: &str = "require \"test_helper\"\n\nclass ArticlesFeaturedControllerT
 
 /// Go's test emit has no `assert_includes`; a probe defines it.
 pub const GO_ASSERT_INCLUDES: &str = "package v2\n\nimport \"strings\"\n\nfunc assert_includes(body string, want string) {\n\tif !strings.Contains(body, want) {\n\t\tpanic(\"missing \" + want + \" in \" + body)\n\t}\n}\n";
+
+/// `app` plus the shapes a model's own method takes in a view:
+/// - `Article#pinned?`, a trivial reader of an `attr_accessor`, which the
+///   Go model emit writes as the field `Pinned`, not a method;
+/// - `Article.last.featured?`, a receiver typed `Article | nil`;
+/// - `Admin::Note#hot?`, a namespaced model's own method.
+/// The integration test asserts `F:true`, `L:true` and `H:true`, Ruby's
+/// answers (the fixture articles are saved; `hot?` is `true`). The
+/// `Admin::Note` is a new record: no fixture file, so the Go fixture
+/// emit isn't part of the run.
+pub fn shapes_app() -> emit_and_run::Overlay {
+    let schema = std::fs::read_to_string("fixtures/real-blog/db/schema.rb").unwrap();
+    let at = schema.find("  create_table").unwrap();
+    let table = "  create_table \"admin_notes\", force: :cascade do |t|\n    t.string \"name\", null: false\n  end\n\n";
+    app()
+        .write("db/schema.rb", &format!("{}{table}{}", &schema[..at], &schema[at..]))
+        .edit(
+            "app/models/article.rb",
+            "  def featured?\n",
+            "  attr_accessor :pinned\n\n  def pinned?\n    @pinned\n  end\n\n  def featured?\n",
+        )
+        .write("app/models/admin/note.rb", "module Admin\n  class Note < ApplicationRecord\n    self.table_name = \"admin_notes\"\n\n    def hot?\n      true\n    end\n  end\nend\n")
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<% @articles.each do |a| %><p class=\"featured\">F:<%= a.featured? %></p><% end %>\n",
+            "<% @articles.each do |a| %><p class=\"featured\">F:<%= a.featured? %></p><p class=\"pinned\">P:<%= a.pinned? %></p><% end %>\n<% last = Article.last %><p class=\"last\">L:<%= last.featured? %></p>\n<% n = Admin::Note.new %><p class=\"hot\">H:<%= n.hot? %></p>\n",
+        )
+        .write("test/controllers/articles_featured_controller_test.rb", SHAPES_TEST)
+}
+
+const SHAPES_TEST: &str = "require \"test_helper\"\n\nclass ArticlesFeaturedControllerTest < ActionDispatch::IntegrationTest\n  test \"the index renders each article's featured answer\" do\n    get articles_url\n    assert_response :success\n    assert_includes response.body, \"F:true\"\n    assert_includes response.body, \"L:true\"\n    assert_includes response.body, \"H:true\"\n  end\nend\n";
+

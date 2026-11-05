@@ -356,6 +356,16 @@ fn emit_ar_class_method_wrappers(name: &str) -> String {
 /// class. Class methods are excluded because implicit-self calls to
 /// them inside another method body route through the bare-fn path
 /// (`ClassName_method()`), not through receiver-shaped dispatch.
+/// The instance methods `class`'s Go type has as methods, by the same
+/// rule the class emit uses: not attr readers or writers, and not a
+/// trivial ivar reader that a struct field already serves.
+pub(super) fn emitted_instance_methods(class: &LibraryClass) -> Vec<String> {
+    let fields = collect_fields(&class.methods, &class.nullable_columns);
+    let mut names: Vec<String> = collect_self_methods(&class.methods, &fields).iter().cloned().collect();
+    names.sort();
+    names
+}
+
 fn collect_self_methods(
     methods: &[crate::dialect::MethodDef],
     fields: &[Field],
