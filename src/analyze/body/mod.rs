@@ -3796,7 +3796,7 @@ impl<'a> BodyTyper<'a> {
                             _ => false,
                         };
                         if then_diverges && else_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe { class_side: ctx.class_side, ..narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx)) }) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, false);
                             }
                         }
@@ -3811,7 +3811,7 @@ impl<'a> BodyTyper<'a> {
                         };
                         let else_diverges = matches!(else_branch.ty.as_ref(), Some(Ty::Bottom));
                         if else_diverges && then_empty {
-                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx))) {
+                            if let Some(pred) = narrowing::extract_narrowing_with(cond, &narrowing::Probe { class_side: ctx.class_side, ..narrowing::Probe::without_members(&|n| self.self_attribute_ty(n, ctx)) }) {
                                 local_ctx = narrowing::apply_narrowing(&local_ctx, &pred, true);
                             }
                         }

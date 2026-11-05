@@ -272,10 +272,16 @@ fn var_key(e: &Expr, probe: &Probe) -> Option<VarKey> {
 /// `x.is_a?(self)` in a class method, as fugit's `Cron.parse` opens with
 /// `return s if s.is_a?(self)`: the class the method's `self` is.
 fn self_class_arg(e: &Expr) -> Option<Ty> {
-    let (ExprNode::SelfRef, Some(Ty::Class { id, .. })) = (&*e.node, &e.ty) else { return None };
-    // Not the nominal class as typed: a class method reopened on `Array` narrows to the structural Array, as `is_a?(Array)` does.
-    let path: Vec<Symbol> = id.0.as_str().split("::").map(Symbol::from).collect();
-    Some(class_name_to_ty(path.last()?, path.len() == 1, &path))
+    let (ExprNode::SelfRef, Some(ty @ Ty::Class { id, .. })) = (&*e.node, &e.ty) else { return None };
+    // Not inside `Class.new`/`Module.new`: `self` there is the class being built, which its type does not name.
+    if matches!(id.0.as_str(), "Class" | "Module") {
+        return None;
+    }
+    // Not the nominal class as typed: a class method reopened on `Array` narrows to the structural Array, as `is_a?(Array)` does; `Store::String` stays nominal.
+    if id.0.as_str().contains("::") {
+        return Some(ty.clone());
+    }
+    Some(class_name_to_ty(&id.0, true, std::slice::from_ref(&id.0)))
 }
 
 fn is_nil_lit(e: &Expr) -> bool {

@@ -24,6 +24,15 @@ fn app() -> emit_and_run::Overlay {
   def self.again
     parse(parse("y"))
   end
+
+  def self.coerce(x)
+    return nil unless x.is_a?(self)
+    x
+  end
+
+  def self.coerced
+    coerce("z") || coerce(new)
+  end
 end
 "#,
     )
@@ -32,6 +41,7 @@ end
 const SCRIPT: &str = r#"
 raise "text" unless StampParse.from_text.is_a?(StampParse)
 raise "again" unless StampParse.again.is_a?(StampParse)
+raise "coerced" unless StampParse.coerced.is_a?(StampParse)
 puts "ok"
 "#;
 
@@ -40,6 +50,9 @@ fn is_a_self_narrows_to_the_class() {
     let (tree, _errors) = app().emit(BuildTarget::Spinel);
     let text = std::fs::read_to_string(tree.join("app/models/stamp_parse.rbs")).expect("stamp_parse sidecar");
     assert!(text.contains("def self.from_text: () -> StampParse"), "{text}");
+    // A guard clause narrows what follows it, as an `if` does.
+    let coerce = text.lines().find(|l| l.contains("def self.coerce:")).unwrap_or_default();
+    assert!(coerce.ends_with("-> StampParse?"), "{text}");
 }
 
 #[test]

@@ -46,8 +46,16 @@ fn app() -> emit_and_run::Overlay {
     flag ? 1 : 0
   end
 
+  def tag_all(*names)
+    names.map(&:to_s)
+  end
+
+  def tags
+    tag_all("a")
+  end
+
   def self.walk(t)
-    [t.subgather(:leaf).size, t.lonely(true)]
+    [t.subgather(:leaf).size, t.lonely(true), t.tag_all("a", :b).size]
   end
 end
 "#,
@@ -57,7 +65,7 @@ end
 const SCRIPT: &str = r#"
 t = NameTree.new(:root, [NameTree.new(:leaf), NameTree.new(:mid, [NameTree.new(:leaf)])])
 got = NameTree.walk(t)
-raise "walk: #{got.inspect}" unless got == [2, 1]
+raise "walk: #{got.inspect}" unless got == [2, 1, 2]
 raise "run" unless NameHost.run(NameHost.new) == "b"
 puts "ok"
 "#;
@@ -69,6 +77,8 @@ fn an_untyped_receivers_call_widens_a_typed_parameter_only() {
     let line = |name: &str| text.lines().find(|l| l.contains(&format!("def {name}:"))).unwrap_or_else(|| panic!("{name}: {text}")).to_string();
     assert!(line("subgather").contains("Symbol"), "{text}");
     assert!(line("lonely").contains("untyped flag"), "{text}");
+    // Every position past `*names` fills the one slot the typed `tag_all("a")` reaches.
+    assert!(line("tag_all").contains("Symbol"), "{text}");
     // A concern's typed evidence is keyed to its includer until the fold; the guess still reaches the module.
     let text = std::fs::read_to_string(tree.join("app/models/name_parsing.rbs")).expect("name_parsing sidecar");
     assert!(text.contains("Symbol"), "{text}");

@@ -6155,11 +6155,16 @@ impl Analyzer {
         let mut open = std::mem::take(&mut self.open_param_slots);
         let mut observations = self.param_observations(sites, params_by_method, defined, &mut open);
         // Not a row of its own: the site may be another class's method of the name, so it only widens a parameter some typed site reaches.
+        // Not each position past a `*rest`: they all fill the one slot, so a typed `f("a")` reaches what a guessed `f("a", :b)` passes second.
+        let slot = |key: &ParamKey, i: usize| {
+            let rest = params_by_method.get(key).and_then(|shape| shape.slots.iter().position(|(_, kind)| matches!(kind, ParamKind::Rest)));
+            rest.filter(|r| i >= *r).unwrap_or(i)
+        };
         let typed: BTreeSet<(ParamKey, usize)> = observations
             .iter()
             .map(|(key, tys)| (key, tys.as_slice()))
             .chain(prev_rows.iter().map(|(key, row)| (key, row.as_slice())))
-            .flat_map(|(key, tys)| tys.iter().enumerate().filter(|(_, t)| !t.is_unknown()).map(move |(i, _)| (key.clone(), i)))
+            .flat_map(|(key, tys)| tys.iter().enumerate().filter(|(_, t)| !t.is_unknown()).map(move |(i, _)| (key.clone(), slot(key, i))))
             .collect();
         let mut guessed_open = BTreeSet::new();
         let guessed = self.param_observations(guessed, params_by_method, defined, &mut guessed_open);
@@ -6167,11 +6172,11 @@ impl Analyzer {
             let tys = tys
                 .into_iter()
                 .enumerate()
-                .map(|(i, t)| if typed.contains(&(key.clone(), i)) { t } else { Ty::Var { var: NO_EVIDENCE } })
+                .map(|(i, t)| if typed.contains(&(key.clone(), slot(&key, i))) { t } else { Ty::Var { var: NO_EVIDENCE } })
                 .collect();
             observations.push((key, tys));
         }
-        open.extend(guessed_open.into_iter().filter(|slot| typed.contains(slot)));
+        open.extend(guessed_open.into_iter().filter(|(key, i)| typed.contains(&(key.clone(), slot(key, *i)))));
         self.open_param_slots = open;
         let mut rows = std::mem::take(&mut self.inferred_params);
         self.unify_memo.fold(scope, &mut rows, observations);
