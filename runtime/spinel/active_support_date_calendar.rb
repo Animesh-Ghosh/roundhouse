@@ -155,157 +155,231 @@ class Date
   end
 end
 
+# Not the Date wrappers above: the date_* helpers build a Date, dropping the clock and offset.
 class DateTime
-  # Not inherited from the Date wrappers above: the date_* helpers build a Date, dropping the clock and offset.
-  def beginning_of_month(*_args, **_opts)
-    raise NotImplementedError, "DateTime#beginning_of_month is not supported yet"
+  def beginning_of_minute
+    DateTime.new(year, month, day, hour, min, 0, offset)
   end
 
-  def at_beginning_of_month(*_args, **_opts)
-    raise NotImplementedError, "DateTime#at_beginning_of_month is not supported yet"
+  def at_beginning_of_minute
+    beginning_of_minute
   end
 
-  def end_of_month(*_args, **_opts)
-    raise NotImplementedError, "DateTime#end_of_month is not supported yet"
+  def end_of_minute
+    DateTime.new(year, month, day, hour, min, 59.999999, offset)
   end
 
-  def at_end_of_month(*_args, **_opts)
-    raise NotImplementedError, "DateTime#at_end_of_month is not supported yet"
+  def at_end_of_minute
+    end_of_minute
   end
 
-  def beginning_of_year(*_args, **_opts)
-    raise NotImplementedError, "DateTime#beginning_of_year is not supported yet"
+  def beginning_of_hour
+    DateTime.new(year, month, day, hour, 0, 0, offset)
   end
 
-  def at_beginning_of_year(*_args, **_opts)
-    raise NotImplementedError, "DateTime#at_beginning_of_year is not supported yet"
+  def at_beginning_of_hour
+    beginning_of_hour
   end
 
-  def end_of_year(*_args, **_opts)
-    raise NotImplementedError, "DateTime#end_of_year is not supported yet"
+  def end_of_hour
+    DateTime.new(year, month, day, hour, 59, 59.999999, offset)
   end
 
-  def at_end_of_year(*_args, **_opts)
-    raise NotImplementedError, "DateTime#at_end_of_year is not supported yet"
+  def at_end_of_hour
+    end_of_hour
   end
 
-  def yesterday(*_args, **_opts)
-    raise NotImplementedError, "DateTime#yesterday is not supported yet"
+  def beginning_of_day
+    DateTime.new(year, month, day, 0, 0, 0, offset)
   end
 
-  def tomorrow(*_args, **_opts)
-    raise NotImplementedError, "DateTime#tomorrow is not supported yet"
+  def at_beginning_of_day
+    beginning_of_day
   end
 
-  def days_since(*_args, **_opts)
-    raise NotImplementedError, "DateTime#days_since is not supported yet"
+  def midnight
+    beginning_of_day
   end
 
-  def days_ago(*_args, **_opts)
-    raise NotImplementedError, "DateTime#days_ago is not supported yet"
+  def at_midnight
+    beginning_of_day
   end
 
-  def weeks_since(*_args, **_opts)
-    raise NotImplementedError, "DateTime#weeks_since is not supported yet"
+  def end_of_day
+    DateTime.new(year, month, day, 23, 59, 59.999999, offset)
   end
 
-  def weeks_ago(*_args, **_opts)
-    raise NotImplementedError, "DateTime#weeks_ago is not supported yet"
+  def at_end_of_day
+    end_of_day
   end
 
-  def months_since(*_args, **_opts)
-    raise NotImplementedError, "DateTime#months_since is not supported yet"
+  def noon
+    DateTime.new(year, month, day, 12, 0, 0, offset)
   end
 
-  def months_ago(*_args, **_opts)
-    raise NotImplementedError, "DateTime#months_ago is not supported yet"
+  def at_noon
+    noon
   end
 
-  def last_month(*_args, **_opts)
-    raise NotImplementedError, "DateTime#last_month is not supported yet"
+  def middle_of_day
+    noon
   end
 
-  def years_since(*_args, **_opts)
-    raise NotImplementedError, "DateTime#years_since is not supported yet"
+  def at_middle_of_day
+    noon
   end
 
-  def years_ago(*_args, **_opts)
-    raise NotImplementedError, "DateTime#years_ago is not supported yet"
+  def beginning_of_month
+    DateTime.new(year, month, 1, 0, 0, 0, offset)
   end
 
-  def last_year(*_args, **_opts)
-    raise NotImplementedError, "DateTime#last_year is not supported yet"
+  def at_beginning_of_month
+    beginning_of_month
   end
 
-  def today?(*_args, **_opts)
-    raise NotImplementedError, "DateTime#today? is not supported yet"
+  def end_of_month
+    DateTime.new(year, month, -1, 23, 59, 59.999999, offset)
   end
 
-  def yesterday?(*_args, **_opts)
-    raise NotImplementedError, "DateTime#yesterday? is not supported yet"
+  def at_end_of_month
+    end_of_month
   end
 
-  def tomorrow?(*_args, **_opts)
-    raise NotImplementedError, "DateTime#tomorrow? is not supported yet"
+  def beginning_of_year
+    DateTime.new(year, 1, 1, 0, 0, 0, offset)
   end
 
-  def past?(*_args, **_opts)
-    raise NotImplementedError, "DateTime#past? is not supported yet"
+  def at_beginning_of_year
+    beginning_of_year
   end
 
-  def future?(*_args, **_opts)
-    raise NotImplementedError, "DateTime#future? is not supported yet"
+  def end_of_year
+    DateTime.new(year, 12, 31, 23, 59, 59.999999, offset)
   end
 
-  def beginning_of_week(*_args, **_opts)
-    raise NotImplementedError, "DateTime#beginning_of_week is not supported yet"
+  def at_end_of_year
+    end_of_year
   end
 
-  def at_beginning_of_week(*_args, **_opts)
-    raise NotImplementedError, "DateTime#at_beginning_of_week is not supported yet"
+  def yesterday
+    self - 1
   end
 
-  def end_of_week(*_args, **_opts)
-    raise NotImplementedError, "DateTime#end_of_week is not supported yet"
+  def tomorrow
+    self + 1
   end
 
-  def at_end_of_week(*_args, **_opts)
-    raise NotImplementedError, "DateTime#at_end_of_week is not supported yet"
+  def days_since(n = 1)
+    self + n
   end
 
-  def next_week(*_args, **_opts)
-    raise NotImplementedError, "DateTime#next_week is not supported yet"
+  def days_ago(n = 1)
+    self - n
   end
 
-  def prev_week(*_args, **_opts)
-    raise NotImplementedError, "DateTime#prev_week is not supported yet"
+  def weeks_since(n = 1)
+    self + 7 * n
   end
 
-  def last_week(*_args, **_opts)
-    raise NotImplementedError, "DateTime#last_week is not supported yet"
+  def weeks_ago(n = 1)
+    self - 7 * n
   end
 
-  def all_day(*_args, **_opts)
-    raise NotImplementedError, "DateTime#all_day is not supported yet"
+  def months_since(n = 1)
+    self >> n
   end
 
-  def all_week(*_args, **_opts)
-    raise NotImplementedError, "DateTime#all_week is not supported yet"
+  def months_ago(n = 1)
+    self >> -n
   end
 
-  def all_month(*_args, **_opts)
-    raise NotImplementedError, "DateTime#all_month is not supported yet"
+  def last_month(n = 1)
+    self >> -n
   end
 
-  def all_year(*_args, **_opts)
-    raise NotImplementedError, "DateTime#all_year is not supported yet"
+  def years_since(n = 1)
+    self >> 12 * n
   end
 
-  def on_weekend?(*_args, **_opts)
-    raise NotImplementedError, "DateTime#on_weekend? is not supported yet"
+  def years_ago(n = 1)
+    self >> -12 * n
   end
 
-  def on_weekday?(*_args, **_opts)
-    raise NotImplementedError, "DateTime#on_weekday? is not supported yet"
+  def last_year(n = 1)
+    self >> -12 * n
+  end
+
+  def beginning_of_week(start = nil)
+    (self - (wday - ActiveSupport::CalendarDispatch.wday(start)) % 7).beginning_of_day
+  end
+
+  def at_beginning_of_week(start = nil)
+    beginning_of_week(start)
+  end
+
+  def end_of_week(start = nil)
+    (beginning_of_week(start) + 6).end_of_day
+  end
+
+  def at_end_of_week(start = nil)
+    end_of_week(start)
+  end
+
+  def next_week(day = nil, same_time: false)
+    week_day = (self + 7).beginning_of_week + ActiveSupport::CalendarDispatch.span(day)
+    same_time ? DateTime.new(week_day.year, week_day.month, week_day.day, hour, min, sec + sec_fraction, offset) : week_day
+  end
+
+  def prev_week(day = nil, same_time: false)
+    week_day = (self - 7).beginning_of_week + ActiveSupport::CalendarDispatch.span(day)
+    same_time ? DateTime.new(week_day.year, week_day.month, week_day.day, hour, min, sec + sec_fraction, offset) : week_day
+  end
+
+  def last_week(day = nil, same_time: false)
+    prev_week(day, same_time: same_time)
+  end
+
+  def all_day
+    beginning_of_day..end_of_day
+  end
+
+  def all_week(start = nil)
+    beginning_of_week(start)..end_of_week(start)
+  end
+
+  def all_month
+    beginning_of_month..end_of_month
+  end
+
+  def all_year
+    beginning_of_year..end_of_year
+  end
+
+  def on_weekend?
+    wday == 0 || wday == 6
+  end
+
+  def on_weekday?
+    !on_weekend?
+  end
+
+  def today?
+    to_date == ActiveSupport.date_current(ActiveSupport.now)
+  end
+
+  def yesterday?
+    to_date == ActiveSupport.date_current(ActiveSupport.now) - 1
+  end
+
+  def tomorrow?
+    to_date == ActiveSupport.date_current(ActiveSupport.now) + 1
+  end
+
+  def past?
+    to_time < ActiveSupport.now
+  end
+
+  def future?
+    to_time > ActiveSupport.now
   end
 end

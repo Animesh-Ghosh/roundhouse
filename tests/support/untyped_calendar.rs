@@ -2,8 +2,8 @@
 //! parameter no call site types) is not grounded by `lower::time_calendar`
 //! and stays a dynamic call. Rails answers it from its core extensions; the
 //! runtime's Time and Date reopen answers it the same way, on CRuby and on
-//! Spinel, for a Time and for a Date (the app names Date, so its calendar
-//! helpers ship).
+//! Spinel, for a Time, a Date and a DateTime (the app names Date, so its
+//! calendar helpers ship).
 
 use super::emit_and_run;
 
@@ -59,5 +59,10 @@ raise "date earlier: #{Article.earlier(d).inspect}" unless Article.earlier(d) ==
 raise "date payday: #{Article.payday(d).inspect}" unless Article.payday(d) == Date.new(2026, 11, 13)
 raise "date week_of: #{Article.week_of(d).inspect}" unless Article.week_of(d) == (Date.new(2026, 11, 1)..Date.new(2026, 11, 7))
 raise "date workday" if Article.workday?(d)
+dt = DateTime.new(2026, 11, 7, 10, 30, 0, "+02:00")
+raise "datetime month: #{Article.month_of(dt).inspect}" unless Article.month_of(dt).begin == DateTime.new(2026, 11, 1, 0, 0, 0, "+02:00") && Article.month_of(dt).end.offset == dt.offset
+raise "datetime earlier: #{Article.earlier(dt).inspect}" unless Article.earlier(dt) == DateTime.new(2026, 9, 7, 10, 30, 0, "+02:00")
+raise "datetime payday: #{Article.payday(dt).inspect}" unless Article.payday(dt) == DateTime.new(2026, 11, 13, 0, 0, 0, "+02:00")
+raise "datetime week_of: #{Article.week_of(dt).inspect}" unless Article.week_of(dt).begin == DateTime.new(2026, 11, 1, 0, 0, 0, "+02:00")
 puts "untyped calendar passed"
 "#;
