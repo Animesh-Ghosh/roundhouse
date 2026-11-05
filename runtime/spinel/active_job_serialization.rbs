@@ -46,6 +46,8 @@ module ActiveJob
     SYMBOL_KEYS_KEY: String
     RUBY2_KEYWORDS_KEY: String
     WITH_INDIFFERENT_ACCESS_KEY: String
+    def self.serialize: (untyped arguments) -> Array[untyped]
+    def self.serialize_argument: (untyped argument) -> untyped
     def self.deserialize: (untyped arguments) -> Array[untyped]
     def self.deserialize_argument: (untyped argument) -> untyped
     def self.deserialize_serialized: (untyped hash) -> untyped

@@ -553,6 +553,38 @@ fn controller_state_ivars(files: &mut [(String, String)]) -> Result<(), String> 
 /// (roundhouse#90). Integer-only apps ship the sidecar byte-for-byte.
 /// The three lines are matched exactly so a drift in the sidecar is a
 /// build error here, not a silent narrowing.
+/// `ActiveModel::UnknownAttributeError.new(self, key)` from a tableless
+/// model's attribute assignment (a gem's `include ActiveModel::Model`
+/// class, MissionControl::Jobs::RecurringTask): Rails takes any record,
+/// and the shared sidecar's `ActiveRecord::Base` refused it on Spinel.
+/// Widened in the Spinel tree alone; the strict targets keep the record
+/// type their own fields need.
+fn widen_unknown_attribute_record(app: &App, files: &mut [(String, String)]) -> Result<(), String> {
+    if !app.models.iter().any(|m| m.parent.is_none()) {
+        return Ok(());
+    }
+    let Some((_, text)) = files.iter_mut().find(|(p, _)| p == "sig/runtime/active_record/errors.rbs") else {
+        return Ok(());
+    };
+    for (narrow, wide) in [
+        ("    def record: () -> ActiveRecord::Base
+", "    def record: () -> untyped
+"),
+        (
+            "    def initialize: (ActiveRecord::Base record, String attribute, ?String message) -> void
+",
+            "    def initialize: (untyped record, String attribute, ?String message) -> void
+",
+        ),
+    ] {
+        if !text.contains(narrow) {
+            return Err(format!("widen_unknown_attribute_record: errors.rbs no longer declares {narrow:?}"));
+        }
+        *text = text.replace(narrow, wide);
+    }
+    Ok(())
+}
+
 fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), String> {
     let string_key = |col: &crate::schema::Column| {
         !matches!(
@@ -9945,6 +9977,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         }
     }
     widen_key_contract(app, &mut files)?;
+    widen_unknown_attribute_record(app, &mut files)?;
     controller_state_ivars(&mut files)?;
     // Relation Base→untyped rewrite is Spinel-only (see
     // `spinel_relation_model_handle` call sites). `ruby_family_runtime_files`

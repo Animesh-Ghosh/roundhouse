@@ -288,6 +288,42 @@ module ActiveJob
     RUBY2_KEYWORDS_KEY = "_aj_ruby2_keywords"
     WITH_INDIFFERENT_ACCESS_KEY = "_aj_hash_with_indifferent_access"
 
+    # Rails' `ActiveJob::Arguments.serialize`, the JSON-ready objects
+    # (solid_queue's recurring task arguments go through it). The same
+    # serializers `deserialize` reads; any other value raises Rails'
+    # SerializationError.
+    def self.serialize(arguments)
+      arguments.map { |argument| serialize_argument(argument) }
+    end
+
+    def self.serialize_argument(argument)
+      case argument
+      when nil, true, false, Integer, Float, String
+        argument
+      when Symbol
+        { SERIALIZER_KEY => SYMBOL_SERIALIZER, "value" => argument.to_s }
+      when Time
+        { SERIALIZER_KEY => TIME_SERIALIZER, "value" => argument.iso8601(9) }
+      when Array
+        argument.map { |part| serialize_argument(part) }
+      when Hash
+        symbol_keys = []
+        result = {}
+        argument.each do |key, value|
+          symbol_keys << key.to_s if key.is_a?(Symbol)
+          result[key.to_s] = serialize_argument(value)
+        end
+        result[SYMBOL_KEYS_KEY] = symbol_keys
+        result
+      else
+        if argument.respond_to?(:to_gid_uri)
+          { GLOBALID_KEY => argument.to_gid_uri }
+        else
+          raise ActiveJob::SerializationError, "Unsupported argument type: " + argument.class.name.to_s
+        end
+      end
+    end
+
     # Not every Rails serializer: Date, DateTime, Duration, BigDecimal, Range, Module and an app's own raise DeserializationError.
     def self.deserialize(arguments)
       arguments.map { |argument| deserialize_argument(argument) }
