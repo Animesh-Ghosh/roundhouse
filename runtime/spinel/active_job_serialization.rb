@@ -126,6 +126,21 @@ module ActiveJob
       "[" + parts.join(",") + "]"
     end
 
+    def self.keywords(names, parts)
+      body = []
+      names.each_with_index { |name, i| body << str(name) + ":" + parts[i] }
+      body << "\"" + RUBY2_KEYWORDS_KEY + "\":" + list(names.map { |name| str(name) })
+      "{" + body.join(",") + "}"
+    end
+
+    # Not nil for a keyword the Hash lacks: Rails would bind the parameter's default, which only `perform` knows.
+    def self.keyword_args(args, name)
+      hash = args[args.length - 1]
+      names = key_of(hash, RUBY2_KEYWORDS_KEY)
+      raise ActiveJob::DeserializationError, deserialize_message("missing keyword " + name) if names.nil? || !names.include?(name)
+      [hash[name]]
+    end
+
     # The keyword hash `Turbo::Streams::ActionBroadcastJob` takes, as
     # turbo-rails 2.0 writes it for a model's `broadcasts_to` (create and
     # update): `perform_later(stream, action:, target:, targets:,

@@ -7,9 +7,9 @@
 //! and `ActiveJob::Arguments.serialize` writes such a Hash with
 //! `_aj_ruby2_keywords`, as Rails does (solid_queue's
 //! `RecurringTask#arguments_with_kwargs` flags a recurring task's last
-//! Hash argument). A splat into keyword parameters is not modelled: a
-//! job whose `perform` takes keywords keeps its Proc rather than a
-//! payload (`lower::job_payload`).
+//! Hash argument). A splat of such a Hash into keyword parameters is not
+//! modelled; a job's own keyword parameters ride its payload by name
+//! (`lower::job_payload`).
 
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
