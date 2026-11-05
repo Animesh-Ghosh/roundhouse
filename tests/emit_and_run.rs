@@ -318,6 +318,10 @@ mod cable_allowed_origins;
 mod public_file_server_headers_contract;
 #[path = "emit_and_run/public_file_server_headers.rs"]
 mod public_file_server_headers;
+#[path = "support/puma_boot.rs"]
+mod puma_boot_contract;
+#[path = "emit_and_run/puma_boot.rs"]
+mod puma_boot;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "emit_and_run/cable_actions.rs"]

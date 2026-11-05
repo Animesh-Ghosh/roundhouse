@@ -279,7 +279,7 @@ fn keep_initializer_defined(
     let referenced = |name: &str| {
         sources.iter().any(|f| {
             let rel = f.path.strip_prefix(root).unwrap_or(&f.path).trim_start_matches('/');
-            if !(rel.starts_with("app/") || rel.starts_with("lib/")) {
+            if !(rel.starts_with("app/") || rel.starts_with("lib/") || rel == "config/puma.rb") {
                 return false;
             }
             // In Ruby, a comment or a string naming it is not a reference.
@@ -2668,6 +2668,7 @@ end
             app.engine_importmaps.push((engine.module.clone(), importmap));
         }
     }
+    super::puma_boot::install(&mut app, vfs, dir)?;
 
     app.vite_manifest = super::vite::read_manifest(vfs, dir);
     let vite_digest = app.vite_manifest.as_ref().map(|m| m.digest.clone());

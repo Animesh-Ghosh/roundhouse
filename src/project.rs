@@ -5385,6 +5385,7 @@ fn ruby_family_runtime_files(
     // that file in `spinel_files` are gone. Write them again here.
     apply_environment_flags(&mut files, app);
     apply_app_requires(&mut files, app, RequireTarget::RubyFamily);
+    apply_puma_boot_hooks(&mut files, app, RequireTarget::RubyFamily)?;
     apply_rails_version(&mut files, app);
     // Overlay boot replaces the spinel boot wholesale (see comment above
     // on apply_module_mixins), wiping the Date-package inject from
@@ -7673,6 +7674,35 @@ enum RequireTarget {
     Spinel,
 }
 
+fn puma_boot_hooks(app: &App) -> bool {
+    app.library_classes.iter().any(|class| class.name.0.as_str() == crate::ingest::puma_boot::CLASS && {
+        class.methods.iter().any(|method| method.name.as_str() == crate::ingest::puma_boot::BOOTED)
+    })
+}
+
+fn apply_puma_boot_hooks(files: &mut [(String, String)], app: &App, target: RequireTarget) -> Result<(), String> {
+    if !puma_boot_hooks(app) { return Ok(()); }
+    for (path, source) in files {
+        match target {
+            RequireTarget::RubyFamily if path == "config/puma.rb" => {
+                source.push_str("\nrequire_relative \"../boot\"\nroundhouse_puma_hooks = RoundhousePumaBoot.__roundhouse_puma_register\nafter_booted { Db.with_connection { RoundhousePumaBoot.__roundhouse_puma_after_booted(roundhouse_puma_hooks) } }\n");
+            }
+            RequireTarget::Spinel if path == "main.rb" => {
+                let anchor = "begin\nMain.configure_default_adapter!\n";
+                if !source.contains(anchor) {
+                    return Err("apply_puma_boot_hooks: main.rb lost its configure_default_adapter! anchor".into());
+                }
+                *source = source.replace(anchor, "begin\nif workers != 1 || (ENV[\"TEP_SERVER\"] || \"thread\") == \"fiber\"\n  raise ArgumentError, \"Puma after_booted hooks require one threaded server process\"\nend\nTep.prepare_boot_hooks\nMain.configure_default_adapter!\n");
+            }
+            RequireTarget::Spinel if path == "runtime/tep/tep_core.rb" => {
+                source.push_str("\nmodule Tep\n  @@roundhouse_puma_hooks = [false]\n  def self.boot_hooks?\n    true\n  end\n  def self.prepare_boot_hooks\n    @@roundhouse_puma_hooks = RoundhousePumaBoot.__roundhouse_puma_register\n    nil\n  end\n  def self.on_booted\n    Db.with_connection { RoundhousePumaBoot.__roundhouse_puma_after_booted(@@roundhouse_puma_hooks) }\n    nil\n  end\nend\n");
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Standard libraries in `ingest::app`'s requirable list that the spinel
 /// tree's boot.rb leaves out; the ruby family loads them all. Spinel warns
 /// "is not available in Spinel" for `delegate`, `English`, `etc` and
@@ -8883,6 +8913,16 @@ fn report_not_nil(expr: &crate::expr::Expr, app: &App, target: &str) {
 }
 
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
+    if puma_boot_hooks(app) && !matches!(target, BuildTarget::Blog | BuildTarget::Futamura | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        let method = app.library_classes.iter().find(|c| c.name.0.as_str() == crate::ingest::puma_boot::CLASS).unwrap().methods.iter()
+            .find(|method| method.name.as_str() == crate::ingest::puma_boot::BOOTED).unwrap();
+        emit::diagnostics::report_unsupported(
+            method.name_span,
+            target.as_str(),
+            "Puma after_booted",
+            format!("{} has no server boot event for config/puma.rb after_booted hooks", target.as_str()),
+        );
+    }
     // Column readers are synthesized inside the emitter, after this walk,
     // so a Send match never sees them. The schema column is the fact.
     // Ruby, JRuby, and Spinel ship the interval intrinsics. Roda is Sequel:
@@ -10362,6 +10402,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_boot_program(&mut files, app);
     apply_environment_flags(&mut files, app);
     apply_app_requires(&mut files, app, RequireTarget::Spinel);
+    apply_puma_boot_hooks(&mut files, app, RequireTarget::Spinel)?;
     apply_rails_version(&mut files, app);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
@@ -13624,8 +13665,12 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
         fs::remove_dir_all(&browse).map_err(|e| format!("clean {}: {e}", browse.display()))?;
     }
     fs::create_dir_all(&browse).map_err(|e| format!("mkdir {}: {e}", browse.display()))?;
-    let app =
-        ingest_app(fixture).map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
+    let ingest = || ingest_app(fixture);
+    let app = if targets.iter().all(|target| matches!(target, BuildTarget::Blog | BuildTarget::Futamura)) {
+        crate::ingest::preserve_puma_config(ingest)
+    } else {
+        ingest()
+    }.map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
     // Futamura needs the types but none of the lowerings, same split as
     // the single-target driver (`bin/roundhouse`).
     let analyzed = targets.contains(&BuildTarget::Futamura).then(|| {
@@ -13825,6 +13870,29 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn puma_boot_hooks_refuse_a_missing_native_startup_anchor() {
+        let mut app = App::new();
+        app.library_classes.push(crate::dialect::LibraryClass {
+            name: crate::ident::ClassId(crate::ident::Symbol::from(crate::ingest::puma_boot::CLASS)),
+            is_module: false,
+            parent: None,
+            parent_span: Default::default(),
+            includes: Vec::new(),
+            include_spans: Vec::new(),
+            methods: crate::runtime_src::parse_methods("def __roundhouse_puma_after_booted\n  nil\nend").unwrap(),
+            nullable_columns: Vec::new(),
+            origin: None,
+            constants: Vec::new(),
+            conditional_definitions: Vec::new(),
+            unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
+        });
+        let mut files = vec![("main.rb".into(), "Main.configure_default_adapter!\n".into())];
+        let error = apply_puma_boot_hooks(&mut files, &app, RequireTarget::Spinel).unwrap_err();
+        assert!(error.contains("main.rb lost its configure_default_adapter! anchor"), "{error}");
+    }
 
     /// A symlinked data file is carried by its contents only when its
     /// target would be carried at its own path.
