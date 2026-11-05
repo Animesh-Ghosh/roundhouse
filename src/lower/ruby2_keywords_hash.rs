@@ -2,12 +2,14 @@
 //!
 //! The method answers a copy of the Hash flagged so that a later `*args`
 //! splat passes it as keywords. Spinel refuses the call by name and no
-//! target carries the flag, so the copy is all that is kept: a flagged
-//! Hash splatted into a method with keyword parameters arrives
-//! positionally. solid_queue's `RecurringTask#arguments_with_kwargs`
-//! flags a recurring task's last Hash argument; `ActiveJob::Arguments.serialize`
-//! then writes `_aj_symbol_keys` where Rails writes `_aj_ruby2_keywords`,
-//! and a job whose `perform` takes keywords from it is a known gap.
+//! target carries the flag, so the copy is all that is kept.
+//! solid_queue's `RecurringTask#arguments_with_kwargs` flags a recurring
+//! task's last Hash argument. A job whose `perform` takes keywords keeps
+//! its Proc rather than a payload (`lower::job_payload`), so nothing here
+//! passes such a Hash to keywords. What differs is the payload text:
+//! `ActiveJob::Arguments.serialize` writes `_aj_symbol_keys` where Rails
+//! writes `_aj_ruby2_keywords`, which a Rails worker reading it would
+//! not splat as keywords. Both close with keyword `perform` payloads.
 
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
