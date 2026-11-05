@@ -3887,8 +3887,12 @@ pub(super) fn hash_method(
             value: std::sync::Arc::new(value.clone()),
         })
         .unwrap_or_else(unknown),
-        "stringify_keys" | "deep_stringify_keys" | "stringify_keys!"
-        | "deep_stringify_keys!" => Ty::Hash {
+        "deep_stringify_keys" => crate::analyze::hash_keys::deep_stringify_keys(
+            &Ty::Hash { key: std::sync::Arc::new(key.clone()), value: std::sync::Arc::new(value.clone()) },
+            method,
+            args,
+        ).unwrap_or_else(unknown),
+        "stringify_keys" | "stringify_keys!" | "deep_stringify_keys!" => Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
             value: std::sync::Arc::new(value.clone()),
         },
@@ -4160,6 +4164,7 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
         // constant holding it was a value with no inferred type, so
         // every read of it was "constant not supported".
         "to_proc" => Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from("Proc")), args: vec![].into() },
+        "name" => Ty::Str,
         "length" | "size" => Ty::Int,
         "upcase" | "downcase" | "capitalize" | "swapcase" => Ty::Sym,
         "empty?" => Ty::Bool,

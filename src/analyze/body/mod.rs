@@ -3205,8 +3205,26 @@ impl<'a> BodyTyper<'a> {
                 self.analyze_expr(scrutinee, ctx);
                 let mut branch_tys = Vec::new();
                 for arm in arms.iter_mut() {
-                    if let Some(g) = &mut arm.guard { self.analyze_expr(g, ctx); }
-                    branch_tys.push(self.analyze_expr(&mut arm.body, ctx));
+                    let pred = if let crate::expr::Pattern::Expr { expr: class } = &mut arm.pattern
+                        && matches!(&*class.node, ExprNode::Const { .. })
+                    {
+                        self.analyze_expr(class, ctx);
+                        let reader = |name: &Symbol| self.self_attribute_ty(name, ctx);
+                        (self.is_class_object(class, ctx)
+                            && !self.owns_operator(class.ty.as_ref(), &Symbol::from("==="), true)).then(|| {
+                            narrowing::extract_case_hash_narrowing(
+                                scrutinee, class, &narrowing::Probe::without_members(&reader),
+                            )
+                        }).flatten()
+                    } else {
+                        None
+                    };
+                    let mut inner = pred.as_ref()
+                        .map(|pred| narrowing::apply_narrowing(ctx, pred, true))
+                        .unwrap_or_else(|| ctx.clone());
+                    narrowing::drop_unstable_members(&mut inner, &[&arm.body]);
+                    if let Some(g) = &mut arm.guard { self.analyze_expr(g, &inner); }
+                    branch_tys.push(self.analyze_expr(&mut arm.body, &inner));
                 }
                 union_many(branch_tys)
             }
