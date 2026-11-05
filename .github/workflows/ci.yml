@@ -1867,11 +1867,22 @@ jobs:
               if json.loads(case.read_text()).get("test") in mine:
                   shutil.copy(case, dst / case.name)' "$RUNNER_TEMP/bundle-all" "$RUNNER_TEMP/bundle-cases"
           echo "collected $(ls "$RUNNER_TEMP/bundle-all" 2>/dev/null | wc -l) cases ($(ls "$RUNNER_TEMP/bundle-cases" | wc -l) this shard's) in $(( $(date +%s) - start ))s"
+          # Not after the shared builds: a test no planned build takes compiles alone, so it runs
+          # while they build.
+          printf '%s\n' "${mine[@]}" | python3 -c 'import json, sys
+          units = {t for unit in json.load(open(sys.argv[1])) for t in unit} if len(sys.argv) > 1 else set()
+          for t in sys.stdin.read().split():
+              print(("later " if t in units else "now ") + t)' "$RUNNER_TEMP/bundle-plan.json" > "$RUNNER_TEMP/split.txt" || printf '%s\n' "${mine[@]}" | sed 's/^/now /' > "$RUNNER_TEMP/split.txt"
+          sed -n 's/^now //p' "$RUNNER_TEMP/split.txt" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact &
+          alone=$!
           RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-cases" RH_SPINEL_BUNDLE_OUT="$RUNNER_TEMP/spinel-bundles" \
             "$SPINEL_TOOLCHAIN_BIN" --ignored --exact spinel_bundle_build --nocapture || true
           echo "bundled in $(( $(date +%s) - start ))s"
-          export RH_SPINEL_BUNDLE="$RUNNER_TEMP/spinel-bundles"
-          printf '%s\n' "${mine[@]}" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact
+          status=0
+          sed -n 's/^later //p' "$RUNNER_TEMP/split.txt" | RH_SPINEL_BUNDLE="$RUNNER_TEMP/spinel-bundles" \
+            python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact || status=1
+          wait "$alone" || status=1
+          exit "$status"
       # fixtures/tiny-api, the API-only app (#321): `spin build` of the
       # app entry, HTTP requests to the binary, and the model script
       # compiled natively. Filtered by name, so the ignored test named
