@@ -30,7 +30,7 @@ pub const VIEW: &str = concat!(
 
 /// What Rails 8.1.4 renders for each line of `VIEW`: the content escaped
 /// unless it is html-safe (a helper's markup, `html_safe`, `raw`): a
-/// `pluralize`'s text is escaped, and a `truncate`'s and an `h`'s only once;
+/// `pluralize`'s, a `truncate`'s and an `h`'s text is escaped only once;
 /// options can be a Hash local. The last line
 /// is #1771's block form with options, which Go didn't compile.
 pub const RENDERS: &[&str] = &[

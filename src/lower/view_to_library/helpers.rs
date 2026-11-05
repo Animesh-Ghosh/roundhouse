@@ -255,8 +255,9 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             // `x.html_safe` or `raw(x)` (`x.to_s.html_safe`), an escape the
             // template applied (`h(x)`), or a helper
             // whose call here is markup (`link_to`, a nested `content_tag`),
-            // or already escaped (`truncate`, `word_wrap`). The other kinds
-            // (`pluralize`'s text, `dom_id`) are escaped like any String.
+            // or already escaped (`truncate`, `word_wrap`, `pluralize`, each
+            // lowered to `html_escape(…)`). The other kinds (`dom_id`) are
+            // escaped like any String.
             let helper_markup = matches!(&*content.node,
                 ExprNode::Send { recv: None, method, args, block: None, parenthesized }
                     if matches!(
@@ -264,7 +265,7 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                         Some(LinkTo { .. } | LinkToIf { .. } | ButtonTo { .. } | ContentTag { .. }
                             | CsrfMetaTags | CspMetaTag | StylesheetLinkTag { .. }
                             | JavascriptImportmapTags { .. } | EngineImportmapTags { .. }
-                            | Truncate { .. } | WordWrap { .. })
+                            | Truncate { .. } | WordWrap { .. } | Pluralize { .. })
                     ));
             let raw_value = match &*content.node {
                 ExprNode::Send { recv: None, method, args, block: None, .. }
