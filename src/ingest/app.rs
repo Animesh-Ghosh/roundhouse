@@ -645,11 +645,11 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let mut source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
         .map_err(|message| IngestError::Parse { file: dir.join("roundhouse.yml").display().to_string(), message })?;
     // The queue's records: on solid_queue the compiler runs the jobs, but the records Rails keeps of them are
-    // solid_queue's own models, read from its installed source over the app's `db/queue_schema.rb`.
+    // solid_queue's own models, read from its installed source over a separate or primary queue schema.
     // Not every app on solid_queue: only one whose code (or a gem it carries) names solid_queue's classes reads its records.
     let solid_queue_models = (effective_queue_adapter(vfs, dir).as_deref() == Some("solid_queue")
-        && vfs.exists(&dir.join("db/queue_schema.rb"))
-        && names_solid_queue(vfs, dir, &source_gems))
+        && names_solid_queue(vfs, dir, &source_gems)
+        && (vfs.exists(&dir.join("db/queue_schema.rb")) || primary_schema_has_queue(vfs, dir)))
         .then(|| super::source_gems::framework_models(vfs, dir, lock.as_ref(), "solid_queue"))
         .flatten();
     let solid_queue_root = solid_queue_models.as_ref().and_then(|gem| gem.mount.strip_prefix(dir).ok().map(|m| m.join("app")));
@@ -820,7 +820,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
         }
     }
     // Not its own database: the runtime opens only the primary, so solid_queue's tables join it.
-    if solid_queue_root.is_some() {
+    if solid_queue_root.is_some() && vfs.exists(&dir.join("db/queue_schema.rb")) {
         let queue_schema = dir.join("db/queue_schema.rb");
         if let Some(source) = read_or_ledger(vfs, &queue_schema)? {
             if let Some(queue) = unwrap_or_record(ingest_schema(&source, &queue_schema.display().to_string()))? {
@@ -12698,11 +12698,25 @@ pub(super) fn queue_adapter_line(line: &str) -> Option<Option<String>> {
     Some(literal.then(|| name.to_string()))
 }
 
-/// `App::queue_adapter`: `config/application.rb`, then
-/// `config/environments/production.rb`, then `config/initializers`, by
-/// line scan as `read_forgery_verification_strategy` reads them. The
-/// last setting wins, and a last setting that isn't a literal leaves the
-/// adapter unknown (`None`) rather than falling back to an earlier one.
+/// Use the ordinary schema readers for selection too. The normal primary schema
+/// pass remains the owner of its facts and diagnostics, including survey gaps.
+fn primary_schema_has_queue<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool {
+    let Some(path) = ["db/schema.rb", "db/structure.sql"].iter()
+        .map(|name| dir.join(name)).find(|path| vfs.exists(path)) else { return false };
+    let Ok(source) = vfs.read(&path) else { return false };
+    let marks = (super::survey::mark(), super::prism::mark());
+    let file = path.display().to_string();
+    let schema = if path.extension().is_some_and(|ext| ext == "rb") {
+        ingest_schema(&source, &file)
+    } else {
+        ingest_structure_sql(&source, &file)
+    };
+    let has_queue = schema.is_ok_and(|schema| schema.tables.contains_key(&Symbol::from("solid_queue_jobs")));
+    super::survey::rewind(marks.0);
+    super::prism::rewind(marks.1);
+    has_queue
+}
+
 /// Whether the app's own code, or a source gem's, writes `SolidQueue::`.
 fn names_solid_queue<V: Vfs + ?Sized>(vfs: &V, dir: &Path, source_gems: &[super::source_gems::SourceGem]) -> bool {
     let mut dirs: Vec<PathBuf> = ["app", "lib", "config"].iter().map(|d| dir.join(d)).collect();
@@ -12715,6 +12729,11 @@ fn names_solid_queue<V: Vfs + ?Sized>(vfs: &V, dir: &Path, source_gems: &[super:
     })
 }
 
+/// `App::queue_adapter`: `config/application.rb`, then
+/// `config/environments/production.rb`, then `config/initializers`, by
+/// line scan as `read_forgery_verification_strategy` reads them. The
+/// last setting wins, and a last setting that isn't a literal leaves the
+/// adapter unknown (`None`) rather than falling back to an earlier one.
 fn read_queue_adapter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
     let mut adapter: Option<String> = None;
     for sub in ["config/application.rb", "config/environments/production.rb", "config/initializers"] {

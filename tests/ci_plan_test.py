@@ -230,6 +230,18 @@ class Routing(unittest.TestCase):
             any("campfire" in job for job in plan["jobs"] if job not in ci.BASE)
         )
 
+    def test_solid_queue_schema_selection_keeps_its_ruby_execution_coverage(self):
+        for path in [
+            "src/ingest/app.rs",
+            "tests/solid_queue_schema.rs",
+            "tests/emit_and_run/solid_queue_worker.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("unit-build", plan["jobs"])
+                self.assertIn("unit", plan["jobs"])
+                self.assertIn("compare-ruby", plan["jobs"])
+
     def test_sidekiq_live_runs_only_when_the_push_or_its_client_changes(self):
         for path in [
             "runtime/spinel/sidekiq_push.rb",

@@ -16,6 +16,17 @@ fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
     files.iter().map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec())).collect()
 }
 
+#[test]
+fn column_primary_keys_are_retained_without_reading_default_text_as_constraints() {
+    let schema = ingest_structure_sql(
+        b"CREATE TABLE jobs (id bigserial PRIMARY KEY, label text DEFAULT 'PRIMARY KEY');",
+        "db/structure.sql",
+    ).unwrap();
+    let table = schema.tables.get(&Symbol::from("jobs")).unwrap();
+    assert!(col(table, "id").primary_key);
+    assert!(!col(table, "label").primary_key);
+}
+
 /// A small hand-rolled `pg_dump`-shaped dump covering the constructs
 /// `ingest_structure_sql` is expected to model plus the ones it must
 /// ledger rather than silently drop.
