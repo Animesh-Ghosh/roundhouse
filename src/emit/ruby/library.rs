@@ -10998,12 +10998,26 @@ fn walk_load_time_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
         };
         Some(block)
     }
-    /// A closure that runs now: its parameter defaults, then its body.
-    fn run(closure: &Expr, out: &mut BTreeSet<Vec<String>>) {
-        match &*closure.node {
-            ExprNode::Lambda { .. } => closure.node.for_each_child(&mut |child| walk_load_time_const_paths(child, out)),
-            _ => walk_load_time_const_paths(closure, out),
+    /// A closure that runs now with at least `given` positional
+    /// arguments: the parameter defaults those leave unfilled, then its
+    /// body. Ruby fills the required parameters first, then the optional
+    /// ones in order. Without a rest parameter the closure has no others
+    /// (ingest folds post-rest parameters into one), so the count is
+    /// exact; with one, every default is walked.
+    fn run(closure: &Expr, given: usize, out: &mut BTreeSet<Vec<String>>) {
+        let ExprNode::Lambda { params, rest_param, extra_params, body, .. } = &*closure.node else {
+            return walk_load_time_const_paths(closure, out);
+        };
+        let mut optional = 0;
+        for param in extra_params {
+            let positional = !param.keyword && !param.rest && !param.forwarding && !param.from_keyword;
+            let filled = positional && rest_param.is_none() && given > params.len() + optional;
+            optional += usize::from(positional);
+            if let Some(default) = param.default.as_ref().filter(|_| !filled) {
+                walk_load_time_const_paths(default, out);
+            }
         }
+        walk_load_time_const_paths(body, out);
     }
     match &*e.node {
         ExprNode::Lambda { .. } => {}
@@ -11012,14 +11026,30 @@ fn walk_load_time_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
             // `(-> { … }).call`, `.()`, `[]`, `yield`: the closure runs now.
             if matches!(method.as_str(), "call" | "[]" | "yield" | "===") {
                 if let Some(closure) = recv.as_ref().and_then(stored_body) {
-                    run(closure, out);
+                    // The arguments that are surely positional: not a
+                    // splat, which may spread to none, nor a hash, which
+                    // may be keywords.
+                    let given = args
+                        .iter()
+                        .filter(|arg| {
+                            !matches!(
+                                &*arg.node,
+                                ExprNode::Splat { .. }
+                                    | ExprNode::Hash { .. }
+                                    | ExprNode::ForwardArgs
+                                    | ExprNode::ForwardKeywords
+                                    | ExprNode::ForwardKeywordsWithPairs { .. }
+                            )
+                        })
+                        .count();
+                    run(closure, given, out);
                 }
             }
             for child in recv.iter().chain(args.iter()) {
                 walk_load_time_const_paths(child, out);
             }
             if let Some(block) = block.as_ref().filter(|_| !stores_block) {
-                run(block, out);
+                run(block, 0, out);
             }
         }
         _ => {

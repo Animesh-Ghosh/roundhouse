@@ -255,6 +255,24 @@ fn a_lambda_called_in_place_loads_what_it_names() {
     assert_eq!(run.stdout.lines().last(), Some("[2, [2]]"), "{}", run.stdout);
 }
 
+/// A default the call's arguments fill does not run, so what it names is
+/// not required: `Widget`'s class body reads `Answer`, and the require
+/// closed a cycle. A default the arguments leave unfilled still runs.
+#[test]
+fn a_default_the_call_fills_is_not_required() {
+    let run = run_files(
+        &[
+            ("app/models/answer.rb", "Answer = (->(x = Widget::VALUE) { x }).call(1)\n"),
+            ("app/models/second.rb", "Second = (->(a, b = Gadget::VALUE) { a + b }).call(1)\n"),
+            ("app/models/gadget.rb", "class Gadget\n  VALUE = 2\nend\n"),
+            ("app/models/widget.rb", "class Widget\n  VALUE = Answer + 1\nend\n"),
+        ],
+        "p [Answer, Second, Widget::VALUE]\n",
+    );
+    run.assert_passes();
+    assert_eq!(run.stdout.lines().last(), Some("[1, 3, 2]"), "{}", run.stdout);
+}
+
 /// `labels.rb` is `Labels`'s file, whatever its first constant, and a read
 /// of any constant in it requires it.
 #[test]
