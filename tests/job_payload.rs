@@ -530,12 +530,13 @@ fn keyword_defaults_are_written_as_the_same_ruby_values() {
     let mut app = ingest_app_from_tree(tree(&[
         ("db/schema.rb", SCHEMA),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
-        ("app/models/user.rb", "class User < ApplicationRecord\n  def self.later\n    BufJob.perform_later(1)\n    TplJob.perform_later(1)\n    CrlfJob.perform_later(1)\n    FrozenJob.perform_later(1)\n    SymJob.perform_later(1)\n  end\nend\n"),
+        ("app/models/user.rb", "class User < ApplicationRecord\n  def self.later\n    BufJob.perform_later(1)\n    TplJob.perform_later(1)\n    CrlfJob.perform_later(1)\n    FrozenJob.perform_later(1)\n    EndnotesJob.perform_later(1)\n    SymJob.perform_later(1)\n  end\nend\n"),
         ("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\nend\n"),
         ("app/jobs/buf_job.rb", "class BufJob < ApplicationJob\n  def perform(n, buf: +\"b\")\n    buf << \"x\"\n  end\nend\n"),
         ("app/jobs/tpl_job.rb", "class TplJob < ApplicationJob\n  def perform(n, tpl: '#{x}')\n    nil\n  end\nend\n"),
         ("app/jobs/sym_job.rb", "class SymJob < ApplicationJob\n  def perform(n, s: :\"9a\")\n    nil\n  end\nend\n"),
         ("app/jobs/frozen_job.rb", "=begin\nA job.\n=end\n# frozen_string_literal: true\n\nclass FrozenJob < ApplicationJob\n  def perform(n, tag: \"kept\")\n    nil\n  end\nend\n"),
+        ("app/jobs/endnotes_job.rb", "=begin\n=endnotes\n# frozen_string_literal: true\n=end\n\nclass EndnotesJob < ApplicationJob\n  def perform(n, tag: \"loose\")\n    nil\n  end\nend\n"),
         ("app/jobs/crlf_job.rb", "class CrlfJob < ApplicationJob\n  def perform(n, eol: \"\\r\\n\")\n    nil\n  end\nend\n"),
     ]))
     .expect("ingest default job app");
@@ -545,6 +546,7 @@ fn keyword_defaults_are_written_as_the_same_ruby_values() {
     assert!(src.contains(": +\"\\#{x}\")"), "{src}");
     assert!(src.contains(": +\"\\r\\n\")"), "{src}");
     assert!(src.contains("0) : \"kept\")"), "{src}");
+    assert!(src.contains("0) : +\"loose\")"), "{src}");
     let sym = plan(&app, "SymJob");
     assert!(sym.fallback.as_ref().is_some_and(|f| f.reason.contains("not a literal")), "{:?}", sym.fallback);
 }
