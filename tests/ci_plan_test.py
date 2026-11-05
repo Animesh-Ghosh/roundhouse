@@ -956,6 +956,17 @@ class Routing(unittest.TestCase):
                 self.assertIn("schema_constraints", plan["spinel_tests"])
                 self.assertIn("spinel-framework", plan["jobs"])
 
+    def test_sql_default_expressions_own_declarations_and_renderers(self):
+        for path in [
+            "tests/schema_default_expressions.rs", "tests/support/schema_defaults_schema.rb",
+            "tests/support/schema_defaults_contract.rb", "src/schema.rs", "src/schema/generated.rs",
+            "src/ingest/schema.rs", "src/emit/shared/schema_sql.rs", "src/emit/roda.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("schema_default_expressions", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
     def test_jdbc_probes_select_the_existing_comparison_without_archives(self):
         for path, native_jobs, suites in [
             ("tests/support/jdbc_cleanup_failures.rb", set(), []),

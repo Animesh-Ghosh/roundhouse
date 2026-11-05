@@ -141,6 +141,7 @@ impl Dialect {
     /// else — a date or binary value, a default ingest could not read — is left to
     /// the model layer, as before.
     fn column_default(self, col: &Column) -> Option<String> {
+        if let Some(sql) = &col.default_expression { return Some(format!("({sql})")); }
         let raw = col.stored_default()?;
         if col.generated.is_some() {
             return None;
@@ -617,6 +618,7 @@ mod tests {
             col_type,
             nullable,
             default: None,
+            default_expression: None,
             primary_key,
             generated: None,
             generated_text_compatible: None,

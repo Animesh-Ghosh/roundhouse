@@ -575,6 +575,8 @@ fn apply_table_verb(
             if let (Some(t), Some(c)) = (arg_name(0), arg_name(1)) {
                 let to_kwarg = kwarg_value(args.iter().skip(2), "to");
                 let value = to_kwarg.as_ref().or_else(|| args.get(2));
+                let expression = value.filter(|n| sql_default_candidate(n))
+                    .map(sql_default_expression).transpose().map_err(|message| IngestError::Unsupported { file: file.into(), message })?;
                 let default_for = |col: &Column| {
                     value.and_then(|value| {
                         if !col.array && matches!(col.col_type, ColumnType::Json | ColumnType::Jsonb) {
@@ -590,6 +592,7 @@ fn apply_table_verb(
                         for col in &mut candidate.columns {
                             if col.name.as_str() == c {
                                 col.default = default_for(col);
+                                col.default_expression = expression.clone();
                             }
                         }
                         validate_generated_migration_candidate(&candidate, verb, file, dialect)?;
@@ -599,6 +602,7 @@ fn apply_table_verb(
                     for col in &mut table.columns {
                         if col.name.as_str() == c {
                             col.default = default_for(col);
+                            col.default_expression = expression.clone();
                         }
                     }
                 }
@@ -826,6 +830,7 @@ fn fold_column(
                 }
                 if !opts.default_given {
                     col.default = existing.default.clone();
+                    col.default_expression = existing.default_expression.clone();
                 }
                 col.primary_key = existing.primary_key;
             }
@@ -1643,6 +1648,7 @@ fn table_from_create_table(
                 col_type: ColumnType::BigInt,
                 nullable: false,
                 default: None,
+                default_expression: None,
                 primary_key: true,
                 generated: None,
                 generated_text_compatible: None,
@@ -1800,6 +1806,7 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             col_type: ColumnType::Text,
             nullable: true,
             default: None,
+            default_expression: None,
             primary_key: false,
             generated: None,
             generated_text_compatible: None,
@@ -1912,6 +1919,7 @@ fn view_columns_from_sql(sql: &str, tables: &IndexMap<Symbol, Table>) -> Vec<Col
             col_type: resolved.map(|(col_type, _)| col_type).unwrap_or_else(|| view_column_type(alias)),
             nullable: true,
             default: None,
+            default_expression: None,
             primary_key: false,
             generated: None,
             generated_text_compatible: None,
@@ -1987,6 +1995,7 @@ fn timestamp_columns_with(nullable: bool) -> [Column; 2] {
         col_type: ColumnType::DateTime,
         nullable,
         default: None,
+        default_expression: None,
         primary_key: false,
         generated: None,
         generated_text_compatible: None,
@@ -2006,6 +2015,7 @@ fn reference_column(name: &str) -> Column {
         col_type: ColumnType::Reference { table: TableRef(Symbol::from(name)) },
         nullable: true,
         default: None,
+        default_expression: None,
         primary_key: false,
         generated: None,
         generated_text_compatible: None,
@@ -2021,6 +2031,7 @@ fn reference_column(name: &str) -> Column {
 struct ColumnOpts {
     nullable: Option<bool>,
     default: Option<String>,
+    default_expression: Option<(usize, Result<String, String>)>,
     json_default: Option<String>,
     /// Whether `default:` was given at all (`default: nil` included):
     /// `change_column` keeps the old default only when it was not.
@@ -2041,6 +2052,40 @@ fn default_value(node: &Node<'_>) -> Option<String> {
         return Some(f.value().to_string());
     }
     bool_value(node).map(|b| b.to_string()).or_else(|| string_value(node))
+}
+
+fn sql_default_expression(node: &Node<'_>) -> Result<String, String> {
+    let gap = || "SQL defaults require a zero-argument literal proc returning a SQL string literal or CURRENT_TIMESTAMP, CURRENT_DATE or CURRENT_TIME".to_string();
+    if let Some(parens) = node.as_parentheses_node() {
+        let statements = parens.body().map(flatten_statements).ok_or_else(gap)?;
+        return if statements.len() == 1 { sql_default_expression(&statements[0]) } else { Err(gap()) };
+    }
+    let (body, parameters) = if let Some(lambda) = node.as_lambda_node() {
+        (lambda.body(), lambda.parameters())
+    } else if let Some(call) = node.as_call_node().filter(|c| c.receiver().is_none() && matches!(constant_id_str(&c.name()), "lambda" | "proc") && c.arguments().is_none_or(|a| a.arguments().len() == 0)) {
+        let block = call.block().and_then(|b| b.as_block_node()).ok_or_else(gap)?;
+        (block.body(), block.parameters())
+    } else { return Err(gap()); };
+    if let Some(params) = parameters.and_then(|n| n.as_block_parameters_node()).and_then(|p| p.parameters()) {
+        if params.requireds().len() != 0 || params.optionals().len() != 0 || params.posts().len() != 0
+            || params.keywords().len() != 0 || params.rest().is_some() || params.keyword_rest().is_some() || params.block().is_some()
+        { return Err(gap()); }
+    }
+    let statements = body.map(flatten_statements).ok_or_else(gap)?;
+    if statements.len() != 1 { return Err(gap()); }
+    let sql = string_value(&statements[0]).ok_or_else(gap)?.trim().to_string();
+    // SQLite's datetime('now') is the same clock default in portable DDL.
+    let sql = if sql.eq_ignore_ascii_case("DATETIME('now')") { "CURRENT_TIMESTAMP".into() } else { sql };
+    let quoted = sql.len() >= 2 && sql.starts_with('\'') && sql.ends_with('\'')
+        && !sql[1..sql.len() - 1].replace("''", "").contains('\'');
+    if !quoted && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str()) { return Err(gap()); }
+    Ok(sql)
+}
+
+fn sql_default_candidate(node: &Node<'_>) -> bool {
+    default_value(node).is_none() && json_default_value(node).is_none()
+        && node.as_nil_node().is_none() && node.as_symbol_node().is_none()
+        && node.as_array_node().is_none() && node.as_hash_node().is_none()
 }
 
 fn json_default_value(node: &Node<'_>) -> Option<String> {
@@ -2103,6 +2148,10 @@ fn parse_column_opts<'pr>(nodes: impl Iterator<Item = &'pr Node<'pr>>) -> Column
                 "default" => {
                     opts.default_given = true;
                     opts.default = default_value(value);
+                    opts.default_expression = None;
+                    if sql_default_candidate(value) {
+                        opts.default_expression = Some((value.location().start_offset(), sql_default_expression(value)));
+                    }
                     opts.json_default = json_default_value(value);
                     opts.empty_array_default = value.as_array_node().is_some_and(|a| a.elements().iter().next().is_none());
                 }
@@ -2313,6 +2362,9 @@ fn column_with_type(
     table: &str,
     file: &str,
 ) -> Result<Column, IngestError> {
+    let default_expression = opts.default_expression.as_ref().map(|(offset, result)| {
+        result.clone().map_err(|why| IngestError::Unsupported { file: file.into(), message: format!("line {}: default for {table}.{col_name}: {why}", super::sources::line_at(file, *offset).unwrap_or(1)) })
+    }).transpose()?;
     let col_type = match type_name {
         // An integer's `limit:` is its size in bytes, and Rails' PostgreSQL
         // and MySQL adapters make 5 to 8 a `bigint`. Rails 4.2 and earlier
@@ -2391,6 +2443,7 @@ fn column_with_type(
         } else {
             opts.default.clone()
         },
+        default_expression,
         primary_key: false,
         generated: None,
         generated_text_compatible,

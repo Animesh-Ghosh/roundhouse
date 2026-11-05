@@ -66,6 +66,9 @@ pub struct Column {
     pub col_type: ColumnType,
     pub nullable: bool,
     pub default: Option<String>,
+    /// A database expression is distinct from the model's literal default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_expression: Option<String>,
     pub primary_key: bool,
     /// The SQL expression and storage mode of a generated column. The
     /// declared `col_type` remains the column's result type; generated

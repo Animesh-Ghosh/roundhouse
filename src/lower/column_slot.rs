@@ -385,6 +385,7 @@ mod tests {
             col_type,
             nullable: true,
             default: None,
+            default_expression: None,
             primary_key: false,
             generated: None,
             generated_text_compatible: None,
