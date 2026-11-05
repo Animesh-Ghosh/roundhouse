@@ -302,8 +302,18 @@ fn ingest_library_classes_impl(
     let mut factories: Vec<LibraryClass> = made.into_iter().map(|(_, c)| c).collect();
     // No class, module or factory to host them: the file is its
     // constants, which Ruby binds on Object as the autoloader loads it.
+    // Only when they are all it runs: the holder carries the writes
+    // alone, so a `Labels << "ready"` after `Labels = []` would be lost.
+    // Such a file is not carried, as before, and a read of its constants
+    // stays refused.
     if matches!(walk, Walk::App) && out.is_empty() && factories.is_empty() && !file_constants.is_empty() {
-        let mut holder = file_constants_holder(&file_constants[0].0);
+        let only_writes = root.as_program_node().is_some_and(|program| {
+            program.statements().body().iter().all(|stmt| stmt.as_constant_write_node().is_some())
+        });
+        if !only_writes {
+            return Ok(Vec::new());
+        }
+        let mut holder = file_constants_holder(file, &file_constants);
         holder.constants = file_constants;
         return Ok(vec![holder]);
     }
@@ -6549,11 +6559,16 @@ fn inert_value(node: &ruby_prism::Node<'_>, targets: &[String]) -> bool {
     })
 }
 
-/// The `LibraryClassOrigin::FileConstants` holder of a file whose first
-/// constant is `first`.
-fn file_constants_holder(first: &Symbol) -> LibraryClass {
+/// The `LibraryClassOrigin::FileConstants` holder of `file`, named for
+/// the constant Rails' autoloader maps the file to (`Labels` in
+/// `labels.rb`), so the emitted file keeps that path, or else for its
+/// first constant.
+fn file_constants_holder(file: &str, constants: &[(Symbol, Expr)]) -> LibraryClass {
+    let stem = std::path::Path::new(file).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    let mapped = crate::naming::camelize(stem);
+    let name = constants.iter().find(|(name, _)| name.as_str() == mapped).unwrap_or(&constants[0]).0.clone();
     LibraryClass {
-        name: ClassId(first.clone()),
+        name: ClassId(name),
         is_module: false,
         parent: None,
         parent_span: Default::default(),

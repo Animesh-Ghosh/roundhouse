@@ -100,6 +100,12 @@ pub(super) fn build<V: Vfs + ?Sized>(
             if !wanted.iter().any(|(_, s)| *s == start) || is_hook(&node) {
                 continue;
             }
+            // An engine's statement is taken only as the constant write it
+            // is: the ledger names a `begin`'s writes, not the `ensure`
+            // or `rescue` that would run with them.
+            if !path.starts_with("config/") && node.as_constant_write_node().is_none() && node.as_constant_path_write_node().is_none() {
+                continue;
+            }
             let end = node.location().end_offset() as u32;
             // rate_limit already moved this store onto Object; replaying it here would build a second store.
             if carried_rate_limit_stores.iter().any(|value| value.file == file_id && value.start >= start && value.end <= end) {

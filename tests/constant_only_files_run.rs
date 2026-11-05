@@ -171,3 +171,106 @@ fn an_alias_of_a_missing_class_is_reported() {
         .check_errors();
     assert!(errors.iter().any(|error| error.contains("constant not supported (all targets): Missing::Thing")), "{errors:?}");
 }
+
+/// A file of constants alone, run on the CRuby tree with `script`.
+fn run_files(files: &[(&str, &str)], script: &str) -> emit_and_run::Run {
+    let mut app = emit_and_run::empty_app()
+        .write("roundhouse.yml", "test_paths:\n  - test\n")
+        .write("test/test_helper.rb", "require \"active_support/test_case\"\n");
+    for (path, source) in files {
+        app = app.write(path, source);
+    }
+    app.run_ruby(script)
+}
+
+/// What a value names loads just before its constant, after the ones
+/// above it: `Widget`'s class body reads `Settings` as it loads, so a
+/// require at the head of the file left `Settings` undefined there.
+#[test]
+fn a_value_s_class_loads_after_the_constants_above_it() {
+    let run = run_files(
+        &[
+            ("app/models/settings.rb", "Settings = 1\nCopy = Widget::VALUE\n"),
+            ("app/models/widget.rb", "class Widget\n  VALUE = Settings + 1\nend\n"),
+        ],
+        "p [Copy, Widget::VALUE]\n",
+    );
+    run.assert_passes();
+    assert_eq!(run.stdout.lines().last(), Some("[2, 2]"), "{}", run.stdout);
+}
+
+/// A stored lambda names `Widget` when it is called, so the file does not
+/// require it: `Widget`'s class body reads `Factory`, and the require
+/// closed a cycle that left `Factory` undefined there.
+#[test]
+fn a_stored_lambda_s_constants_load_when_it_runs() {
+    let run = run_files(
+        &[
+            ("app/models/factory.rb", "Factory = -> { Widget.new }\n"),
+            ("app/models/widget.rb", "class Widget\n  MADE = Factory\nend\n"),
+        ],
+        "p [Factory.call.class, Widget::MADE.equal?(Factory)]\n",
+    );
+    run.assert_passes();
+    assert_eq!(run.stdout.lines().last(), Some("[Widget, true]"), "{}", run.stdout);
+}
+
+/// The whole value is the constant's: `(1; 2)` is 2, and `(42 if false)`
+/// is nil, not a write that does not happen.
+#[test]
+fn a_grouped_value_is_the_constant_s() {
+    let run = run_files(
+        &[("app/models/choice.rb", "Choice = (1; 2)\n"), ("app/models/other.rb", "Other = (42 if false)\n")],
+        "p [Choice, defined?(Other), Other]\n",
+    );
+    run.assert_passes();
+    assert_eq!(run.stdout.lines().last(), Some("[2, \"constant\", nil]"), "{}", run.stdout);
+}
+
+/// `labels.rb` is `Labels`'s file, whatever its first constant, and a read
+/// of any constant in it requires it.
+#[test]
+fn every_constant_of_the_file_is_required_from_it() {
+    let run = run_files(
+        &[
+            ("app/models/labels.rb", "ZZ = [\"x\"]\nLabels = ZZ\n"),
+            ("app/models/reader.rb", "class Reader\n  L = Labels\n  Z = ZZ\nend\n"),
+        ],
+        "p [Reader::L, Reader::Z]\n",
+    );
+    run.assert_passes();
+    assert!(run.emitted.join("app/models/labels.rb").exists(), "{}", run.emitted.display());
+    assert_eq!(run.stdout.lines().last(), Some("[[\"x\"], [\"x\"]]"), "{}", run.stdout);
+}
+
+/// A file that runs more than its constant writes is not carried, as on
+/// `main`: carrying the writes alone would emit `Labels` without the
+/// element the next statement adds. A read of it stays refused.
+#[test]
+fn a_file_with_other_statements_is_not_carried() {
+    let errors = emit_and_run::empty_app()
+        .write("roundhouse.yml", "test_paths:\n  - test\n")
+        .write("app/models/labels.rb", "Labels = []\nLabels << \"ready\"\n")
+        .write("app/models/reader.rb", "class Reader\n  def self.read\n    Labels\n  end\nend\n")
+        .check_errors();
+    assert!(errors.iter().any(|error| error.contains("constant not supported (all targets): Labels")), "{errors:?}");
+}
+
+/// The sidecar declares the constants at the top level, an alias as RBS's
+/// class or module alias, not a class named for the file.
+#[test]
+fn the_rbs_sidecar_declares_the_constants() {
+    let (emitted, errors) = emit_and_run::empty_app()
+        .write("roundhouse.yml", "test_paths:\n  - test\n")
+        .write("app/models/thing.rb", "class Thing\nend\n")
+        .write("app/models/named.rb", "module Named\n  def self.x\n    1\n  end\nend\n")
+        .write("app/models/remote_thing.rb", "RemoteThing = Thing\n")
+        .write("app/models/old_named.rb", "OldNamed = Named\n")
+        .write("app/models/labels.rb", "Labels = [\"a\"].freeze\n")
+        .emit(BuildTarget::Ruby);
+    assert!(errors.is_empty(), "{errors:?}");
+    let sig = |name: &str| std::fs::read_to_string(emitted.join(format!("sig/app/models/{name}.rbs"))).unwrap();
+    assert_eq!(sig("remote_thing"), "class RemoteThing = ::Thing\n");
+    assert_eq!(sig("old_named"), "module OldNamed = ::Named\n");
+    assert_eq!(sig("labels"), "Labels: Array[String]\n");
+}

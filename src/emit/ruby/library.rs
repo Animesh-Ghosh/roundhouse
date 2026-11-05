@@ -8548,38 +8548,39 @@ fn emit_library_class_decl_inner(
 
     // A file of constants alone: its writes at the top level, where Ruby
     // binds them on Object. Each value runs as the file loads, so what it
-    // names is loaded first, as for a class-body constant.
+    // names is loaded just before it, after the constants written above
+    // it: a class body that file loads may read those. A stored lambda
+    // names its constants when it is called, not here.
     if lc.is_file_constants() {
-        let mut requires: BTreeSet<String> = BTreeSet::new();
-        for (_, value) in &lc.constants {
-            let mut paths: BTreeSet<Vec<String>> = BTreeSet::new();
-            walk_const_paths(value, &mut paths);
-            for path in &paths {
-                if let Some(anchor) = require_path_for_body_const(path, app, classes, "") {
-                    if anchor != self_anchor {
-                        requires.insert(relpath(&out_dir, &anchor));
-                    }
-                }
-            }
-        }
-        for require in &requires {
-            writeln!(s, "require_relative {require:?}").unwrap();
-        }
-        if !requires.is_empty() {
-            writeln!(s).unwrap();
-        }
+        let mut required: BTreeSet<String> = BTreeSet::new();
         for (cname, value) in &lc.constants {
-            let rendered = super::emit_expr(value);
-            let mut lines = rendered.lines();
-            match lines.next() {
-                Some(first) => {
-                    writeln!(s, "{} = {first}", cname.as_str()).unwrap();
-                    for line in lines {
-                        writeln!(s, "{line}").unwrap();
-                    }
+            let mut paths: BTreeSet<Vec<String>> = BTreeSet::new();
+            walk_load_time_const_paths(value, &mut paths);
+            let requires: BTreeSet<String> = paths
+                .iter()
+                .filter_map(|path| require_path_for_body_const(path, app, classes, ""))
+                .filter(|anchor| *anchor != self_anchor)
+                .map(|anchor| relpath(&out_dir, &anchor))
+                .filter(|require| !required.contains(require))
+                .collect();
+            if !requires.is_empty() {
+                if !s.is_empty() {
+                    writeln!(s).unwrap();
                 }
-                None => writeln!(s, "{} = nil", cname.as_str()).unwrap(),
+                for require in &requires {
+                    writeln!(s, "require_relative {require:?}").unwrap();
+                }
+                writeln!(s).unwrap();
+                required.extend(requires);
             }
+            // As an assignment, which groups a `(a; b)` or `(x if c)`
+            // value: bare, only its first statement, or only when `c`
+            // holds, would be the constant's.
+            let assign = Expr::new(
+                value.span,
+                ExprNode::Assign { target: LValue::Const { path: vec![cname.clone()] }, value: value.clone() },
+            );
+            writeln!(s, "{}", super::emit_expr(&assign)).unwrap();
         }
         return EmittedFile { path: out_path, content: s };
     }
@@ -10743,6 +10744,14 @@ fn require_path_for_body_const(
         }
         return Some(format!("app/models/{}", crate::naming::underscore(&owner)));
     }
+    // Any constant of a file of constants alone is that file's, not only
+    // the one it is named for: `Labels = DEFAULT` beside `DEFAULT = […]`.
+    if let Some(file) = classes.iter().chain(&app.library_classes).find(|class| {
+        class.is_file_constants() && class.constants.iter().any(|(name, _)| name.as_str() == first)
+    }) {
+        let owner = file.name.0.as_str();
+        return (owner != self_name).then(|| format!("app/models/{}", crate::naming::underscore(owner)));
+    }
     if first == self_name {
         return None;
     }
@@ -10962,6 +10971,40 @@ pub(super) fn walk_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
         out.insert(path.iter().map(|s| s.as_str().to_string()).collect());
     }
     e.node.for_each_child(&mut |child| walk_const_paths(child, out));
+}
+
+/// [`walk_const_paths`], for what runs as the expression does: not the
+/// body of a closure it stores (`-> { … }`, `proc { … }`, `lambda { … }`,
+/// `Proc.new { … }`), which runs when something calls it. A block a call
+/// runs now (`map`, `each`) is walked, as `partition_deferred_constants`
+/// reads it.
+fn walk_load_time_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
+    match &*e.node {
+        ExprNode::Lambda { .. } => {}
+        ExprNode::Send { recv, method, args, block, .. } => {
+            let stores_block = matches!(method.as_str(), "proc" | "lambda")
+                || (method.as_str() == "new"
+                    && matches!(
+                        recv.as_ref().map(|r| &*r.node),
+                        Some(ExprNode::Const { path }) if path.len() == 1 && path[0].as_str() == "Proc"
+                    ));
+            for child in recv.iter().chain(args.iter()) {
+                walk_load_time_const_paths(child, out);
+            }
+            if let Some(block) = block.as_ref().filter(|_| !stores_block) {
+                match &*block.node {
+                    ExprNode::Lambda { body, .. } => walk_load_time_const_paths(body, out),
+                    _ => walk_load_time_const_paths(block, out),
+                }
+            }
+        }
+        _ => {
+            if let ExprNode::Const { path } = &*e.node {
+                out.insert(path.iter().map(|s| s.as_str().to_string()).collect());
+            }
+            e.node.for_each_child(&mut |child| walk_load_time_const_paths(child, out));
+        }
+    }
 }
 
 // has_secure_password synthesis moved to the shared model lowering

@@ -101,3 +101,20 @@ fn an_engine_initializer_constant_runs_on_the_ruby_tree() {
     run.assert_passes();
     assert_eq!(run.stdout.lines().last(), Some(r#"["app:run", "b:y", 51]"#), "{}", run.stderr);
 }
+
+#[test]
+fn an_engine_initializer_constant_inside_a_begin_is_not_taken() {
+    // The ledger names the `begin`'s write, but taking the statement would
+    // run its `ensure` at boot too: it stays on the ledger.
+    let root = scratch::dir("roundhouse-engine-initializer-begin");
+    write_app(
+        &root,
+        &[(
+            "engines/telemetry/config/initializers/01_audit.rb",
+            "begin\n  AUDITED = 1\nensure\n  Telemetry::SpanBuffer.build(\"audit\").record(:loaded)\nend\n",
+        )],
+    );
+    let out = check_continue(&root);
+    assert!(out.lines().any(|l| l.contains("unconsumed_initializer") && l.contains("01_audit.rb:1")), "{out}");
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -56,8 +56,37 @@ pub(super) fn emit_library_class_rbs_with_factories(
     factories: &[super::library::DataFactoryOwner],
 ) -> EmittedFile {
     let path = sig_path_for(rb_path);
-    let content = render_class(lc, classes, factories);
+    let content = if lc.is_file_constants() { render_file_constants(lc, classes) } else { render_class(lc, classes, factories) };
     EmittedFile { path, content }
+}
+
+/// A file of constants alone declares no class: each constant at the top
+/// level, an alias of a class or module as RBS's alias of it
+/// (`class RemoteThing = Thing`), any other value with its type.
+fn render_file_constants(lc: &LibraryClass, classes: &[LibraryClass]) -> String {
+    let mut s = String::new();
+    for (name, value) in &lc.constants {
+        let name = name.as_str();
+        // A read of the class itself, which analysis types as the
+        // class's name (`Thing` for `RemoteThing = Thing`).
+        let alias = match (&*value.node, &value.ty) {
+            (ExprNode::Const { path }, Some(Ty::Class { id, .. })) => {
+                let target = path.iter().map(|segment| segment.as_str()).collect::<Vec<_>>().join("::");
+                let target = target.trim_start_matches("::").to_string();
+                (id.0.as_str() == target).then_some(target)
+            }
+            _ => None,
+        };
+        match (alias, &value.ty) {
+            (Some(target), _) => {
+                let keyword = if classes.iter().any(|class| class.is_module && class.name.0.as_str() == target) { "module" } else { "class" };
+                writeln!(s, "{keyword} {name} = ::{target}").unwrap();
+            }
+            (None, Some(ty)) if !matches!(ty, Ty::SelfInstance) => writeln!(s, "{name}: {}", ty_to_rbs(ty)).unwrap(),
+            _ => writeln!(s, "{name}: untyped").unwrap(),
+        }
+    }
+    s
 }
 
 /// Compute the `sig/`-rooted destination path for a `.rb` source path.

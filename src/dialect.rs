@@ -1333,11 +1333,12 @@ pub enum LibraryClassOrigin {
     Oj,
     /// Not a class: an autoloaded app file that declares no class or
     /// module and holds only file-level constants (`RemoteThing =
-    /// Thing`, `Labels = LabelFactory.build(...)`). Named for its first
-    /// constant, so the file keeps the path Rails' autoloader maps to
-    /// that constant; `constants` are the file's writes, in source
-    /// order. The analyzer gives it no class entry (an alias of a class
-    /// resolves to that class through the source index) and types each
+    /// Thing`, `Labels = LabelFactory.build(...)`). Named for the
+    /// constant Rails' autoloader maps the file to (else its first), so
+    /// the file keeps that path; `constants` are the file's writes, in
+    /// source order, and a read of any of them requires the file. The
+    /// analyzer gives it no class entry (an alias of a class resolves to
+    /// that class through the source index) and types each
     /// value as a top-level constant; the CRuby and JRuby trees write the
     /// constants at the top level of the file, and every other target
     /// refuses it (`project::refuse_file_constants`).
