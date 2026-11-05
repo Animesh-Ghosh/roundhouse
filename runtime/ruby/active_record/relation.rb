@@ -2932,6 +2932,18 @@ module ActiveRecord
       created
     end
 
+    def create(conditions = {})
+      created = @model.new(scope_attributes.merge(conditions))
+      created.save
+      created
+    end
+
+    def create!(conditions = {})
+      created = @model.new(scope_attributes.merge(conditions))
+      created.save!
+      created
+    end
+
     # Rails' `find_or_create_by!`: `find_by(attributes) ||
     # create!(attributes)`. A block is the lowering's statement form
     # (`lower::first_or_create`); the runtime method takes none.

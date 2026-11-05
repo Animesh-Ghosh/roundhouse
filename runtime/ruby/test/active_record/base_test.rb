@@ -997,6 +997,54 @@ class BaseTest < Minitest::Test
     assert_match(/Validation failed/, err.message)
   end
 
+  def test_relation_create_saves_equality_attributes_and_returns_the_record
+    relation = ActiveRecord::Relation.new(HashItem).where(title: "Scoped")
+    item = relation.create
+    assert_kind_of HashItem, item
+    assert_predicate item, :persisted?
+    assert_equal "Scoped", item.title
+    assert_equal "Scoped", HashItem.find(item.id).title
+  end
+
+  def test_relation_create_bang_saves_equality_attributes_and_returns_the_record
+    relation = ActiveRecord::Relation.new(HashItem).where(title: "Scoped")
+    item = relation.create!
+    assert_kind_of HashItem, item
+    assert_predicate item, :persisted?
+    assert_equal "Scoped", item.title
+    assert_equal "Scoped", HashItem.find(item.id).title
+  end
+
+  def test_relation_create_explicit_attributes_override_scope_attributes
+    relation = ActiveRecord::Relation.new(HashItem).where(title: "Scoped")
+    assert_equal "Explicit", relation.create(title: "Explicit").title
+    assert_equal "Bang", relation.create!(title: "Bang").title
+    assert_equal({ title: "Scoped" }, relation.scope_attributes)
+  end
+
+  def test_relation_create_uses_association_scope_attributes
+    relation = ActiveRecord::Relation.new(HashItem).where_scope(title: "Association")
+    assert_equal "Association", relation.create({}).title
+    assert_equal "Association", relation.create!({}).title
+  end
+
+  def test_relation_create_returns_an_unpersisted_record_when_validation_fails
+    relation = ActiveRecord::Relation.new(FailingHashItem).where(title: "Scoped")
+    item = relation.create({})
+    assert_kind_of FailingHashItem, item
+    refute_predicate item, :persisted?
+    assert_equal "Scoped", item.title
+    assert_equal ["boom"], item.errors
+    assert_equal 0, Item.count
+  end
+
+  def test_relation_create_bang_raises_record_invalid_when_validation_fails
+    relation = ActiveRecord::Relation.new(FailingHashItem).where(title: "Scoped")
+    err = assert_raises(ActiveRecord::RecordInvalid) { relation.create!({}) }
+    assert_match(/Validation failed/, err.message)
+    assert_equal 0, Item.count
+  end
+
   # ── timestamps (non-trivial: the only Base behavior with state
   #   beyond pure-adapter passthrough) ──────────────────────────
 
