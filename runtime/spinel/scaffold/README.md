@@ -69,7 +69,7 @@ managers:
 
 The end-to-end demo path additionally needs:
 
-- **Rails gem** — `gem install rails`. Used by `bin/rh fixture` to
+- **Rails gem** — `gem install rails -v 8.1.4`. Used by `bin/rh fixture` to
   generate the Rails fixture via `rails new`.
 - **Rust + cargo** — install via [rustup](https://rustup.rs). Used
   to build the Roundhouse transpiler.

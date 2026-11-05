@@ -19,10 +19,11 @@ The default suite loads Ruby gems as well as Rust code. Prepare them and
 the generated fixtures:
 
 ```sh
-gem install rails rails-html-sanitizer sqlite3 bcrypt rack minitest rake --no-document
-gem install activerecord -v '~> 8.1.0' --no-document
+gem install rails -v 8.1.4 --no-document
+gem install rails-html-sanitizer sqlite3 bcrypt rack minitest rake --no-document
+gem install activerecord -v 8.1.4 --no-document
 (cd runtime/spinel/scaffold && bundle install)   # framework_tests_ruby runs through this bundle
-bin/rh fixture
+bin/rh fixture --rails 8.1.4
 (cd fixtures && ../scripts/create-store store)
 bin/rh doctor
 cargo build --locked
