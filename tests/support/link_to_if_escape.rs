@@ -1,19 +1,22 @@
 //! `link_to_if`'s label: Rails 8.1.4 escapes it in both branches. A label
-//! already escaped by the view helpers (`truncate`) is escaped once; one
-//! through an app's own `html_escape`, which may not escape, is escaped.
+//! already escaped by the view helpers (`truncate`) or by `ERB::Util` is
+//! escaped once; one through an app's own `html_escape`, which may not
+//! escape, is escaped.
 
 use super::emit_and_run;
 
 pub const VIEW: &str = concat!(
     "<%= link_to_if false, \"<i>\", \"/x\" %>\n",
     "<%= link_to_if true, \"<u>\", \"/x\" %>\n",
+    "<%= link_to_if false, ERB::Util.html_escape(\"<v>\"), \"/x\" %>\n",
+    "<%= link_to_if true, ERB::Util.h(\"<w>\"), \"/x\" %>\n",
 );
 
 /// What Rails 8.1.4 renders for the lines of `VIEW`.
-pub const RENDERS: &[&str] = &["&lt;i&gt;", "<a href=\"/x\">&lt;u&gt;</a>"];
+pub const RENDERS: &[&str] = &["&lt;i&gt;", "<a href=\"/x\">&lt;u&gt;</a>", "&lt;v&gt;", "<a href=\"/x\">&lt;w&gt;</a>"];
 
 /// Neither a raw label nor a second escape.
-pub const ABSENT: &[&str] = &["<i>", "<u>", "&amp;lt;"];
+pub const ABSENT: &[&str] = &["<i>", "<u>", "<v>", "<w>", "&amp;lt;"];
 
 /// A label the view helpers escape (`truncate`), taken once.
 pub const TRUNCATE_LINE: &str = "<%= link_to_if false, truncate(\"<b>xx</b>\", length: 5), \"/x\" %>\n";
