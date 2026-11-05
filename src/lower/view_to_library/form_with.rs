@@ -605,11 +605,14 @@ pub(super) fn emit_tag_builder_void_or_content(
         return out;
     }
     if let Some(c) = content {
-        let escaped = view_helpers_call(
-            "html_escape",
-            vec![send(Some(rewrite_helpers_in_expr(&c, ctx)), "to_s", Vec::new(), None, false)],
-        );
-        out.push(accumulator_append_call(escaped, ctx));
+        // Content Rails holds as an html-safe buffer (`truncate(x)`,
+        // `truncate(x) + "!"`) is written as it is; anything else escaped.
+        let rewritten = rewrite_helpers_in_expr(&c, ctx);
+        let written = match super::walker::safe_buffer_value(&rewritten) {
+            Some(safe) => send(Some(safe), "to_s", Vec::new(), None, false),
+            None => view_helpers_call("html_escape", vec![send(Some(rewritten), "to_s", Vec::new(), None, false)]),
+        };
+        out.push(accumulator_append_call(written, ctx));
     }
     out.push(accumulator_append_call(lit_str(format!("</{element}>")), ctx));
     out

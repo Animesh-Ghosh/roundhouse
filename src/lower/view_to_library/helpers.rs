@@ -255,10 +255,11 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             // `x.html_safe` or `raw(x)` (`x.to_s.html_safe`), an escape the
             // template applied (`h(x)`), or a helper
             // whose call here is markup (`link_to`, a nested `content_tag`,
-            // `turbo_stream_from`'s element, `content_for`'s capture),
-            // or already escaped (`truncate`, `word_wrap`, `pluralize`, each
-            // lowered to `html_escape(…)`). The other kinds (`dom_id`) are
-            // escaped like any String.
+            // `turbo_stream_from`'s element, `content_for`'s capture). A
+            // `truncate` or `word_wrap` (an html-safe buffer, alone or in a
+            // `+`) is written as it is below, by `safe_buffer_value`; a
+            // `pluralize`, a plain String, is escaped once. The other kinds
+            // (`dom_id`) are escaped like any String.
             let is_helper_markup = |e: &Expr| matches!(&*e.node,
                 ExprNode::Send { recv: None, method, args, block: None, parenthesized }
                     if matches!(
@@ -266,8 +267,7 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                         Some(LinkTo { .. } | LinkToIf { .. } | ButtonTo { .. } | ContentTag { .. }
                             | CsrfMetaTags | CspMetaTag | StylesheetLinkTag { .. }
                             | JavascriptImportmapTags { .. } | EngineImportmapTags { .. }
-                            | TurboStreamFrom { .. } | ContentForGetter { .. }
-                            | Truncate { .. } | WordWrap { .. } | Pluralize { .. })
+                            | TurboStreamFrom { .. } | ContentForGetter { .. })
                     ));
             let helper_markup = is_helper_markup(content);
             let raw_value = match &*content.node {
@@ -315,8 +315,16 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                     match safe_arg {
                         Some(safe) => lit_str_coerce(rewrite_helpers_in_expr(&safe, ctx)),
                         None => {
-                            let text = lit_str_coerce(rewrite_helpers_in_expr(escaped_value.unwrap_or(content), ctx));
-                            view_helpers_call("html_escape", vec![text])
+                            let lowered = rewrite_helpers_in_expr(escaped_value.unwrap_or(content), ctx);
+                            // Content Rails holds as an html-safe buffer
+                            // (`truncate(x)`, `truncate(x) + "!"`) is written
+                            // as it is, and `h` leaves one as it is too; a
+                            // `pluralize` or any other String is escaped.
+                            match super::walker::safe_buffer_value(&lowered) {
+                                Some(safe) if matches!(&*safe.node, ExprNode::Send { method, .. } if matches!(method.as_str(), "html_escape" | "+")) => safe,
+                                Some(safe) => lit_str_coerce(safe),
+                                None => view_helpers_call("html_escape", vec![lit_str_coerce(lowered)]),
+                            }
                         }
                     }
                 }
@@ -727,15 +735,14 @@ fn escaped_label(text: &Expr, ctx: &ViewCtx) -> Expr {
     if let Some(arg) = escaped_arg {
         return view_helpers_call("html_escape", vec![lit_str_coerce(rewrite_helpers_in_expr(arg, ctx))]);
     }
+    // A label Rails holds as an html-safe buffer (an escape the view helpers
+    // applied, `truncate(x) + "!"`, `x.html_safe`) is written as it is.
     let lowered = rewrite_helpers_in_expr(text, ctx);
-    let pre_escaped = matches!(&*lowered.node,
-        ExprNode::Send { recv: Some(r), method, args, .. }
-            if method.as_str() == "html_escape" && args.len() == 1
-                && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"])));
-    if pre_escaped {
-        lowered
-    } else {
-        view_helpers_call("html_escape", vec![lit_str_coerce(lowered)])
+    match super::walker::safe_buffer_value(&lowered) {
+        // The view helpers' escape and a `+` of buffers are Strings already.
+        Some(safe) if matches!(&*safe.node, ExprNode::Send { method, .. } if matches!(method.as_str(), "html_escape" | "+")) => safe,
+        Some(safe) => lit_str_coerce(safe),
+        None => view_helpers_call("html_escape", vec![lit_str_coerce(lowered)]),
     }
 }
 

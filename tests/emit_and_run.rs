@@ -20920,6 +20920,29 @@ fn pluralize_in_a_template_is_escaped_on_spinel() {
         .assert_passes();
 }
 
+#[path = "support/helper_escape_at_output.rs"]
+mod helper_escape_at_output;
+
+/// #1796: a helper inside a larger template expression is escaped as
+/// Rails 8.1.4 escapes it.
+#[test]
+fn a_nested_helper_is_escaped_as_rails() {
+    let run = helper_escape_at_output::app(helper_escape_at_output::VIEW)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(helper_escape_at_output::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb");
+    eprintln!("{}", run.stdout);
+    run.assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_nested_helper_is_escaped_as_rails_on_spinel() {
+    let run = helper_escape_at_output::app(helper_escape_at_output::VIEW)
+        .run_spinel(&helper_escape_at_output::render_script(helper_escape_at_output::RENDERS));
+    eprintln!("{}", run.stdout);
+    run.assert_passes();
+}
+
 #[path = "emit_and_run/unknown_class_association.rs"]
 mod unknown_class_association;
 
