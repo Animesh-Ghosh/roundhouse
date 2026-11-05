@@ -59,8 +59,13 @@ def check_date_storage
     raise 'date writer and predicate disagree' unless
       SqliteAdapter.where('date_quote_events', {'due_on' => value}).length == 1
     puts SqliteAdapter.escape_value(stored)
+    read_back = ActiveSupport.parse_db_date(stored)
+    expected = Date.new(value.year, value.month, value.day).iso8601
+    raise 'date reader lost its written value' unless read_back.iso8601 == expected
+    puts read_back.iso8601
   end
   Db.close
+  puts 'SQLite date roundtrips passed'
 end
 
 puts quote_date_value(Date.new(2024, 2, 29))

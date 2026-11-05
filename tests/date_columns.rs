@@ -129,6 +129,11 @@ date_quote_values.each do |value|
   DateQuoteEvent.create!(due_on: value)
   raise 'Rails date query missed its row' unless DateQuoteEvent.where(due_on: value).count == 1
   puts CONNECTION.quote(CONNECTION.select_value('SELECT due_on FROM date_quote_events'))
+  puts DateQuoteEvent.first.due_on.iso8601
+end
+puts 'SQLite date roundtrips passed'
+['unparseable', '2024-02', '2024-02-30', '0000-00-00'].each do |text|
+  puts TYPE.deserialize(text).nil?
 end
 "#,
         ])
@@ -157,6 +162,9 @@ require_relative 'runtime/spinel/sqlite_adapter'
 def quote_date_value(value); SqliteAdapter.escape_value(value); end
 require_relative 'tests/date_columns_spinel'
 check_date_storage
+['unparseable', '2024-02', '2024-02-30', '0000-00-00'].each do |text|
+  puts ActiveSupport.parse_db_date(text).nil?
+end
 "#,
         ])
         .output()

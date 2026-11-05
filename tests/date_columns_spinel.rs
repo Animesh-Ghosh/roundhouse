@@ -156,11 +156,9 @@ begin
   raise "invalid DB date value was accepted"
 rescue TypeError
 end
-begin
-  ActiveSupport.parse_db_date("2024-02-30")
-  raise "invalid parse_db_date was accepted"
-rescue Date::Error
-end
+raise 'invalid date reader' unless ActiveSupport.parse_db_date('2024-02-30').nil?
+raise 'incomplete date reader' unless ActiveSupport.parse_db_date('2024-02').nil?
+raise 'unparseable date reader' unless ActiveSupport.parse_db_date('unparseable').nil?
 raise SqliteAdapter.escape_value(Date.new(2024, 2, 29)).inspect unless SqliteAdapter.escape_value(Date.new(2024, 2, 29)) == "'2024-02-29'"
 raise Date.new(2024, 1, 31).inspect.inspect unless Date.new(2024, 1, 31).inspect == "#<Date: 2024-01-31 ((2460341j,0s,0n),+0s,2299161j)>"
 raise Date.new(2024, 1, 31).xmlschema.inspect unless Date.new(2024, 1, 31).xmlschema == "2024-01-31"
@@ -176,4 +174,5 @@ puts "Spinel Date column contract passed"
     let run = overlay.run_spinel(&script);
     run.assert_passes();
     assert!(run.stdout.contains("Spinel Date column contract passed"));
+    assert!(run.stdout.contains("SQLite date roundtrips passed"));
 }
