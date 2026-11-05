@@ -89,6 +89,11 @@ pub struct App {
     /// otherwise → here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub library_classes: Vec<LibraryClass>,
+    /// A parameter some caller passes a value the analysis could not
+    /// type stays `untyped` instead of taking the other callers' type
+    /// (#617). Set for the Ruby family: Spinel trusts the RBS it ships.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pins_unresolved_params: bool,
     /// Framework calls still use their lowered ABI; native argument
     /// preservation requires a source library declaration.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1214,6 +1219,7 @@ impl App {
             i18n_table_sites: Vec::new(),
             models: Vec::new(),
             library_classes: Vec::new(),
+            pins_unresolved_params: false,
             native_library_keywords: false,
             file_programs: Vec::new(),
             boot_gem_entries: Vec::new(),
