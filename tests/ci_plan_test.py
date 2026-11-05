@@ -148,6 +148,13 @@ class Routing(unittest.TestCase):
                 self.assertIn("spinel-framework", plan["jobs"])
                 self.assertIn("spinel_stream_error", plan["spinel_tests"])
 
+    def test_module_self_value_analysis_runs_generated_sidecars_natively(self):
+        for path in ["src/analyze/mod.rs", "src/analyze/body/mod.rs", "tests/module_self_argument_rbs.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("module_self_argument_rbs", plan["spinel_tests"])
+
     def test_shared_controller_base_runs_every_extra_language(self):
         for suffix in ("rb", "rbs"):
             with self.subTest(suffix=suffix):

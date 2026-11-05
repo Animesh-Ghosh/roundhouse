@@ -534,6 +534,7 @@ pub(crate) fn lexical_class<T>(
 /// without cloning.
 pub struct BodyTyper<'a> {
     classes: &'a HashMap<ClassId, ClassInfo>,
+    module_self_types: Option<&'a HashMap<ClassId, (ClassId, Ty)>>,
     materialized_associations: Option<&'a crate::det::HashSet<Symbol>>,
     const_resolver: Option<std::sync::Arc<ConstResolver>>,
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
@@ -684,6 +685,7 @@ impl<'a> BodyTyper<'a> {
     pub fn new(classes: &'a HashMap<ClassId, ClassInfo>) -> Self {
         Self {
             classes,
+            module_self_types: None,
             materialized_associations: None,
             const_resolver: None,
             typed_constants: None,
@@ -808,6 +810,17 @@ impl<'a> BodyTyper<'a> {
         changed
     }
 
+    pub(super) fn with_module_self_types(mut self, types: &'a HashMap<ClassId, (ClassId, Ty)>) -> Self {
+        self.module_self_types = Some(types);
+        self
+    }
+
+    fn self_value_ty(&self, ctx: &Ctx) -> Option<&Ty> {
+        let (module, _, false) = ctx.super_method.as_ref()? else { return None };
+        let (lookup, value) = self.module_self_types?.get(module)?;
+        (!ctx.class_side && matches!(ctx.self_ty.as_ref(), Some(Ty::Class { id, .. }) if id == lookup)).then_some(value)
+    }
+
     pub(crate) fn with_materialized_associations(mut self, names: &'a crate::det::HashSet<Symbol>) -> Self {
         self.materialized_associations = Some(names);
         self
@@ -872,12 +885,23 @@ impl<'a> BodyTyper<'a> {
     /// annotation rides with the IR so emitters can render a runtime
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        self.analyze_expr_role(expr, ctx, false)
+    }
+
+    fn analyze_receiver(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
+        self.analyze_expr_role(expr, ctx, true)
+    }
+
+    fn analyze_expr_role(&self, expr: &mut Expr, ctx: &Ctx, receiver: bool) -> Ty {
         // The outermost call types a whole body: count the locals it binds.
         let root = self.inquirers.is_some() && self.scope_bindings.borrow().is_none();
         if root {
             *self.scope_bindings.borrow_mut() = Some(active_storage::ScopeBindings::of(expr));
         }
-        let ty = self.compute(expr, ctx);
+        // A direct self receiver keeps main's lookup type and identity evidence.
+        let ty = if receiver && matches!(&*expr.node, ExprNode::SelfRef) {
+            ctx.self_ty.clone().unwrap_or_else(unknown)
+        } else { self.compute(expr, ctx) };
         if root {
             *self.scope_bindings.borrow_mut() = None;
         }
@@ -1581,7 +1605,7 @@ impl<'a> BodyTyper<'a> {
                 ctx.ivar_bindings.get(name).cloned().unwrap_or_else(unknown)
             }
 
-            ExprNode::SelfRef => ctx.self_ty.clone().unwrap_or_else(unknown),
+            ExprNode::SelfRef => self.self_value_ty(ctx).cloned().or_else(|| ctx.self_ty.clone()).unwrap_or_else(unknown),
 
             ExprNode::Return { value } => {
                 self.analyze_expr(value, ctx);
@@ -1985,7 +2009,7 @@ impl<'a> BodyTyper<'a> {
             // directly somewhere feeds its own param types).
             ExprNode::MethodRef { recv, name } => {
                 let recv_ty = match recv {
-                    Some(r) => Some(self.analyze_expr(r, ctx)),
+                    Some(r) => Some(self.analyze_receiver(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
                 let instance_receiver = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx))
@@ -2040,7 +2064,7 @@ impl<'a> BodyTyper<'a> {
                 }
                 if let Some(ty) = self.class_factories.and_then(|factories| factories.get(&expr_span)) {
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
-                    if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
+                    if let Some(recv) = recv { self.analyze_receiver(recv, ctx); }
                     // A literal superclass is declaration metadata, just as
                     // in an ordinary class header. An external parent need
                     // not resolve as a supported value expression in main.
@@ -2072,7 +2096,7 @@ impl<'a> BodyTyper<'a> {
                     // Only admitted declarations establish a Data class identity.
                     expr.decisions |= crate::expr::RESOLVED_DATA_FACTORY;
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, None);
-                    if let Some(recv) = recv { self.analyze_expr(recv, ctx); }
+                    if let Some(recv) = recv { self.analyze_receiver(recv, ctx); }
                     for arg in args.iter_mut() { self.analyze_expr(arg, ctx); }
                     return ty.clone();
                 }
@@ -2094,7 +2118,7 @@ impl<'a> BodyTyper<'a> {
                     if let Some(r) = recv.as_mut() {
                         if let ExprNode::Var { name, .. } = &*r.node {
                             if let Some(ty) = ctx.local_bindings.get(&narrowing::member_key(name, method)).cloned() {
-                                self.analyze_expr(r, ctx);
+                                self.analyze_receiver(r, ctx);
                                 return ty;
                             }
                         }
@@ -2171,7 +2195,7 @@ impl<'a> BodyTyper<'a> {
                 }
 
                 let recv_ty = match recv.as_mut() {
-                    Some(r) => Some(self.analyze_expr(r, ctx)),
+                    Some(r) => Some(self.analyze_receiver(r, ctx)),
                     None => ctx.self_ty.clone(),
                 };
                 // Not by name alone: an application `tap`/`each` may answer its block's value.
@@ -3864,10 +3888,10 @@ impl<'a> BodyTyper<'a> {
                 }
                 let value_ty = self.analyze_expr(value, ctx);
                 if let LValue::Attr { recv, .. } = target {
-                    self.analyze_expr(recv, ctx);
+                    self.analyze_receiver(recv, ctx);
                 }
                 if let LValue::Index { recv, index } = target {
-                    self.analyze_expr(recv, ctx);
+                    self.analyze_receiver(recv, ctx);
                     self.analyze_expr(index, ctx);
                 }
                 value_ty
@@ -3882,10 +3906,10 @@ impl<'a> BodyTyper<'a> {
                 // expression's type, which matches naive desugar.
                 let value_ty = self.analyze_expr(value, ctx);
                 if let LValue::Attr { recv, .. } = target {
-                    self.analyze_expr(recv, ctx);
+                    self.analyze_receiver(recv, ctx);
                 }
                 if let LValue::Index { recv, index } = target {
-                    self.analyze_expr(recv, ctx);
+                    self.analyze_receiver(recv, ctx);
                     self.analyze_expr(index, ctx);
                 }
                 value_ty
@@ -3954,10 +3978,10 @@ impl<'a> BodyTyper<'a> {
                 self.analyze_expr(value, ctx);
                 for target in targets.iter_mut() {
                     if let LValue::Attr { recv, .. } = target {
-                        self.analyze_expr(recv, ctx);
+                        self.analyze_receiver(recv, ctx);
                     }
                     if let LValue::Index { recv, index } = target {
-                        self.analyze_expr(recv, ctx);
+                        self.analyze_receiver(recv, ctx);
                         self.analyze_expr(index, ctx);
                     }
                 }
