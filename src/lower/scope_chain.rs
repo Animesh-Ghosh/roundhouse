@@ -65,7 +65,7 @@ pub fn build_unique_keys(models: &[Model], schema: &crate::schema::Schema) -> Un
         let mut keys: Vec<UniqueKey> = table
             .indexes
             .iter()
-            .filter(|i| i.unique && !i.columns.is_empty())
+            .filter(|i| i.unique && i.expression.is_none() && !i.columns.is_empty())
             .filter(|i| i.columns.iter().all(not_null))
             .map(|i| UniqueKey {
                 columns: i.columns.clone(),
