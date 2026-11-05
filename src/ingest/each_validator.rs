@@ -44,8 +44,9 @@ use crate::span::Span;
 thread_local! {
     /// The `validates` calls ingest kept for their custom keys: the call's
     /// span, its source text (a `with_options` call is merged source, not
-    /// the file's), the keys, and its lowered built-in rules' keys.
-    static NOTED: RefCell<Vec<(Span, String, Vec<String>, Vec<String>)>> = const { RefCell::new(Vec::new()) };
+    /// the file's), the keys to expand, its lowered built-in rules' keys,
+    /// and the original declaration's custom keys for diagnostics.
+    static NOTED: RefCell<Vec<(Span, String, Vec<String>, Vec<String>, Vec<String>)>> = const { RefCell::new(Vec::new()) };
 }
 
 const DETAIL: &str = "validation option not lowered; Rails rejects records this build saves";
@@ -55,7 +56,19 @@ pub(super) fn reset() {
 }
 
 pub(super) fn note(span: Span, text: String, keys: Vec<String>, kept: Vec<String>) {
-    NOTED.with(|n| n.borrow_mut().push((span, text, keys, kept)));
+    NOTED.with(|n| n.borrow_mut().push((span, text, keys.clone(), kept, keys)));
+}
+
+/// Splitting a mixed declaration changes registration positions, not the
+/// other rules its diagnostic says are kept. Resolve the original custom
+/// siblings for that note without expanding them again at this position.
+pub(super) fn keep_diagnostic_context(span: Span, custom: &[String], kept: &[String]) {
+    NOTED.with(|n| {
+        if let Some((_, _, _, original_kept, original_custom)) = n.borrow_mut().iter_mut().rev().find(|(s, ..)| *s == span) {
+            *original_kept = kept.to_vec();
+            *original_custom = custom.to_vec();
+        }
+    });
 }
 
 /// After ingest: each noted call's keys that name an app `EachValidator`
@@ -76,7 +89,7 @@ pub(super) fn resolve(app: &mut App) {
             if !validates_call(expr) {
                 continue;
             }
-            let Some((span, text, keys, kept)) = noted.iter().find(|(span, ..)| *span == expr.span) else { continue };
+            let Some((span, text, keys, kept, diagnostic_keys)) = noted.iter().find(|(span, ..)| *span == expr.span) else { continue };
             let mut found: Vec<(String, String)> = Vec::new();
             let mut unresolved: Vec<String> = Vec::new();
             for key in keys {
@@ -85,7 +98,9 @@ pub(super) fn resolve(app: &mut App) {
                     None => unresolved.push(key.clone()),
                 }
             }
-            let others: Vec<String> = kept.iter().cloned().chain(found.iter().map(|(key, _)| key.clone())).collect();
+            let others: Vec<String> = kept.iter().cloned()
+                .chain(diagnostic_keys.iter().filter(|key| validator_class(app, mi, key).is_some()).cloned())
+                .collect();
             gaps.extend(key_gaps(*span, text, &unresolved, &others));
             if found.is_empty() {
                 dropped.push(*span);
@@ -112,6 +127,7 @@ pub(super) fn resolve(app: &mut App) {
 /// dropped and reported for `target`.
 pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diagnostic> {
     let calls = std::mem::take(&mut app.each_validator_calls);
+    let sources = app.sources.clone();
     let mut gaps: Vec<(Span, String, String)> = Vec::new();
     // One count for the app, as `validates_with` keeps.
     let mut counter = 0usize;
@@ -134,7 +150,7 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
                 if src.is_empty() {
                     Some(Vec::new())
                 } else {
-                    super::validates_with::ingest_source(&src, &model.name)
+                    super::validates_with::ingest_source_with_constants(&src, &model.name, &super::validates_with::constants_at(&sources, call.span))
                 }
             });
             match expanded {
@@ -332,6 +348,10 @@ fn shape(text: &str) -> Option<Shape> {
                         let value = assoc.value();
                         match name.as_str() {
                             "if" | "unless" | "on" => conditions.push((name, slice(value.location())?)),
+                            "prepend" => {
+                                options.push(slice(assoc.location())?);
+                                conditions.push((name, slice(value.location())?));
+                            }
                             "allow_nil" => allow_nil = Some(literal_bool(&value)?),
                             "allow_blank" => allow_blank = Some(literal_bool(&value)?),
                             "strict" => return None,

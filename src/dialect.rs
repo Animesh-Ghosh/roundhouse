@@ -137,6 +137,12 @@ pub struct Model {
 }
 
 impl Model {
+    /// Validation execution order: each prepended callback goes ahead of earlier ones.
+    pub fn validation_order(&self) -> impl Iterator<Item = &ModelBodyItem> {
+        let prepended = |item: &&ModelBodyItem| matches!(item, ModelBodyItem::Validation { validation, .. } if validation.prepend);
+        self.body.iter().filter(prepended).rev().chain(self.body.iter().filter(move |item| !prepended(item)))
+    }
+
     /// Rails' `human_attribute_name(attr)` for this model.
     pub fn human_attribute_name(&self, attr: &str) -> String {
         self.i18n.human_attribute_name(attr)
@@ -239,6 +245,38 @@ impl Model {
             _ => None,
         })
     }
+}
+
+/// Symbol callbacks have identity: a later registration replaces the earlier
+/// one, including its conditions and position. Validator objects do not share
+/// this identity. Keep individual symbols so scheduling can prepend each one.
+pub(crate) fn replace_validation_callbacks(body: &mut Vec<ModelBodyItem>) {
+    let mut registered: Vec<ModelBodyItem> = Vec::with_capacity(body.len());
+    for item in std::mem::take(body) {
+        let ModelBodyItem::Validation { validation, leading_comments, leading_blank_line, span } = &item else {
+            registered.push(item);
+            continue;
+        };
+        if !validation.rules.iter().all(|r| matches!(r, ValidationRule::Custom { .. })) || validation.rules.is_empty() {
+            registered.push(item);
+            continue;
+        }
+        for (i, rule) in validation.rules.iter().enumerate() {
+            let ValidationRule::Custom { method, .. } = rule else { unreachable!() };
+            registered.retain(|previous| !matches!(previous, ModelBodyItem::Validation { validation, .. }
+                if validation.rules.iter().any(|r| matches!(r, ValidationRule::Custom { method: old, .. } if old == method))));
+            let mut validation = validation.clone();
+            validation.attribute = method.clone();
+            validation.rules = vec![rule.clone()];
+            registered.push(ModelBodyItem::Validation {
+                validation,
+                leading_comments: if i == 0 { leading_comments.clone() } else { Vec::new() },
+                leading_blank_line: i == 0 && *leading_blank_line,
+                span: *span,
+            });
+        }
+    }
+    *body = registered;
 }
 
 /// One statement inside a model's class body, in source order. Known DSL
@@ -599,6 +637,8 @@ pub enum Dependent {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Validation {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prepend: bool,
     pub attribute: Symbol,
     pub rules: Vec<ValidationRule>,
     /// `if: :pred` / `if: -> { … }` / `if: lambda { … }` / `if: proc { … }`.
