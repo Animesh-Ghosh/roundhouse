@@ -20695,6 +20695,49 @@ fn an_api_controller_answers_on_ruby() {
     go_action_controller_api::app().run_test("test/controllers/ping_controller_test.rb").assert_passes();
 }
 
+#[path = "support/block_control_flow.rs"]
+mod block_control_flow;
+
+#[test]
+fn a_block_starting_with_control_flow_renders() {
+    block_control_flow::app()
+        .write("test/controllers/probes_controller_test.rb", &block_control_flow::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_block_starting_with_control_flow_renders_on_spinel() {
+    block_control_flow::app()
+        .run_spinel(&format!(
+            "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"rendered\"\n",
+            block_control_flow::body_checks()
+        ))
+        .assert_passes();
+}
+
+#[path = "support/go_conditional_operand.rs"]
+mod go_conditional_operand;
+
+/// #1696's `Note#headline?` on the ruby target: the answers the Go probe
+/// checks are Ruby's.
+#[test]
+fn a_conditional_operand_of_and_answers_as_ruby() {
+    go_conditional_operand::note_app().run_test("test/models/note_headline_test.rb").assert_passes();
+}
+
+/// The Go emit writes the conditional operand as a func literal, not an
+/// `if` statement in expression position.
+#[test]
+fn a_conditional_operand_of_and_is_a_go_value() {
+    let (emitted, errors) = go_conditional_operand::issue_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let model = std::fs::read_to_string(emitted.join("app/v2/article.go")).unwrap();
+    let body = model.split("func (self *Article) HeadlinePred() bool {").nth(1).expect("HeadlinePred").split("\n}\n").next().unwrap();
+    assert!(!body.contains("return if ") && body.contains("func() bool {"), "{body}");
+}
+
 #[path = "support/rust_bare_model.rs"]
 mod rust_bare_model;
 

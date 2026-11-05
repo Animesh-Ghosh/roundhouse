@@ -1864,16 +1864,19 @@ fn bind_before_block(e: Expr, site: u32, bound: &mut usize, stmts: &mut Vec<Expr
     }
 }
 
+/// Whether a helper's block is template markup: it writes the ERB buffer
+/// (`_buf = …`) somewhere, at its top level or inside the control flow it
+/// starts with (`<% if … %>…<% end %>`, an `each`, a `case`), which
+/// `walk_body` walks as it walks the rest.
 fn block_body_is_template(body: &Expr) -> bool {
-    let stmts: Vec<&Expr> = match &*body.node {
-        ExprNode::Seq { exprs } => exprs.iter().collect(),
-        _ => vec![body],
-    };
-    stmts.iter().any(|s| {
-        matches!(&*s.node,
-            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
-                if name.as_str() == "_buf")
-    })
+    if matches!(&*body.node,
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. } if name.as_str() == "_buf")
+    {
+        return true;
+    }
+    let mut found = false;
+    body.node.for_each_child(&mut |c| found = found || block_body_is_template(c));
+    found
 }
 
 fn unwrap_to_s(expr: &Expr) -> &Expr {
