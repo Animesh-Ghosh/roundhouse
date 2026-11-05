@@ -642,7 +642,7 @@ pub mod bundle {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    const GROUP: usize = 16;
+    const GROUP: usize = 8;
 
     /// The flag a case recorded by `Overlay::native_http_tree` carries: a
     /// server built with `spin build`, not a contract compiled by spinel.

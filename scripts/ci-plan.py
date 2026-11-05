@@ -1002,7 +1002,12 @@ def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS, timings=
             taken.update(unit)
             items.append(unit)
     items.extend([t] for t in tests if t not in taken)
-    cost = lambda item: sum(spinel_toolchain_seconds(t, timings) for t in item)
+    # A unit is one build. Its tests' recorded seconds are either their shares of it (#1781),
+    # which sum to it, or what each paid compiling alone, which sum to many builds; one build
+    # of n cases costs about its heaviest case's, a bit more per case. The lesser of the two.
+    def cost(item):
+        seconds = [spinel_toolchain_seconds(t, timings) for t in item]
+        return min(sum(seconds), max(seconds) * (1 + (len(item) - 1) / 8))
     mine = []
     for item in sorted(items, key=lambda item: (-cost(item), item[0])):
         i = loads.index(min(loads))
