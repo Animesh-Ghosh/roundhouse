@@ -355,8 +355,18 @@ fn assigned_literal(mut value: Expr, file: &str) -> Expr {
 
 /// Does the source's leading comment block say `frozen_string_literal: true`?
 pub(crate) fn freezes_literals(text: &str) -> bool {
-    for line in text.lines() {
-        let line = line.trim();
+    let mut in_block = false;
+    for raw in text.lines() {
+        // Not the end of the comment section at `=begin`: Ruby still reads a directive after an `=begin`/`=end` block.
+        if in_block {
+            in_block = !raw.starts_with("=end");
+            continue;
+        }
+        if raw.starts_with("=begin") {
+            in_block = true;
+            continue;
+        }
+        let line = raw.trim();
         if line.is_empty() {
             continue;
         }

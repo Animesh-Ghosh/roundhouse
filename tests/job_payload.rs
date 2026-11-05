@@ -535,7 +535,7 @@ fn keyword_defaults_are_written_as_the_same_ruby_values() {
         ("app/jobs/buf_job.rb", "class BufJob < ApplicationJob\n  def perform(n, buf: +\"b\")\n    buf << \"x\"\n  end\nend\n"),
         ("app/jobs/tpl_job.rb", "class TplJob < ApplicationJob\n  def perform(n, tpl: '#{x}')\n    nil\n  end\nend\n"),
         ("app/jobs/sym_job.rb", "class SymJob < ApplicationJob\n  def perform(n, s: :\"9a\")\n    nil\n  end\nend\n"),
-        ("app/jobs/frozen_job.rb", "# frozen_string_literal: true\n\nclass FrozenJob < ApplicationJob\n  def perform(n, tag: \"kept\")\n    nil\n  end\nend\n"),
+        ("app/jobs/frozen_job.rb", "=begin\nA job.\n=end\n# frozen_string_literal: true\n\nclass FrozenJob < ApplicationJob\n  def perform(n, tag: \"kept\")\n    nil\n  end\nend\n"),
         ("app/jobs/crlf_job.rb", "class CrlfJob < ApplicationJob\n  def perform(n, eol: \"\\r\\n\")\n    nil\n  end\nend\n"),
     ]))
     .expect("ingest default job app");
