@@ -354,7 +354,7 @@ fn assigned_literal(mut value: Expr, file: &str) -> Expr {
 }
 
 /// Does the source's leading comment block say `frozen_string_literal: true`?
-fn freezes_literals(text: &str) -> bool {
+pub(crate) fn freezes_literals(text: &str) -> bool {
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {

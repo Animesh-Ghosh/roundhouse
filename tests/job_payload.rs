@@ -523,18 +523,19 @@ fn a_required_keyword_still_has_no_wrapper_off_the_ruby_family() {
 }
 
 /// A literal default goes into the reader as Ruby that means the same
-/// value: a String is a mutable copy, a `#{` stays text, a CR stays a CR, and a Symbol
+/// value: a String is mutable unless the job's file freezes its literals, a `#{` stays text, a CR stays a CR, and a Symbol
 /// that is no bare identifier keeps the job on its Proc.
 #[test]
 fn keyword_defaults_are_written_as_the_same_ruby_values() {
     let mut app = ingest_app_from_tree(tree(&[
         ("db/schema.rb", SCHEMA),
         ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
-        ("app/models/user.rb", "class User < ApplicationRecord\n  def self.later\n    BufJob.perform_later(1)\n    TplJob.perform_later(1)\n    CrlfJob.perform_later(1)\n    SymJob.perform_later(1)\n  end\nend\n"),
+        ("app/models/user.rb", "class User < ApplicationRecord\n  def self.later\n    BufJob.perform_later(1)\n    TplJob.perform_later(1)\n    CrlfJob.perform_later(1)\n    FrozenJob.perform_later(1)\n    SymJob.perform_later(1)\n  end\nend\n"),
         ("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\nend\n"),
         ("app/jobs/buf_job.rb", "class BufJob < ApplicationJob\n  def perform(n, buf: +\"b\")\n    buf << \"x\"\n  end\nend\n"),
         ("app/jobs/tpl_job.rb", "class TplJob < ApplicationJob\n  def perform(n, tpl: '#{x}')\n    nil\n  end\nend\n"),
         ("app/jobs/sym_job.rb", "class SymJob < ApplicationJob\n  def perform(n, s: :\"9a\")\n    nil\n  end\nend\n"),
+        ("app/jobs/frozen_job.rb", "# frozen_string_literal: true\n\nclass FrozenJob < ApplicationJob\n  def perform(n, tag: \"kept\")\n    nil\n  end\nend\n"),
         ("app/jobs/crlf_job.rb", "class CrlfJob < ApplicationJob\n  def perform(n, eol: \"\\r\\n\")\n    nil\n  end\nend\n"),
     ]))
     .expect("ingest default job app");
@@ -543,6 +544,7 @@ fn keyword_defaults_are_written_as_the_same_ruby_values() {
     assert!(src.contains(": +\"b\")"), "{src}");
     assert!(src.contains(": +\"\\#{x}\")"), "{src}");
     assert!(src.contains(": +\"\\r\\n\")"), "{src}");
+    assert!(src.contains("0) : \"kept\")"), "{src}");
     let sym = plan(&app, "SymJob");
     assert!(sym.fallback.as_ref().is_some_and(|f| f.reason.contains("not a literal")), "{:?}", sym.fallback);
 }

@@ -435,21 +435,27 @@ fn plan_params(
         // Not a default that is no literal: the payload reader would evaluate it outside `perform`, where it may read what only `perform` sees.
         let default = match p.default.as_ref() {
             None => None,
-            Some(d) => Some(literal_ruby(d).ok_or_else(|| gap(Some(&p.name), "a keyword default that is not a literal".to_string()))?),
+            Some(d) => Some(literal_ruby(app, d).ok_or_else(|| gap(Some(&p.name), "a keyword default that is not a literal".to_string()))?),
         };
         out.push(JobParam { name: p.name.clone(), rest: false, keyword: true, default, codec });
     }
     Ok(out)
 }
 
-fn literal_ruby(e: &Expr) -> Option<String> {
+fn literal_ruby(app: &App, e: &Expr) -> Option<String> {
+    let frozen = !matches!(e.hint(), Some(crate::expr::IrHint::MutableStringLiteral))
+        && (e.span.file.0 as usize)
+            .checked_sub(1)
+            .and_then(|i| app.sources.get(i))
+            .is_some_and(|f| crate::ingest::expr::freezes_literals(&f.text));
     match &*e.node {
         ExprNode::Lit { value } => match value {
             Literal::Nil => Some("nil".to_string()),
             Literal::Bool { value } => Some(value.to_string()),
             Literal::Int { value } => Some(value.to_string()),
             Literal::Float { value } if value.is_finite() => Some(format!("{value:?}")),
-            // Not a bare `"…"`: the registry is `frozen_string_literal: true`, and outside such a file Ruby hands the job a String it may append to.
+            // Not a bare `"…"` unless the job's own file freezes its literals: the registry does, and elsewhere Ruby hands the job a String it may append to.
+            Literal::Str { value } if frozen => Some(ruby_str(value)),
             Literal::Str { value } => Some(format!("+{}", ruby_str(value))),
             Literal::Sym { value }
                 if value.as_str().chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
