@@ -1792,7 +1792,7 @@ impl<'a> BodyTyper<'a> {
                 self.propagate_match_bindings(left, &mut seeded, true);
                 let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
                 let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &seeded);
-                let pred = narrowing::extract_narrowing_with(left, &narrowing::Probe { reader: &reader, member: &member });
+                let pred = narrowing::extract_narrowing_with(left, &narrowing::Probe { reader: &reader, member: &member, class_side: ctx.class_side });
                 let mut right_ctx = match (&pred, &*op) {
                     (Some(p), crate::expr::BoolOpKind::And) => {
                         narrowing::apply_narrowing(&seeded, p, true)
@@ -3157,7 +3157,7 @@ impl<'a> BodyTyper<'a> {
                 self.propagate_match_bindings(cond, &mut base, true);
                 let reader = |n: &Symbol| self.self_attribute_ty(n, ctx);
                 let member = |l: &Symbol, a: &Symbol| self.member_attribute_ty(l, a, &base);
-                let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe { reader: &reader, member: &member });
+                let pred = narrowing::extract_narrowing_with(cond, &narrowing::Probe { reader: &reader, member: &member, class_side: ctx.class_side });
                 let mut then_ctx = match &pred {
                     Some(p) => narrowing::apply_narrowing(&base, p, true),
                     None => base.clone(),

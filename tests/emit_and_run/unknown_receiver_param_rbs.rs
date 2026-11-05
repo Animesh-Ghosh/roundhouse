@@ -5,13 +5,21 @@
 //! for the Symbol and raised NoMethodError. On the Ruby family the site
 //! now widens the parameter of each library class defining the method,
 //! but only a parameter a typed site already reaches: the name may be
-//! another class's method, so it is never the only evidence.
+//! another class's method, so it is never the only evidence. A concern's
+//! method takes the guess too, though its typed evidence is keyed to the
+//! includer until the fold.
 
 use super::emit_and_run;
 use roundhouse::project::BuildTarget;
 
 fn app() -> emit_and_run::Overlay {
-    emit_and_run::real_blog().write(
+    emit_and_run::real_blog()
+        .write("app/models/name_parsing.rb", "module NameParsing\n  def parse_name(n)\n    n.to_s\n  end\nend\n")
+        .write(
+            "app/models/name_host.rb",
+            "class NameHost\n  include NameParsing\n\n  def go\n    parse_name(\"a\")\n  end\n\n  def self.run(x)\n    x.parse_name(:b)\n  end\nend\n",
+        )
+        .write(
         "app/models/name_tree.rb",
         r#"class NameTree
   def initialize(name, kids = [])
@@ -50,6 +58,7 @@ const SCRIPT: &str = r#"
 t = NameTree.new(:root, [NameTree.new(:leaf), NameTree.new(:mid, [NameTree.new(:leaf)])])
 got = NameTree.walk(t)
 raise "walk: #{got.inspect}" unless got == [2, 1]
+raise "run" unless NameHost.run(NameHost.new) == "b"
 puts "ok"
 "#;
 
@@ -60,6 +69,9 @@ fn an_untyped_receivers_call_widens_a_typed_parameter_only() {
     let line = |name: &str| text.lines().find(|l| l.contains(&format!("def {name}:"))).unwrap_or_else(|| panic!("{name}: {text}")).to_string();
     assert!(line("subgather").contains("Symbol"), "{text}");
     assert!(line("lonely").contains("untyped flag"), "{text}");
+    // A concern's typed evidence is keyed to its includer until the fold; the guess still reaches the module.
+    let text = std::fs::read_to_string(tree.join("app/models/name_parsing.rbs")).expect("name_parsing sidecar");
+    assert!(text.contains("Symbol"), "{text}");
 }
 
 #[test]

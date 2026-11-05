@@ -6022,7 +6022,8 @@ impl Analyzer {
         // into `Str | Untyped`, which is `untyped` with extra steps.
         // The refined round strictly dominates the one before it, so
         // the earlier observation has nothing to contribute.
-        self.inferred_params.clear();
+        // The round before's rows: a guess may widen a concern's slot, which only the fold below types from its includers.
+        let prev_rows = std::mem::take(&mut self.inferred_params);
         let helpers = &app.helper_method_index;
         // A CALLEE'S KEYWORD PARAMETER IS NOT ITS KWARGS HASH. The
         // fourth slot carries a call's trailing `kwargs: true` entries
@@ -6156,7 +6157,9 @@ impl Analyzer {
         // Not a row of its own: the site may be another class's method of the name, so it only widens a parameter some typed site reaches.
         let typed: BTreeSet<(ParamKey, usize)> = observations
             .iter()
-            .flat_map(|(key, tys)| tys.iter().enumerate().filter(|(_, t)| !matches!(t, Ty::Var { .. })).map(move |(i, _)| (key.clone(), i)))
+            .map(|(key, tys)| (key, tys.as_slice()))
+            .chain(prev_rows.iter().map(|(key, row)| (key, row.as_slice())))
+            .flat_map(|(key, tys)| tys.iter().enumerate().filter(|(_, t)| !t.is_unknown()).map(move |(i, _)| (key.clone(), i)))
             .collect();
         let mut guessed_open = BTreeSet::new();
         let guessed = self.param_observations(guessed, params_by_method, defined, &mut guessed_open);
