@@ -617,17 +617,16 @@ module Main
     # next page show text of its choosing. Load
     # through the constructor (NOT flash[:k]=) so to_persisted's show-once
     # diff sees them as carried-in (value == @notice_was) and sweeps them.
-    # `fetch(name, "")` avoids a missing-key raise; a flash message is
-    # never empty, so non-empty == present.
-    inbound_flash = Tep.str_hash
+    inbound_flash = ActionDispatch::Flash.new
     # Every `flash_<key>` cookie, not only notice/alert: lobsters' layout shows `flash[:error]` / `[:success]`.
     req.cookies.each do |cname, cvalue|
       if cname.start_with?("flash_")
-        fin = ActionDispatch::SignedCookie.verified(cvalue, cname)
-        inbound_flash[cname[6, cname.length - 6]] = fin if fin.length > 0
+        ActionDispatch::Flash.cookie_flashes(cvalue, cname).each do |key, value|
+          inbound_flash[key] = value
+        end
       end
     end
-    controller.flash = ActionDispatch::Flash.new(inbound_flash)
+    controller.flash = ActionDispatch::Flash.new(inbound_flash.to_h)
     controller.request_format = request_format
     controller.accepts_any_format = Main.accepts_any_format?(req.req_headers.fetch("accept", ""))
     # Rails' `Vary: Accept` on a render whose format came from the Accept
@@ -739,14 +738,15 @@ module Main
     # doesn't stick on the next nav.
     persisted = controller.flash.to_persisted
     persisted.each do |kind, pv|
-      if pv.length > 0
+      if !pv.is_a?(String) || pv.length > 0
         fname = "flash_" + kind
-        Main.set_flash_cookie(res, fname, ActionDispatch::SignedCookie.sign(pv, fname), request_obj.ssl?)
+        Main.set_flash_cookie(res, fname, ActionDispatch::Flash.signed_cookie(pv, fname), request_obj.ssl?)
       end
     end
     req.cookies.each do |cname, cvalue|
-      if cname.start_with?("flash_") && cvalue.length > 0 && persisted.fetch(cname[6, cname.length - 6], "").length == 0
-        Main.clear_flash_cookie(res, cname)
+      if cname.start_with?("flash_") && cvalue.length > 0
+        value = persisted.fetch(cname[6, cname.length - 6], "")
+        Main.clear_flash_cookie(res, cname) if value.is_a?(String) && value.empty?
       end
     end
 
