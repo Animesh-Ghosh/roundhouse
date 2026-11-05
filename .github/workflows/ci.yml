@@ -1848,14 +1848,25 @@ jobs:
           RUST_MIN_STACK: "33554432"
         run: |
           test -x "$SPINEL_TOOLCHAIN_BIN"
-          mapfile -t mine < <("$SPINEL_TOOLCHAIN_BIN" --ignored --list --format terse | sed -n 's/: test$//p' | grep -vx spinel_bundle_build | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }})
-          test "${#mine[@]}" -gt 0
-          # Not a compile per contract: this shard's run_spinel contracts are collected (each test stops
-          # at its contract) and built in shared groups first; a contract left out compiles in its test.
+          mapfile -t all < <("$SPINEL_TOOLCHAIN_BIN" --ignored --list --format terse | sed -n 's/: test$//p' | grep -vx -e spinel_bundle_build -e spinel_bundle_plan)
+          # Not a compile per contract: every run_spinel contract and HTTP server overlay is
+          # collected (each test stops at it), the cases one build can share are planned as
+          # units, and each unit goes to one shard whole; a case left out compiles in its test.
           start=$(date +%s)
-          printf '%s\n' "${mine[@]}" | RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-cases" \
+          printf '%s\n' "${all[@]}" | RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-all" \
             xargs -P "$(( $(nproc) * 2 ))" -I{} timeout 60 "$SPINEL_TOOLCHAIN_BIN" --ignored --exact {} >/dev/null 2>&1 || true
-          echo "collected $(ls "$RUNNER_TEMP/bundle-cases" 2>/dev/null | wc -l) contracts in $(( $(date +%s) - start ))s"
+          RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-all" RH_SPINEL_BUNDLE_PLAN="$RUNNER_TEMP/bundle-plan.json" \
+            "$SPINEL_TOOLCHAIN_BIN" --ignored --exact spinel_bundle_plan >/dev/null 2>&1 || true
+          mapfile -t mine < <(printf '%s\n' "${all[@]}" | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }} --units "$RUNNER_TEMP/bundle-plan.json")
+          test "${#mine[@]}" -gt 0
+          mkdir -p "$RUNNER_TEMP/bundle-cases"
+          printf '%s\n' "${mine[@]}" | python3 -c 'import json, pathlib, shutil, sys
+          mine = set(sys.stdin.read().split())
+          src, dst = map(pathlib.Path, sys.argv[1:])
+          for case in src.glob("*.json"):
+              if json.loads(case.read_text()).get("test") in mine:
+                  shutil.copy(case, dst / case.name)' "$RUNNER_TEMP/bundle-all" "$RUNNER_TEMP/bundle-cases"
+          echo "collected $(ls "$RUNNER_TEMP/bundle-all" 2>/dev/null | wc -l) cases ($(ls "$RUNNER_TEMP/bundle-cases" | wc -l) this shard's) in $(( $(date +%s) - start ))s"
           RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-cases" RH_SPINEL_BUNDLE_OUT="$RUNNER_TEMP/spinel-bundles" \
             "$SPINEL_TOOLCHAIN_BIN" --ignored --exact spinel_bundle_build --nocapture || true
           echo "bundled in $(( $(date +%s) - start ))s"

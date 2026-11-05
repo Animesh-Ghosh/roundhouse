@@ -208,6 +208,17 @@ fn spinel_bundle_build() {
     emit_and_run::bundle::build_all(std::path::Path::new(&collected), std::path::Path::new(&out));
 }
 
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn spinel_bundle_plan() {
+    let (Some(collected), Some(out)) =
+        (std::env::var_os("RH_SPINEL_BUNDLE_COLLECT"), std::env::var_os("RH_SPINEL_BUNDLE_PLAN"))
+    else {
+        return;
+    };
+    emit_and_run::bundle::plan(std::path::Path::new(&collected), std::path::Path::new(&out));
+}
+
 /// Compile and execute the shared custom Data factory contract with Spinel;
 /// successful Ruby emission alone does not establish native target support.
 #[test]
