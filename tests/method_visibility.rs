@@ -416,21 +416,20 @@ end"#;
     }
 }
 
+/// A private `attr_reader` in a model is a reader method carrying that
+/// visibility (mission_control-jobs' `RecurringTask#queue_adapter`); a
+/// private writer or accessor is still refused, since mass assignment
+/// refuses its key in Rails and the model lowering does not model that.
 #[test]
-fn nonpublic_model_accessors_are_not_silently_accepted_without_method_metadata() {
-    for body in [
-        "private\n attr_reader :value",
-        "attr_reader :value\n private :value",
-    ] {
+fn nonpublic_model_readers_are_private_methods_and_writers_are_refused() {
+    for body in ["private\n attr_reader :value", "attr_reader :value\n private :value"] {
+        let source = format!("class Thing < ApplicationRecord\n{body}\nend");
+        assert_eq!(visibility(&methods(&source, true), "value", MethodReceiver::Instance), MethodVisibility::Private, "{source}");
+    }
+    for body in ["private\n attr_writer :value", "attr_accessor :value\n private :value"] {
         let source = format!("class Thing < ApplicationRecord\n{body}\nend");
         assert!(
-            ingest_model(
-                source.as_bytes(),
-                "thing.rb",
-                &Schema::default(),
-                &Default::default()
-            )
-            .is_err(),
+            ingest_model(source.as_bytes(), "thing.rb", &Schema::default(), &Default::default()).is_err(),
             "{source}"
         );
     }

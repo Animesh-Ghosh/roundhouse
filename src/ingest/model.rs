@@ -849,18 +849,17 @@ fn expand_mattr_cattr(
 }
 
 /// `private` then `attr_reader :queue_adapter` (MissionControl::Jobs::RecurringTask): the
-/// readers and writers as methods carrying that visibility, which a class-body
-/// `attr_*` statement has nowhere to hold.
+/// readers as methods carrying that visibility, which a class-body `attr_*`
+/// statement has nowhere to hold.
 fn restricted_attr_methods(
     expr: &Expr,
     owner: &ClassId,
     visibility: crate::dialect::MethodVisibility,
 ) -> Option<Vec<crate::dialect::MethodDef>> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { return None };
+    // Not a writer: mass assignment refuses a private writer's key in Rails, which the model lowering does not model, so `check_model_item` still refuses one.
     let (reader, writer) = match method.as_str() {
         "attr_reader" => (true, false),
-        "attr_writer" => (false, true),
-        "attr_accessor" => (true, true),
         _ => return None,
     };
     let mut names = Vec::new();

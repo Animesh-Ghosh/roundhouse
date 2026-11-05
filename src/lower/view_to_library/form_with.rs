@@ -186,17 +186,13 @@ pub(super) fn emit_form_with_blockless(args: &[Expr], ctx: &ViewCtx) -> Option<V
         id_prefix: String::new(),
     };
     let mut out: Vec<Expr> = form_with_entry(ctx).into_iter().collect();
-    out.extend([
-        emit_open_form_tag(&comps, ctx, false),
-        accumulator_append_call(
-            view_helpers_call("method_override_input", vec![method]),
-            ctx,
-        ),
-        accumulator_append_call(
-            view_helpers_call("csrf_token_hidden_input", Vec::new()),
-            ctx,
-        ),
-    ]);
+    out.push(emit_open_form_tag(&comps, ctx, false));
+    if !is_get(&comps.method) {
+        out.extend([
+            accumulator_append_call(view_helpers_call("method_override_input", vec![method]), ctx),
+            accumulator_append_call(view_helpers_call("csrf_token_hidden_input", Vec::new()), ctx),
+        ]);
+    }
     Some(out)
 }
 
@@ -280,30 +276,30 @@ pub(super) fn emit_form_with_inline(
     //    action expression spliced in. Order matches Rails'
     //    `render_attrs({action:, "accept-charset":, method:}.merge(opts))`:
     //    action, accept-charset, method, then user opts. The HTML
-    //    `method` attribute is always "post" for resource forms
-    //    (PATCH/DELETE flow through `_method` override below); :get
-    //    fixtures aren't exercised so we hard-code "post" here.
+    //    `method` attribute is "post" for resource forms (PATCH/DELETE
+    //    flow through `_method` override below), "get" for a GET form.
     out.push(emit_open_form_tag(&comps, ctx, block_has_file_field(body, form_param_str, ctx)));
 
     // 2. Method override: `<input type="hidden" name="_method"
     //    value="patch">` for non-get/post methods, empty string
     //    otherwise. Calls the runtime helper with the bound method
     //    local so the conditional evaluates once.
-    let method_var_ref = Expr::new(
-        Span::synthetic(),
-        ExprNode::Var { id: VarId(0), name: form_method_var.clone() },
-    );
-    out.push(accumulator_append_call(
-        view_helpers_call("method_override_input", vec![method_var_ref]),
-        ctx,
-    ));
-
-    // 3. CSRF token hidden input — emitted unconditionally to match
-    //    Rails' position (after _method, before the body).
-    out.push(accumulator_append_call(
-        view_helpers_call("csrf_token_hidden_input", Vec::new()),
-        ctx,
-    ));
+    // 3. CSRF token hidden input, in Rails' position (after _method,
+    //    before the body). Neither for a GET form, as Rails writes none.
+    if !is_get(&comps.method) {
+        let method_var_ref = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: form_method_var.clone() },
+        );
+        out.push(accumulator_append_call(
+            view_helpers_call("method_override_input", vec![method_var_ref]),
+            ctx,
+        ));
+        out.push(accumulator_append_call(
+            view_helpers_call("csrf_token_hidden_input", Vec::new()),
+            ctx,
+        ));
+    }
 
     // 4. Walk the block body against the OUTER accumulator. The
     //    binding registered below feeds `form.X` macro expansion
@@ -432,6 +428,12 @@ fn block_has_file_field(body: &Expr, form_param: &str, ctx: &ViewCtx) -> bool {
     found
 }
 
+/// `method: :get` (or "get") as written: Rails' form then says `method="get"` and carries no
+/// `_method` or authenticity token (mission_control-jobs' job filters).
+fn is_get(method: &Expr) -> bool {
+    str_or_sym_literal(method).is_some_and(|m| m.eq_ignore_ascii_case("get"))
+}
+
 fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx, multipart: bool) -> Expr {
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
@@ -441,7 +443,7 @@ fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx, multipart: bool
         expr: view_helpers_call("html_escape", vec![comps.action.clone()]),
     });
     parts.push(InterpPart::Text {
-        value: "\" accept-charset=\"UTF-8\" method=\"post\"".to_string(),
+        value: format!("\" accept-charset=\"UTF-8\" method=\"{}\"", if is_get(&comps.method) { "get" } else { "post" }),
     });
     // `enctype`: what Rails renders for `multipart: true`, which a
     // `file_field` in the block sets for it (`block_has_file_field`).

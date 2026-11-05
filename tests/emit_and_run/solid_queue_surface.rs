@@ -37,7 +37,7 @@ fn app() -> emit_and_run::Overlay {
         .edit(
             "app/models/article.rb",
             "class Article < ApplicationRecord\n",
-            "class Article < ApplicationRecord\n  def peek\n    secret\n  end\n\n  private\n\n  attr_reader :secret\n\n  public\n\n",
+            "class Article < ApplicationRecord\n  def remember(value)\n    @secret = value\n  end\n\n  def peek\n    secret\n  end\n\n  private\n\n  attr_reader :secret\n\n  public\n\n",
         )
 }
 
@@ -58,7 +58,8 @@ raise "json" unless SurfaceProbe.round_trip({ "a" => [1, "x"] }) == { "a" => [1,
 raise "page_size" unless SurfaceProbe.page_size == 1000
 article = Article.new(title: "Surface", body: "A body long enough")
 raise "secret is public" if article.respond_to?(:secret)
-raise "peek" unless article.peek.nil?
+article.remember("kept")
+raise "peek" unless article.peek == "kept"
 puts "ok"
 "#;
 
