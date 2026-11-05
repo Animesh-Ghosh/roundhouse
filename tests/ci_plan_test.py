@@ -127,6 +127,13 @@ class PublicationBoundary(unittest.TestCase):
 
 
 class Routing(unittest.TestCase):
+    def test_class_object_return_analysis_runs_generated_sidecars_natively(self):
+        for path in ["src/analyze/mod.rs", "tests/class_object_return_rbs.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("class_object_return_rbs", plan["spinel_tests"])
+
     def test_shared_controller_base_runs_every_extra_language(self):
         for suffix in ("rb", "rbs"):
             with self.subTest(suffix=suffix):
