@@ -1,5 +1,5 @@
-# A relative timing contract catches suffix copies per decoded chunk.
-# Run explicitly on a quiet host; the normal suite checks framing only.
+# Local benchmark: ruby scripts/bench-chunked-body.rb on a quiet host.
+# No test harness runs this: concurrent CI suites make elapsed-time ratios noisy.
 require_relative "../runtime/spinel/tep/chunked_body"
 
 def decode_time(chunks)

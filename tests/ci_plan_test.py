@@ -143,7 +143,7 @@ class Routing(unittest.TestCase):
             "tests/spinel_chunked_body.rs", "tests/spinel_chunked_body.rb",
             "tests/spinel_chunked_body_native.rb", "tests/spinel_chunked_body_native_check.rb",
             "tests/spinel_chunked_body_app_check.rb",
-            "tests/spinel_chunked_body_puma.rb", "tests/spinel_chunked_body_timing.rb",
+            "tests/spinel_chunked_body_puma.rb", "tests/spinel_chunked_body_work.rb",
             "tests/support/server_check_io.rb",
         ]:
             with self.subTest(path=path):

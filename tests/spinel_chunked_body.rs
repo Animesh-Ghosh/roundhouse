@@ -36,9 +36,9 @@ fn puma_confirms_the_chunked_body_contract() {
 }
 
 #[test]
-#[ignore = "relative timing contract; run explicitly on a quiet host"]
+#[ignore = "deterministic CRuby slice-work contract; run in the framework lane"]
 fn chunk_count_has_linear_cost() {
-    ruby_driver("spinel_chunked_body_timing");
+    ruby_driver("spinel_chunked_body_work");
 }
 
 #[test]
