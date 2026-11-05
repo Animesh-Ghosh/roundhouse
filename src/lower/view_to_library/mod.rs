@@ -5373,12 +5373,35 @@ struct MarkClass {
 /// `delegate`'s `prefix:` applied and `store`'s `accessors:` read; an
 /// extended module to `extends`. A call whose effect can't be read
 /// (`prepend`, `include` of a computed module, `class_eval`, a
-/// `define_method` or `send` with a computed name) sets `opaque`.
+/// `define_method` or `send` with a computed name) sets `opaque`. A
+/// call's block is read as class-body code too (`block_shadows`), with
+/// `with_options`' literal options merged into each call in it.
 fn macro_shadows(e: &crate::expr::Expr, c: &mut MarkClass) {
     use crate::expr::{ExprNode, Literal};
-    let ExprNode::Send { recv, method, args, .. } = &*e.node else { return };
+    let ExprNode::Send { recv, method, args, block, .. } = &*e.node else { return };
     if recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
         return;
+    }
+    if let Some(b) = block {
+        if method.as_str() == "with_options" {
+            let mut outer = Vec::new();
+            for a in args {
+                match &*a.node {
+                    ExprNode::Hash { entries, .. } => outer.extend(entries.iter().cloned()),
+                    _ => {
+                        c.opaque = true;
+                        return;
+                    }
+                }
+            }
+            block_shadows(b, Some(&outer), c);
+            return;
+        }
+        if is_callback(method.as_str()) {
+            callback_block_shadows(b, c);
+        } else {
+            block_shadows(b, None, c);
+        }
     }
     let name = |a: &crate::expr::Expr| match &*a.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
@@ -5474,6 +5497,92 @@ fn macro_shadows(e: &crate::expr::Expr, c: &mut MarkClass) {
             c.shadows.insert(format!("{p}_{n}"));
         }
         c.shadows.insert(n);
+    }
+}
+
+/// A callback or validation macro (`after_create_commit { … }`, `before_save
+/// do … end`, `validate do … end`): its block runs on a record, not in the
+/// class body.
+fn is_callback(method: &str) -> bool {
+    ["before_", "after_", "around_"].iter().any(|p| method.starts_with(p)) || matches!(method, "validate" | "validates_each")
+}
+
+/// A callback's block is the record's code, run later: a `def` in it
+/// defines its name on the class when it runs, so the name shadows; the
+/// block's other calls aren't class-body calls.
+fn callback_block_shadows(e: &crate::expr::Expr, c: &mut MarkClass) {
+    if let Some(d) = e.nested_def() {
+        c.shadows.insert(d.name.as_str().to_string());
+    }
+    e.node.for_each_child(&mut |ch| callback_block_shadows(ch, c));
+}
+
+/// What a class-body call's block adds to `c`. Each statement is a call
+/// on the block's param, on `self` or on no receiver, read as a
+/// class-body call (with `with_options`' entries merged into its options,
+/// its own keys winning, as Rails' `OptionMerger` merges them), or a
+/// `def`, whose name shadows. Anything else, a block that isn't a literal
+/// one among them, sets `opaque`: what it defines isn't read here.
+fn block_shadows(
+    b: &crate::expr::Expr,
+    merge: Option<&[(crate::expr::Expr, crate::expr::Expr)]>,
+    c: &mut MarkClass,
+) {
+    use crate::expr::{ExprNode, Literal};
+    let ExprNode::Lambda { params, body, .. } = &*b.node else {
+        c.opaque = true;
+        return;
+    };
+    let key = |k: &crate::expr::Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    };
+    let stmts = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect::<Vec<_>>(),
+        _ => vec![body],
+    };
+    for st in stmts {
+        if let Some(d) = st.nested_def() {
+            c.shadows.insert(d.name.as_str().to_string());
+            continue;
+        }
+        match &*st.node {
+            ExprNode::Lit { value: Literal::Nil } => {}
+            ExprNode::Send { recv, method, args, block, parenthesized }
+                if recv.as_ref().is_none_or(|r| match &*r.node {
+                    ExprNode::SelfRef => true,
+                    ExprNode::Var { name, .. } => params.first() == Some(name),
+                    _ => false,
+                }) =>
+            {
+                let mut args = args.clone();
+                if let Some(outer) = merge {
+                    let own = args.iter().rposition(|a| matches!(&*a.node, ExprNode::Hash { .. }));
+                    let inner: Vec<_> = match own.map(|i| &*args[i].node) {
+                        Some(ExprNode::Hash { entries, .. }) => entries.clone(),
+                        _ => Vec::new(),
+                    };
+                    if outer.iter().chain(&inner).any(|(k, _)| key(k).is_none()) {
+                        c.opaque = true;
+                        return;
+                    }
+                    let mut entries: Vec<_> = outer.iter().filter(|(k, _)| !inner.iter().any(|(ik, _)| key(ik) == key(k))).cloned().collect();
+                    entries.extend(inner);
+                    let hash = crate::expr::Expr::new(st.span, ExprNode::Hash { entries, kwargs: true });
+                    match own {
+                        Some(i) => args[i] = hash,
+                        None => args.push(hash),
+                    }
+                }
+                let call = ExprNode::Send { recv: None, method: method.clone(), args, block: block.clone(), parenthesized: *parenthesized };
+                macro_shadows(&crate::expr::Expr::new(st.span, call), c);
+            }
+            _ => {
+                c.opaque = true;
+                return;
+            }
+        }
     }
 }
 
@@ -6314,6 +6423,65 @@ mod tests {
         assert!(!c.opaque && c.extends == vec!["Helpers".to_string()]);
         let c = read_class_call(class_call("include", vec![helpers]));
         assert!(!c.opaque && c.shadows.is_empty());
+    }
+
+    fn block_call(method: &str, args: Vec<Expr>, params: &[&str], stmts: Vec<Expr>) -> Expr {
+        let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts });
+        let block = Expr::new(Span::synthetic(), ExprNode::Lambda {
+            extra_params: Vec::new(),
+            rest_param: None,
+            params: params.iter().map(|p| Symbol::from(*p)).collect(),
+            block_param: None,
+            body,
+            block_style: crate::expr::BlockStyle::Do,
+        });
+        Expr::new(Span::synthetic(), ExprNode::Send { recv: None, method: Symbol::from(method), args, block: Some(block), parenthesized: false })
+    }
+
+    fn opts(pairs: &[(&str, Expr)]) -> Expr {
+        let entries = pairs.iter().map(|(k, v)| (lit_sym(Symbol::from(*k)), v.clone())).collect();
+        Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true })
+    }
+
+    fn on(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Send { recv: Some(recv), method: Symbol::from(method), args, block: None, parenthesized: false })
+    }
+
+    fn var(name: &str) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from(name) })
+    }
+
+    #[test]
+    fn a_with_options_block_shadows_the_names_its_calls_define() {
+        let label = || lit_sym(Symbol::from("label"));
+        let to = || opts(&[("to", lit_sym(Symbol::from("inner")))]);
+        let c = read_class_call(block_call("with_options", vec![to()], &["o"], vec![on(var("o"), "delegate", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("label"), "through the param");
+        let c = read_class_call(block_call("with_options", vec![to()], &[], vec![class_call("delegate", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("label"), "implicit receiver");
+        // The outer `prefix: true` merges into the inner `delegate`, with the outer `to:`.
+        let outer = opts(&[("prefix", Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Bool { value: true } })), ("to", lit_sym(Symbol::from("inner")))]);
+        let c = read_class_call(block_call("with_options", vec![outer], &[], vec![class_call("delegate", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("inner_label"), "{:?}", c.shadows);
+        let c = read_class_call(block_call("concerning", vec![lit_sym(Symbol::from("Labels"))], &[], vec![class_call("attr_reader", vec![label()])]));
+        assert!(!c.opaque && c.shadows.contains("label"));
+    }
+
+    #[test]
+    fn a_block_whose_statements_cant_be_read_makes_the_class_opaque() {
+        let other = on(var("x"), "delegate", vec![lit_sym(Symbol::from("label"))]);
+        assert!(read_class_call(block_call("with_options", vec![], &["o"], vec![other.clone()])).opaque);
+        assert!(read_class_call(block_call("with_options", vec![var("computed")], &["o"], vec![])).opaque);
+        assert!(read_class_call(block_call("concerning", vec![], &[], vec![other])).opaque);
+    }
+
+    #[test]
+    fn a_callback_block_is_the_records_code_not_the_class_body() {
+        let body = on(var("article"), "touch", vec![]);
+        for m in ["after_create_commit", "before_save", "around_update", "validate"] {
+            let c = read_class_call(block_call(m, vec![], &[], vec![body.clone()]));
+            assert!(!c.opaque && c.shadows.is_empty(), "{m}");
+        }
     }
 
     #[test]

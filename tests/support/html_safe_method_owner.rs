@@ -33,6 +33,8 @@ pub const VIEW: &str = concat!(
     "L:<%= @relaid.label %>\n",
     "J:<%= content_tag(:span, @comment.label) %>\n",
     "D:<%= content_tag(:span, @article.label) %>\n",
+    "w1:<%= @opted.label %>\n",
+    "w2:<%= @opted2.label %>\n",
 );
 
 pub const RENDERS: &[&str] = &[
@@ -48,7 +50,7 @@ pub const RENDERS: &[&str] = &[
 /// (only `Article` has the marked one), and each value whose closer
 /// definition shadows a marked one, unescaped, also as `content_tag`'s
 /// content.
-pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>", "H:<cr>", "H:<b>", "L:<cr>", "L:<l>", "J:<span><c></span>"];
+pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>", "H:<cr>", "H:<b>", "L:<cr>", "L:<l>", "J:<span><c></span>", "w1:<ow>", "w1:<b>", "w2:<ow>", "w2:<b>"];
 
 /// real-blog with `GET /probe` rendering `VIEW`:
 /// - `Article#label` and `ApplicationRecord#tag_html` return html-safe
@@ -80,6 +82,11 @@ pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t
 ///   after `Relaid`'s own html-safe `label`. Rails 8.1.4 renders
 ///   `L:&lt;cr&gt;`; the emitted `Relaid` answers with its own `label`,
 ///   so the line only checks that neither value is written unescaped;
+/// - `Opted < Base` and `Opted2 < Base` define `label` with a `delegate`
+///   inside a `with_options` block, through the block's param and through
+///   its implicit receiver. Rails 8.1.4 renders `&lt;ow&gt;` for both;
+///   the emitted classes answer with `Base#label`, so the lines only
+///   check that neither value is written unescaped;
 /// - `ApplicationRecord#body` is html-safe, and `articles.body` is a
 ///   column. Rails 8.1.4 renders `K:<j>`: Active Record doesn't generate
 ///   a reader that a class between the model and `ActiveRecord::Base`
@@ -123,10 +130,13 @@ pub fn app() -> emit_and_run::Overlay {
         .write("app/models/concerns/relabel.rb", "module Relabel\n  extend ActiveSupport::Concern\n\n  included do\n    def label\n      \"<cr>\"\n    end\n  end\nend\n")
         .write("lib/recon.rb", "class Recon < Base\n  include Relabel\nend\n")
         .write("lib/relaid.rb", "class Relaid\n  def label\n    \"<l>\".html_safe\n  end\n\n  include Relabel\nend\n")
+        .write("lib/inner_ow.rb", "class InnerOw\n  def label\n    \"<ow>\"\n  end\nend\n")
+        .write("lib/opted.rb", "class Opted < Base\n  with_options to: :inner do |o|\n    o.delegate :label\n  end\n\n  def inner\n    InnerOw.new\n  end\nend\n")
+        .write("lib/opted2.rb", "class Opted2 < Base\n  with_options to: :inner do\n    delegate :label\n  end\n\n  def inner\n    InnerOw.new\n  end\nend\n")
         .write("app/models/concerns/labelled.rb", "module Labelled\n  extend ActiveSupport::Concern\n\n  def shiny\n    \"<y>\".html_safe\n  end\nend\n")
         .write(
             "app/controllers/probes_controller.rb",
-            "class ProbesController < ApplicationController\n  def show\n    @article = Article.new\n    @comment = Comment.new\n    @base = Base.new\n    @special = Special.new\n    @mixed = Mixed.new\n    @twin2 = Twin2.new\n    @fronted = Fronted.new\n    @readered = Readered.new\n    @delegating = Delegating.new\n    @shelf = Shelf.new\n    @recon = Recon.new\n    @relaid = Relaid.new\n  end\nend\n",
+            "class ProbesController < ApplicationController\n  def show\n    @article = Article.new\n    @comment = Comment.new\n    @base = Base.new\n    @special = Special.new\n    @mixed = Mixed.new\n    @twin2 = Twin2.new\n    @fronted = Fronted.new\n    @readered = Readered.new\n    @delegating = Delegating.new\n    @shelf = Shelf.new\n    @recon = Recon.new\n    @relaid = Relaid.new\n    @opted = Opted.new\n    @opted2 = Opted2.new\n  end\nend\n",
         )
         .write("app/views/probes/show.html.erb", VIEW)
         .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe\", to: \"probes#show\", as: :probe\n")
