@@ -20716,6 +20716,44 @@ fn a_content_tag_with_options_renders_on_spinel() {
         .assert_passes();
 }
 
+#[path = "support/go_view_predicate.rs"]
+mod go_view_predicate;
+
+/// #1802's view on the ruby target: `F:true` is what it renders.
+#[test]
+fn a_views_model_predicate_call_renders_on_ruby() {
+    go_view_predicate::app().run_test("test/controllers/articles_featured_controller_test.rb").assert_passes();
+}
+
+/// The shapes' answers on the ruby target: the ones the Go run checks.
+#[test]
+fn a_views_model_method_shapes_render_on_ruby() {
+    go_view_predicate::shapes_app().run_test("test/controllers/articles_featured_controller_test.rb").assert_passes();
+}
+
+/// The Go view reads a trivial `attr_accessor` reader as its field, over
+/// the parent's method of that name (also when an intermediate parent
+/// model defines that reader), and calls a nilable or namespaced
+/// receiver's own method and a parent model's method.
+#[test]
+fn a_views_model_method_shapes_are_go_calls_or_fields() {
+    let (emitted, errors) = go_view_predicate::shapes_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let view = std::fs::read_to_string(emitted.join("app/v2/views_articles.go")).unwrap();
+    let missing: Vec<_> = ["a.FeaturedPred()", "a.Pinned)", "last.FeaturedPred()", "n.HotPred()", "a.SharedFlagPred()", "n.Pinned)"].into_iter().filter(|w| !view.contains(w)).collect();
+    let wrong: Vec<_> = ["a.PinnedPred()", "n.PinnedPred()"].into_iter().filter(|w| view.contains(w)).collect();
+    assert!(missing.is_empty() && wrong.is_empty(), "missing {missing:?}, wrong {wrong:?} in {view}");
+}
+
+/// The Go view calls the model's own predicate as its method.
+#[test]
+fn a_views_model_predicate_call_is_a_go_method_call() {
+    let (emitted, errors) = go_view_predicate::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let view = std::fs::read_to_string(emitted.join("app/v2/views_articles.go")).unwrap();
+    assert!(view.contains("a.FeaturedPred()") && !view.contains("a.Featured)"), "{view}");
+}
+
 #[path = "support/go_test_literal_receiver.rs"]
 mod go_test_literal_receiver;
 
