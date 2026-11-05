@@ -34,6 +34,8 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/json_flash.rs"]
+mod json_flash_contract;
 #[path = "support/response_content_type.rs"]
 mod response_content_type_contract;
 #[path = "spinel_toolchain/response_content_type.rs"]
