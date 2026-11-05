@@ -20711,6 +20711,15 @@ fn an_html_safe_method_is_trusted_by_its_owner_on_spinel() {
     html_safe_method_owner::app().run_spinel(&html_safe_method_owner::render_script()).assert_passes();
 }
 
+#[path = "support/go_action_controller_api.rs"]
+mod go_action_controller_api;
+
+/// #1804's API controller on the ruby target.
+#[test]
+fn an_api_controller_answers_on_ruby() {
+    go_action_controller_api::app().run_test("test/controllers/ping_controller_test.rb").assert_passes();
+}
+
 #[path = "support/block_control_flow.rs"]
 mod block_control_flow;
 
