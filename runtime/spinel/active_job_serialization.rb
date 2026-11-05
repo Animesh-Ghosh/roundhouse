@@ -133,12 +133,15 @@ module ActiveJob
       "{" + body.join(",") + "}"
     end
 
-    # Not nil for a keyword the Hash lacks: Rails would bind the parameter's default, which only `perform` knows.
+    def self.keyword_given?(args, name)
+      names = key_of(args[args.length - 1], RUBY2_KEYWORDS_KEY)
+      !names.nil? && names.include?(name)
+    end
+
+    # Not nil for a keyword the Hash lacks: a defaulted one is read only behind `keyword_given?`, and a required one is an error in Rails too.
     def self.keyword_args(args, name)
-      hash = args[args.length - 1]
-      names = key_of(hash, RUBY2_KEYWORDS_KEY)
-      raise ActiveJob::DeserializationError, deserialize_message("missing keyword " + name) if names.nil? || !names.include?(name)
-      [hash[name]]
+      raise ActiveJob::DeserializationError, deserialize_message("missing keyword " + name) unless keyword_given?(args, name)
+      [args[args.length - 1][name]]
     end
 
     # The keyword hash `Turbo::Streams::ActionBroadcastJob` takes, as
