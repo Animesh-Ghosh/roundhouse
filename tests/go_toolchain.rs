@@ -23,6 +23,8 @@ mod emit_and_run;
 #[path = "support/content_tag_options.rs"]
 #[allow(dead_code)]
 mod content_tag_options;
+#[path = "support/go_view_predicate.rs"]
+mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
 mod go_test_literal_receiver;
 #[path = "support/go_action_controller_api.rs"]
@@ -396,6 +398,43 @@ fn assert_content_tag_test_passes(app: emit_and_run::Overlay) {
         .expect("run go test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("--- PASS: TestContentTagRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1802: a view's call to a model's own predicate builds and renders.
+#[test]
+#[ignore]
+fn a_views_model_predicate_call_runs() {
+    let (emitted, errors) = go_view_predicate::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/assert_includes_test.go"), go_view_predicate::GO_ASSERT_INCLUDES).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheIndexRenders", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheIndexRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A view's 0-arg reads of a model's own methods build and render: a
+/// trivial `attr_accessor` reader, an `Article | nil` receiver, a
+/// namespaced model, and a method whose omitted optional params take
+/// their literal Ruby defaults.
+#[test]
+#[ignore]
+fn a_views_model_method_shapes_run() {
+    let (emitted, errors) = go_view_predicate::shapes_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/assert_includes_test.go"), go_view_predicate::GO_ASSERT_INCLUDES).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheIndexRenders", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheIndexRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// #1803: an assertion on a method of a new record parses and runs.
