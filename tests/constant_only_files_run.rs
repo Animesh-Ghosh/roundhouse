@@ -233,18 +233,26 @@ fn a_grouped_value_is_the_constant_s() {
 fn a_lambda_called_in_place_loads_what_it_names() {
     let run = run_files(
         &[
-            ("app/models/answer.rb", "Answer = (-> { Widget::VALUE }).call
-"),
-            ("app/models/widget.rb", "class Widget
-  VALUE = 1
-end
-"),
+            ("app/models/answer.rb", "Answer = (-> { Widget::VALUE }).call\n"),
+            ("app/models/widget.rb", "class Widget\n  VALUE = 1\nend\n"),
         ],
-        "p Answer
-",
+        "p Answer\n",
     );
     run.assert_passes();
     assert_eq!(run.stdout.lines().last(), Some("1"), "{}", run.stdout);
+    // Its parameter defaults run before its body, and so do those of a
+    // block a call runs now.
+    let run = run_files(
+        &[
+            ("app/models/answer.rb", "Answer = (->(x = Gadget::VALUE) { x }).call\n"),
+            ("app/models/gadget.rb", "class Gadget\n  VALUE = 2\nend\n"),
+            ("app/models/tally.rb", "Tally = [1].map { |x, y = Widget::VALUE| x + y }\n"),
+            ("app/models/widget.rb", "class Widget\n  VALUE = 1\nend\n"),
+        ],
+        "p [Answer, Tally]\n",
+    );
+    run.assert_passes();
+    assert_eq!(run.stdout.lines().last(), Some("[2, [2]]"), "{}", run.stdout);
 }
 
 /// `labels.rb` is `Labels`'s file, whatever its first constant, and a read

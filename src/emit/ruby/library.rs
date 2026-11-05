@@ -10998,6 +10998,13 @@ fn walk_load_time_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
         };
         Some(block)
     }
+    /// A closure that runs now: its parameter defaults, then its body.
+    fn run(closure: &Expr, out: &mut BTreeSet<Vec<String>>) {
+        match &*closure.node {
+            ExprNode::Lambda { .. } => closure.node.for_each_child(&mut |child| walk_load_time_const_paths(child, out)),
+            _ => walk_load_time_const_paths(closure, out),
+        }
+    }
     match &*e.node {
         ExprNode::Lambda { .. } => {}
         ExprNode::Send { recv, method, args, block, .. } => {
@@ -11005,20 +11012,14 @@ fn walk_load_time_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
             // `(-> { … }).call`, `.()`, `[]`, `yield`: the closure runs now.
             if matches!(method.as_str(), "call" | "[]" | "yield" | "===") {
                 if let Some(closure) = recv.as_ref().and_then(stored_body) {
-                    match &*closure.node {
-                        ExprNode::Lambda { body, .. } => walk_load_time_const_paths(body, out),
-                        _ => walk_load_time_const_paths(closure, out),
-                    }
+                    run(closure, out);
                 }
             }
             for child in recv.iter().chain(args.iter()) {
                 walk_load_time_const_paths(child, out);
             }
             if let Some(block) = block.as_ref().filter(|_| !stores_block) {
-                match &*block.node {
-                    ExprNode::Lambda { body, .. } => walk_load_time_const_paths(body, out),
-                    _ => walk_load_time_const_paths(block, out),
-                }
+                run(block, out);
             }
         }
         _ => {
