@@ -5338,7 +5338,8 @@ pub(super) struct ViewCtx {
 
 /// The app's html-safe-marked definitions (`App::html_safe_method_defs`)
 /// with what is needed to find which definition a call resolves to:
-/// each class's or module's parent, included modules and own methods.
+/// each class's or module's parent, included modules and own methods,
+/// and the names it gets from anything other than a `def`.
 #[derive(Default)]
 pub(super) struct HtmlSafeMarks {
     classes: crate::det::HashMap<String, MarkClass>,
@@ -5351,6 +5352,100 @@ struct MarkClass {
     includes: Vec<String>,
     /// `(method, singleton)` for every method the class defines itself.
     defines: crate::det::HashSet<(String, bool)>,
+    /// Names a class-body call defines on the class or on a module it
+    /// mixes in ahead of its parent: `attr_reader`, `delegate`,
+    /// `alias_method`, `define_method`, `store_accessor`, an association's
+    /// readers. Read from the call's literal arguments, on either side.
+    shadows: crate::det::HashSet<String>,
+    /// The class prepends a module, or calls `define_method` with a name
+    /// that isn't a literal: which definition it answers with isn't
+    /// known here.
+    opaque: bool,
+}
+
+/// What a class-body call (`attr_reader :label`, `prepend Front`)
+/// defines: its literal symbol or string arguments, with `delegate`'s
+/// `prefix:` applied and `store`'s `accessors:` read, added to
+/// `shadows`. True when the call prepends a module or names a method
+/// that can't be read.
+fn macro_shadows(e: &crate::expr::Expr, shadows: &mut crate::det::HashSet<String>) -> bool {
+    use crate::expr::{ExprNode, Literal};
+    let ExprNode::Send { recv, method, args, .. } = &*e.node else { return false };
+    if recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
+        return false;
+    }
+    let name = |a: &crate::expr::Expr| match &*a.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    };
+    match method.as_str() {
+        "prepend" => return true,
+        "include" | "extend" => return false,
+        "define_method" | "define_singleton_method" if args.first().and_then(name).is_none() => return true,
+        "has_secure_password" => {
+            let attr = args.first().and_then(name).unwrap_or_else(|| "password".to_string());
+            if attr == "password" {
+                shadows.insert("authenticate".to_string());
+            }
+            shadows.extend([format!("authenticate_{attr}"), format!("{attr}_confirmation"), format!("{attr}_challenge")]);
+        }
+        _ => {}
+    }
+    let mut prefix = None;
+    for a in args {
+        let ExprNode::Hash { entries, .. } = &*a.node else { continue };
+        for (k, v) in entries {
+            match name(k).as_deref() {
+                Some("accessors") => {
+                    if let ExprNode::Array { elements, .. } = &*v.node {
+                        shadows.extend(elements.iter().filter_map(name));
+                    }
+                }
+                Some("prefix") => match &*v.node {
+                    ExprNode::Lit { value: Literal::Bool { value: false } } => {}
+                    ExprNode::Lit { value: Literal::Bool { value: true } } => {
+                        let to = entries.iter().find(|(k, _)| name(k).as_deref() == Some("to")).and_then(|(_, v)| name(v));
+                        match to {
+                            Some(to) => prefix = Some(to),
+                            None => return true,
+                        }
+                    }
+                    _ => match name(v) {
+                        Some(p) => prefix = Some(p),
+                        None => return true,
+                    },
+                },
+                _ => {}
+            }
+        }
+    }
+    for n in args.iter().filter_map(name) {
+        if let Some(p) = &prefix {
+            shadows.insert(format!("{p}_{n}"));
+        }
+        shadows.insert(n);
+    }
+    false
+}
+
+/// The readers an association declares on its model: Rails defines them
+/// in a module the model includes, so they come before its parent's
+/// methods.
+fn association_shadows(a: &crate::dialect::Association, shadows: &mut crate::det::HashSet<String>) {
+    use crate::dialect::Association;
+    let n = a.name().as_str();
+    shadows.insert(n.to_string());
+    match a {
+        Association::HasMany { .. } | Association::HasAndBelongsToMany { .. } => {
+            shadows.insert(format!("{}_ids", crate::naming::singularize(n)));
+        }
+        Association::BelongsTo { .. } | Association::HasOne { .. } => {
+            for f in ["build_{}", "create_{}", "create_{}!", "reload_{}", "reset_{}", "{}_changed?", "{}_previously_changed?"] {
+                shadows.insert(f.replace("{}", n));
+            }
+        }
+    }
 }
 
 impl HtmlSafeMarks {
@@ -5362,6 +5457,19 @@ impl HtmlSafeMarks {
             c.parent = m.parent.as_ref().map(|p| p.0.as_str().to_string());
             c.includes.extend(crate::analyze::model_includes(m).iter().map(|i| i.0.as_str().to_string()));
             c.defines.extend(m.methods().map(|d| (d.name.as_str().to_string(), singleton(d))));
+            // A column's reader: the emitted model defines it on the class,
+            // so it comes before an inherited `def` of the same name.
+            c.shadows.extend(m.attributes.fields.keys().map(|k| k.as_str().to_string()));
+            for item in &m.body {
+                match item {
+                    crate::dialect::ModelBodyItem::Unknown { expr, .. } => c.opaque |= macro_shadows(expr, &mut c.shadows),
+                    crate::dialect::ModelBodyItem::Association { assoc, .. } => association_shadows(assoc, &mut c.shadows),
+                    crate::dialect::ModelBodyItem::Alias { new, .. } => {
+                        c.shadows.insert(new.as_str().to_string());
+                    }
+                    _ => {}
+                }
+            }
         }
         for lc in &app.library_classes {
             let c = classes.entry(lc.name.0.as_str().to_string()).or_default();
@@ -5370,6 +5478,9 @@ impl HtmlSafeMarks {
             }
             c.includes.extend(lc.includes.iter().map(|i| i.0.as_str().to_string()));
             c.defines.extend(lc.methods.iter().map(|d| (d.name.as_str().to_string(), singleton(d))));
+            for e in &lc.unknown_calls {
+                c.opaque |= macro_shadows(e, &mut c.shadows);
+            }
         }
         HtmlSafeMarks { classes, marked: app.html_safe_method_defs.iter().cloned().collect() }
     }
@@ -5386,13 +5497,18 @@ impl HtmlSafeMarks {
     /// defines the method decides: an instance call looks in the class,
     /// then its included modules, last included first, then its parent;
     /// a singleton call looks in the class, then its parent. A method no
-    /// known class defines isn't trusted.
+    /// known class defines isn't trusted, and neither is one that a class
+    /// on the way gets from a call rather than a `def` (`attr_reader
+    /// :label`), or that a class answers through a prepended module.
     pub(super) fn resolves_marked(&self, class: &str, method: &str, singleton: bool) -> bool {
         let mut order = Vec::new();
         self.lookup_order(class, singleton, &mut order);
         for c in &order {
-            let defines = self.classes.get(c).is_some_and(|k| k.defines.contains(&(method.to_string(), singleton)));
-            if defines {
+            let Some(k) = self.classes.get(c) else { continue };
+            if k.opaque || k.shadows.contains(method) {
+                return false;
+            }
+            if k.defines.contains(&(method.to_string(), singleton)) {
                 return self.marked.contains(&(c.clone(), method.to_string(), singleton));
             }
         }
