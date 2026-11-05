@@ -1358,7 +1358,14 @@ impl<'a> BodyTyper<'a> {
                         let id = class.as_ref().clone();
                         if self.classes().contains_key(&id) || *runtime {
                             expr.decisions |= crate::expr::RESOLVED_CLASS_REF;
-                            qualify_resolved_path(path, &id);
+                            if *runtime && crate::gems::preloaded_constant(id.0.as_str()) {
+                                // Object:: and Object aliases name this same preloaded
+                                // namespace. Its resolved name lets BUNDLED load the package.
+                                *path = std::iter::once(Symbol::from(""))
+                                    .chain(id.0.as_str().split("::").map(Symbol::from)).collect();
+                            } else {
+                                qualify_resolved_path(path, &id);
+                            }
                             Ty::Class { id, args: vec![].into() }
                         } else {
                             unknown()
