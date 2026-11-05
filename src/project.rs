@@ -8676,6 +8676,7 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport", "errors_import"),
     ("ActiveSupport", "errors_merge"),
     ("ActiveJob::Arguments", "serialize"),
+    ("ActiveJob::Arguments", "ruby2_keywords_hash"),
 ];
 
 /// Instance methods only the ruby family and spinel can answer: a model's

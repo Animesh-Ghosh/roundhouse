@@ -1,15 +1,15 @@
-//! `Hash.ruby2_keywords_hash(hash)` → `hash.dup`.
+//! `Hash.ruby2_keywords_hash(hash)` →
+//! `ActiveJob::Arguments.ruby2_keywords_hash(hash)`.
 //!
 //! The method answers a copy of the Hash flagged so that a later `*args`
 //! splat passes it as keywords. Spinel refuses the call by name and no
-//! target carries the flag, so the copy is all that is kept.
-//! solid_queue's `RecurringTask#arguments_with_kwargs` flags a recurring
-//! task's last Hash argument. A job whose `perform` takes keywords keeps
-//! its Proc rather than a payload (`lower::job_payload`), so nothing here
-//! passes such a Hash to keywords. What differs is the payload text:
-//! `ActiveJob::Arguments.serialize` writes `_aj_symbol_keys` where Rails
-//! writes `_aj_ruby2_keywords`, which a Rails worker reading it would
-//! not splat as keywords. Both close with keyword `perform` payloads.
+//! target carries the flag, so the runtime holds the copies it answered
+//! and `ActiveJob::Arguments.serialize` writes such a Hash with
+//! `_aj_ruby2_keywords`, as Rails does (solid_queue's
+//! `RecurringTask#arguments_with_kwargs` flags a recurring task's last
+//! Hash argument). A splat into keyword parameters is not modelled: a
+//! job whose `perform` takes keywords keeps its Proc rather than a
+//! payload (`lower::job_payload`).
 
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
@@ -24,6 +24,6 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     if !hash {
         return;
     }
-    let arg = args.pop().expect("one argument");
-    *expr.node = ExprNode::Send { recv: Some(arg), method: Symbol::from("dup"), args: Vec::new(), block: None, parenthesized: false };
+    let span = recv.span;
+    *recv = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActiveJob"), Symbol::from("Arguments")] });
 }

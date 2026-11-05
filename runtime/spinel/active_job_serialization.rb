@@ -297,6 +297,20 @@ module ActiveJob
       arguments.map { |argument| serialize_argument(argument) }
     end
 
+    # Not a flag on the Hash, as Ruby keeps one: no target carries it, so the latest copies are held and known by identity (not `object_id`, which Spinel reuses once one is freed).
+    FLAGGED = []
+
+    def self.ruby2_keywords_hash(hash)
+      copy = hash.dup
+      FLAGGED << copy
+      FLAGGED.shift if FLAGGED.length > 64
+      copy
+    end
+
+    def self.ruby2_keywords_hash?(hash)
+      FLAGGED.any? { |held| held.equal?(hash) }
+    end
+
     def self.serialize_hash_key(key)
       unless key.is_a?(String) || key.is_a?(Symbol)
         raise ActiveJob::SerializationError, "Only string and symbol hash keys may be serialized as job arguments, but " + key.inspect + " is a " + key.class.name.to_s
@@ -326,7 +340,7 @@ module ActiveJob
           symbol_keys << name if key.is_a?(Symbol)
           result[name] = serialize_argument(value)
         end
-        result[SYMBOL_KEYS_KEY] = symbol_keys
+        result[ruby2_keywords_hash?(argument) ? RUBY2_KEYWORDS_KEY : SYMBOL_KEYS_KEY] = symbol_keys
         result
       else
         # Not Date, Duration or an app's own serializer, which Rails writes: `deserialize` reads none of them either.
@@ -387,7 +401,7 @@ module ActiveJob
         next if key == SYMBOL_KEYS_KEY || key == RUBY2_KEYWORDS_KEY || key == WITH_INDIFFERENT_ACCESS_KEY
         result[symbol_keys && symbol_keys.include?(key) ? key.to_sym : key] = deserialize_argument(value)
       end
-      result
+      hash[RUBY2_KEYWORDS_KEY].nil? ? result : ruby2_keywords_hash(result)
     end
   end
 

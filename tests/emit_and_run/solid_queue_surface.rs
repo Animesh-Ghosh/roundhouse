@@ -5,7 +5,8 @@
 //!   `case` over `config/recurring.yml`'s commands, and a command not in
 //!   the file raises ArgumentError (under `eval` the unknown one below is
 //!   a NameError).
-//! - `Hash.ruby2_keywords_hash(h)` answers a copy; `ActiveSupport::JSON`'s
+//! - `Hash.ruby2_keywords_hash(h)` answers a copy, which `ActiveJob::Arguments`
+//!   writes with `_aj_ruby2_keywords` and reads back flagged; `ActiveSupport::JSON`'s
 //!   `load` and `dump` are Rails' `decode` and `encode`.
 //! - A Concern's `included do class_attribute ... end` declares the
 //!   attribute on each library class that includes it
@@ -54,6 +55,10 @@ end
 h = { a: 1 }
 k = SurfaceProbe.keywords(h)
 raise "keywords: #{k.inspect}" unless k == h && !k.equal?(h)
+raise "flagged: #{ActiveJob::Arguments.serialize([k]).inspect}" unless ActiveJob::Arguments.serialize([k]) == [{ "a" => 1, "_aj_ruby2_keywords" => ["a"] }]
+raise "unflagged" unless ActiveJob::Arguments.serialize([h]) == [{ "a" => 1, "_aj_symbol_keys" => ["a"] }]
+back = ActiveJob::Arguments.deserialize(ActiveJob::Arguments.serialize([k])).first
+raise "round trip: #{back.inspect}" unless back == h && ActiveJob::Arguments.serialize([back]) == [{ "a" => 1, "_aj_ruby2_keywords" => ["a"] }]
 raise "json" unless SurfaceProbe.round_trip({ "a" => [1, "x"] }) == { "a" => [1, "x"] }
 raise "page_size" unless SurfaceProbe.page_size == 1000
 raise "serialize" unless ActiveJob::Arguments.serialize([{ a: 1, "b" => :c }]) == [{ "a" => 1, "b" => { "_aj_serialized" => "ActiveJob::Serializers::SymbolSerializer", "value" => "c" }, "_aj_symbol_keys" => ["a"] }]
