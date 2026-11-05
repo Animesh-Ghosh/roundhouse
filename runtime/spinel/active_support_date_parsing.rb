@@ -19,12 +19,8 @@ module ActiveSupport
   def self.format_db_date(value)
     return nil if value.nil?
     return nil if value.is_a?(String) && value == ""
-    # `instance_of?(Date)` — DateTime is a Date subclass but carries a
-    # clock; a date column stores the civil day only (Rails).
-    return value.iso8601 if value.instance_of?(Date)
-    if value.is_a?(Date)
-      return Date.new(value.year, value.month, value.day).iso8601
-    end
+    # Rails casts DateTime to its civil Date and preserves Date formatting.
+    return value.to_date.strftime("%Y-%m-%d") if value.is_a?(Date)
     return Date.iso8601(value).iso8601 if value.is_a?(String)
     raise TypeError, "expected Date, String, or nil"
   end

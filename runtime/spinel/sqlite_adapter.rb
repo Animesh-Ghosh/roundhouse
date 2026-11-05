@@ -186,7 +186,7 @@ module SqliteAdapter
       # `time` can load Date even when the app has no date columns and
       # the optional ActiveSupport date helpers were omitted. Quote the
       # civil day directly, including for a DateTime receiver.
-      Db.escape_string(v.strftime("%Y-%m-%d"))
+      Db.escape_string(v.to_date.strftime("%Y-%m-%d"))
     else
       Db.escape_string(v.to_s)
     end
