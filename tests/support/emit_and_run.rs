@@ -999,7 +999,25 @@ pub mod bundle {
             let edits = if case.flags.iter().any(|f| f == HTTP) { http_base_edits(case) } else { base_edits(case) };
             groups.entry((case.base.clone(), case.flags.clone(), edits)).or_default().push(case);
         }
-        groups.values().flat_map(|g| g.chunks(GROUP).map(|c| c.to_vec())).collect()
+        // Not the group cut in order: a whole-file write two cases make differently (an empty app's
+        // routes and schema) does not compose, so each chunk takes only cases that merge with it.
+        let mut out = Vec::new();
+        for group in groups.into_values() {
+            let mut left = group;
+            while !left.is_empty() {
+                let mut chunk = vec![left.remove(0)];
+                let mut rest = Vec::new();
+                for case in left {
+                    chunk.push(case);
+                    if chunk.len() > GROUP || merged_edits(&chunk).is_none() {
+                        rest.push(chunk.pop().unwrap());
+                    }
+                }
+                out.push(chunk);
+                left = rest;
+            }
+        }
+        out
     }
 
     /// The tests each shared build would take, for the lane to keep each such set on one shard
