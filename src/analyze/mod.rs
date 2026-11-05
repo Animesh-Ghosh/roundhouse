@@ -10476,16 +10476,9 @@ fn register_attr_accessors(body: &[ModelBodyItem], methods: &mut HashMap<Symbol,
 /// `typed_store`, reusing its type map. A bare `attribute :name` with no
 /// type, or an unrecognized type, falls back to `Untyped` (gradual).
 fn register_ar_attributes(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {
-    for item in body {
-        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
-        let ExprNode::Send { recv, method, args, .. } = &*expr.node else { continue };
-        if recv.is_some() || method.as_str() != "attribute" {
-            continue;
-        }
-        let Some(name) = args.first().and_then(symbol_arg) else { continue };
-        let ty = args
-            .get(1)
-            .and_then(symbol_arg)
+    for (name, ty) in crate::lower::model_to_library::markers::attribute_api_decls(body) {
+        let ty = ty
+            .as_ref()
             .and_then(|t| typed_store_ty(t.as_str()))
             .unwrap_or(Ty::Untyped);
         methods.entry(name.clone()).or_insert(ty.clone());

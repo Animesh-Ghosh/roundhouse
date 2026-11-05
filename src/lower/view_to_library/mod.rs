@@ -5386,7 +5386,7 @@ fn bool_reader_names(
             }
         }
         for (name, ty) in crate::lower::model_to_library::attribute_api_decls(&m.body) {
-            if ty.as_str() == "boolean" {
+            if ty.as_ref().is_some_and(|ty| ty.as_str() == "boolean") {
                 set.insert(name.as_str().to_string());
             }
         }
