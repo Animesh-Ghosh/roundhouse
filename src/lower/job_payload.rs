@@ -449,8 +449,13 @@ fn literal_ruby(e: &Expr) -> Option<String> {
             Literal::Bool { value } => Some(value.to_string()),
             Literal::Int { value } => Some(value.to_string()),
             Literal::Float { value } if value.is_finite() => Some(format!("{value:?}")),
+            // Not a bare `"…"` for `+"…"`: the registry is `frozen_string_literal: true`, and the job may append to its default.
+            Literal::Str { value } if matches!(e.hint(), Some(crate::expr::IrHint::MutableStringLiteral)) => Some(format!("+{}", ruby_str(value))),
             Literal::Str { value } => Some(ruby_str(value)),
-            Literal::Sym { value } if value.as_str().chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+            Literal::Sym { value }
+                if value.as_str().chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && value.as_str().chars().all(|c| c.is_ascii_alphanumeric() || c == '_') =>
+            {
                 Some(format!(":{}", value.as_str()))
             }
             _ => None,
@@ -1561,7 +1566,8 @@ pub(crate) fn fresh_name(base: &str, taken: &[&str]) -> String {
 }
 
 fn ruby_str(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    // Not `#` as written: `#{`, `#@` and `#$` interpolate in a double-quoted literal.
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('#', "\\#"))
 }
 
 fn write_expr(codec: &Codec, v: &str) -> String {

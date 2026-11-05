@@ -521,3 +521,26 @@ fn a_required_keyword_still_has_no_wrapper_off_the_ruby_family() {
     let req = emitted(&app, "req_job.rb");
     assert!(!req.contains("def self.perform_later"), "{req}");
 }
+
+/// A literal default goes into the reader as Ruby that means the same
+/// value: a mutable String keeps its `+`, a `#{` stays text, and a Symbol
+/// that is no bare identifier keeps the job on its Proc.
+#[test]
+fn keyword_defaults_are_written_as_the_same_ruby_values() {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+        ("app/models/user.rb", "class User < ApplicationRecord\n  def self.later\n    BufJob.perform_later(1)\n    TplJob.perform_later(1)\n    SymJob.perform_later(1)\n  end\nend\n"),
+        ("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\nend\n"),
+        ("app/jobs/buf_job.rb", "class BufJob < ApplicationJob\n  def perform(n, buf: +\"b\")\n    buf << \"x\"\n  end\nend\n"),
+        ("app/jobs/tpl_job.rb", "class TplJob < ApplicationJob\n  def perform(n, tpl: '#{x}')\n    nil\n  end\nend\n"),
+        ("app/jobs/sym_job.rb", "class SymJob < ApplicationJob\n  def perform(n, s: :\"9a\")\n    nil\n  end\nend\n"),
+    ]))
+    .expect("ingest default job app");
+    roundhouse::session::analyze_and_lower_for(&mut app, roundhouse::build_target::BuildTarget::Ruby);
+    let src = registry_source(&app.job_plans, false);
+    assert!(src.contains(": +\"b\")"), "{src}");
+    assert!(src.contains(": \"\\#{x}\")"), "{src}");
+    let sym = plan(&app, "SymJob");
+    assert!(sym.fallback.as_ref().is_some_and(|f| f.reason.contains("not a literal")), "{:?}", sym.fallback);
+}
