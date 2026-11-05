@@ -449,9 +449,8 @@ fn literal_ruby(e: &Expr) -> Option<String> {
             Literal::Bool { value } => Some(value.to_string()),
             Literal::Int { value } => Some(value.to_string()),
             Literal::Float { value } if value.is_finite() => Some(format!("{value:?}")),
-            // Not a bare `"…"` for `+"…"`: the registry is `frozen_string_literal: true`, and the job may append to its default.
-            Literal::Str { value } if matches!(e.hint(), Some(crate::expr::IrHint::MutableStringLiteral)) => Some(format!("+{}", ruby_str(value))),
-            Literal::Str { value } => Some(ruby_str(value)),
+            // Not a bare `"…"`: the registry is `frozen_string_literal: true`, and outside such a file Ruby hands the job a String it may append to.
+            Literal::Str { value } => Some(format!("+{}", ruby_str(value))),
             Literal::Sym { value }
                 if value.as_str().chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
                     && value.as_str().chars().all(|c| c.is_ascii_alphanumeric() || c == '_') =>
@@ -1566,8 +1565,23 @@ pub(crate) fn fresh_name(base: &str, taken: &[&str]) -> String {
 }
 
 fn ruby_str(s: &str) -> String {
-    // Not `#` as written: `#{`, `#@` and `#$` interpolate in a double-quoted literal.
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('#', "\\#"))
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            // Not `#` as written: `#{`, `#@` and `#$` interpolate in a double-quoted literal.
+            '#' => out.push_str("\\#"),
+            '\n' => out.push_str("\\n"),
+            // Not a raw CR: Ruby reads a CRLF in source as LF.
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn write_expr(codec: &Codec, v: &str) -> String {
