@@ -918,7 +918,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     expect_string_key::apply_expect_string_keys(app);
     ran!("expect_string_key");
     diags.extend(crate::timings::phase("post-analyze: blank", || {
-        blank::apply_blank_lowering(app)
+        blank::apply_blank_lowering_for(app, target)
     }));
     ran!("blank");
     as_json_super::apply_as_json_super_grounding(app);
