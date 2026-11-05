@@ -486,20 +486,21 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // present?") and downstream emitters don't need target-specific
     // `defined?` knowledge.
     let mut rewritten = rewritten;
-    // An app override owns pluralize, including nested ERB calls.
-    // Qualify it before the framework classifier consumes bare Sends.
-    if let Some(owner) = app.helper_method_index.get(&Symbol::from("pluralize")) {
-        fn qualify_pluralize(e: &mut Expr, owner: &ClassId) {
-            e.node.for_each_child_mut(&mut |c| qualify_pluralize(c, owner));
+    // An app override owns pluralize or content_tag, including nested ERB
+    // calls. Qualify it before the framework classifier consumes bare Sends.
+    for helper in ["pluralize", "content_tag"] {
+        let Some(owner) = app.helper_method_index.get(&Symbol::from(helper)) else { continue };
+        fn qualify_helper(e: &mut Expr, helper: &str, owner: &ClassId) {
+            e.node.for_each_child_mut(&mut |c| qualify_helper(c, helper, owner));
             if let ExprNode::Send { recv, method, .. } = &mut *e.node {
-                if recv.is_none() && method.as_str() == "pluralize" {
+                if recv.is_none() && method.as_str() == helper {
                     *recv = Some(Expr::new(e.span, ExprNode::Const {
                         path: owner.0.as_str().split("::").map(Symbol::from).collect(),
                     }));
                 }
             }
         }
-        qualify_pluralize(&mut rewritten, owner);
+        qualify_helper(&mut rewritten, helper, owner);
     }
     rewrite_defined_to_nil_check(&mut rewritten);
     // `local_assigns[:x]` → the bare local `x`. Same place and the same

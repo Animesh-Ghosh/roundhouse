@@ -1544,7 +1544,7 @@ fn emit_turbo_frame_tag(args: &[Expr], block: Option<&Expr>, ctx: &ViewCtx) -> O
 /// is answered here rather than left for a runtime that has no
 /// safe-string type); a call to a recorded producer yields itself, when
 /// its receiver is one of the classes that have the marked definition.
-fn html_safe_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
+pub(super) fn html_safe_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else {
         return None;
     };
@@ -1631,7 +1631,7 @@ fn coerce_to_s(expr: Expr) -> Expr {
 /// read of it: a partial handed `csrf_meta_tags:` reads the caller's
 /// value, as Ruby takes the bare name for the lvar, not the helper.
 /// `csrf_meta_tags()` is still the call.
-fn classify_template_helper<'a>(
+pub(super) fn classify_template_helper<'a>(
     method: &str,
     args: &'a [Expr],
     parenthesized: bool,

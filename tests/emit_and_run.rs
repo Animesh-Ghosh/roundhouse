@@ -127,6 +127,10 @@ mod source_gem_autoload;
 mod source_gem_load_order;
 #[path = "emit_and_run/unresolved_param_rbs.rs"]
 mod unresolved_param_rbs;
+#[path = "emit_and_run/unknown_receiver_param_rbs.rs"]
+mod unknown_receiver_param_rbs;
+#[path = "emit_and_run/is_a_self_narrowing.rs"]
+mod is_a_self_narrowing;
 #[path = "emit_and_run/source_gem_facade.rs"]
 mod source_gem_facade;
 #[path = "support/for_loops.rs"]
@@ -368,6 +372,8 @@ mod constructor_unrelated_mutations;
 mod render_to_string_partial_ivar;
 #[path = "emit_and_run/active_support_extensions.rs"]
 mod active_support_extensions;
+#[path = "emit_and_run/array_pluck_union.rs"]
+mod array_pluck_union;
 #[path = "emit_and_run/routing_redirect_host.rs"]
 mod routing_redirect_host;
 #[path = "emit_and_run/time_find_zone.rs"]
@@ -20709,6 +20715,24 @@ fn an_html_safe_method_is_trusted_by_its_owner() {
 #[ignore = "requires the Spinel toolchain"]
 fn an_html_safe_method_is_trusted_by_its_owner_on_spinel() {
     html_safe_method_owner::app().run_spinel(&html_safe_method_owner::render_script()).assert_passes();
+}
+
+#[path = "support/content_tag_options.rs"]
+mod content_tag_options;
+
+#[test]
+fn a_content_tag_with_options_renders() {
+    content_tag_options::app(content_tag_options::VIEW)
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_content_tag_with_options_renders_on_spinel() {
+    content_tag_options::app(content_tag_options::VIEW)
+        .run_spinel(&content_tag_options::render_script())
+        .assert_passes();
 }
 
 #[path = "support/go_test_literal_receiver.rs"]
