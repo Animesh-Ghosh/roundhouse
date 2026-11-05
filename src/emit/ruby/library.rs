@@ -3611,6 +3611,17 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         };
         let declared_instance = declared_on(false);
         let declared_class = declared_on(true);
+        let controller_shadows = app
+            .controllers
+            .iter()
+            .find(|controller| controller.name == lc.name)
+            .map(|controller| {
+                crate::lower::controller_to_library::route_helper_shadows(
+                    controller,
+                    &app.controllers,
+                )
+            })
+            .unwrap_or_default();
         // A framework-helper name the app defines on a SUPERCLASS or in an
         // INCLUDED module (`ApplicationRecord#dom_class`, a concern's
         // `number_to_currency`) is the same self-dispatch: qualifying it to
@@ -3675,6 +3686,9 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 MethodReceiver::Instance => declared_instance.clone(),
                 MethodReceiver::Class => declared_class.clone(),
             };
+            if m.receiver == MethodReceiver::Instance {
+                own_methods.extend(controller_shadows.iter().cloned());
+            }
             own_methods.extend(match m.receiver {
                 MethodReceiver::Instance => inherited_instance.iter().cloned(),
                 MethodReceiver::Class => inherited_class.iter().cloned(),

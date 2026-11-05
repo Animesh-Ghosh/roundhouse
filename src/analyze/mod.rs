@@ -5825,84 +5825,45 @@ impl Analyzer {
         if let Some(Ty::Fn { ret, .. }) = &method.signature {
             return Some((**ret).clone());
         }
-        self.class_object_return_ty(&method.body)
-            .or_else(|| tuple_return_ty(&method.body))
-            .or_else(|| effective_return_ty(&method.body))
+        tuple_return_ty(&method.body)
+            .or_else(|| effective_return_ty_with(&method.body, Self::class_object_return_ty))
     }
 
-    /// A method whose every return value is a class constant returns
-    /// the CLASS, not an instance of it: lobsters'
-    /// `Search#searched_model` is `what == :stories ? Story : Comment`.
-    /// The body typer gives a class constant the same `Ty::Class { C }`
-    /// an instance has (deliberately, so `Story.where` dispatches), and
-    /// harvesting that as the return declared `-> (Comment | Story)` in
-    /// the emitted RBS — a lie spinel trusted, which hid a
-    /// `searched_model.none` NoMethodError (#132). The boundary is where
-    /// the distinction is recoverable, so it is drawn here, the way
-    /// `Relation` is: `Class[C]`, which RBS spells `singleton(C)` and
-    /// `dispatch` reads back as `C` for callers.
+    /// A return value that is a class constant is the CLASS, not an
+    /// instance of it: lobsters' `Search#searched_model` is
+    /// `what == :stories ? Story : Comment`. The body typer gives a class
+    /// constant the same `Ty::Class { C }` an instance has (deliberately,
+    /// so `Story.where` dispatches), and harvesting that as the return
+    /// declared `-> (Comment | Story)` in the emitted RBS, a lie spinel
+    /// trusted, which hid a `searched_model.none` NoMethodError (#132).
+    /// The boundary is drawn here, the way `Relation` is: `Class[C]`, which
+    /// RBS spells `singleton(C)` and `dispatch` reads back as `C`.
     ///
-    /// All or nothing: a tail mixing a class with any other value, or a
-    /// `return` off the tail, keeps the ordinary harvest.
-    fn class_object_return_ty(&self, body: &Expr) -> Option<Ty> {
-        fn tails<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>, returns: &mut usize) {
-            match &*e.node {
-                ExprNode::If { then_branch, else_branch, .. } => {
-                    tails(then_branch, out, returns);
-                    tails(else_branch, out, returns);
-                }
-                ExprNode::Case { arms, .. } => {
-                    arms.iter().for_each(|a| tails(&a.body, out, returns))
-                }
-                ExprNode::Seq { exprs } if !exprs.is_empty() => {
-                    tails(exprs.last().unwrap(), out, returns)
-                }
-                ExprNode::Return { value } => {
-                    *returns += 1;
-                    tails(value, out, returns);
-                }
-                // A raising arm returns nothing.
-                ExprNode::Raise { .. } => {}
-                _ => out.push(e),
-            }
+    /// Each return alternative is promoted on its own, so a method that
+    /// returns `C` on one path and `C.new` on another declares
+    /// `singleton(C) | C`. Nominal types alone don't tell `C` from
+    /// `C.new`; the body typer's identity evidence does, including a local
+    /// copy of `C`. An unresolved alternative keeps the whole return unknown.
+    fn class_object_return_ty(body: &Expr) -> Option<Ty> {
+        let mut promoted = false;
+        let mut tys = Vec::new();
+        for leaf in return_leaves(body) {
+            let ty = leaf.ty.clone().unwrap_or_else(crate::analyze::body::unknown);
+            // A runtime-created class has kind Class/Module but no named identity.
+            let value = if matches!(&ty, Ty::Class { id, .. } if matches!(id.0.as_str(), "Class" | "Module"))
+                && !matches!(&*leaf.node, ExprNode::Const { .. })
+            { ty.clone() } else { class_object_arg_ty(leaf, ty.clone()) };
+            promoted |= value != ty;
+            tys.push(value);
         }
-        fn count_returns(e: &Expr) -> usize {
-            let mut n = usize::from(matches!(&*e.node, ExprNode::Return { .. }));
-            e.node.for_each_child(&mut |c| n += count_returns(c));
-            n
+        if !promoted {
+            return body.ty.clone();
         }
-        let mut out = Vec::new();
-        let mut tail_returns = 0;
-        tails(body, &mut out, &mut tail_returns);
-        // A `return` off the tail is a value this walk did not see.
-        if out.is_empty() || count_returns(body) != tail_returns {
-            return None;
+        // An unresolved alternative must not disappear behind a proven one.
+        if tys.iter().any(Ty::has_unknown_arm) {
+            return Some(crate::analyze::body::unknown());
         }
-        let mut classes: Vec<Ty> = Vec::new();
-        for t in out {
-            let ExprNode::Const { path } = &*t.node else { return None };
-            let Some(Ty::Class { id, args }) = &t.ty else { return None };
-            // The constant must NAME the class it is typed as. A value
-            // constant (`DEFAULT = Foo.new`) is typed by its value,
-            // whose class is not its own name.
-            let written = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-            let named = id.0.as_str() == written
-                || id.0.as_str().ends_with(&format!("::{written}"));
-            if !args.is_empty() || !named || !self.classes.contains_key(id) {
-                return None;
-            }
-            let singleton = Ty::Class {
-                id: ClassId(Symbol::from("Class")),
-                args: vec![Ty::Class { id: id.clone(), args: vec![].into() }].into(),
-            };
-            if !classes.contains(&singleton) {
-                classes.push(singleton);
-            }
-        }
-        Some(match classes.len() {
-            1 => classes.pop().unwrap(),
-            _ => Ty::Union { variants: classes.into() },
-        })
+        Some(crate::analyze::body::union_many(tys))
     }
 
     /// True when every value `body` can return is the value of the
@@ -9586,9 +9547,13 @@ fn helper_instance_index(app: &App) -> HashMap<Symbol, ClassId> {
 }
 
 fn effective_return_ty(body: &Expr) -> Option<Ty> {
+    effective_return_ty_with(body, |value| value.ty.clone())
+}
+
+fn effective_return_ty_with(body: &Expr, value_ty: fn(&Expr) -> Option<Ty>) -> Option<Ty> {
     let mut tys: Vec<Ty> = Vec::new();
     let mut saw_return = false;
-    collect_return_types(body, &mut tys, &mut saw_return);
+    collect_return_types(body, &mut tys, &mut saw_return, value_ty);
     // Not the known arms alone: parslet's `Atoms::Base#apply` returns an
     // unknown `result` beside `context.err_at(...)`, and harvesting only
     // the latter typed every parse result as a `Parslet::Cause`.
@@ -9597,7 +9562,7 @@ fn effective_return_ty(body: &Expr) -> Option<Ty> {
     }
     // Tail (implicit return). Drop `Bottom` so an all-diverging tail
     // doesn't poison the union; keep everything else.
-    if let Some(t) = &body.ty {
+    if let Some(t) = value_ty(body) {
         if !matches!(t, Ty::Bottom) {
             tys.push(t.clone());
         }
@@ -9630,7 +9595,7 @@ fn effective_return_ty(body: &Expr) -> Option<Ty> {
 
 fn returns_an_unknown(expr: &Expr) -> bool {
     match &*expr.node {
-        ExprNode::Return { value } => matches!(value.ty, Some(Ty::Var { .. })) || returns_an_unknown(value),
+        ExprNode::Return { value } => value.ty.as_ref().is_some_and(Ty::has_unknown_arm) || returns_an_unknown(value),
         ExprNode::Lambda { .. } => false,
         ExprNode::Send { recv, args, block, method, .. } => {
             recv.as_ref().is_some_and(returns_an_unknown)
@@ -9672,16 +9637,16 @@ fn returns_an_unknown(expr: &Expr) -> bool {
 /// receivers make a `{ }` block a closure anyway and are named:
 /// `lambda` (a lambda's `return` is lambda-local) and `define_method`
 /// (the `return` belongs to the method being defined).
-fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>, saw: &mut bool) {
+fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>, saw: &mut bool, value_ty: fn(&Expr) -> Option<Ty>) {
     match &*expr.node {
         ExprNode::Return { value } => {
             *saw = true;
-            if let Some(t) = &value.ty {
+            if let Some(t) = value_ty(value) {
                 if !t.is_open() {
                     out.push(t.clone());
                 }
             }
-            collect_return_types(value, out, saw);
+            collect_return_types(value, out, saw, value_ty);
         }
         // A `Lambda` reached here is in value position — a closure
         // boundary. The `Send`/`Apply` arms below step past the node
@@ -9690,40 +9655,40 @@ fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>, saw: &mut bool) {
 
         ExprNode::Send { recv, args, block, method, .. } => {
             if let Some(r) = recv {
-                collect_return_types(r, out, saw);
+                collect_return_types(r, out, saw, value_ty);
             }
             for a in args {
-                collect_return_types(a, out, saw);
+                collect_return_types(a, out, saw, value_ty);
             }
             // `lambda { return }` is lambda-local, and
             // `define_method(:x) { return }` belongs to the method
             // being defined. Every other block's `return` is ours.
             if !matches!(method.as_str(), "lambda" | "define_method") {
                 if let Some(b) = block {
-                    collect_block_return_types(b, out, saw);
+                    collect_block_return_types(b, out, saw, value_ty);
                 }
             }
         }
         ExprNode::Apply { fun, args, block } => {
-            collect_return_types(fun, out, saw);
+            collect_return_types(fun, out, saw, value_ty);
             for a in args {
-                collect_return_types(a, out, saw);
+                collect_return_types(a, out, saw, value_ty);
             }
             if let Some(b) = block {
-                collect_block_return_types(b, out, saw);
+                collect_block_return_types(b, out, saw, value_ty);
             }
         }
 
-        _ => expr.node.for_each_child(&mut |c| collect_return_types(c, out, saw)),
+        _ => expr.node.for_each_child(&mut |c| collect_return_types(c, out, saw, value_ty)),
     }
 }
 
 /// Walk a call's block body for `return`s that belong to the enclosing
 /// method. Steps past the `Lambda` node deliberately: reaching the body
 /// through `collect_return_types` would hit the closure-boundary arm.
-fn collect_block_return_types(block: &Expr, out: &mut Vec<Ty>, saw: &mut bool) {
+fn collect_block_return_types(block: &Expr, out: &mut Vec<Ty>, saw: &mut bool, value_ty: fn(&Expr) -> Option<Ty>) {
     match &*block.node {
-        ExprNode::Lambda { body, .. } => collect_return_types(body, out, saw),
+        ExprNode::Lambda { body, .. } => collect_return_types(body, out, saw, value_ty),
         // A block passed as `&blk` (or any non-literal block operand)
         // has no body here.
         _ => {}
