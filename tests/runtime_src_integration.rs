@@ -1297,7 +1297,12 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 924 on 2026-11-04 (on 921): `Type::Value#serialize`
     // takes any value, as Rails' does, and reads it three times
     // (+3 in active_record/types.rb).
-    const CEILING: usize = 924;
+    // MEASURED 929 on 2026-11-04 (exact main 7868dd14: 924):
+    // ActiveSupport.blank? follows Object's optional empty? protocol and
+    // String's encoding fallback. Its deliberately untyped argument adds
+    // 5 sites; all other files and method bodies are unchanged
+    // (+5 in active_support_ext.rb).
+    const CEILING: usize = 929;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"
