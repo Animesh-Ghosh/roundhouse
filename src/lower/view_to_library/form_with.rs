@@ -318,6 +318,7 @@ pub(super) fn emit_form_with_inline(
         record_var: record_var.clone(),
         form_method_var,
         id_prefix: comps.id_prefix.clone(),
+        recordless: !comps.model_name.is_empty() && matches!(&*comps.model.node, ExprNode::Lit { value: Literal::Nil }),
     });
     // `f.object` is the one FormBuilder method used in EXPRESSION
     // position (`errors_for f.object`) — substitute the record local
@@ -788,6 +789,7 @@ fn classify_form_with_components(
     let mut url_expr: Option<Expr> = None;
     let mut method_expr: Option<Expr> = None;
     let mut namespace: Option<String> = None;
+    let mut scope: Option<String> = None;
     let mut opts_entries: Vec<(Expr, Expr)> = Vec::new();
 
     for arg in args {
@@ -820,10 +822,11 @@ fn classify_form_with_components(
                         // not an HTML attribute — left in opts it rendered
                         // a bogus `scope="…"` attr (keybase's
                         // `scope: :keybase_proof`) whose Symbol value
-                        // crashed html_escape. Dropped here (field-name
-                        // prefixing itself is a separate unimplemented gap;
-                        // fields name bare today either way).
+                        // crashed html_escape. A form with no model takes
+                        // it as the prefix (`filter[job_class_name]`); a
+                        // model form still names its fields after the model.
                         "scope" => {
+                            scope = str_or_sym_literal(v);
                             continue;
                         }
                         // form_with's generated-id prefix option, not an
@@ -868,7 +871,7 @@ fn classify_form_with_components(
             let url = url_expr?;
             return Some(FormWithComponents {
                 model: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
-                model_name: String::new(),
+                model_name: scope.clone().unwrap_or_default(),
                 action: route_helperize(url, &route_helpers, ctx),
                 method: method_expr.clone().unwrap_or_else(default_post),
                 opts_entries,

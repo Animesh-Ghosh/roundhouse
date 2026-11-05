@@ -940,6 +940,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             record_var: record_var.clone(),
             form_method_var: form_method_var.clone(),
             id_prefix: binding.id_prefix.clone(),
+            recordless: false,
         });
         let record_ref = Expr::new(
             Span::synthetic(),
@@ -5026,6 +5027,9 @@ pub(super) struct FormBuilderBinding {
     /// on one page don't collide. Field NAMES are untouched. Empty for
     /// the common un-namespaced form.
     pub(super) id_prefix: String,
+    /// A `scope:` form with no record (`form_for :filter, url: ...`): its
+    /// fields are named under the scope but read no attributes.
+    pub(super) recordless: bool,
 }
 
 impl FormBuilderBinding {

@@ -746,6 +746,15 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         if method.as_str() == "form_with" {
             return emit_form_with_inline(sa, block, ctx);
         }
+        // `form_for :filter, url: ..., method: :get do |form|`: a form for
+        // no record, which is form_with's `scope:` form (Rails moves
+        // form_for's top-level `data:` into its html options, as
+        // form_with takes it).
+        if method.as_str() == "form_for" {
+            if let Some(args) = form_for_scope_args(sa) {
+                return emit_form_with_inline(&args, block, ctx);
+            }
+        }
         // `<%= form_tag(action, opts) do ...inner... %>` — the
         // builder-less bare form, same inline expansion minus the
         // FormBuilder binding (lobsters' link_post).
@@ -3046,4 +3055,25 @@ fn emit_cached_fragment(
             },
         ),
     ]
+}
+
+/// `form_for :scope, k: v, ...` as `form_with(scope: :scope, k: v, ...)`.
+/// None for a record form (`form_for @user`), which names and fills its
+/// fields from the record.
+fn form_for_scope_args(args: &[Expr]) -> Option<Vec<Expr>> {
+    let (first, rest) = args.split_first()?;
+    let ExprNode::Lit { value: Literal::Sym { .. } } = &*first.node else { return None };
+    let mut entries = vec![(
+        Expr::new(first.span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from("scope") } }),
+        first.clone(),
+    )];
+    match rest {
+        [] => {}
+        [opts] => {
+            let ExprNode::Hash { entries: more, .. } = &*opts.node else { return None };
+            entries.extend(more.iter().cloned());
+        }
+        _ => return None,
+    }
+    Some(vec![Expr::new(first.span, ExprNode::Hash { entries, kwargs: true })])
 }
