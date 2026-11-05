@@ -1400,7 +1400,7 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     }
     // `truncate(x) + "!"`: Rails' SafeBuffer `+` stays html-safe, escaping
     // only what it appends, so the whole is written as it is.
-    if let Some(safe) = safe_buffer_value(&rewritten) {
+    if let Some(safe) = safe_buffer_value(&rewritten, ctx) {
         return vec![accumulator_append_call(coerce_to_s(safe), ctx)];
     }
     // Not left to each emitter: only the Ruby one unwrapped the escape around `raw`, and TypeScript shipped `html_escape(raw(x))`
@@ -1614,26 +1614,27 @@ fn receiver_classes(r: &Expr) -> Option<(Vec<String>, bool)> {
 /// buffer, ready to write unescaped, or `None` when it has to be escaped
 /// as a whole. A buffer is an escape the view helpers applied
 /// (`ActionView::ViewHelpers.html_escape(…)`, which is how `truncate`,
-/// `word_wrap` and `h` lower), an explicit `x.html_safe`, or
-/// a buffer `+` anything: SafeBuffer's `+` stays safe and escapes the
-/// operand unless that is a buffer too. A String on the left (`"!" +
-/// truncate(x)`) is a plain String in Rails, so it isn't one.
-///
-/// Methods recorded in `App::html_safe_methods` are left out: they are
-/// matched by name only, and the bare output answers them itself
-/// ([`html_safe_value`]).
-pub(super) fn safe_buffer_value(e: &Expr) -> Option<Expr> {
+/// `word_wrap` and `h` lower), an explicit `x.html_safe`, a call to an
+/// app method marked html-safe on every class its receiver can be
+/// ([`html_safe_value`]), or a buffer `+` anything: SafeBuffer's
+/// `+` stays safe and escapes the operand unless that is a buffer too. A
+/// String on the left (`"!" + truncate(x)`) is a plain String in Rails,
+/// so it isn't one.
+pub(super) fn safe_buffer_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     let ExprNode::Send { recv: Some(r), method, args, block: None, parenthesized } = &*e.node else {
         return None;
     };
+    if let Some(marked) = html_safe_value(e, ctx) {
+        return Some(marked);
+    }
     match (method.as_str(), args.len()) {
         ("html_escape", 1) if matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"])) => {
             Some(e.clone())
         }
         ("html_safe", 0) => Some((*r).clone()),
         ("+", 1) => {
-            let left = safe_buffer_value(r)?;
-            let right = safe_buffer_value(&args[0])
+            let left = safe_buffer_value(r, ctx)?;
+            let right = safe_buffer_value(&args[0], ctx)
                 .unwrap_or_else(|| view_helpers_call("html_escape", vec![coerce_to_s(args[0].clone())]));
             let mut sum = Expr::new(
                 e.span,

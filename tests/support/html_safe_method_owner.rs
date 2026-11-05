@@ -37,10 +37,16 @@ pub const VIEW: &str = concat!(
     "w2:<%= @opted2.label %>\n",
     "s1:<%= @sent.inner_label %>\n",
     "s2:<%= @sent2.inner_label %>\n",
+    "c1:<%= content_tag(:p, @article.label + pluralize(1, @comment.label)) %>\n",
     "c2:<%= content_tag(:p, truncate(@article.label, length: 5)) %>\n",
     "c3:<%= content_tag(:p, truncate(@comment.label, length: 20)) %>\n",
     "c4:<%= content_tag(:p, @comment.label + truncate(\"<b>xx</b>\", length: 5)) %>\n",
     "c5:<%= content_tag(:p, pluralize(1, @article.label)) %>\n",
+    "c6:<%= content_tag(:p, @article.label + truncate(\"<b>xx</b>\", length: 5)) %>\n",
+    "c7:<%= @article.label + pluralize(1, @comment.label) %>\n",
+    "c8:<%= link_to @article.label + pluralize(1, @comment.label), \"/x\" %>\n",
+    "c9:<%= tag.p(@article.label + pluralize(1, @comment.label)) %>\n",
+    "c10:<% x = @comment.nil? ? @article : @comment %><%= content_tag(:p, x.label + \"!\") %>\n",
 );
 
 pub const RENDERS: &[&str] = &[
@@ -49,8 +55,11 @@ pub const RENDERS: &[&str] = &[
     "R:&lt;f&gt;", "E:&lt;r&gt;", "G:&lt;d&gt;", "Q:&lt;q&gt;",
     "N:&lt;e&gt;", "O:&lt;o&gt;", "V:<v>", "H:&lt;cr&gt;",
     "J:<span>&lt;c&gt;</span>", "D:<span><b>a</b></span>",
-    "c2:<p>&lt;b...</p>", "c3:<p>&lt;c&gt;</p>",
+    "c1:<p><b>a</b>1 &lt;c&gt;</p>", "c2:<p>&lt;b...</p>", "c3:<p>&lt;c&gt;</p>",
     "c4:<p>&lt;c&gt;&amp;lt;b...</p>", "c5:<p>1 &lt;b&gt;a&lt;/b&gt;</p>",
+    "c6:<p><b>a</b>&lt;b...</p>", "c7:<b>a</b>1 &lt;c&gt;",
+    "c8:<a href=\"/x\"><b>a</b>1 &lt;c&gt;</a>", "c9:<p><b>a</b>1 &lt;c&gt;</p>",
+    "c10:<p>&lt;c&gt;!</p>",
 ];
 
 /// What trusting a mark too widely wrote: another class's `label`,
@@ -58,7 +67,7 @@ pub const RENDERS: &[&str] = &[
 /// (only `Article` has the marked one), and each value whose closer
 /// definition shadows a marked one, unescaped, also as `content_tag`'s
 /// content.
-pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>", "H:<cr>", "H:<b>", "L:<cr>", "L:<l>", "J:<span><c></span>", "w1:<ow>", "w1:<b>", "w2:<ow>", "w2:<b>", "s1:<d>", "s1:<il>", "s2:<d>", "s2:<il>", "c2:<p><b", "c3:<p><c></p>", "c4:<p><c>", "c5:<p>1 <b>a</b></p>"];
+pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>", "H:<cr>", "H:<b>", "L:<cr>", "L:<l>", "J:<span><c></span>", "w1:<ow>", "w1:<b>", "w2:<ow>", "w2:<b>", "s1:<d>", "s1:<il>", "s2:<d>", "s2:<il>", "c1:<p><b>a</b>1 <c></p>", "c2:<p><b", "c3:<p><c></p>", "c4:<p><c>", "c5:<p>1 <b>a</b></p>", "c6:<p><b>a</b><b...</p>", "c7:<b>a</b>1 <c>", "c8:<a href=\"/x\"><b>a</b>1 <c></a>", "c9:<p><b>a</b>1 <c></p>", "c10:<p><c>!</p>"];
 
 /// real-blog with `GET /probe` rendering `VIEW`:
 /// - `Article#label` and `ApplicationRecord#tag_html` return html-safe
@@ -99,11 +108,14 @@ pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t
 ///   `public_send`, with `prefix: :inner`, over `Base#inner_label`, which
 ///   is html-safe. Rails 8.1.4 renders `&lt;d&gt;`; the lines check that
 ///   neither `<d>` nor `<il>` is written unescaped;
-/// - lines `c2`–`c5` give `content_tag` a marked (`Article#label`) or
-///   unmarked (`Comment#label`) value with a nested `pluralize` or
-///   `truncate`: `truncate` escapes an unmarked value, and a marked one
-///   it cuts; `+` onto the unmarked value is escaped whole; `pluralize`
-///   drops the mark;
+/// - lines `c1`–`c10` combine a marked (`Article#label`) or unmarked
+///   (`Comment#label`) value with a nested `pluralize` or `truncate`, as
+///   `content_tag`'s content, `link_to`'s label, `tag.p`'s content and
+///   bare output: a `+` onto the marked value stays html-safe and escapes
+///   the other side; `+` onto the unmarked value, or onto `label` on an
+///   `Article | Comment` receiver, is escaped whole; `truncate` escapes an
+///   unmarked value, and a marked one it cuts; `pluralize` drops the
+///   mark;
 /// - `ApplicationRecord#body` is html-safe, and `articles.body` is a
 ///   column. Rails 8.1.4 renders `K:<j>`: Active Record doesn't generate
 ///   a reader that a class between the model and `ActiveRecord::Base`
