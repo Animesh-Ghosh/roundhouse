@@ -15,9 +15,7 @@ pub const RENDERS: &[&str] = &["&lt;i&gt;", "<a href=\"/x\">&lt;u&gt;</a>"];
 /// Neither a raw label nor a second escape.
 pub const ABSENT: &[&str] = &["<i>", "<u>", "&amp;lt;"];
 
-/// A label the view helpers escape (`truncate`), taken once. Ruby only:
-/// the link branch's inline label isn't lowered yet, so a helper in it is
-/// a bare call that Crystal and Spinel don't compile (#1794 (open) lowers it).
+/// A label the view helpers escape (`truncate`), taken once.
 pub const TRUNCATE_LINE: &str = "<%= link_to_if false, truncate(\"<b>xx</b>\", length: 5), \"/x\" %>\n";
 pub const TRUNCATE_RENDERS: &str = "&lt;b...";
 pub const TRUNCATE_ABSENT: &str = "<b>xx";
@@ -76,34 +74,34 @@ pub fn app() -> emit_and_run::Overlay {
         .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe\", to: \"probes#show\", as: :probe\n")
 }
 
-/// `app` with `APP_ESCAPE_VIEW` too, and the app module it calls; with
-/// `TRUNCATE_LINE` when `truncate` is set.
-pub fn app_with_app_escape(truncate: bool) -> emit_and_run::Overlay {
-    let extra = if truncate { TRUNCATE_LINE } else { "" };
+/// `app` with `TRUNCATE_LINE` too.
+pub fn app_with_truncate() -> emit_and_run::Overlay {
+    app().write("app/views/probes/show.html.erb", &format!("{VIEW}{TRUNCATE_LINE}"))
+}
+
+/// `app` with `APP_ESCAPE_VIEW` and `TRUNCATE_LINE` too, and the app
+/// module it calls.
+pub fn app_with_app_escape() -> emit_and_run::Overlay {
     app()
-        .write("app/views/probes/show.html.erb", &format!("{VIEW}{APP_ESCAPE_VIEW}{extra}"))
+        .write("app/views/probes/show.html.erb", &format!("{VIEW}{APP_ESCAPE_VIEW}{TRUNCATE_LINE}"))
         .write("lib/formatting.rb", "module Formatting\n  def self.html_escape(s)\n    s\n  end\nend\n")
 }
 
-fn all_renders(truncate: bool) -> Vec<&'static str> {
-    let mut all: Vec<&str> = RENDERS.iter().chain(APP_ESCAPE_RENDERS).copied().collect();
-    all.extend(truncate.then_some(TRUNCATE_RENDERS));
-    all
+fn all_renders() -> Vec<&'static str> {
+    RENDERS.iter().chain(APP_ESCAPE_RENDERS).copied().chain([TRUNCATE_RENDERS]).collect()
 }
 
-fn all_absent(truncate: bool) -> Vec<&'static str> {
-    let mut all: Vec<&str> = ABSENT.iter().chain(APP_ESCAPE_ABSENT).copied().collect();
-    all.extend(truncate.then_some(TRUNCATE_ABSENT));
-    all
+fn all_absent() -> Vec<&'static str> {
+    ABSENT.iter().chain(APP_ESCAPE_ABSENT).copied().chain([TRUNCATE_ABSENT]).collect()
 }
 
-/// A minitest integration test for `app_with_app_escape(true)`'s page.
+/// A minitest integration test for `app_with_app_escape()`'s page.
 pub fn integration_test() -> String {
     let mut asserts = String::new();
-    for r in all_renders(true) {
+    for r in all_renders() {
         asserts.push_str(&format!("    assert_includes response.body, {}\n", ruby_str(r)));
     }
-    for a in all_absent(true) {
+    for a in all_absent() {
         asserts.push_str(&format!("    refute_includes response.body, {}\n", ruby_str(a)));
     }
     format!(
@@ -111,14 +109,14 @@ pub fn integration_test() -> String {
     )
 }
 
-/// Ruby statements that raise unless `body`, `app_with_app_escape(false)`'s
+/// Ruby statements that raise unless `body`, `app_with_app_escape()`'s
 /// page, holds every render and none of the absent strings.
 pub fn body_checks() -> String {
     let mut checks = String::new();
-    for r in all_renders(false) {
+    for r in all_renders() {
         checks.push_str(&format!("raise body unless body.include?({})\n", ruby_str(r)));
     }
-    for a in all_absent(false) {
+    for a in all_absent() {
         checks.push_str(&format!("raise body if body.include?({})\n", ruby_str(a)));
     }
     checks

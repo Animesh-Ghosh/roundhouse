@@ -20687,11 +20687,12 @@ mod concern_with_options;
 mod content_tag_block;
 
 #[path = "support/link_to_if_escape.rs"]
+#[allow(dead_code)]
 mod link_to_if_escape;
 
 #[test]
 fn link_to_if_escapes_its_label() {
-    link_to_if_escape::app_with_app_escape(true)
+    link_to_if_escape::app_with_app_escape()
         .write("test/controllers/probes_controller_test.rb", &link_to_if_escape::integration_test())
         .run_test("test/controllers/probes_controller_test.rb")
         .assert_passes();
@@ -20700,7 +20701,7 @@ fn link_to_if_escapes_its_label() {
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn link_to_if_escapes_its_label_on_spinel() {
-    link_to_if_escape::app_with_app_escape(false)
+    link_to_if_escape::app_with_app_escape()
         .run_spinel(&format!(
             "Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\ncontroller = ProbesController.new\ncontroller.request_method = \"GET\"\ncontroller.process_action(:show)\nbody = controller.body\n{}puts \"link_to_if escaped\"\n",
             link_to_if_escape::body_checks()

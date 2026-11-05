@@ -322,7 +322,7 @@ fn content_tag_blocks_render() {
 #[test]
 #[ignore]
 fn link_to_if_escapes_its_label() {
-    let (emitted, errors) = link_to_if_escape::app().emit(roundhouse::project::BuildTarget::Crystal);
+    let (emitted, errors) = link_to_if_escape::app_with_truncate().emit(roundhouse::project::BuildTarget::Crystal);
     assert!(errors.is_empty(), "{errors:?}");
     shards_install(&emitted);
     std::fs::write(
@@ -338,10 +338,10 @@ fn link_to_if_escapes_its_label() {
         .expect("run crystal");
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(run.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
-    for want in link_to_if_escape::RENDERS {
+    for want in link_to_if_escape::RENDERS.iter().chain([&link_to_if_escape::TRUNCATE_RENDERS]) {
         assert!(stdout.contains(want), "expected {want} in\n{stdout}");
     }
-    for absent in link_to_if_escape::ABSENT {
+    for absent in link_to_if_escape::ABSENT.iter().chain([&link_to_if_escape::TRUNCATE_ABSENT]) {
         assert!(!stdout.contains(absent), "unexpected {absent} in\n{stdout}");
     }
 }
