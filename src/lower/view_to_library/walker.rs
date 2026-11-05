@@ -8,7 +8,7 @@ use crate::span::Span;
 
 use crate::lower::view::{
     classify_form_builder_method, classify_render_partial, classify_view_helper,
-    extract_sym_or_str, ViewHelperKind,
+    extract_sym_or_str, FormBuilderMethod, ViewHelperKind,
 };
 
 use super::form_builder::{
@@ -24,7 +24,7 @@ use super::partial::{emit_flagged_collection_render, emit_render_partial, emit_y
 use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
 use super::{
-    accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_sym,
+    accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_str, lit_sym,
     nil_lit, seq, noop_io_append, send, todo_io_append, var_ref, view_helpers_call, ViewCtx,
 };
 
@@ -746,6 +746,22 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         if method.as_str() == "form_with" {
             return emit_form_with_inline(sa, block, ctx);
         }
+        // `form_for :filter, url: ..., method: :get do |form|`: a form for
+        // no record, which is form_with's `scope:` form (Rails moves
+        // form_for's top-level `data:` into its html options, as
+        // form_with takes it).
+        if method.as_str() == "form_for" && matches!(sa.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { .. } })) {
+            if let Some(args) = form_for_scope_args(sa, ctx) {
+                return emit_form_with_inline(&args, block, ctx);
+            }
+            crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                inner.span,
+                None,
+                Symbol::from("form_for scope form"),
+                "form_for :scope is lowered only with url: and no @scope record to fill its fields",
+            ));
+            return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+        }
         // `<%= form_tag(action, opts) do ...inner... %>` — the
         // builder-less bare form, same inline expansion minus the
         // FormBuilder binding (lobsters' link_post).
@@ -837,7 +853,10 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 .find(|b| b.form_param == name)
             {
                 if let Some(fb) = classify_form_builder_method(method.as_str()) {
-                    return emit_form_builder_inline(binding, fb, sa, ctx);
+                    // Not for a recordless form: Trix's input id is the record's dom_id, which it has none of.
+                    if !(binding.recordless && matches!(fb, FormBuilderMethod::RichTextArea)) {
+                        return emit_form_builder_inline(binding, fb, sa, ctx);
+                    }
                 }
             }
         }
@@ -3046,4 +3065,31 @@ fn emit_cached_fragment(
             },
         ),
     ]
+}
+
+/// `form_for :scope, k: v, ...` as `form_with(scope: :scope, k: v, ...)`.
+/// None for a record form (`form_for @user`), which names and fills its
+/// fields from the record.
+fn form_for_scope_args(args: &[Expr], ctx: &ViewCtx) -> Option<Vec<Expr>> {
+    let (first, rest) = args.split_first()?;
+    let ExprNode::Lit { value: Literal::Sym { value: scope } } = &*first.node else { return None };
+    // Not as recordless when the view has a `@<scope>` record: Rails fills the fields from it.
+    if ctx.record_classes.contains_key(scope.as_str()) || ctx.ivar_models.contains_key(scope.as_str()) {
+        return None;
+    }
+    let mut entries = vec![(
+        Expr::new(first.span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from("scope") } }),
+        first.clone(),
+    )];
+    match rest {
+        [] => {}
+        [opts] => {
+            let ExprNode::Hash { entries: more, .. } = &*opts.node else { return None };
+            entries.extend(more.iter().cloned());
+        }
+        _ => return None,
+    }
+    // Not without `url:`: Rails posts to the current URL, which the form_with expansion has no spelling for.
+    let has_url = entries.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "url"));
+    has_url.then(|| vec![Expr::new(first.span, ExprNode::Hash { entries, kwargs: true })])
 }
