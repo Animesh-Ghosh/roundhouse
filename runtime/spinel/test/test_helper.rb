@@ -318,7 +318,7 @@ module Dom
     chunk = target_chunk(selector)
     negated = negated_attrs(chunk)
     chunk = without_negations(chunk)
-    base = chunk.split("[")[0].to_s
+    base = selector_base(chunk)
     want_tag = selector_tag(base)
     want_id = selector_id(base)
     want_classes = selector_classes(base)
@@ -459,7 +459,7 @@ module Dom
   # attribute or in text — which costs candidates, not correctness:
   # a false candidate fails the class check that follows.
   def self.fragment_for(selector)
-    base = target_chunk(selector).split("[")[0].to_s
+    base = selector_base(without_negations(target_chunk(selector)))
     tag = selector_tag(base)
     id = selector_id(base)
     classes = selector_classes(base)
@@ -550,10 +550,7 @@ module Dom
 
   def self.selector_attrs(chunk)
     out = []
-    parts = chunk.split("[")
-    i = 1
-    while i < parts.length
-      pred = parts[i].to_s.split("]")[0].to_s
+    selector_preds(chunk).each do |pred|
       eq = pred.index("=")
       if eq.nil?
         out << pred
@@ -571,9 +568,51 @@ module Dom
           out << %(#{name}="#{value}")
         end
       end
-      i += 1
     end
     out
+  end
+
+  # Not `split("[")`: a quoted value can hold brackets (`[name='filter[q]']`) and an id can follow a predicate.
+  def self.selector_base(chunk)
+    selector_split(chunk)[0].to_s
+  end
+
+  def self.selector_preds(chunk)
+    parts = selector_split(chunk)
+    parts[1, parts.length].to_a
+  end
+
+  def self.selector_split(chunk)
+    base = ""
+    preds = []
+    pred = ""
+    inside = false
+    quote = ""
+    i = 0
+    while i < chunk.length
+      c = chunk[i, 1].to_s
+      if !inside
+        if c == "["
+          inside = true
+          pred = ""
+        else
+          base = base + c
+        end
+      elsif quote != ""
+        quote = "" if c == quote
+        pred = pred + c
+      elsif c == "'" || c == "\""
+        quote = c
+        pred = pred + c
+      elsif c == "]"
+        preds << pred
+        inside = false
+      else
+        pred = pred + c
+      end
+      i += 1
+    end
+    [base] + preds
   end
 
   # The three parts of one compound selector chunk. Split by hand rather
