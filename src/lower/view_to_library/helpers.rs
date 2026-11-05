@@ -254,7 +254,8 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             // Rails escapes the content unless it is html-safe: an
             // `x.html_safe` or `raw(x)` (`x.to_s.html_safe`), an escape the
             // template applied (`h(x)`), or a helper
-            // whose call here is markup (`link_to`, a nested `content_tag`),
+            // whose call here is markup (`link_to`, a nested `content_tag`,
+            // `turbo_stream_from`'s element, `content_for`'s capture),
             // or already escaped (`truncate`, `word_wrap`, `pluralize`, each
             // lowered to `html_escape(…)`). The other kinds (`dom_id`) are
             // escaped like any String.
@@ -265,6 +266,7 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                         Some(LinkTo { .. } | LinkToIf { .. } | ButtonTo { .. } | ContentTag { .. }
                             | CsrfMetaTags | CspMetaTag | StylesheetLinkTag { .. }
                             | JavascriptImportmapTags { .. } | EngineImportmapTags { .. }
+                            | TurboStreamFrom { .. } | ContentForGetter { .. }
                             | Truncate { .. } | WordWrap { .. } | Pluralize { .. })
                     ));
             let raw_value = match &*content.node {
