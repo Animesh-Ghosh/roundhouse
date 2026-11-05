@@ -20698,6 +20698,24 @@ mod concern_with_options;
 #[path = "emit_and_run/content_tag_block.rs"]
 mod content_tag_block;
 
+#[path = "support/content_tag_options.rs"]
+mod content_tag_options;
+
+#[test]
+fn a_content_tag_with_options_renders() {
+    content_tag_options::app(content_tag_options::VIEW)
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_content_tag_with_options_renders_on_spinel() {
+    content_tag_options::app(content_tag_options::VIEW)
+        .run_spinel(&content_tag_options::render_script())
+        .assert_passes();
+}
+
 #[path = "support/go_test_literal_receiver.rs"]
 mod go_test_literal_receiver;
 
