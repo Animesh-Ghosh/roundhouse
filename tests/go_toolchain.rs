@@ -376,8 +376,9 @@ fn a_views_model_predicate_call_runs() {
 }
 
 /// A view's 0-arg reads of a model's own methods build and render: a
-/// trivial `attr_accessor` reader, an `Article | nil` receiver and a
-/// namespaced model.
+/// trivial `attr_accessor` reader, an `Article | nil` receiver, a
+/// namespaced model, and a method whose omitted optional params take
+/// their literal Ruby defaults.
 #[test]
 #[ignore]
 fn a_views_model_method_shapes_run() {

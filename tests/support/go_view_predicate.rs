@@ -36,14 +36,16 @@ pub const GO_ASSERT_INCLUDES: &str = "package v2\n\nimport \"strings\"\n\nfunc a
 ///   promotes through the embedded `*ApplicationRecord`;
 /// - `ApplicationRecord#pinned?`, which `Article`'s own reader overrides,
 ///   and which `ContentRecord`, an abstract model between
-///   `ApplicationRecord` and `Admin::Note`, overrides for `Admin::Note`.
-/// The integration test asserts `F:true`, `L:true`, `H:true`, `S:true`
-/// and `Q:true`, Ruby's answers (the fixture articles are saved; `hot?`
-/// and `shared_flag?` are `true`; the view sets the note's `pinned`,
-/// which `ContentRecord`'s reader answers and `ApplicationRecord`'s
-/// `false` would not). The
-/// `Admin::Note` is a new record: no fixture file, so the Go fixture
-/// emit isn't part of the run.
+///   `ApplicationRecord` and `Admin::Note`, overrides for `Admin::Note`;
+/// - `Article#tagline(prefix = "x")` and `Article#rank(n = 2)`, read with
+///   the arg omitted, which binds the Ruby default, and `tagline` passed
+///   one.
+/// The integration test asserts `F:true`, `L:true`, `H:true`, `S:true`,
+/// `Q:true` and `D:x-t E:y-t R:2`, Ruby's answers (the fixture articles
+/// are saved; `hot?` and `shared_flag?` are `true`; the view sets the
+/// note's `pinned`, which `ContentRecord`'s reader answers and
+/// `ApplicationRecord`'s `false` would not). The `Admin::Note` is a new
+/// record: no fixture file, so the Go fixture emit isn't part of the run.
 pub fn shapes_app() -> emit_and_run::Overlay {
     let schema = std::fs::read_to_string("fixtures/real-blog/db/schema.rb").unwrap();
     let at = schema.find("  create_table").unwrap();
@@ -53,7 +55,7 @@ pub fn shapes_app() -> emit_and_run::Overlay {
         .edit(
             "app/models/article.rb",
             "  def featured?\n",
-            "  attr_accessor :pinned\n\n  def pinned?\n    @pinned\n  end\n\n  def featured?\n",
+            "  attr_accessor :pinned\n\n  def pinned?\n    @pinned\n  end\n\n  def tagline(prefix = \"x\")\n    \"#{prefix}-t\"\n  end\n\n  def rank(n = 2)\n    \"#{n}\"\n  end\n\n  def featured?\n",
         )
         .edit(
             "app/models/application_record.rb",
@@ -68,10 +70,10 @@ pub fn shapes_app() -> emit_and_run::Overlay {
         .edit(
             "app/views/articles/index.html.erb",
             "<% @articles.each do |a| %><p class=\"featured\">F:<%= a.featured? %></p><% end %>\n",
-            "<% @articles.each do |a| %><p class=\"featured\">F:<%= a.featured? %></p><p class=\"pinned\">P:<%= a.pinned? %></p><p class=\"shared\">S:<%= a.shared_flag? %></p><% end %>\n<% last = Article.last %><p class=\"last\">L:<%= last.featured? %></p>\n<% n = Admin::Note.new %><% n.pinned = true %><p class=\"hot\">H:<%= n.hot? %></p><p class=\"note-pinned\">Q:<%= n.pinned? %></p>\n",
+            "<% @articles.each do |a| %><p class=\"featured\">F:<%= a.featured? %></p><p class=\"pinned\">P:<%= a.pinned? %></p><p class=\"shared\">S:<%= a.shared_flag? %></p><p class=\"tagline\">D:<%= a.tagline %> E:<%= a.tagline(\"y\") %> R:<%= a.rank %></p><% end %>\n<% last = Article.last %><p class=\"last\">L:<%= last.featured? %></p>\n<% n = Admin::Note.new %><% n.pinned = true %><p class=\"hot\">H:<%= n.hot? %></p><p class=\"note-pinned\">Q:<%= n.pinned? %></p>\n",
         )
         .write("test/controllers/articles_featured_controller_test.rb", SHAPES_TEST)
 }
 
-const SHAPES_TEST: &str = "require \"test_helper\"\n\nclass ArticlesFeaturedControllerTest < ActionDispatch::IntegrationTest\n  test \"the index renders each article's featured answer\" do\n    get articles_url\n    assert_response :success\n    assert_includes response.body, \"F:true\"\n    assert_includes response.body, \"L:true\"\n    assert_includes response.body, \"H:true\"\n    assert_includes response.body, \"S:true\"\n    assert_includes response.body, \"Q:true\"\n  end\nend\n";
+const SHAPES_TEST: &str = "require \"test_helper\"\n\nclass ArticlesFeaturedControllerTest < ActionDispatch::IntegrationTest\n  test \"the index renders each article's featured answer\" do\n    get articles_url\n    assert_response :success\n    assert_includes response.body, \"F:true\"\n    assert_includes response.body, \"L:true\"\n    assert_includes response.body, \"H:true\"\n    assert_includes response.body, \"S:true\"\n    assert_includes response.body, \"Q:true\"\n    assert_includes response.body, \"D:x-t E:y-t R:2\"\n  end\nend\n";
 

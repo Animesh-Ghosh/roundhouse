@@ -1271,9 +1271,16 @@ fn render_params_with_unpack(m: &MethodDef) -> (String, String) {
                 } else {
                     format!("_opts[{j}].({opt_go_ty})")
                 };
-                unpack.push_str(&format!(
-                    "\tif len(_opts) > {j} {{ {opt_name} = {read} }}\n"
-                ));
+                // Not left at Go's zero value when the arg is omitted: Ruby binds the default
+                let omitted = opt.default.as_ref().and_then(|d| go_param_default(d, &opt_go_ty));
+                match omitted {
+                    Some(default) => unpack.push_str(&format!(
+                        "\tif len(_opts) > {j} {{ {opt_name} = {read} }} else {{ {opt_name} = {default} }}\n"
+                    )),
+                    None => unpack.push_str(&format!(
+                        "\tif len(_opts) > {j} {{ {opt_name} = {read} }}\n"
+                    )),
+                }
                 // Suppress Go's "declared and not used" error for
                 // optional params the body doesn't reference. Many
                 // view methods accept `notice`/`alert` from the
@@ -1286,6 +1293,35 @@ fn render_params_with_unpack(m: &MethodDef) -> (String, String) {
         }
     }
     (params_out.join(", "), unpack)
+}
+
+/// The Go value an omitted optional param starts with: its literal Ruby
+/// default when that literal fits the param's Go type. `None` keeps Go's
+/// zero value: right for `nil` (the types' empty-as-absent convention)
+/// and, for reads, for an empty-hash default such as `{}` or
+/// `EMPTY_HTML_OPTS` (a nil map reads as empty); not yet right for other
+/// non-literal defaults.
+fn go_param_default(default: &Expr, go_ty: &str) -> Option<String> {
+    use crate::expr::{ExprNode, Literal};
+    let ExprNode::Lit { value } = &*default.node else {
+        return None;
+    };
+    let fits = match value {
+        Literal::Nil | Literal::Regex { .. } => false,
+        Literal::Str { .. } | Literal::Sym { .. } => matches!(go_ty, "string" | "interface{}"),
+        Literal::Int { .. } => matches!(go_ty, "int64" | "float64" | "interface{}"),
+        Literal::Float { .. } => matches!(go_ty, "float64" | "interface{}"),
+        Literal::Bool { .. } => matches!(go_ty, "bool" | "interface{}"),
+    };
+    if !fits {
+        return None;
+    }
+    let lit = super::expr::emit_literal(value);
+    // An untyped Go constant in an `interface{}` would box as `int`, not the `int64` the reads assert
+    Some(match value {
+        Literal::Int { .. } if go_ty == "interface{}" => format!("int64({lit})"),
+        _ => lit,
+    })
 }
 
 fn signature_param_tys(m: &MethodDef) -> Option<Vec<Ty>> {
