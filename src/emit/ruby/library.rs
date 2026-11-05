@@ -11028,10 +11028,26 @@ fn walk_load_time_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
                 if let Some(closure) = recv.as_ref().and_then(stored_body) {
                     // The arguments that are surely positional: not a
                     // splat, which may spread to none, nor a hash, which
-                    // may be keywords.
+                    // may be keywords. A keyword splat of known keys is
+                    // one positional hash to a closure that takes no
+                    // keywords; `**{}` passes nothing.
+                    let takes_keywords = matches!(
+                        &*closure.node,
+                        ExprNode::Lambda { extra_params, .. }
+                            if extra_params.iter().any(|param| param.keyword || param.from_keyword)
+                    );
                     let given = args
                         .iter()
                         .filter(|arg| {
+                            let splatted = match &*arg.node {
+                                ExprNode::KeywordSplat { value } => Some(value),
+                                _ if arg.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0 => Some(*arg),
+                                _ => None,
+                            };
+                            if let Some(value) = splatted {
+                                return !takes_keywords
+                                    && matches!(&*value.node, ExprNode::Hash { entries, .. } if !entries.is_empty());
+                            }
                             !matches!(
                                 &*arg.node,
                                 ExprNode::Splat { .. }

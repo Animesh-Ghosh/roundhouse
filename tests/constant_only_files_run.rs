@@ -273,6 +273,27 @@ fn a_default_the_call_fills_is_not_required() {
     assert_eq!(run.stdout.lines().last(), Some("[1, 3, 2]"), "{}", run.stdout);
 }
 
+/// A keyword splat fills a positional default only when it is known to
+/// hold keys and the closure takes no keywords: `**{k: 1}` goes to `**kw`,
+/// and `**{}` passes nothing, so their defaults load; to a closure without
+/// keywords `**{k: 1}` is the positional hash, and its default is not
+/// required (`Widget` reads `Filled`).
+#[test]
+fn a_keyword_splat_fills_a_default_only_as_a_positional_hash() {
+    let run = run_files(
+        &[
+            ("app/models/keyed.rb", "Keyed = (->(x = Gadget::VALUE, **kw) { x }).call(**{k: 1})\n"),
+            ("app/models/empty.rb", "Empty = (->(x = Gadget::VALUE) { x }).call(**{})\n"),
+            ("app/models/filled.rb", "Filled = (->(x = Widget::VALUE) { x }).call(**{k: 1})\n"),
+            ("app/models/gadget.rb", "class Gadget\n  VALUE = 2\nend\n"),
+            ("app/models/widget.rb", "class Widget\n  VALUE = Filled.size\nend\n"),
+        ],
+        "p [Keyed, Empty, Filled, Widget::VALUE]\n",
+    );
+    run.assert_passes();
+    assert_eq!(run.stdout.lines().last(), Some("[2, 2, {k: 1}, 1]"), "{}", run.stdout);
+}
+
 /// `labels.rb` is `Labels`'s file, whatever its first constant, and a read
 /// of any constant in it requires it.
 #[test]
