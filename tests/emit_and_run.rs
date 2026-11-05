@@ -20406,6 +20406,10 @@ mod format_once;
 mod condition_lambda_record;
 #[path = "emit_and_run/where_time_range.rs"]
 mod where_time_range;
+#[path = "support/untyped_calendar.rs"]
+mod untyped_calendar_contract;
+#[path = "emit_and_run/untyped_calendar.rs"]
+mod untyped_calendar;
 #[path = "emit_and_run/route_record_to_param.rs"]
 mod route_record_to_param;
 #[path = "emit_and_run/module_factory.rs"]
@@ -20724,6 +20728,15 @@ fn a_views_model_predicate_call_is_a_go_method_call() {
     assert!(errors.is_empty(), "{errors:?}");
     let view = std::fs::read_to_string(emitted.join("app/v2/views_articles.go")).unwrap();
     assert!(view.contains("a.FeaturedPred()") && !view.contains("a.Featured)"), "{view}");
+}
+
+#[path = "support/go_action_controller_api.rs"]
+mod go_action_controller_api;
+
+/// #1804's API controller on the ruby target.
+#[test]
+fn an_api_controller_answers_on_ruby() {
+    go_action_controller_api::app().run_test("test/controllers/ping_controller_test.rb").assert_passes();
 }
 
 #[path = "support/block_control_flow.rs"]

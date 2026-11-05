@@ -1765,6 +1765,7 @@ fn inject_date_package_into_boot(boot: &mut String) -> Result<(), String> {
         "# Date package — only when the app uses Date or DateTime.\n",
         "require \"date\"\n",
         "require_relative \"runtime/active_support_date_parsing\"\n",
+        "require_relative \"runtime/active_support_date_calendar\"\n",
         "require_relative \"runtime/active_record_date_serialization\"\n",
     );
     if boot.contains("require_relative \"runtime/active_support_date_parsing\"") {
@@ -1792,6 +1793,7 @@ fn inject_cruby_date_calendar_helpers(boot: &mut String) -> Result<(), String> {
     let inject = concat!(
         "# Date calendar helpers — shared with Spinel (invariant 2).\n",
         "require_relative \"runtime/active_support_date_parsing\"\n",
+        "require_relative \"runtime/active_support_date_calendar\"\n",
     );
     if boot.contains("require_relative \"runtime/active_support_date_parsing\"") {
         return Ok(());
@@ -9608,6 +9610,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     // serialization.
     const DATE_PACKAGE_FILES: &[&str] = &[
         "runtime/active_support_date_parsing.rb",
+        "runtime/active_support_date_calendar.rb",
         "runtime/active_record_date_serialization.rb",
         "sig/runtime/active_support_date_parsing.rbs",
         "sig/runtime/active_record_date_serialization.rbs",
