@@ -9,6 +9,15 @@ module ActiveSupport
       WEEK_DAYS.index(start) || raise(ArgumentError, "Invalid beginning of week: #{start}")
     end
 
+    def self.span(day)
+      (wday(day) - 1) % 7
+    end
+
+    def self.keep_time(from, result, same_time)
+      return result unless same_time
+      ActiveSupport.days_since(from, ActiveSupport.civil_days(result.year, result.month, result.day) - ActiveSupport.civil_days(from.year, from.month, from.day))
+    end
+
     TIME = {
       beginning_of_minute: :beginning_of_minute, at_beginning_of_minute: :beginning_of_minute,
       end_of_minute: :end_of_minute, at_end_of_minute: :end_of_minute,
@@ -22,7 +31,6 @@ module ActiveSupport
       end_of_month: :end_of_month, at_end_of_month: :end_of_month,
       beginning_of_year: :beginning_of_year, at_beginning_of_year: :beginning_of_year,
       end_of_year: :end_of_year, at_end_of_year: :end_of_year,
-      next_week: :next_week, prev_week: :prev_week, last_week: :prev_week,
       yesterday: :yesterday, tomorrow: :tomorrow,
       on_weekend?: :on_weekend?, on_weekday?: :on_weekday?
     }.freeze
@@ -41,7 +49,6 @@ module ActiveSupport
       end_of_month: :date_end_of_month, at_end_of_month: :date_end_of_month,
       beginning_of_year: :date_beginning_of_year, at_beginning_of_year: :date_beginning_of_year,
       end_of_year: :date_end_of_year, at_end_of_year: :date_end_of_year,
-      next_week: :date_next_week, prev_week: :date_prev_week, last_week: :date_prev_week,
       yesterday: :date_yesterday, tomorrow: :date_tomorrow
     }.freeze
     # Not next_day/prev_day/next_month/prev_month/next_year/prev_year: Date has its own, which Rails keeps.
@@ -53,7 +60,7 @@ module ActiveSupport
     }.freeze
     DATE_NOW = { today?: :date_today?, yesterday?: :date_yesterday?, tomorrow?: :date_tomorrow?,
                  past?: :date_past?, future?: :date_future? }.freeze
-    RANGE_UNITS = %i[week month year].freeze
+    RANGE_UNITS = %i[month year].freeze
   end
 end
 
@@ -75,8 +82,21 @@ class Time
     define_method(name) { |start = nil| ActiveSupport.end_of_week(self, ActiveSupport::CalendarDispatch.wday(start)) }
   end
 
+  def next_week(day = nil, same_time: false)
+    ActiveSupport::CalendarDispatch.keep_time(self, ActiveSupport.days_since(ActiveSupport.next_week(self), ActiveSupport::CalendarDispatch.span(day)), same_time)
+  end
+
+  def prev_week(day = nil, same_time: false)
+    ActiveSupport::CalendarDispatch.keep_time(self, ActiveSupport.days_since(ActiveSupport.prev_week(self), ActiveSupport::CalendarDispatch.span(day)), same_time)
+  end
+  alias_method :last_week, :prev_week
+
   def all_day
     beginning_of_day..end_of_day
+  end
+
+  def all_week(start = nil)
+    beginning_of_week(start)..end_of_week(start)
   end
 
   ActiveSupport::CalendarDispatch::RANGE_UNITS.each do |unit|
@@ -101,6 +121,19 @@ if defined?(::Date)
     end
     %i[end_of_week at_end_of_week].each do |name|
       define_method(name) { |start = nil| ActiveSupport.date_end_of_week(self, ActiveSupport::CalendarDispatch.wday(start)) }
+    end
+
+    def next_week(day = nil)
+      ActiveSupport.date_days_since(ActiveSupport.date_next_week(self), ActiveSupport::CalendarDispatch.span(day))
+    end
+
+    def prev_week(day = nil)
+      ActiveSupport.date_days_since(ActiveSupport.date_prev_week(self), ActiveSupport::CalendarDispatch.span(day))
+    end
+    alias_method :last_week, :prev_week
+
+    def all_week(start = nil)
+      beginning_of_week(start)..end_of_week(start)
     end
 
     def all_day
