@@ -497,6 +497,15 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 let primitive_kind = |t: &Option<Ty>| {
                     matches!(t, Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float))
                 };
+                // A conditional whose branches are both non-nil scalars is
+                // truthy in Ruby whichever runs, 0 and "" included, so `||`
+                // never takes its fallback; `cmp.Or` would, on Go's zero.
+                if let ExprNode::If { then_branch, else_branch, .. } = &*left.node
+                    && primitive_kind(&then_branch.ty)
+                    && primitive_kind(&else_branch.ty)
+                {
+                    return emit_expr_as_value(ctx, left);
+                }
                 if primitive_kind(&left.ty) || primitive_kind(&right.ty) {
                     return format!(
                         "cmp.Or({}, {})",

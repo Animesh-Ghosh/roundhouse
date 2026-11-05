@@ -381,3 +381,21 @@ fn a_conditional_operand_of_and_runs() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("--- PASS: TestNoteHeadlineProbe"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
+
+/// A conditional of non-nil scalars on the left of `||` is its own value,
+/// as in Ruby, where 0 and "" are truthy.
+#[test]
+#[ignore]
+fn a_conditional_scalar_left_of_or_is_kept() {
+    let (emitted, errors) = go_conditional_operand::or_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/note_or_probe_test.go"), go_conditional_operand::GO_OR_PROBE).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestNoteOrProbe", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestNoteOrProbe"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
