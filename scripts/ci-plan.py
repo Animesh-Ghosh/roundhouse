@@ -116,6 +116,7 @@ SPINEL_TESTS = [
     "plain_class_optional_keywords_spinel",
     "conditional_expression_parens",
     "class_object_return_rbs",
+    "module_self_argument_rbs",
     "jbuilder_array_value_spinel",
     "active_job_payload",
     "render_json_encoder_spinel",
@@ -509,6 +510,8 @@ def native_coverage(path):
     suites = set()
     if path == "src/analyze/mod.rs":
         suites.add("class_object_return_rbs")
+    if path in {"src/analyze/mod.rs", "src/analyze/body/mod.rs"}:
+        suites.add("module_self_argument_rbs")
     if path in {"src/emit/ruby.rs", "src/emit/ruby/expr.rs"}:
         suites.add("conditional_expression_parens")
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):

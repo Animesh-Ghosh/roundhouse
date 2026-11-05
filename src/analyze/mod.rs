@@ -107,6 +107,8 @@ use crate::ty::{ParamKind, Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
+    /// Module lookup owner and escaped `self` values; dispatch keeps its original context.
+    module_self_types: HashMap<ClassId, (ClassId, Ty)>,
     upload_array_fields: Option<BTreeMap<ClassId, BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), BTreeSet<Symbol>>>>,
     materialized_associations: crate::det::HashSet<Symbol>,
     /// Inferred parameter types per (class, method). Empty after
@@ -1336,6 +1338,7 @@ impl Analyzer {
 
         Self {
             materialized_associations: crate::lower::assoc_pluck::materialized_assoc_names(app),
+            module_self_types: Self::module_self_types(&classes, app, &const_resolver),
             classes,
             upload_array_fields: None,
             inferred_params: HashMap::default(),
@@ -1374,6 +1377,7 @@ impl Analyzer {
     /// Cheap — just a struct with a reference.
     fn body_typer(&self) -> BodyTyper<'_> {
         let typer = BodyTyper::new(&self.classes)
+            .with_module_self_types(&self.module_self_types)
             .with_materialized_associations(&self.materialized_associations)
             .with_inquirers(&self.inquirers)
             .with_i18n(&self.i18n, &self.helper_modules)
@@ -4914,6 +4918,48 @@ impl Analyzer {
         }
     }
 
+    fn module_self_types(classes: &HashMap<ClassId, ClassInfo>, app: &App, resolver: &ConstResolver) -> HashMap<ClassId, (ClassId, Ty)> {
+        let mut includes: HashMap<_, _> = classes.iter().map(|(id, c)| (id, c.includes.clone())).collect();
+        // Library prepends are retained calls; membership shares the instance lookup side.
+        let bodies = app.library_classes.iter().map(|c| (&c.name, c.unknown_calls.iter().collect::<Vec<_>>()))
+            .chain(app.models.iter().map(|m| (&m.name, m.body.iter().filter_map(|item| match item { ModelBodyItem::Unknown { expr, .. } => Some(expr), _ => None }).collect())));
+        for (owner, calls) in bodies {
+            for call in calls {
+                if let ExprNode::Send { recv, method, args, .. } = &*call.node {
+                    if method.as_str() != "prepend" || !recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) { continue; }
+                    for arg in args {
+                        if let ExprNode::Const { path } = &*arg.node {
+                            if let Some(id) = resolver.namespace(arg.span, path) { includes.entry(owner).or_default().push(id.clone()); }
+                        }
+                    }
+                }
+            }
+        }
+        let mut hosts: HashMap<ClassId, Vec<Ty>> = HashMap::default();
+        for (host, info) in classes {
+            for class_side in [false, true] {
+                if !class_side && info.is_module { continue; }
+                let value = Ty::Class { id: host.clone(), args: vec![].into() };
+                let value = if class_side { Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![value].into() } } else { value };
+                let mut pending = vec![(host, class_side)];
+                let mut seen = BTreeSet::new();
+                while let Some((id, side)) = pending.pop() {
+                    if !seen.insert((id, side)) { continue; }
+                    let Some(class) = classes.get(id) else { continue };
+                    if !side && class.is_module && id != host { hosts.entry(id.clone()).or_default().push(value.clone()); }
+                    pending.extend(class.parent.iter().map(|p| (p, side)));
+                    let mixins = if side { &class.class_method_extensions } else { &includes[id] };
+                    pending.extend(mixins.iter().map(|m| (m, false)));
+                }
+            }
+        }
+        let lookup = app.sole_includer_of_modules();
+        hosts.into_iter().map(|(id, values)| {
+            let owner = lookup.get(&id).cloned().unwrap_or_else(|| id.clone());
+            (id, (owner, body::union_many(values)))
+        }).collect()
+    }
+
     fn seed_method_params(
         &self,
         base: &Ctx,
@@ -7776,7 +7822,7 @@ fn collect_transitive_filter_ivars(
             let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
             for (i, target) in targets.iter().enumerate() {
                 if let (LValue::Ivar { name }, false) = (target, own) {
-                    if let Some(ty) = body::multiassign_target_ty(&value.ty, i) {
+                    if let Some(ty) = body::multiassign_target_ty(value, i) {
                         union_ivar_maps(&mut out, HashMap::from_iter([(name.clone(), ty)]));
                     }
                 }
@@ -9951,7 +9997,7 @@ fn walk_ivar_assignments(
             for (i, target) in targets.iter().enumerate() {
                 if let LValue::Ivar { name } = target {
                     if let Some(ty) =
-                        crate::analyze::body::multiassign_target_ty(&value.ty, i)
+                        crate::analyze::body::multiassign_target_ty(value, i)
                     {
                         let merged = match out.remove(name) {
                             Some(prev) => crate::analyze::body::join_ivar_slot(prev, ty),
@@ -11418,9 +11464,10 @@ impl Analyzer {
     /// is measured on a copy. Destructured without `..`, so a new field has
     /// to be listed here; `Copy` fields own no heap.
     pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
-        let Analyzer { classes, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, unify_memo } = self;
+        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, unify_memo } = self;
         let mut freed: Vec<(&str, i64)> = vec![
             ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
+            ("module_self_types", crate::memory_census::freed_by(|| drop(module_self_types))),
             ("upload_array_fields", crate::memory_census::freed_by(|| drop(upload_array_fields))),
             ("materialized_associations", crate::memory_census::freed_by(|| drop(materialized_associations))),
             ("inferred_params", crate::memory_census::freed_by(|| drop(inferred_params))),
