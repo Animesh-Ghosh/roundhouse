@@ -191,6 +191,8 @@ payload = JSON.parse(JobRegistry.payload_keyword_job(article, "second", 3))
 want = { "label" => "second", "count" => 3, "_aj_ruby2_keywords" => ["label", "count"] }
 raise "keywords #{payload["arguments"][1].inspect}" unless payload["arguments"][1] == want
 raise "drain ran #{ActiveJob.pending_count}" unless ActiveJob.drain == 2
+# Rails leaves a defaulted keyword out of the Hash; perform binds its default.
+JobRegistry.perform("KeywordJob", [payload["arguments"][0], { "label" => "railsish", "_aj_ruby2_keywords" => ["label"] }])
 begin
   JobRegistry.perform("KeywordJob", [payload["arguments"][0], { "count" => 2, "_aj_ruby2_keywords" => ["count"] }])
   raise "a payload without a required keyword ran"
@@ -203,7 +205,8 @@ puts "keyword payload passed"
 /// A job's keyword parameters ride the payload as the trailing Hash Rails
 /// flags with `_aj_ruby2_keywords`, and come back by name. A keyword a call
 /// leaves to its default is written with that default, where Rails leaves
-/// the key out; `perform` sees the same value either way.
+/// the key out; a payload without the key binds the literal default, so
+/// `perform` sees the same value either way.
 #[test]
 fn keyword_arguments_round_trip_as_rails_flags_them() {
     let run = emit_and_run::real_blog()
@@ -213,6 +216,7 @@ fn keyword_arguments_round_trip_as_rails_flags_them() {
     run.assert_passes();
     assert!(run.stdout.contains("keywords Keyword title first 1"), "{}", run.stdout);
     assert!(run.stdout.contains("keywords Keyword title second 3"), "{}", run.stdout);
+    assert!(run.stdout.contains("keywords Keyword title railsish 1"), "{}", run.stdout);
     assert!(run.stdout.contains("keyword payload passed"), "{}", run.stdout);
 }
 

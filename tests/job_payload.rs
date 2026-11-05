@@ -507,6 +507,10 @@ fn keyword_parameters_forward_and_ride_the_payload_on_the_ruby_family() {
         src.contains("ReqJob.new.perform(ActiveJob::Arguments.int_at(args, 0), note: ActiveJob::Arguments.str_at(ActiveJob::Arguments.keyword_args(args, \"note\"), 0))"),
         "{src}"
     );
+    assert!(
+        src.contains("note: (ActiveJob::Arguments.keyword_given?(args, \"note\") ? ActiveJob::Arguments.str_at(ActiveJob::Arguments.keyword_args(args, \"note\"), 0) : \"x\")"),
+        "{src}"
+    );
 }
 
 /// A target whose keywords are trailing positionals has no slot a caller

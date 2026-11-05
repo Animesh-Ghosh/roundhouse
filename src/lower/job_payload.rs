@@ -63,6 +63,9 @@ pub struct JobParam {
     /// `name:`: written in the trailing keyword Hash Rails flags with `_aj_ruby2_keywords`, and passed back by name.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keyword: bool,
+    /// A keyword's literal default, as Ruby text: what `perform` binds when a payload leaves the key out, as Rails' do for a defaulted keyword.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
     pub codec: Codec,
 }
 
@@ -411,7 +414,7 @@ fn plan_params(
         if p.rest && matches!(codec, Codec::NullableRecord { .. }) {
             return Err(gap(Some(&p.name), "a rest parameter of nullable records".to_string()));
         }
-        out.push(JobParam { name: p.name.clone(), rest: p.rest, keyword: false, codec });
+        out.push(JobParam { name: p.name.clone(), rest: p.rest, keyword: false, default: None, codec });
     }
     for p in &keywords {
         let mut codec: Option<Codec> = None;
@@ -429,9 +432,31 @@ fn plan_params(
         let Some(codec) = codec else {
             return Err(gap(Some(&p.name), "no call site passes it".to_string()));
         };
-        out.push(JobParam { name: p.name.clone(), rest: false, keyword: true, codec });
+        // Not a default that is no literal: the payload reader would evaluate it outside `perform`, where it may read what only `perform` sees.
+        let default = match p.default.as_ref() {
+            None => None,
+            Some(d) => Some(literal_ruby(d).ok_or_else(|| gap(Some(&p.name), "a keyword default that is not a literal".to_string()))?),
+        };
+        out.push(JobParam { name: p.name.clone(), rest: false, keyword: true, default, codec });
     }
     Ok(out)
+}
+
+fn literal_ruby(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Lit { value } => match value {
+            Literal::Nil => Some("nil".to_string()),
+            Literal::Bool { value } => Some(value.to_string()),
+            Literal::Int { value } => Some(value.to_string()),
+            Literal::Float { value } if value.is_finite() => Some(format!("{value:?}")),
+            Literal::Str { value } => Some(ruby_str(value)),
+            Literal::Sym { value } if value.as_str().chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+                Some(format!(":{}", value.as_str()))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn describe(ty: &Ty) -> String {
@@ -1328,8 +1353,13 @@ pub fn registry_source_with_broadcasts(
                 if p.rest {
                     call_args.push(format!("*{}", read_rest(&p.codec, i)));
                 } else if p.keyword {
-                    let at = format!("ActiveJob::Arguments.keyword_args(args, {}), 0", ruby_str(p.name.as_str()));
-                    call_args.push(format!("{}: {}", p.name.as_str(), read_expr(&p.codec, &at)));
+                    let key = ruby_str(p.name.as_str());
+                    let read = read_expr(&p.codec, &format!("ActiveJob::Arguments.keyword_args(args, {key}), 0"));
+                    let value = match &p.default {
+                        Some(default) => format!("(ActiveJob::Arguments.keyword_given?(args, {key}) ? {read} : {default})"),
+                        None => read,
+                    };
+                    call_args.push(format!("{}: {value}", p.name.as_str()));
                 } else {
                     call_args.push(read_expr(&p.codec, &format!("args, {i}")));
                 }
