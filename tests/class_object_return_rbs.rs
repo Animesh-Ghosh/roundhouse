@@ -266,6 +266,56 @@ fn an_unresolved_return_alternative_is_not_a_concrete_instance() {
 }
 
 #[test]
+fn an_unknown_union_in_an_early_return_is_untyped() {
+    use roundhouse::expr::{Expr, ExprNode};
+    use roundhouse::ty::Ty;
+
+    fn unknown_union(expr: &Expr) -> bool {
+        matches!(&expr.ty, Some(Ty::Union { variants }) if variants.iter().any(Ty::is_unknown))
+    }
+    fn unknown_return(expr: &Expr) -> bool {
+        if let ExprNode::Return { value } = &*expr.node {
+            if unknown_union(value) {
+                return true;
+            }
+        }
+        let mut found = false;
+        expr.node.for_each_child(&mut |child| found |= unknown_return(child));
+        found
+    }
+
+    for tail in ["Lantern", "\"ordinary\""] {
+        for value in ["values.first", "Source.new.choice"] {
+            let source = format!(
+                "class Lantern\nend\nclass Shelf\n  def self.pick(flag, values = [])\n    return {value} if flag\n    {tail}\n  end\nend\n"
+            );
+            let tree = [
+                ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+                ("app/services/union_return.rb", source.as_str()),
+                ("sig/source.rbs", "class Source\n  def choice: () -> (String | untyped)\nend\n"),
+            ]
+            .into_iter()
+            .map(|(p, s)| (PathBuf::from(p), s.as_bytes().to_vec()))
+            .collect();
+            let mut app = ingest_app_from_tree(tree).unwrap();
+            roundhouse::session::analyze_and_lower(&mut app);
+            let method = app.library_classes.iter().flat_map(|c| &c.methods)
+                .find(|m| m.name.as_str() == "pick").unwrap();
+            assert!(unknown_return(&method.body), "the return must contain an unknown union arm");
+            // Rendering a gradual union already says `untyped`; the inferred
+            // return must also be unknown before another analysis pass uses it.
+            assert!(method.signature.is_none()
+                || matches!(&method.signature, Some(Ty::Fn { ret, .. }) if ret.is_unknown()),
+                "{value}, {tail}: {:?}", method.signature);
+            let files = roundhouse::emit::ruby::emit_library(&app);
+            let rbs = &files.iter().find(|f| f.path.ends_with("shelf.rbs")).unwrap().content;
+            let pick = rbs.lines().find(|l| l.contains("def self.pick:")).unwrap();
+            assert!(pick.ends_with(" -> untyped"), "{value}, {tail}: {rbs}");
+        }
+    }
+}
+
+#[test]
 fn a_runtime_class_has_no_false_constant_identity() {
     for body in ["    Class.new", "    copy = Class.new\n    copy"] {
         let files = mixed_files(&MIXED.replace(PICK_BODY, body));

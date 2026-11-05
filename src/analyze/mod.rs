@@ -5860,7 +5860,7 @@ impl Analyzer {
             return body.ty.clone();
         }
         // An unresolved alternative must not disappear behind a proven one.
-        if tys.iter().any(Ty::is_unknown) {
+        if tys.iter().any(Ty::has_unknown_arm) {
             return Some(crate::analyze::body::unknown());
         }
         Some(crate::analyze::body::union_many(tys))
@@ -9595,7 +9595,7 @@ fn effective_return_ty_with(body: &Expr, value_ty: fn(&Expr) -> Option<Ty>) -> O
 
 fn returns_an_unknown(expr: &Expr) -> bool {
     match &*expr.node {
-        ExprNode::Return { value } => matches!(value.ty, Some(Ty::Var { .. })) || returns_an_unknown(value),
+        ExprNode::Return { value } => value.ty.as_ref().is_some_and(Ty::has_unknown_arm) || returns_an_unknown(value),
         ExprNode::Lambda { .. } => false,
         ExprNode::Send { recv, args, block, method, .. } => {
             recv.as_ref().is_some_and(returns_an_unknown)
