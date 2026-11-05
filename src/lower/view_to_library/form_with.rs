@@ -608,7 +608,7 @@ pub(super) fn emit_tag_builder_void_or_content(
         // Content Rails holds as an html-safe buffer (`truncate(x)`,
         // `truncate(x) + "!"`) is written as it is; anything else escaped.
         let rewritten = rewrite_helpers_in_expr(&c, ctx);
-        let written = match super::walker::safe_buffer_value(&rewritten) {
+        let written = match super::walker::safe_buffer_value(&rewritten, ctx) {
             Some(safe) => send(Some(safe), "to_s", Vec::new(), None, false),
             None => view_helpers_call("html_escape", vec![send(Some(rewritten), "to_s", Vec::new(), None, false)]),
         };

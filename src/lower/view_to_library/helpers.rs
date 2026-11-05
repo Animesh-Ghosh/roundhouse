@@ -320,7 +320,7 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                             // (`truncate(x)`, `truncate(x) + "!"`) is written
                             // as it is, and `h` leaves one as it is too; a
                             // `pluralize` or any other String is escaped.
-                            match super::walker::safe_buffer_value(&lowered) {
+                            match super::walker::safe_buffer_value(&lowered, ctx) {
                                 Some(safe) if matches!(&*safe.node, ExprNode::Send { method, .. } if matches!(method.as_str(), "html_escape" | "+")) => safe,
                                 Some(safe) => lit_str_coerce(safe),
                                 None => view_helpers_call("html_escape", vec![lit_str_coerce(lowered)]),
@@ -738,7 +738,7 @@ fn escaped_label(text: &Expr, ctx: &ViewCtx) -> Expr {
     // A label Rails holds as an html-safe buffer (an escape the view helpers
     // applied, `truncate(x) + "!"`, `x.html_safe`) is written as it is.
     let lowered = rewrite_helpers_in_expr(text, ctx);
-    match super::walker::safe_buffer_value(&lowered) {
+    match super::walker::safe_buffer_value(&lowered, ctx) {
         // The view helpers' escape and a `+` of buffers are Strings already.
         Some(safe) if matches!(&*safe.node, ExprNode::Send { method, .. } if matches!(method.as_str(), "html_escape" | "+")) => safe,
         Some(safe) => lit_str_coerce(safe),
