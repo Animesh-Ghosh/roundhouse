@@ -31,6 +31,8 @@ pub const VIEW: &str = concat!(
     "V:<%= Fmt.badge %>\n",
     "H:<%= @recon.label %>\n",
     "L:<%= @relaid.label %>\n",
+    "J:<%= content_tag(:span, @comment.label) %>\n",
+    "D:<%= content_tag(:span, @article.label) %>\n",
 );
 
 pub const RENDERS: &[&str] = &[
@@ -38,18 +40,22 @@ pub const RENDERS: &[&str] = &[
     "B:<b>", "S:&lt;x&gt;", "M:&lt;m&gt;", "Y:<y>", "T:&lt;t1&gt;", "W:<t2>", "I:&lt;i2&gt;",
     "R:&lt;f&gt;", "E:&lt;r&gt;", "G:&lt;d&gt;", "Q:&lt;q&gt;",
     "N:&lt;e&gt;", "O:&lt;o&gt;", "V:<v>", "H:&lt;cr&gt;",
+    "J:<span>&lt;c&gt;</span>", "D:<span><b>a</b></span>",
 ];
 
 /// What trusting a mark too widely wrote: another class's `label`,
 /// another module's `badge`, `label` on an `Article | Comment` receiver
 /// (only `Article` has the marked one), and each value whose closer
-/// definition shadows a marked one, unescaped.
-pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>", "H:<cr>", "H:<b>", "L:<cr>", "L:<l>"];
+/// definition shadows a marked one, unescaped, also as `content_tag`'s
+/// content.
+pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>", "H:<cr>", "H:<b>", "L:<cr>", "L:<l>", "J:<span><c></span>"];
 
 /// real-blog with `GET /probe` rendering `VIEW`:
 /// - `Article#label` and `ApplicationRecord#tag_html` return html-safe
 ///   markup; `Comment#label` returns a plain String;
 /// - `Formatting.badge` is html-safe, `Plain.badge` isn't;
+/// - `content_tag(:span, …)` takes `Comment#label` and `Article#label`
+///   as its content, escaping the first only;
 /// - `x` and `z` are typed `Article | Comment`: `label` is marked only
 ///   on `Article`, so it is escaped; `tag_html` is marked on both
 ///   classes' parent, so it is trusted (which shows the receiver's
