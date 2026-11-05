@@ -11070,6 +11070,7 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
         // `:boolean` already casts inline (`markers::push_attribute_api_methods`).
         {
             for (name, ty) in crate::lower::model_to_library::markers::attribute_api_decls(&model.body) {
+                let Some(ty) = ty else { continue };
                 if model.enums.contains_key(&name) {
                     continue;
                 }
