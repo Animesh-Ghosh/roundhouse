@@ -6240,12 +6240,13 @@ impl Analyzer {
             };
             let Some(key) = key else { continue };
             // Not the placed row: keyword placement pads the slots a call leaves to their defaults with the same `Var`.
-            if let Some(shape) = params_by_method.get(&key) {
-                let positional = arg_tys.len().saturating_sub(usize::from(kw_tys.group));
-                for (i, (t, (_, kind))) in arg_tys.iter().zip(&shape.slots).take(positional).enumerate() {
-                    if matches!(kind, ParamKind::Required | ParamKind::Optional) && leaves_unknown(t) {
-                        open.insert((key.clone(), i));
-                    }
+            let positional = arg_tys.len().saturating_sub(usize::from(kw_tys.group));
+            let shape = params_by_method.get(&key);
+            for (i, t) in arg_tys.iter().take(positional).enumerate() {
+                // Not skipped without a shape: a concern's method keys to the includer, which has none, and its row folds into the module's.
+                let plain = shape.is_none_or(|s| s.slots.get(i).is_some_and(|(_, kind)| matches!(kind, ParamKind::Required | ParamKind::Optional)));
+                if plain && leaves_unknown(t) {
+                    open.insert((key.clone(), i));
                 }
             }
             let arg_tys = Self::place_keyword_args(params_by_method.get(&key), arg_tys, kw_tys);
@@ -6443,6 +6444,7 @@ impl Analyzer {
         let mut targets = targets;
         targets.sort_by(|a, b| a.0.cmp(&b.0));
         let mut adds: Vec<(ParamKey, Vec<Ty>)> = Vec::new();
+        let mut open_adds: Vec<(ParamKey, usize)> = Vec::new();
         for (id, includes) in targets {
             let mut queue = includes;
             let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
@@ -6473,14 +6475,21 @@ impl Analyzer {
                         continue;
                     }
                     for side in [MethodReceiver::Instance, MethodReceiver::Class] {
-                        if let Some(tys) = self.inferred_params.get(&(id.clone(), name.clone(), side)) {
+                        let from = (id.clone(), name.clone(), side);
+                        if let Some(tys) = self.inferred_params.get(&from) {
                             adds.push(((m.clone(), name.clone(), side), tys.clone()));
+                            for i in 0..tys.len() {
+                                if self.open_param_slots.contains(&(from.clone(), i)) {
+                                    open_adds.push(((m.clone(), name.clone(), side), i));
+                                }
+                            }
                         }
                     }
                 }
             }
         }
         fold_param_observations(&mut self.inferred_params, adds);
+        self.open_param_slots.extend(open_adds);
     }
 
     /// Every (class, method) pair's parameter names and canonical kinds

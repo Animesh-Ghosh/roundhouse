@@ -8,13 +8,20 @@
 //! types keeps its type, through a recursion too, and so does one a
 //! caller forwards its own parameter to: campfire's `Room#receive` is
 //! called from a test alone, and its `push_later(message)` kept the
-//! Message the job payload is lowered from.
+//! Message the job payload is lowered from. A concern's method follows
+//! its includer's untyped caller into the module's own row.
 
 use super::emit_and_run;
 use roundhouse::project::BuildTarget;
 
 fn app() -> emit_and_run::Overlay {
-    emit_and_run::real_blog().write(
+    emit_and_run::real_blog()
+        .write("app/models/stamping.rb", "module Stamping\n  def stamp_year(t)\n    t.year\n  end\nend\n")
+        .write(
+            "app/models/stamp_host.rb",
+            "class StampHost\n  include Stamping\n\n  def epoch\n    stamp_year(Time.at(0).utc)\n  end\n\n  def from_hash(h)\n    stamp_year(h[:at])\n  end\nend\n",
+        )
+        .write(
         "app/models/zone_probe.rb",
         r#"class ZoneProbe
   def self.local(time)
@@ -68,6 +75,7 @@ got = ZoneProbe.pick(["a", "b"])
 raise "pick: #{got.inspect}" unless got == 2
 raise "start" unless ZoneProbe.start == 0
 raise "relay" unless ZoneProbe.relay(Time.at(0).utc) == 1970
+raise "stamp" unless StampHost.new.from_hash({ at: Time.at(0).utc }) == 1970
 puts "ok"
 "#;
 
@@ -78,6 +86,9 @@ fn a_parameter_an_untyped_caller_reaches_ships_untyped() {
     for line in ["def self.local: (untyped time)", "def self.take: (untyped arr)", "def self.count_down: (Integer n)", "def self.year_of: (Time t)"] {
         assert!(text.contains(line), "{line}: {text}");
     }
+    // A concern's method keys its calls to the includer; the module's row is what the sidecar declares.
+    let text = std::fs::read_to_string(tree.join("app/models/stamping.rbs")).expect("stamping sidecar");
+    assert!(text.contains("def stamp_year: (untyped t)"), "{text}");
 }
 
 #[test]
