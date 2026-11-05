@@ -7800,7 +7800,7 @@ fn collect_transitive_filter_ivars(
             let mut out = collect_transitive_filter_ivars(value, bodies, depth, visited, own);
             for (i, target) in targets.iter().enumerate() {
                 if let (LValue::Ivar { name }, false) = (target, own) {
-                    if let Some(ty) = body::multiassign_target_ty(&value.ty, i) {
+                    if let Some(ty) = body::multiassign_target_ty(value, i) {
                         union_ivar_maps(&mut out, HashMap::from_iter([(name.clone(), ty)]));
                     }
                 }
@@ -9975,7 +9975,7 @@ fn walk_ivar_assignments(
             for (i, target) in targets.iter().enumerate() {
                 if let LValue::Ivar { name } = target {
                     if let Some(ty) =
-                        crate::analyze::body::multiassign_target_ty(&value.ty, i)
+                        crate::analyze::body::multiassign_target_ty(value, i)
                     {
                         let merged = match out.remove(name) {
                             Some(prev) => crate::analyze::body::join_ivar_slot(prev, ty),

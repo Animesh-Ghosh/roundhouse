@@ -53,11 +53,155 @@ fn signature(source: &str) -> String {
 }
 
 #[test]
+fn parallel_assignment_preserves_the_attachment_receiver() {
+    let source = r#"module PresentationHelper
+  def present(message)
+    Presentation.new(message, context: self).poster_url
+  end
+end
+class FirstHost
+  include PresentationHelper
+end
+class SecondHost
+  include PresentationHelper
+end
+class Presentation
+  def initialize(message, context:)
+    @message, @context = message, context
+  end
+  attr_reader :message, :context
+  def poster_url
+    poster = message.attachment.preview(:poster)
+    ActionView::ViewHelpers.url_for(poster)
+  end
+end
+class Run
+  def self.run
+    FirstHost.new.present(Message.new)
+  end
+end
+"#;
+    let tree = [
+        ("db/schema.rb", "ActiveRecord::Schema.define do\n  create_table(:messages) { |t| t.string :content_type }\nend\n"),
+        ("app/models/message.rb", "class Message < ActiveRecord::Base\n  has_one_attached :attachment\nend\n"),
+        ("app/services/presentation.rb", source),
+    ].into_iter().map(|(p, s)| (PathBuf::from(p), s.as_bytes().to_vec())).collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).unwrap();
+    app.pins_unresolved_params = true;
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = roundhouse::emit::ruby::emit_library(&app);
+    let ruby = &files.iter().find(|f| f.path.ends_with("presentation.rb")).unwrap().content;
+    assert!(ruby.contains("url_for(poster.url)"), "{ruby}");
+    let rbs = &files.iter().find(|f| f.path.ends_with("presentation.rbs")).unwrap().content;
+    assert!(rbs.contains("attr_reader message: Message"), "{rbs}");
+    assert!(rbs.contains("attr_reader context: (FirstHost | SecondHost)"), "{rbs}");
+}
+
+#[test]
 fn shared_module_self_keeps_class_and_instance_receivers() {
     let rbs = signature(SOURCE);
     assert!(rbs.contains("singleton(StaticAction)"), "{rbs}");
     assert!(rbs.contains("ConfiguredAction"), "{rbs}");
     assert!(!rbs.contains(" | StaticAction"), "{rbs}");
+}
+
+#[test]
+fn parallel_assignment_uses_literal_slots_and_keeps_splats_conservative() {
+    let source = r#"class Slots
+  def initialize
+    @number, @text, @missing = 7, "seven"
+  end
+  attr_reader :number, :text, :missing
+  def local_number
+    number, text = 7, "seven"
+    number + 1
+  end
+  def local_text
+    number, text = 7, "seven"
+    text.upcase
+  end
+  def local_write
+    x = 1
+    a, b, c = [x, x = "s", x]
+    c
+  end
+  def ivar_write
+    x = 1
+    @a, @b, @last = [x, x = "s", x]
+  end
+  attr_reader :last
+  def unknown(values)
+    first, second = values
+    second
+  end
+  def splatted(values)
+    first, second = [*values, "tail"]
+    second
+  end
+end
+"#;
+    let files = emit(source);
+    let rbs = &files.iter().find(|f| f.path.ends_with("slots.rbs")).unwrap().content;
+    for expected in ["attr_reader number: Integer", "attr_reader text: String",
+        "attr_reader missing: nil", "def local_number: () -> Integer", "def local_text: () -> String",
+        "def unknown: (untyped values) -> untyped", "def splatted: (untyped values) -> untyped",
+        "def local_write: () -> (Integer | String)"] {
+        assert!(rbs.contains(expected), "{expected}: {rbs}");
+    }
+    let last = rbs.lines().find(|l| l.contains("attr_reader last:")).unwrap();
+    assert!(last.contains("Integer") && last.contains("String"), "{rbs}");
+}
+
+#[test]
+fn literal_positions_preserve_proven_class_values() {
+    let source = r#"class Lantern
+end
+class IdentitySlots
+  VALUE = Lantern.new
+  def initialize
+    instance = Lantern.new
+    copy = Lantern
+    runtime = Class.new
+    @klass, @instance, @copy, @text, @value, @runtime = Lantern, instance, copy, "s", VALUE, runtime
+  end
+  attr_reader :klass, :instance, :copy, :text, :value, :runtime
+end
+"#;
+    let files = emit(source);
+    let rbs = &files.iter().find(|f| f.path.ends_with("identity_slots.rbs")).unwrap().content;
+    for expected in ["attr_reader klass: singleton(Lantern)", "attr_reader instance: Lantern",
+        "attr_reader copy: singleton(Lantern)", "attr_reader text: String",
+        "attr_reader value: Lantern", "attr_reader runtime: Class"] {
+        assert!(rbs.contains(expected), "{rbs}");
+    }
+}
+
+fn parallel_self_source() -> String {
+    let mut source = SOURCE.replace("Descriptions.for(self)", "Descriptions.for(Holder.new(self, \"\"))");
+    source.push_str(r#"
+class Holder
+  def initialize(action, prefix)
+    @action, @prefix = action, prefix
+  end
+  attr_reader :action, :prefix
+  def label
+    @prefix + @action.label
+  end
+end
+"#);
+    source
+}
+
+#[test]
+fn parallel_assignment_keeps_escaped_self_beside_another_value() {
+    let source = parallel_self_source();
+    let files = emit(&source);
+    let rbs = &files.iter().find(|f| f.path.ends_with("holder.rbs")).unwrap().content;
+    assert!(rbs.contains("attr_reader prefix: String"), "{rbs}");
+    let action = rbs.lines().find(|l| l.contains("attr_reader action:")).unwrap();
+    assert!(action.contains("singleton(StaticAction)") && action.contains("ConfiguredAction"), "{rbs}");
+    assert!(!action.contains("String"), "{rbs}");
+    run(&source, false, "class\ninstance\n");
 }
 
 fn cases() -> Vec<(&'static str, String, &'static str)> {
@@ -272,6 +416,7 @@ fn module_self_keeps_app_defined_kernel_overrides() {
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn module_self_runs_natively_with_generated_sidecars() {
+    run(&parallel_self_source(), true, "class\ninstance\n");
     for (_, source, expected) in cases() {
         run(&source, true, expected);
     }

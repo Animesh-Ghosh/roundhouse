@@ -3562,9 +3562,8 @@ impl<'a> BodyTyper<'a> {
                     // Per-position typing via `multiassign_target_ty`;
                     // targets with no usable RHS signal are left as-is.
                     if let ExprNode::MultiAssign { targets, value } = &*e.node {
-                        let rhs = value.ty.clone();
                         for (i, target) in targets.iter().enumerate() {
-                            let Some(ty) = multiassign_target_ty(&rhs, i) else {
+                            let Some(ty) = multiassign_target_ty(value, i) else {
                                 continue;
                             };
                             match target {
@@ -4464,7 +4463,27 @@ fn empty_container_ty_uninformative(e: &Expr) -> bool {
 ///     `ivar_unresolved` error.
 /// Anything else yields `None` (no usable signal — leave the target
 /// unbound rather than guess).
-pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty> {
+pub(crate) fn multiassign_target_ty(rhs: &Expr, index: usize) -> Option<Ty> {
+    // Plain reads and literals have positional evidence that the Array union
+    // loses. Computed elements can rebind a later read, and splats move slots;
+    // both retain the conservative type-based fallback.
+    if let ExprNode::Array { elements, .. } = &*rhs.node {
+        if elements.iter().all(|e| matches!(&*e.node,
+            ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef | ExprNode::Const { .. } | ExprNode::Lit { .. }))
+        {
+            return Some(elements.get(index).map(|e| {
+                let ty = e.ty.clone().unwrap_or_else(unknown);
+                // A runtime class has a kind, but no proven named singleton.
+                if matches!(&ty, Ty::Class { id, .. } if matches!(id.0.as_str(), "Class" | "Module"))
+                    && !matches!(&*e.node, ExprNode::Const { .. })
+                { ty } else { super::class_object_arg_ty(e, ty) }
+            }).unwrap_or(Ty::Nil));
+        }
+    }
+    multiassign_type_target_ty(&rhs.ty, index)
+}
+
+fn multiassign_type_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty> {
     match rhs {
         Some(Ty::Array { elem }) => Some((**elem).clone()),
         // Destructuring a relation materializes it — each scalar
@@ -4478,7 +4497,7 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
         }
         Some(ty @ Ty::Class { id, .. }) if !splats(id.0.as_str()) => Some(if index == 0 { ty.clone() } else { Ty::Nil }),
         Some(ty @ Ty::Union { variants })
-            if variants.iter().all(|v| multiassign_target_ty(&Some(v.clone()), 1) == Some(Ty::Nil)) =>
+            if variants.iter().all(|v| multiassign_type_target_ty(&Some(v.clone()), 1) == Some(Ty::Nil)) =>
         {
             Some(if index == 0 { ty.clone() } else { Ty::Nil })
         }
