@@ -87,3 +87,40 @@ p (only_a & [Note.find(a.id)]).length
         "1\n1\n1\nfalse\n[\"a\", \"b\"]\n2\n2\n[\"a\"]\n[\"b\", \"c\"]\n[\"a\", \"b\", \"c\"]\n1\n"
     );
 }
+
+#[test]
+fn relation_enumeration_chains_answer_loaded_rows() {
+    if !Command::new("ruby").args(["-rsqlite3", "-e", "1"]).status().is_ok_and(|s| s.success()) {
+        eprintln!("skipping: ruby with the sqlite3 gem not available");
+        return;
+    }
+    let out = tree();
+    let script = r#"
+require File.expand_path("main", Dir.pwd)
+Main.configure_default_adapter!
+%w[B A C].each { |body| record = Note.new; record.body = body; record.save! }
+relation = ActiveRecord::Relation.new(Note).order(:id)
+p relation.filter_map { |record| record.body if record.body != "A" }
+p relation.flat_map { |record| [record.body, record.body] }
+p relation.each_with_index.map { |record, index| [record.body, index] }
+p relation.find_each.reduce(true) { |memo, record| memo && record.body != "D" }
+p relation.find_each.filter_map { |record| record.body if record.body != "A" }
+p relation.find_each.map { |record| record.body }
+p relation.sort_by.with_index { |record, index| -index }.map { |record| record.body }
+p relation.sort_by.with_index { |record, index| 0 }.map { |record| record.body }
+"#;
+    let result = Command::new("ruby")
+        .arg("-e")
+        .arg(script)
+        .current_dir(&out)
+        .env("BLOG_DB", ":memory:")
+        .output()
+        .expect("ruby");
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[\"B\", \"C\"]\n[\"B\", \"B\", \"A\", \"A\", \"C\", \"C\"]\n\
+         [[\"B\", 0], [\"A\", 1], [\"C\", 2]]\ntrue\n[\"B\", \"C\"]\n\
+         [\"B\", \"A\", \"C\"]\n[\"C\", \"A\", \"B\"]\n[\"B\", \"A\", \"C\"]\n"
+    );
+}
