@@ -992,7 +992,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     // just PORO classes. The singular path uses
                     // find_first_class and would drop a module.
                     if let Some(classes) =
-                        unwrap_or_record(ingest_library_classes(&source, &path_str))?
+                        unwrap_or_record(super::library_class::ingest_app_library_classes(&source, &path_str))?
                     {
                         app.library_classes.extend(classes);
                         // After the file is registered, so the spans name it.
@@ -1236,8 +1236,20 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     }
                 }
             }
-            let (ingested, mut aliases) =
-                super::inherited_alias::capturing(|| ingest_library_classes(&source, &path_str));
+            // A file of constants alone is carried only where Rails'
+            // autoloader maps it to its constant: an app root's
+            // directory, not `lib/`, a gem's lib or a boot-required file.
+            let autoloaded = !sub.is_empty()
+                && sub != "lib"
+                && sub != "extras"
+                && !gem_libs.iter().any(|lib| support_dir.starts_with(lib));
+            let (ingested, mut aliases) = super::inherited_alias::capturing(|| {
+                if autoloaded {
+                    super::library_class::ingest_app_library_classes(&source, &path_str)
+                } else {
+                    ingest_library_classes(&source, &path_str)
+                }
+            });
             match ingested {
                 Ok(mut classes) => {
                     // A gem's file runs more than its declarations when it

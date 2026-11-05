@@ -8546,6 +8546,44 @@ fn emit_library_class_decl_inner(
     let self_anchor = out_path.with_extension("").to_string_lossy().into_owned();
     let mut s = String::new();
 
+    // A file of constants alone: its writes at the top level, where Ruby
+    // binds them on Object. Each value runs as the file loads, so what it
+    // names is loaded first, as for a class-body constant.
+    if lc.is_file_constants() {
+        let mut requires: BTreeSet<String> = BTreeSet::new();
+        for (_, value) in &lc.constants {
+            let mut paths: BTreeSet<Vec<String>> = BTreeSet::new();
+            walk_const_paths(value, &mut paths);
+            for path in &paths {
+                if let Some(anchor) = require_path_for_body_const(path, app, classes, "") {
+                    if anchor != self_anchor {
+                        requires.insert(relpath(&out_dir, &anchor));
+                    }
+                }
+            }
+        }
+        for require in &requires {
+            writeln!(s, "require_relative {require:?}").unwrap();
+        }
+        if !requires.is_empty() {
+            writeln!(s).unwrap();
+        }
+        for (cname, value) in &lc.constants {
+            let rendered = super::emit_expr(value);
+            let mut lines = rendered.lines();
+            match lines.next() {
+                Some(first) => {
+                    writeln!(s, "{} = {first}", cname.as_str()).unwrap();
+                    for line in lines {
+                        writeln!(s, "{line}").unwrap();
+                    }
+                }
+                None => writeln!(s, "{} = nil", cname.as_str()).unwrap(),
+            }
+        }
+        return EmittedFile { path: out_path, content: s };
+    }
+
     let mut emitted_external_require = false;
     for included in &lc.includes {
         let detail = format!("{} includes unresolved {}", lc.name.0, included.0);

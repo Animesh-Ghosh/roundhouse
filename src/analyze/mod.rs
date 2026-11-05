@@ -2274,8 +2274,10 @@ impl Analyzer {
         // Int to one, and the two `each`es iterated one. Five of the
         // emit's type errors, one missing loop.
         for lc in &app.library_classes {
+            // A file of constants alone writes them at the top level.
+            let owner = if lc.is_file_constants() { ClassId(Symbol::from("Object")) } else { lc.name.clone() };
             for (name, value) in &lc.constants {
-                let self_ty = Ty::Class { id: lc.name.clone(), args: vec![].into() };
+                let self_ty = Ty::Class { id: owner.clone(), args: vec![].into() };
                 entries.push((self_ty, name.clone(), declaration_id(name, value), value.clone(), true));
             }
         }

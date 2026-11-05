@@ -1184,6 +1184,12 @@ pub struct LibraryClass {
 }
 
 impl LibraryClass {
+    /// A file of constants alone, which declares no class
+    /// (`LibraryClassOrigin::FileConstants`).
+    pub fn is_file_constants(&self) -> bool {
+        matches!(self.origin, Some(LibraryClassOrigin::FileConstants))
+    }
+
     /// The members and the `Data.define` span of a class that a
     /// file-level `X = Data.define(…)` creates.
     pub fn data_define(&self) -> Option<(&[Symbol], Span)> {
@@ -1325,6 +1331,17 @@ pub enum LibraryClassOrigin {
     },
     /// The `Oj` stand-in an app under `Oj.mimic_JSON` reaches (`ingest::oj`).
     Oj,
+    /// Not a class: an autoloaded app file that declares no class or
+    /// module and holds only file-level constants (`RemoteThing =
+    /// Thing`, `Labels = LabelFactory.build(...)`). Named for its first
+    /// constant, so the file keeps the path Rails' autoloader maps to
+    /// that constant; `constants` are the file's writes, in source
+    /// order. The analyzer gives it no class entry (an alias of a class
+    /// resolves to that class through the source index) and types each
+    /// value as a top-level constant; the CRuby and JRuby trees write the
+    /// constants at the top level of the file, and every other target
+    /// refuses it (`project::refuse_file_constants`).
+    FileConstants,
 }
 
 /// A graphql-ruby object type (a class descending from
