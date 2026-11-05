@@ -440,6 +440,8 @@ fn nonpublic_model_readers_are_private_methods_and_writers_are_refused() {
     let schema = ingest_schema(b"ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :things do |t|\n    t.string :value\n  end\nend\n", "db/schema.rb").unwrap();
     let source = "class Thing < ApplicationRecord\n private\n attr_reader :value\nend";
     assert!(ingest_model(source.as_bytes(), "thing.rb", &schema, &Default::default()).is_err());
+    let source = "class Thing < ApplicationRecord\n attribute :secret, :string\n private\n attr_reader :secret\nend";
+    assert!(ingest_model(source.as_bytes(), "thing.rb", &Schema::default(), &Default::default()).is_err());
 }
 
 /// A model aliases a private def under `private` with `alias_method`. The

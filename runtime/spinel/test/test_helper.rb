@@ -537,7 +537,7 @@ module Dom
              else value.end_with?(want) || value.end_with?(escaped)
              end
     end
-    tag.include?(pred) || tag.include?(pred.gsub(">", "&gt;").gsub("<", "&lt;"))
+    tag.include?(pred) || tag.include?(pred.gsub(">", "&gt;").gsub("<", "&lt;").gsub("'", "&#39;"))
   end
 
   # Whether a start tag carries the attribute a predicate names: a
@@ -556,7 +556,7 @@ module Dom
         out << pred
       else
         name = pred[0, eq].to_s
-        value = pred[eq + 1, pred.length].to_s.gsub("'", "").gsub("\"", "")
+        value = selector_value(pred[eq + 1, pred.length].to_s)
         # `*=` / `^=` / `$=` — substring, prefix and suffix matches
         # (campfire's `img[src*='install-edge']`). Kept as the operator
         # spelled out, which `attr_matches?` reads; `=` stays the literal
@@ -572,7 +572,24 @@ module Dom
     out
   end
 
-  # Not `split("[")`: a quoted value can hold brackets (`[name='filter[q]']`) and an id can follow a predicate.
+  # Not `split("[")`: a quoted value can hold brackets (`[name='filter[q]']`) and an id can follow a predicate; a pseudo-class (`:checked`) is not checked, as before.
+  def self.selector_value(raw)
+    q = raw[0, 1].to_s
+    raw = raw[1, raw.length - 2].to_s if raw.length >= 2 && (q == "'" || q == "\"") && raw[-1, 1].to_s == q
+    out = ""
+    i = 0
+    while i < raw.length
+      c = raw[i, 1].to_s
+      if c == "\\" && i + 1 < raw.length
+        i += 1
+        c = raw[i, 1].to_s
+      end
+      out = out + c
+      i += 1
+    end
+    out
+  end
+
   def self.selector_base(chunk)
     selector_split(chunk)[0].to_s
   end
@@ -587,6 +604,7 @@ module Dom
     preds = []
     pred = ""
     inside = false
+    pseudo = false
     quote = ""
     i = 0
     while i < chunk.length
@@ -594,10 +612,17 @@ module Dom
       if !inside
         if c == "["
           inside = true
+          pseudo = false
           pred = ""
-        else
+        elsif c == ":"
+          pseudo = true
+        elsif !pseudo || c == "#" || c == "."
+          pseudo = false
           base = base + c
         end
+      elsif quote != "" && c == "\\"
+        pred = pred + chunk[i, 2].to_s
+        i += 1
       elsif quote != ""
         quote = "" if c == quote
         pred = pred + c

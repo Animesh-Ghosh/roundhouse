@@ -113,13 +113,35 @@ fn expand_included_blocks(app: &mut App) {
             continue;
         };
         let module_name = module.name.0.as_str().to_string();
+        let own_consts: Vec<Symbol> = module.constants.iter().map(|(n, _)| n.clone()).collect();
+        let mut decls = decls;
+        for decl in &mut decls {
+            if let Some(default) = &mut decl.default {
+                qualify_constants(default, &module_name, &own_consts);
+            }
+        }
+        // The block runs in the class that finally includes it, through any modules between.
+        let mut holders: Vec<String> = vec![module_name.clone()];
+        loop {
+            let more: Vec<String> = app
+                .library_classes
+                .iter()
+                .filter(|c| c.is_module && !holders.contains(&c.name.0.as_str().to_string()))
+                .filter(|c| c.includes.iter().any(|inc| resolve(&names, inc.0.as_str(), c.name.0.as_str()).is_some_and(|r| holders.contains(&r))))
+                .map(|c| c.name.0.as_str().to_string())
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            holders.extend(more);
+        }
         let includers: Vec<usize> = app
             .library_classes
             .iter()
             .enumerate()
             .filter(|(_, c)| !c.is_module)
             .filter(|(_, c)| {
-                c.includes.iter().any(|inc| resolve(&names, inc.0.as_str(), c.name.0.as_str()).as_deref() == Some(module_name.as_str()))
+                c.includes.iter().any(|inc| resolve(&names, inc.0.as_str(), c.name.0.as_str()).is_some_and(|r| holders.contains(&r)))
             })
             .map(|(i, _)| i)
             .collect();
@@ -137,6 +159,20 @@ fn expand_included_blocks(app: &mut App) {
         }
         app.library_classes[mi].unknown_calls.remove(ci);
     }
+}
+
+/// A bare read of one of the Concern's own constants, spelled from the top so it still names it in the includer.
+fn qualify_constants(e: &mut Expr, module: &str, own: &[Symbol]) {
+    if let ExprNode::Const { path } = &mut *e.node
+        && path.len() == 1
+        && own.contains(&path[0])
+    {
+        let mut full: Vec<Symbol> = std::iter::once(Symbol::from("")).chain(module.split("::").map(Symbol::from)).collect();
+        full.push(path[0].clone());
+        *path = full;
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| qualify_constants(c, module, own));
 }
 
 /// `class_attribute :live` written in a library class's own body.

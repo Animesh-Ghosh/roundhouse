@@ -5,7 +5,8 @@
 //! allow_other_host:, **args)`), and only the second has a runtime and a
 //! place among the controller lowering's response terminals.
 //! mission_control-jobs' queue pauses answer this way. A call with a key
-//! the runtime does not take (`allow_other_host:`) is left as written.
+//! the runtime does not take (`allow_other_host:`) is left as written, and
+//! only a controller's own calls are rewritten.
 
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
@@ -25,7 +26,13 @@ pub(crate) fn rewrite_node(expr: &mut Expr) {
     if !entries.iter().all(|(k, _)| key(k).is_some_and(|k| k == "fallback_location" || PASSED.contains(&k.as_str()))) {
         return;
     }
-    let Some(fallback) = entries.iter().find(|(k, _)| key(k).as_deref() == Some("fallback_location")).map(|(_, v)| v.clone()) else { return };
+    let Some(at) = entries.iter().position(|(k, _)| key(k).as_deref() == Some("fallback_location")) else { return };
+    // Not past a value with effects: the positional fallback would then be evaluated before it.
+    let pure = |v: &Expr| matches!(&*v.node, ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. });
+    if !entries[..at].iter().all(|(_, v)| pure(v)) {
+        return;
+    }
+    let fallback = entries[at].1.clone();
     let rest: Vec<(Expr, Expr)> = entries.iter().filter(|(k, _)| key(k).as_deref() != Some("fallback_location")).cloned().collect();
     let span = args[0].span;
     let mut new_args = vec![fallback];
