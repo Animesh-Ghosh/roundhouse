@@ -333,7 +333,7 @@ pub(in crate::analyze) fn register(
         for m in [
             "user_agent", "remote_ip", "ip", "url", "original_url", "fullpath", "path",
             "host", "host_with_port", "domain", "protocol", "scheme", "port_string",
-            "request_method", "method", "raw_post", "uuid", "request_id", "base_url",
+            "request_method", "method", "raw_post", "request_id=", "base_url",
             "script_name", "path_info", "query_string", "media_type",
             // The cookie-jar salts (`Request::Cookies`), read where an app
             // builds its own MessageVerifier off the request.
@@ -343,7 +343,7 @@ pub(in crate::analyze) fn register(
             request.instance_methods.insert(Symbol::from(m), Ty::Str);
         }
         for m in [
-            "referer", "referrer", "content_type", "origin", "subdomain", "remote_addr",
+            "referer", "referrer", "content_type", "origin", "subdomain", "remote_addr", "uuid", "request_id",
             // The CSP nonce a layout interpolates into a script tag —
             // `get_header(NONCE)`, so nil until a policy sets one.
             // Typing `request` on the view context is what surfaced
