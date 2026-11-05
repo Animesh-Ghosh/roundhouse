@@ -127,6 +127,27 @@ class PublicationBoundary(unittest.TestCase):
 
 
 class Routing(unittest.TestCase):
+    def test_class_object_return_analysis_runs_generated_sidecars_natively(self):
+        for path in ["src/analyze/mod.rs", "tests/class_object_return_rbs.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("class_object_return_rbs", plan["spinel_tests"])
+
+    def test_stream_error_sources_select_the_native_suite(self):
+        for path in [
+            "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
+            "runtime/spinel/tep/server_scheduled.rb", "runtime/spinel/tep/streamer.rb",
+            "tests/spinel_stream_error.rs", "tests/spinel_stream_error.rb",
+            "tests/spinel_stream_error_native.rb", "tests/spinel_stream_error_native_check.rb",
+            "tests/spinel_stream_error_puma.rb",
+            "tests/spinel_stream_error_io.rb", "tests/support/server_check_io.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("spinel_stream_error", plan["spinel_tests"])
+
     def test_shared_controller_base_runs_every_extra_language(self):
         for suffix in ("rb", "rbs"):
             with self.subTest(suffix=suffix):
@@ -1459,6 +1480,15 @@ class Results(unittest.TestCase):
         ]
         loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * ci.SPINEL_TOOLCHAIN_THREADS
         self.assertLess(max(loads) - min(loads), max(ci.SPINEL_TOOLCHAIN_SECONDS.values()))
+
+    def test_spinel_toolchain_shards_keep_a_shared_build_on_one_shard(self):
+        tests = [f"t{i:02}" for i in range(40)]
+        units = [["t01", "t07", "t13", "t19", "t25"], ["t02", "t30"], ["t03", "missing"]]
+        shards = [ci.spinel_toolchain_shard(tests, k, units=units) for k in range(ci.SPINEL_TOOLCHAIN_SHARDS)]
+        self.assertEqual(sorted(t for s in shards for t in s), sorted(tests))
+        for unit in units:
+            present = [t for t in unit if t in tests]
+            self.assertEqual(sum(all(t in s for t in present) for s in shards), 1, unit)
 
     def test_toolchain_shard_prints_nothing_for_an_empty_selection(self):
         out = subprocess.run(

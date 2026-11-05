@@ -259,8 +259,9 @@ module Main
       cookies.each do |cname, cvalue|
         name = cname.to_s
         next unless name.start_with?("flash_")
-        value = ActionDispatch::SignedCookie.verified(cvalue.to_s, name)
-        inbound_flash[name.delete_prefix("flash_")] = value unless value.empty?
+        ActionDispatch::Flash.cookie_flashes(cvalue.to_s, name).each do |key, value|
+          inbound_flash[key] = value
+        end
       end
     else
       host_flash.each { |k, v| inbound_flash[k.to_s] = v }
@@ -347,7 +348,7 @@ module Main
     else
       persisted.each do |kind, value|
         name = "flash_#{kind}"
-        out_cookies[name.to_sym] = ActionDispatch::SignedCookie.sign(value, name)
+        out_cookies[name.to_sym] = ActionDispatch::Flash.signed_cookie(value, name)
       end
       cookies.each_key do |cname|
         name = cname.to_s

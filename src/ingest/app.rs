@@ -611,6 +611,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             .collect();
         if more.is_empty() || auto.len() >= 32 {
             app.auto_source_gems = auto.into_iter().filter(|g| app.gem_lock.as_ref().is_some_and(|l| l.source.contains(g))).collect();
+            super::recurring_commands::apply(&mut app, vfs, dir)?;
             return Ok(app);
         }
         // Not the superseded pass's parse errors and survey gaps as well: the next pass reports them again.

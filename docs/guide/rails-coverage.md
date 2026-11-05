@@ -327,6 +327,10 @@ What differs from Rails, and why:
   an empty session or no message. The session payload is not Rails'
   JSON either, so a migration from Rails starts every session afresh;
   Campfire's login rides its own signed cookie and carries over.
+  On Ruby and Spinel, non-String flash values are JSON-encoded and
+  signed with a separate `flash.json.<cookie name>` purpose. String
+  flash values keep the existing cookie format. Strict targets keep
+  String notice/alert values.
   `cookies.encrypted` is Rails' jar (AES-256-GCM, the "authenticated
   encrypted cookie" key from `SECRET_KEY_BASE`, JSON values), so a value
   either side encrypted reads on the other; the session store does not

@@ -465,3 +465,55 @@ fn the_rest_reader_calls_only_runtime_readers() {
         );
     }
 }
+
+fn keyword_app(target: Option<roundhouse::build_target::BuildTarget>) -> App {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n"),
+        ("app/models/user.rb", "class User < ApplicationRecord\n  def self.later\n    OptJob.perform_later(1, note: \"y\")\n    ReqJob.perform_later(1, note: \"y\")\n  end\nend\n"),
+        ("app/jobs/application_job.rb", "class ApplicationJob < ActiveJob::Base\nend\n"),
+        ("app/jobs/opt_job.rb", "class OptJob < ApplicationJob\n  def perform(n, note: \"x\")\n    nil\n  end\nend\n"),
+        ("app/jobs/req_job.rb", "class ReqJob < ApplicationJob\n  def perform(n, note:)\n    nil\n  end\nend\n"),
+    ]))
+    .expect("ingest keyword job app");
+    match target {
+        Some(target) => {
+            roundhouse::session::analyze_and_lower_for(&mut app, target);
+        }
+        None => {
+            roundhouse::session::analyze_and_lower(&mut app);
+        }
+    }
+    app
+}
+
+/// On the Ruby family a job's keywords stay keywords: the wrappers forward
+/// them by name, the payload writes them in the trailing Hash Rails flags,
+/// and the drain passes them back by name.
+#[test]
+fn keyword_parameters_forward_and_ride_the_payload_on_the_ruby_family() {
+    let app = keyword_app(Some(roundhouse::build_target::BuildTarget::Ruby));
+    for job in ["OptJob", "ReqJob"] {
+        let p = plan(&app, job);
+        assert!(p.fallback.is_none(), "{job}: {:?}", p.fallback);
+        assert!(p.params.iter().any(|p| p.keyword && p.name.as_str() == "note" && p.codec == Codec::Str), "{:?}", p.params);
+    }
+    let req = emitted(&app, "req_job.rb");
+    assert!(req.contains("def self.perform_later(n, note:)"), "{req}");
+    assert!(req.contains("new.perform(n, note: note)"), "{req}");
+    let src = registry_source(&app.job_plans, false);
+    assert!(src.contains("ActiveJob::Arguments.keywords([\"note\"], [ActiveJob::Arguments.str(note)])"), "{src}");
+    assert!(
+        src.contains("ReqJob.new.perform(ActiveJob::Arguments.int_at(args, 0), note: ActiveJob::Arguments.str_at(ActiveJob::Arguments.keyword_args(args, \"note\"), 0))"),
+        "{src}"
+    );
+}
+
+/// A target whose keywords are trailing positionals has no slot a caller
+/// can fill by name for a required keyword, so that job gets no wrapper.
+#[test]
+fn a_required_keyword_still_has_no_wrapper_off_the_ruby_family() {
+    let app = keyword_app(None);
+    let req = emitted(&app, "req_job.rb");
+    assert!(!req.contains("def self.perform_later"), "{req}");
+}
