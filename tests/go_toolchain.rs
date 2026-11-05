@@ -20,6 +20,8 @@ use std::process::Command;
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
+#[path = "support/go_conditional_operand.rs"]
+mod go_conditional_operand;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -348,4 +350,52 @@ fn a_model_test_with_a_persisted_override_runs() {
         .expect("run go test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("--- PASS: TestTheOverrideAnswers"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1696: the issue's reduction parses: its conditional operand of `&&`
+/// is a func literal, not an `if` in expression position.
+#[test]
+#[ignore]
+fn a_conditional_operand_of_and_parses() {
+    let (emitted, errors) = go_conditional_operand::issue_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let output = Command::new("gofmt").args(["-e", "-l", "app/v2/article.go"]).current_dir(&*emitted).output().expect("run gofmt");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A conditional operand of `&&` runs, answering as Ruby does.
+#[test]
+#[ignore]
+fn a_conditional_operand_of_and_runs() {
+    let (emitted, errors) = go_conditional_operand::note_app()
+        .remove("test/models/note_headline_test.rb")
+        .emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/note_headline_probe_test.go"), go_conditional_operand::GO_PROBE).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestNoteHeadlineProbe", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestNoteHeadlineProbe"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A conditional of non-nil scalars on the left of `||` is its own value,
+/// as in Ruby, where 0 and "" are truthy.
+#[test]
+#[ignore]
+fn a_conditional_scalar_left_of_or_is_kept() {
+    let (emitted, errors) = go_conditional_operand::or_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/note_or_probe_test.go"), go_conditional_operand::GO_OR_PROBE).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestNoteOrProbe", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestNoteOrProbe"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }

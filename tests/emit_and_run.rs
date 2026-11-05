@@ -20686,6 +20686,27 @@ mod concern_with_options;
 #[path = "emit_and_run/content_tag_block.rs"]
 mod content_tag_block;
 
+#[path = "support/go_conditional_operand.rs"]
+mod go_conditional_operand;
+
+/// #1696's `Note#headline?` on the ruby target: the answers the Go probe
+/// checks are Ruby's.
+#[test]
+fn a_conditional_operand_of_and_answers_as_ruby() {
+    go_conditional_operand::note_app().run_test("test/models/note_headline_test.rb").assert_passes();
+}
+
+/// The Go emit writes the conditional operand as a func literal, not an
+/// `if` statement in expression position.
+#[test]
+fn a_conditional_operand_of_and_is_a_go_value() {
+    let (emitted, errors) = go_conditional_operand::issue_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let model = std::fs::read_to_string(emitted.join("app/v2/article.go")).unwrap();
+    let body = model.split("func (self *Article) HeadlinePred() bool {").nth(1).expect("HeadlinePred").split("\n}\n").next().unwrap();
+    assert!(!body.contains("return if ") && body.contains("func() bool {"), "{body}");
+}
+
 #[path = "support/rust_bare_model.rs"]
 mod rust_bare_model;
 
