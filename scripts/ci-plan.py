@@ -561,6 +561,7 @@ def native_coverage(path):
     }:
         suites.add("spinel_stream_error")
     if path.startswith("tests/spinel_chunked_body") or path in {
+        "tests/spinel_toolchain/chunked_body.rs",
         "tests/support/server_check_io.rb",
         "tests/tep_server_harness.rb", "runtime/spinel/tep/chunked_body.rb",
         "runtime/spinel/tep/request.rb", "runtime/spinel/tep/parser.rb",
