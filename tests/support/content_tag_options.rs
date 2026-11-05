@@ -24,6 +24,10 @@ pub const VIEW: &str = concat!(
     "<%= content_tag :p, h(\"<s>t</s>\".html_safe) %>\n",
     "<%= content_tag :p, h(raw(\"<s>v</s>\")) %>\n",
     "<%= content_tag :p, ERB::Util.html_escape(\"<z>\") %>\n",
+    "<%= content_tag :p, h(content_tag(:b, \"x\")) %>\n",
+    "<%= content_tag :p, ERB::Util.h(content_tag(:b, \"y\")) %>\n",
+    "<%= content_tag :p, ERB::Util.html_escape(link_to(\"<l>\", \"/l\")) %>\n",
+    "<%= content_tag :p, h(truncate(\"<i>yy</i>\", length: 5)) %>\n",
     "<%= content_tag :div, turbo_stream_from(\"room\") %>\n",
     "<% content_for :t do %><i>m</i><% end %><%= content_tag :p, content_for(:t) %>\n",
     "<% attrs = { class: \"c\" } %><%= content_tag :p, \"x\", attrs %>\n",
@@ -33,9 +37,10 @@ pub const VIEW: &str = concat!(
 /// What Rails 8.1.4 renders for each line of `VIEW`: the content escaped
 /// unless it is html-safe (a helper's markup, including a
 /// `turbo_stream_from`'s element and a `content_for`'s capture;
-/// `html_safe`; `raw`): a `pluralize`'s, a `truncate`'s and an `h`'s text
-/// is escaped only once; options can be a Hash local. The last line is
-/// #1771's block form with options, which Go didn't compile. The
+/// `html_safe`; `raw`; an `h` of any of these): a `pluralize`'s, a
+/// `truncate`'s and an `h`'s text is escaped only once; options can be a
+/// Hash local. The last line is #1771's block form with options, which Go
+/// didn't compile. The
 /// `turbo_stream_from` render is the element's start: its signed name is
 /// the runtime's.
 pub const RENDERS: &[&str] = &[
@@ -56,6 +61,10 @@ pub const RENDERS: &[&str] = &[
     "<p><s>t</s></p>",
     "<p><s>v</s></p>",
     "<p>&lt;z&gt;</p>",
+    "<p><b>x</b></p>",
+    "<p><b>y</b></p>",
+    "<p><a href=\"/l\">&lt;l&gt;</a></p>",
+    "<p>&lt;i...</p>",
     "<div><turbo-cable-stream-source channel=\"Turbo::StreamsChannel\"",
     "<p><i>m</i></p>",
     "<p class=\"c\">x</p>",

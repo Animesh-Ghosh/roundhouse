@@ -259,7 +259,7 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             // or already escaped (`truncate`, `word_wrap`, `pluralize`, each
             // lowered to `html_escape(…)`). The other kinds (`dom_id`) are
             // escaped like any String.
-            let helper_markup = matches!(&*content.node,
+            let is_helper_markup = |e: &Expr| matches!(&*e.node,
                 ExprNode::Send { recv: None, method, args, block: None, parenthesized }
                     if matches!(
                         super::walker::classify_template_helper(method.as_str(), args, *parenthesized, ctx),
@@ -269,6 +269,7 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                             | TurboStreamFrom { .. } | ContentForGetter { .. }
                             | Truncate { .. } | WordWrap { .. } | Pluralize { .. })
                     ));
+            let helper_markup = is_helper_markup(content);
             let raw_value = match &*content.node {
                 ExprNode::Send { recv: None, method, args, block: None, .. }
                     if method.as_str() == "raw" && args.len() == 1 && !ctx.is_local("raw") =>
@@ -300,13 +301,15 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                 None if helper_markup => lit_str_coerce(rewrite_helpers_in_expr(content, ctx)),
                 None => {
                     // `h` leaves an html-safe argument as it is
-                    // (`h(x.html_safe)`, `h(raw(x))`).
+                    // (`h(x.html_safe)`, `h(raw(x))`, `h(content_tag(…))`,
+                    // a helper's markup as the bare content takes it).
                     let safe_arg = escaped_value.and_then(|v| match &*v.node {
                         ExprNode::Send { recv: None, method, args, block: None, .. }
                             if method.as_str() == "raw" && args.len() == 1 && !ctx.is_local("raw") =>
                         {
                             Some(args[0].clone())
                         }
+                        _ if is_helper_markup(v) => Some(v.clone()),
                         _ => super::walker::html_safe_value(v, ctx),
                     });
                     match safe_arg {
