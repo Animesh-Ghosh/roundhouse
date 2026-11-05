@@ -70,6 +70,7 @@ require_relative "runtime/active_support_duration"
 # Blank-predicate helper for receivers `src/lower/blank.rs` had no static
 # type to ground on. Before anything that can hold a `present?` site.
 require_relative "runtime/active_support_ext"
+require_relative "runtime/active_support_calendar"
 require_relative "runtime/active_model_validator"
 require_relative "runtime/rails"
 # Not part of runtime/rails: the instrumented Notifications paths keep per-thread state the strict targets' typing gate does not follow.
@@ -295,6 +296,8 @@ require_relative "runtime/action_controller_fragment_caching"
 require_relative "runtime/public_files"
 require_relative "runtime/action_controller_page_caching"
 require_relative "runtime/solid_queue"
+require_relative "runtime/solid_queue_standin"
+require_relative "runtime/solid_queue_runner"
 require_relative "runtime/integration_session"
 # Rails 8.1.4's full ActionController::Head options hash is a Ruby-family
 # feature; strict non-Ruby targets keep the bounded shared implementation.

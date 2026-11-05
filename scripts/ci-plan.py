@@ -59,6 +59,9 @@ BASE = [
 # selected (scheduled full, or a change that owns them). Unselected skips
 # must not fail the Ruby PR floor.
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
+# Canonical home after the org transfer. Forks and the retired rubys/
+# name stay rejected.
+CANONICAL_REPOSITORY = "roundhouse-rb/roundhouse"
 CORE = ["spinel-build", "spinel-toolchain", "spinel-compare"]
 JRUBY_BIND_INPUTS = {
     "tests/param_binds_jruby.rb",
@@ -74,12 +77,14 @@ JRUBY_BIND_INPUTS = {
 }
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
+    "did_you_mean",
     "spinel_faye_websocket",
     "spinel_websocket_lifecycle",
     "select_alias_index",
     "date_columns_spinel",
     "temporal_initialize_spinel",
     "framework_tests_spinel",
+    "object_blank",
     "spinel_web_push_crypto",
     "openssl_random",
     "spinel_db_lease",
@@ -108,6 +113,7 @@ SPINEL_TESTS = [
     "before_action_return_spinel",
     "partial_flash_from_caller_spinel",
     "plain_class_optional_keywords_spinel",
+    "conditional_expression_parens",
     "jbuilder_array_value_spinel",
     "active_job_payload",
     "render_json_encoder_spinel",
@@ -499,8 +505,12 @@ def native_coverage(path):
         or path == "tests/support/full_forwarding.rs"
     ) and not interpreter_only
     suites = set()
+    if path in {"src/emit/ruby.rs", "src/emit/ruby/expr.rs"}:
+        suites.add("conditional_expression_parens")
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
         suites.add("framework_tests_spinel")
+    if path in {"runtime/ruby/active_support_ext.rb", "src/lower/blank.rs", "src/lower/mod.rs", "src/lower/jbuilder_to_library/mod.rs"}:
+        suites.add("object_blank")
     # `Model.transaction` (rollback, nesting, savepoints) lives here; its
     # gate compiles it with the real_blog fixture.
     if path in {
@@ -511,6 +521,19 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
+    if path in {
+        "src/ingest/settled_conditionals.rs",
+        "src/lower/defined_const_fold.rs",
+        "src/analyze/body/const_resolution/mod.rs",
+        "src/analyze/body/mod.rs",
+        "src/analyze/registry/stdlib.rs",
+        "src/gems.rs",
+        "src/project.rs",
+        "tests/stdlib_gem_fates.rs",
+    } or path.startswith("tests/did_you_mean/"):
+        suites.add("did_you_mean")
+    if path in {"tests/spinel_net_http_transport.rb", "tests/spinel_net_http_stream.rb", "tests/spinel_net_http_raise.rb"}:
+        suites.add("spinel_net_http_start")
     if path.startswith("tests/spinel_faye_websocket/") or path == "runtime/spinel/faye_websocket.rb":
         suites.add("spinel_faye_websocket")
     if path.startswith(("tests/spinel_websocket_lifecycle", "runtime/spinel/tep/websocket")) or path in {
@@ -743,6 +766,11 @@ def select(
     wasm = site = spinel = False
     reasons = []
     for path in paths:
+        if path in {"runtime/ruby/action_controller/base.rb", "runtime/ruby/action_controller/base.rbs"}:
+            targets.update(EXTRA_COMPARE_TARGETS)
+            spinel_tests.add("render_json_encoder_spinel")
+            reasons.append(f"{path}: shared controller runtime on every extra language")
+
         if path in {"tests/emit_and_run/class_body_calls.rs", "tests/support/class_body_calls.rs"}:
             reasons.append(f"{path}: unit (emit_and_run), spinel-toolchain (ordinary class-body calls)")
             spinel = True
@@ -978,17 +1006,34 @@ def record_timing(kind, name, seconds, ok):
             f.write(json.dumps({"kind": kind, "name": name, "seconds": max(round(seconds), 1), "ok": ok}) + "\n")
 
 
-def run_timed(kind, name, command):
+def run_timed(kind, name, command, charged=0):
     start = time.monotonic()
     status = subprocess.run(command).returncode
-    record_timing(kind, name, time.monotonic() - start, status == 0)
+    record_timing(kind, name, time.monotonic() - start + charged, status == 0)
     return status
+
+
+def bundle_seconds():
+    """Each test's share of the shared Spinel bundle compiles it took part in, written by spinel_bundle_build.
+
+    A bundled test runs a prebuilt binary in well under a second; recording only that let the
+    planner pile every bundled test onto one shard, which then paid all their compiles (#1781).
+    """
+    path = os.environ.get("RH_SPINEL_BUNDLE", "")
+    try:
+        data = json.loads((Path(path) / "seconds.json").read_text()) if path else {}
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {name: seconds for name, seconds in data.items() if positive_seconds(seconds)}
 
 
 def run_tests(kind, tests, parallel, command):
     """Each test in its own process, so each one's seconds can be recorded."""
+    charged = bundle_seconds()
     with ThreadPoolExecutor(max_workers=max(parallel, 1)) as pool:
-        statuses = list(pool.map(lambda t: run_timed(kind, t, [*command, t]), tests))
+        statuses = list(pool.map(lambda t: run_timed(kind, t, [*command, t], charged.get(t, 0)), tests))
     failed = [t for t, status in zip(tests, statuses) if status != 0]
     print(f"{len(tests) - len(failed)} passed, {len(failed)} failed")
     for test in failed:
@@ -1252,6 +1297,15 @@ def _advisory_complete(job, need, advisory, plan=None):
     return all(need.get("outputs", {}).get(key) == "success" for key in keys)
 
 
+def publication_caller_allowed(repository, ref, event_name):
+    """True only for scheduled / dispatched Full validation on canonical main."""
+    return (
+        repository == CANONICAL_REPOSITORY
+        and ref == "refs/heads/main"
+        and event_name in {"schedule", "workflow_dispatch"}
+    )
+
+
 def write_outputs(values):
     output = os.environ.get("GITHUB_OUTPUT")
     lines = "".join(
@@ -1373,10 +1427,10 @@ def main():
                 "Ruby+Spinel only (extra-language SDKs not selected)"
             )
     publish = os.environ.get("CI_PUBLISH") == "true"
-    if publish and (
-        os.environ["GITHUB_REPOSITORY"] != "rubys/roundhouse"
-        or os.environ["GITHUB_REF"] != "refs/heads/main"
-        or event_name not in {"schedule", "workflow_dispatch"}
+    if publish and not publication_caller_allowed(
+        os.environ["GITHUB_REPOSITORY"],
+        os.environ["GITHUB_REF"],
+        event_name,
     ):
         raise ValueError("publication is only allowed by canonical main's full caller")
     plan = select(

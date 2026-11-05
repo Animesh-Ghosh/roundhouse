@@ -283,6 +283,32 @@ class ViewHelpersTest < Minitest::Test
     assert_equal %(<span class="badge">hi</span>), out
   end
 
+  # A template's `content_tag … do … end`: the captured markup is written
+  # as it is (Rails 8.1.4 renders `<section class="boxed">inside2</section>`).
+  def test_content_tag_html_writes_the_captured_markup
+    assert_equal %(<section class="boxed"><b>inside</b></section>), ViewHelpers.content_tag_html(:section, "<b>inside</b>", class: "boxed")
+    assert_equal "<aside>direct</aside>", ViewHelpers.content_tag_html(:aside, "direct")
+  end
+
+  # Rails writes a newline ahead of a textarea's content.
+  def test_content_tag_textarea_content_follows_a_newline
+    assert_equal "<textarea>\n\nhi</textarea>", ViewHelpers.content_tag(:textarea, "\nhi")
+    assert_equal "<textarea>\nhi</textarea>", ViewHelpers.content_tag_html(:textarea, "hi")
+  end
+
+  # Rails' `ensure_valid_html5_tag_name`: a name that is not a letter and
+  # then no whitespace, `/` or `>` raises rather than writing past the tag.
+  def test_content_tag_rejects_a_name_that_is_not_a_tag
+    assert_raises(ArgumentError) { ViewHelpers.content_tag(:_p, "y") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_html(:_p, "y") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_name("p onclick=x") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_name("a/b") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_name("a>b") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_name("1p") }
+    assert_raises(ArgumentError) { ViewHelpers.content_tag_name("") }
+    assert_equal "my-el", ViewHelpers.content_tag_name("my-el")
+  end
+
   # Every expectation below is the byte-for-byte output of Rails 8.1's
   # own `mail_to` for the same call, apart from attribute ORDER (Rails
   # puts the html options before the href; `link_to` above follows
@@ -435,6 +461,112 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "", ViewHelpers.optional_value_attr("")
   end
 
+  # Rails 8.1.4's `form.color_field` values (actionview's
+  # `Tags::ColorField#validate_color_string`).
+  def test_color_value_attr_keeps_a_hex_color_lowercased
+    assert_equal %( value="#abcdef"), ViewHelpers.color_value_attr("#ABCDEF")
+    assert_equal %( value="x#12ab34y"), ViewHelpers.color_value_attr("x#12ab34y")
+    assert_equal %( value="swatch #abcdef"), ViewHelpers.color_value_attr("Swatch #ABCDEF")
+  end
+
+  def test_color_value_attr_is_black_without_a_color
+    assert_equal %( value="#000000"), ViewHelpers.color_value_attr(nil)
+    assert_equal %( value="#000000"), ViewHelpers.color_value_attr("red")
+    assert_equal %( value="#000000"), ViewHelpers.color_value_attr("#12345")
+  end
+
+  def test_color_field_value_attr_prefers_the_option
+    assert_equal %( value="#FF0000"), ViewHelpers.color_field_value_attr("#FF0000", "#00ff00")
+    assert_equal %( value="red"), ViewHelpers.color_field_value_attr("red", nil)
+    assert_equal %( value="#00ff00"), ViewHelpers.color_field_value_attr(nil, "#00FF00")
+    # `||=` replaces a false option too; the String "false" is kept.
+    assert_equal %( value="#00ff00"), ViewHelpers.color_field_value_attr(false, "#00FF00")
+    assert_equal %( value="false"), ViewHelpers.color_field_value_attr("false", "#00FF00")
+  end
+
+  # Rails 8.1.4's `form.datetime_local_field` value for a datetime or
+  # date column's text (`DatetimeLocalField`, `%Y-%m-%dT%T`).
+  def test_datetime_local_value_attr_formats_a_stored_time
+    assert_equal %( value="2026-11-01T09:30:15"), ViewHelpers.datetime_local_value_attr("2026-11-01 09:30:15.5")
+    assert_equal %( value="2026-11-01T09:30:15"), ViewHelpers.datetime_local_value_attr("2026-11-01 09:30:15 UTC")
+  end
+
+  def test_datetime_local_value_attr_puts_a_date_at_midnight
+    assert_equal %( value="2026-11-01T00:00:00"), ViewHelpers.datetime_local_value_attr("2026-11-01")
+  end
+
+  def test_datetime_local_value_attr_empty_for_nil
+    assert_equal "", ViewHelpers.datetime_local_value_attr(nil)
+    assert_equal "", ViewHelpers.datetime_local_value_attr("")
+  end
+
+  # Rails 8.1.4's `current_page?(path)` answers (actionview url_helper.rb),
+  # on the request's method, path, fullpath and protocol with host.
+  def test_current_page_match_answers_a_get_or_head_only
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org", "/events")
+    assert_equal true, ViewHelpers.current_page_match?("HEAD", "/events", "/events", "http://example.org", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("POST", "/events", "/events", "http://example.org", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events/1", "/events/1", "http://example.org", "/events")
+  end
+
+  def test_current_page_match_reads_the_query_only_when_the_path_has_one
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", "http://example.org", "/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org", "/events?order=asc")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", "http://example.org", "/events?order=asc")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events?order=desc", "http://example.org", "/events?order=asc")
+  end
+
+  def test_current_page_match_drops_a_trailing_slash
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events/", "/events/", "http://example.org", "/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org", "/events/")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/", "/", "http://example.org", "/")
+  end
+
+  def test_current_page_match_percent_decodes_both_sides
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/caf%C3%A9", "/caf%C3%A9", "http://example.org", "/café")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/caf%C3%A9", "/caf%C3%A9", "http://example.org", "/caf%C3%A9")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a+b", "/a+b", "http://example.org", "/a+b")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a%2Bb", "/a%2Bb", "http://example.org", "/a+b")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/a%20b", "/a%20b", "http://example.org", "/a b")
+  end
+
+  def test_current_page_match_compares_a_url_with_the_request_protocol_and_host
+    o = "http://example.org"
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("HEAD", "/events", "/events", o, "http://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("POST", "/events", "/events", o, "http://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://other.example/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "https://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "HTTP://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://EXAMPLE.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "my_app2://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org:8080", "http://example.org:8080/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", "http://example.org:8080", "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", "https://example.org", "https://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", "https://example.org", "http://example.org/events")
+  end
+
+  def test_current_page_match_decodes_and_trims_a_url_as_a_path
+    o = "http://example.org"
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http%3A%2F%2Fexample.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://example.org/events/")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events/", "/events/", o, "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/", "/", o, "http://example.org/")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/", "/", o, "http://example.org")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", o, "http://example.org/events")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/events", "/events?order=asc", o, "http://example.org/events?order=asc")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "http://example.org/events?order=asc")
+    assert_equal true, ViewHelpers.current_page_match?("GET", "/caf%C3%A9", "/caf%C3%A9", o, "http://example.org/café")
+  end
+
+  # `^` matches after a newline too, so a `scheme://` there makes it a URL.
+  def test_current_page_match_reads_a_scheme_after_a_newline
+    o = "http://example.org"
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/events", "/events", o, "/x\nhttp://example.org/events")
+    assert_equal false, ViewHelpers.current_page_match?("GET", "/x%0Ahttp://y", "/x%0Ahttp://y", o, "/x\nhttp://y")
+  end
+
   # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`).
   # Rails' `source.blank?`: empty, or only whitespace (`[[:space:]]`), is "".
   def test_stylesheet_href_answers_empty_for_a_blank_source
@@ -519,6 +651,49 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "", ViewHelpers.render_attrs({ disabled: false })
     assert_equal "", ViewHelpers.render_attrs({ checked: nil })
     assert_equal %( data-turbo="false"), ViewHelpers.render_attrs({ "data-turbo": false })
+  end
+
+  # Attribute NAMES go through Rails' `ERB::Util.xml_name_escape`, as
+  # `tag_option` does: a first character that cannot start an XML name
+  # and any later one that cannot continue it become `_`, so a key never
+  # closes the attribute or opens another one. Expected strings MEASURED
+  # against actionview 8.1.4 with these exact calls.
+  def test_content_tag_escapes_a_data_key_name
+    out = ViewHelpers.content_tag(:p, "x", data: { "x onmouseover=alert(1) z": "v" })
+    assert_equal %(<p data-x_onmouseover_alert_1__z="v">x</p>), out
+  end
+
+  # One key per call: the Swift runtime renders attributes sorted by
+  # key, so a multi-key Hash is not in Rails' order there.
+  def test_content_tag_escapes_a_top_level_key_name
+    assert_equal %(<p a_b_c="v">x</p>), ViewHelpers.content_tag(:p, "x", "a b=c": "v")
+    assert_equal %(<p _st="w">x</p>), ViewHelpers.content_tag(:p, "x", "1st": "w")
+    assert_equal %(<p x_y="z">x</p>), ViewHelpers.content_tag(:p, "x", "x\"y": "z")
+    assert_equal %(<p _a="y">x</p>), ViewHelpers.content_tag(:p, "x", "-a": "y")
+    assert_equal %(<p a_b="z">x</p>), ViewHelpers.content_tag(:p, "x", "a>b": "z")
+  end
+
+  def test_content_tag_escapes_an_aria_key_name
+    out = ViewHelpers.content_tag(:p, "x", aria: { "label by": "v" })
+    assert_equal %(<p aria-label_by="v">x</p>), out
+  end
+
+  # A name that escapes to "" is NO attribute. Written as ` ="…"`, the
+  # HTML parser reads `="foo` as a name and the value's later words as
+  # attributes of their own. Stricter than Rails for a blank Symbol key,
+  # which Rails writes as ` ="…"`; a blank String key Rails skips.
+  def test_content_tag_drops_a_name_that_escapes_to_nothing
+    assert_equal %(<p>x</p>), ViewHelpers.content_tag(:p, "x", " ": "foo onmouseover=alert(1) x")
+    assert_equal "", ViewHelpers.render_attrs({ " ": "v" })
+  end
+
+  def test_content_tag_keeps_valid_key_names
+    assert_equal %(<p class="c">x</p>), ViewHelpers.content_tag(:p, "x", class: "c")
+    assert_equal %(<p id="i">x</p>), ViewHelpers.content_tag(:p, "x", id: "i")
+    assert_equal %(<p data-turbo-confirm="ok">x</p>), ViewHelpers.content_tag(:p, "x", data: { turbo_confirm: "ok" })
+    assert_equal %(<p aria-labelledby="l">x</p>), ViewHelpers.content_tag(:p, "x", aria: { labelledby: "l" })
+    assert_equal %(<p @a:b-c.d_9="v">x</p>), ViewHelpers.content_tag(:p, "x", "@a:b-c.d_9": "v")
+    assert_equal %(<p :x="w">x</p>), ViewHelpers.content_tag(:p, "x", ":x": "w")
   end
 
   # FormBuilder + form_with tests retired alongside the runtime

@@ -495,7 +495,7 @@ fn collect_fields(methods: &[MethodDef], nullable_columns: &[Symbol]) -> Vec<Fie
 /// `@foo = ...` write already serves as the Go reader, so emitting
 /// the method on top of it would collide. Detect this de-facto
 /// attr_reader shape and let the field stand alone.
-fn is_trivial_ivar_reader(m: &MethodDef) -> bool {
+pub(super) fn is_trivial_ivar_reader(m: &MethodDef) -> bool {
     use crate::expr::ExprNode;
     // Predicate-suffixed reader: `def persisted?; @persisted; end`.
     // Ivar names never carry `?`/`!`/`=` — strip suffixes from the
@@ -846,6 +846,12 @@ fn embedded_parent_type(class: &LibraryClass) -> Option<String> {
     // one is a plain struct, like the framework error sentinels.
     if is_core_exception_root(raw) || matches!(raw, "Object" | "BasicObject") {
         return None;
+    }
+    // `ActionController::API` has the runtime's one controller base, as
+    // the ruby emit gives it: Rails' API leaves out view, cookie and CSRF
+    // modules, which an API app's controllers don't call.
+    if raw == "ActionController::API" {
+        return Some(sanitize_type_name("ActionController::Base"));
     }
     Some(sanitize_type_name(raw))
 }
