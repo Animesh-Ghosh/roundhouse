@@ -230,6 +230,18 @@ class Routing(unittest.TestCase):
             any("campfire" in job for job in plan["jobs"] if job not in ci.BASE)
         )
 
+    def test_solid_queue_schema_selection_keeps_its_ruby_execution_coverage(self):
+        for path in [
+            "src/ingest/app.rs",
+            "tests/solid_queue_schema.rs",
+            "tests/emit_and_run/solid_queue_worker.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("unit-build", plan["jobs"])
+                self.assertIn("unit", plan["jobs"])
+                self.assertIn("compare-ruby", plan["jobs"])
+
     def test_sidekiq_live_runs_only_when_the_push_or_its_client_changes(self):
         for path in [
             "runtime/spinel/sidekiq_push.rb",
@@ -310,6 +322,23 @@ class Routing(unittest.TestCase):
         self.assertNotIn("compare-jruby", plan["jobs"])
         self.assertNotIn("build-wasm", plan["jobs"])
         self.assertIn("generated_columns_spinel", plan["spinel_tests"])
+
+    def test_did_you_mean_inputs_select_the_native_contract(self):
+        for path in [
+            "src/ingest/settled_conditionals.rs",
+            "src/lower/defined_const_fold.rs",
+            "src/analyze/body/const_resolution/mod.rs",
+            "src/analyze/body/mod.rs",
+            "src/analyze/registry/stdlib.rs",
+            "src/gems.rs",
+            "src/project.rs",
+            "tests/did_you_mean.rs",
+            "tests/stdlib_gem_fates.rs",
+            "tests/did_you_mean/suggest_message.rb",
+        ]:
+            with self.subTest(path=path):
+                self.assertIn("did_you_mean", ci.select([path])["spinel_tests"])
+        self.assertIn("did_you_mean", ci.select([], full=True)["spinel_tests"])
 
     def test_campfire_latest_is_not_planned(self):
         # Dropped: tip drift against once-campfire main is not a standing job.
@@ -664,6 +693,19 @@ class Routing(unittest.TestCase):
                     | ({"compare-jruby"} if binary in {"param_binds_values", "param_binds_cleanup"} else set()),
                 )
 
+    def test_object_blank_owns_its_runtime_lowering_and_native_suite(self):
+        for path in [
+            "runtime/ruby/active_support_ext.rb",
+            "src/lower/blank.rs",
+            "src/lower/mod.rs",
+            "src/lower/jbuilder_to_library/mod.rs",
+            "tests/object_blank.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("object_blank", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
     def test_conditional_value_grouping_keeps_native_coverage(self):
         for path in ["src/emit/ruby.rs", "src/emit/ruby/expr.rs", "tests/conditional_expression_parens.rs"]:
             with self.subTest(path=path):
@@ -916,6 +958,18 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(ci.select([path])["spinel_tests"], [binary])
 
+    def test_sqlite_date_quote_inputs_select_the_native_regression(self):
+        for path in [
+            "runtime/spinel/sqlite_adapter.rb",
+            "tests/date_columns_spinel.rs",
+            "tests/date_columns_spinel.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("date_columns_spinel", plan["spinel_tests"])
+                self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
+                self.assertIn("spinel-framework", plan["jobs"])
+
     def test_interpreter_only_files_do_not_start_native_work(self):
         for path, targets in {
             "runtime/spinel/db_jruby.rb": ["jruby"],
@@ -1105,7 +1159,6 @@ class Routing(unittest.TestCase):
 
     def test_packaging_and_unknown_target_changes_keep_the_ruby_floor(self):
         for path in [
-            "src/project.rs",
             "src/emit/newlang.rs",
             "tests/framework_tests_newlang.rs",
             "scripts/ci-plan.py",
@@ -1149,7 +1202,7 @@ class Routing(unittest.TestCase):
             self.assertTrue(plan["extras_advisory"])
         self.assertEqual(
             ci.select(["src/project.rs"], project_scope="unknown")["jobs"],
-            ci.BASE,
+            [*ci.BASE, "spinel-build", "spinel-framework", "spinel-toolchain", "spinel-compare"],
         )
         self.assertEqual(
             ci.select(["src/project.rs"], project_scope="unknown")["smoke"],
@@ -1847,7 +1900,7 @@ class ProjectScope(unittest.TestCase):
         )
         self.assertEqual(
             ci.select(["src/project.rs"], project_scope=None)["jobs"],
-            ci.BASE,
+            [*ci.BASE, "spinel-build", "spinel-framework", "spinel-toolchain", "spinel-compare"],
         )
 
     def test_builder_text_inside_strings_or_comments_is_not_a_rust_item(self):

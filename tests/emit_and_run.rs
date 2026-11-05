@@ -125,6 +125,12 @@ mod gem_class_macros;
 mod source_gem_autoload;
 #[path = "emit_and_run/source_gem_load_order.rs"]
 mod source_gem_load_order;
+#[path = "emit_and_run/unresolved_param_rbs.rs"]
+mod unresolved_param_rbs;
+#[path = "emit_and_run/unknown_receiver_param_rbs.rs"]
+mod unknown_receiver_param_rbs;
+#[path = "emit_and_run/is_a_self_narrowing.rs"]
+mod is_a_self_narrowing;
 #[path = "emit_and_run/source_gem_facade.rs"]
 mod source_gem_facade;
 #[path = "support/for_loops.rs"]
@@ -366,6 +372,8 @@ mod constructor_unrelated_mutations;
 mod render_to_string_partial_ivar;
 #[path = "emit_and_run/active_support_extensions.rs"]
 mod active_support_extensions;
+#[path = "emit_and_run/array_pluck_union.rs"]
+mod array_pluck_union;
 #[path = "emit_and_run/routing_redirect_host.rs"]
 mod routing_redirect_host;
 #[path = "emit_and_run/time_find_zone.rs"]
@@ -20404,6 +20412,10 @@ mod format_once;
 mod condition_lambda_record;
 #[path = "emit_and_run/where_time_range.rs"]
 mod where_time_range;
+#[path = "support/untyped_calendar.rs"]
+mod untyped_calendar_contract;
+#[path = "emit_and_run/untyped_calendar.rs"]
+mod untyped_calendar;
 #[path = "emit_and_run/route_record_to_param.rs"]
 mod route_record_to_param;
 #[path = "emit_and_run/module_factory.rs"]
@@ -20685,6 +20697,42 @@ mod concern_with_options;
 
 #[path = "emit_and_run/content_tag_block.rs"]
 mod content_tag_block;
+
+#[path = "support/content_tag_options.rs"]
+mod content_tag_options;
+
+#[test]
+fn a_content_tag_with_options_renders() {
+    content_tag_options::app(content_tag_options::VIEW)
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn a_content_tag_with_options_renders_on_spinel() {
+    content_tag_options::app(content_tag_options::VIEW)
+        .run_spinel(&content_tag_options::render_script())
+        .assert_passes();
+}
+
+#[path = "support/go_test_literal_receiver.rs"]
+mod go_test_literal_receiver;
+
+/// #1803's model test on the ruby target: the answers it asserts are Ruby's.
+#[test]
+fn an_assertion_on_a_new_records_method_passes_on_ruby() {
+    go_test_literal_receiver::app().run_test("test/models/featured_test.rb").assert_passes();
+}
+
+#[path = "support/go_action_controller_api.rs"]
+mod go_action_controller_api;
+
+/// #1804's API controller on the ruby target.
+#[test]
+fn an_api_controller_answers_on_ruby() {
+    go_action_controller_api::app().run_test("test/controllers/ping_controller_test.rb").assert_passes();
+}
 
 #[path = "support/block_control_flow.rs"]
 mod block_control_flow;

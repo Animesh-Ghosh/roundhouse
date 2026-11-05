@@ -77,12 +77,14 @@ JRUBY_BIND_INPUTS = {
 }
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
+    "did_you_mean",
     "spinel_faye_websocket",
     "spinel_websocket_lifecycle",
     "select_alias_index",
     "date_columns_spinel",
     "temporal_initialize_spinel",
     "framework_tests_spinel",
+    "object_blank",
     "spinel_web_push_crypto",
     "openssl_random",
     "spinel_db_lease",
@@ -507,6 +509,8 @@ def native_coverage(path):
         suites.add("conditional_expression_parens")
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
         suites.add("framework_tests_spinel")
+    if path in {"runtime/ruby/active_support_ext.rb", "src/lower/blank.rs", "src/lower/mod.rs", "src/lower/jbuilder_to_library/mod.rs"}:
+        suites.add("object_blank")
     # `Model.transaction` (rollback, nesting, savepoints) lives here; its
     # gate compiles it with the real_blog fixture.
     if path in {
@@ -517,6 +521,17 @@ def native_coverage(path):
     focused = re.fullmatch(r"tests/([^/]+)\.(?:rs|rb)", path)
     if focused and focused[1] in SPINEL_TESTS:
         suites.add(focused[1])
+    if path in {
+        "src/ingest/settled_conditionals.rs",
+        "src/lower/defined_const_fold.rs",
+        "src/analyze/body/const_resolution/mod.rs",
+        "src/analyze/body/mod.rs",
+        "src/analyze/registry/stdlib.rs",
+        "src/gems.rs",
+        "src/project.rs",
+        "tests/stdlib_gem_fates.rs",
+    } or path.startswith("tests/did_you_mean/"):
+        suites.add("did_you_mean")
     if path in {"tests/spinel_net_http_transport.rb", "tests/spinel_net_http_stream.rb", "tests/spinel_net_http_raise.rb"}:
         suites.add("spinel_net_http_start")
     if path.startswith("tests/spinel_faye_websocket/") or path == "runtime/spinel/faye_websocket.rb":

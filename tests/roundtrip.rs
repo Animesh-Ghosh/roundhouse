@@ -154,6 +154,7 @@ fn tiny_blog_round_trips() {
         models: vec![post_model],
         library_classes: vec![],
         native_library_keywords: false,
+        pins_unresolved_params: false,
         file_programs: vec![],
         boot_gem_entries: vec![],
         current_attribute_classes: vec![],
