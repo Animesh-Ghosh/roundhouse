@@ -134,6 +134,20 @@ class Routing(unittest.TestCase):
                 self.assertIn("spinel-framework", plan["jobs"])
                 self.assertIn("class_object_return_rbs", plan["spinel_tests"])
 
+    def test_stream_error_sources_select_the_native_suite(self):
+        for path in [
+            "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
+            "runtime/spinel/tep/server_scheduled.rb", "runtime/spinel/tep/streamer.rb",
+            "tests/spinel_stream_error.rs", "tests/spinel_stream_error.rb",
+            "tests/spinel_stream_error_native.rb", "tests/spinel_stream_error_native_check.rb",
+            "tests/spinel_stream_error_puma.rb",
+            "tests/spinel_stream_error_io.rb", "tests/support/server_check_io.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("spinel_stream_error", plan["spinel_tests"])
+
     def test_shared_controller_base_runs_every_extra_language(self):
         for suffix in ("rb", "rbs"):
             with self.subTest(suffix=suffix):
