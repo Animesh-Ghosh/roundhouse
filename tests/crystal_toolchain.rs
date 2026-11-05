@@ -32,6 +32,9 @@ mod ts_controller_ivars;
 #[path = "support/content_tag_options.rs"]
 #[allow(dead_code)]
 mod content_tag_options;
+#[path = "support/block_control_flow.rs"]
+#[allow(dead_code)]
+mod block_control_flow;
 #[path = "support/pluralize_escape.rs"]
 #[allow(dead_code)]
 mod pluralize_escape;
@@ -359,6 +362,32 @@ fn content_tag_with_a_bad_dynamic_name_raises() {
     let (ok, stdout, stderr) = render_probe(content_tag_options::app(view));
     assert!(!ok && stderr.contains("Invalid HTML5 tag name"), "{stdout}\n{stderr}");
     assert!(!stdout.contains("onclick"), "{stdout}");
+}
+
+/// #1774: a block helper whose template body starts with control flow
+/// renders its markup, as Rails 8.1.4 does.
+#[test]
+#[ignore]
+fn a_block_starting_with_control_flow_renders() {
+    let (emitted, errors) = block_control_flow::app().emit(roundhouse::project::BuildTarget::Crystal);
+    assert!(errors.is_empty(), "{errors:?}");
+    shards_install(&emitted);
+    std::fs::write(
+        emitted.join("probe.cr"),
+        "require \"./src/app\"\nc = ProbesController.new\nc.request_method = \"GET\"\nc.process_action(:show)\nputs c.body\n",
+    )
+    .unwrap();
+    let run = Command::new("crystal")
+        .args(["run", "probe.cr"])
+        .current_dir(&emitted)
+        .env("CRYSTAL_CACHE_DIR", emitted.join(".crystal-cache"))
+        .output()
+        .expect("run crystal");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(run.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&run.stderr));
+    for want in block_control_flow::RENDERS {
+        assert!(stdout.contains(want), "expected {want} in\n{stdout}");
+    }
 }
 
 /// `pluralize`'s String is escaped in a template, as Rails 8.1.4 escapes
