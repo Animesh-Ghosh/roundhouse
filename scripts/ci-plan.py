@@ -114,6 +114,7 @@ SPINEL_TESTS = [
     "partial_flash_from_caller_spinel",
     "plain_class_optional_keywords_spinel",
     "conditional_expression_parens",
+    "class_object_return_rbs",
     "jbuilder_array_value_spinel",
     "active_job_payload",
     "render_json_encoder_spinel",
@@ -505,6 +506,8 @@ def native_coverage(path):
         or path == "tests/support/full_forwarding.rs"
     ) and not interpreter_only
     suites = set()
+    if path == "src/analyze/mod.rs":
+        suites.add("class_object_return_rbs")
     if path in {"src/emit/ruby.rs", "src/emit/ruby/expr.rs"}:
         suites.add("conditional_expression_parens")
     if path.startswith("runtime/ruby/") and path.endswith((".rb", ".rbs")):
