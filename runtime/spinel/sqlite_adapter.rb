@@ -183,10 +183,10 @@ module SqliteAdapter
     elsif v.is_a?(Time)
       Db.escape_string(ActiveSupport.format_db_time(v).to_s)
     elsif defined?(Date) && v.is_a?(Date)
-      # Date-only predicates compare against YYYY-MM-DD text, never a
-      # zoned timestamp. Date + format_db_date load only with the Date
-      # package (matz/spinel#7334).
-      Db.escape_string(ActiveSupport.format_db_date(v).to_s)
+      # `time` can load Date even when the app has no date columns and
+      # the optional ActiveSupport date helpers were omitted. Quote the
+      # civil day directly, including for a DateTime receiver.
+      Db.escape_string(v.strftime("%Y-%m-%d"))
     else
       Db.escape_string(v.to_s)
     end

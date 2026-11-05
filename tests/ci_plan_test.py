@@ -929,6 +929,18 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(ci.select([path])["spinel_tests"], [binary])
 
+    def test_sqlite_date_quote_inputs_select_the_native_regression(self):
+        for path in [
+            "runtime/spinel/sqlite_adapter.rb",
+            "tests/date_columns_spinel.rs",
+            "tests/date_columns_spinel.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("date_columns_spinel", plan["spinel_tests"])
+                self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
+                self.assertIn("spinel-framework", plan["jobs"])
+
     def test_interpreter_only_files_do_not_start_native_work(self):
         for path, targets in {
             "runtime/spinel/db_jruby.rb": ["jruby"],

@@ -3,6 +3,83 @@ mod emit_and_run;
 
 #[test]
 #[ignore = "requires the Spinel toolchain"]
+fn sqlite_date_quotes_do_not_require_optional_helpers() {
+    use std::process::Command;
+    let scratch =
+        std::env::temp_dir().join(format!("roundhouse-date-quotes-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    for name in [
+        "db",
+        "sqlite_adapter",
+        "active_support_time_parsing",
+        "active_support_interval",
+        "active_support_duration",
+        "active_support_date_parsing",
+    ] {
+        std::fs::copy(
+            format!("runtime/spinel/{name}.rb"),
+            scratch.join(format!("{name}.rb")),
+        )
+        .unwrap();
+    }
+    std::fs::copy("tests/date_columns_spinel.rb", scratch.join("probe.rb")).unwrap();
+    // Literal output verified by date_columns' Rails control. Native jobs need no Rails gems.
+    let expected = "'2024-02-29'\n'2024-03-01'\n'2024-02-29'\n'-0001-01-02'\n'10000-01-02'\n'2024-02-29'\n'written''2024-02-29'\n'written''2024-02-29'\n'included''2024-02-29'\n";
+    for helper in [false, true] {
+        let script = format!(
+            r#"
+require 'date'
+require_relative 'db'
+{}
+require_relative 'sqlite_adapter'
+def quote_date_value(value); SqliteAdapter.escape_value(value); end
+require_relative 'probe'
+raise 'nil' unless SqliteAdapter.escape_value(nil) == 'NULL'
+raise 'true' unless SqliteAdapter.escape_value(true) == '1'
+raise 'false' unless SqliteAdapter.escape_value(false) == '0'
+raise 'integer' unless SqliteAdapter.escape_value(42) == '42'
+raise 'float' unless SqliteAdapter.escape_value(1.5) == "'1.5'"
+raise 'string' unless SqliteAdapter.escape_value("a'b") == "'a''b'"
+raise 'empty' unless SqliteAdapter.escape_value('') == "''"
+raise 'time' unless SqliteAdapter.escape_value(Time.new(2024, 3, 1, 0, 30, 0, '+14:00')) ==
+  "'2024-02-29 10:30:00.000000'"
+"#,
+            if helper {
+                "require_relative 'active_support_date_parsing'"
+            } else {
+                ""
+            }
+        );
+        std::fs::write(scratch.join("driver.rb"), script).unwrap();
+        let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+        let build = Command::new(compiler)
+            .args(["driver.rb", "--strict-require", "-o", "driver"])
+            .current_dir(&scratch)
+            .output()
+            .expect("compile date quote probe");
+        assert!(
+            build.status.success(),
+            "helper={helper}: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = Command::new(scratch.join("driver"))
+            .output()
+            .expect("run date quote probe");
+        assert!(
+            run.status.success(),
+            "helper={helper}: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&run.stdout),
+            expected,
+            "helper={helper}"
+        );
+    }
+    std::fs::remove_dir_all(scratch).unwrap();
+}
+#[test]
+#[ignore = "requires the Spinel toolchain"]
 fn spinel_gate_date_column_crud_and_month_shifts_run() {
     let overlay = emit_and_run::real_blog()
         .edit(
