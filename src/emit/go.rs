@@ -295,16 +295,7 @@ func main() {\n\
         // The methods each model's Go type has, by the class emit's own
         // field-or-method choice: a view's 0-arg read of another record's
         // method is a call only when the type has it as a method.
-        expr::set_all_model_methods(
-            lowered_models
-                .iter()
-                .flat_map(|lc| {
-                    library::emitted_instance_methods(lc)
-                        .into_iter()
-                        .map(move |m| (lc.name.0.as_str().to_string(), m))
-                })
-                .collect(),
-        );
+        expr::set_all_model_methods(model_go_methods(&lowered_models));
 
         // Controllers are lowered next so we can build the variadic-
         // ctor registry across the full set (runtime + models +
@@ -1179,6 +1170,40 @@ pub(super) fn nullable_column_pairs(app: &crate::App) -> Vec<(String, String)> {
                 out.push((m.name.0.as_str().to_string(), c.name.as_str().to_string()));
             }
         }
+    }
+    out
+}
+
+/// `(Model path, method)` for every method a model's Go type has: its own,
+/// and its parent models' (`ApplicationRecord`'s), which Go promotes
+/// through the embedded `*Parent`. A method the model defines itself,
+/// as a method or a field, shadows the parent's.
+fn model_go_methods(models: &[crate::dialect::LibraryClass]) -> Vec<(String, String)> {
+    let by_name: crate::det::HashMap<&str, &crate::dialect::LibraryClass> =
+        models.iter().map(|lc| (lc.name.0.as_str(), lc)).collect();
+    let mut out = Vec::new();
+    for lc in models {
+        let own: crate::det::HashSet<&str> = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance)
+            .map(|m| m.name.as_str())
+            .collect();
+        let mut names = library::emitted_instance_methods(lc);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut parent = lc.parent.as_ref().and_then(|p| by_name.get(p.0.as_str()));
+        while let Some(p) = parent {
+            if !seen.insert(p.name.0.as_str()) {
+                break;
+            }
+            for m in library::emitted_instance_methods(p) {
+                if !own.contains(m.as_str()) && !names.contains(&m) {
+                    names.push(m);
+                }
+            }
+            parent = p.parent.as_ref().and_then(|q| by_name.get(q.0.as_str()));
+        }
+        out.extend(names.into_iter().map(|m| (lc.name.0.as_str().to_string(), m)));
     }
     out
 }

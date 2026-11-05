@@ -20701,14 +20701,15 @@ fn a_views_model_method_shapes_render_on_ruby() {
     go_view_predicate::shapes_app().run_test("test/controllers/articles_featured_controller_test.rb").assert_passes();
 }
 
-/// The Go view reads a trivial `attr_accessor` reader as its field and
-/// calls a nilable or namespaced receiver's own method.
+/// The Go view reads a trivial `attr_accessor` reader as its field, over
+/// the parent's method of that name, and calls a nilable or namespaced
+/// receiver's own method and a parent model's method.
 #[test]
 fn a_views_model_method_shapes_are_go_calls_or_fields() {
     let (emitted, errors) = go_view_predicate::shapes_app().emit(roundhouse::project::BuildTarget::Go);
     assert!(errors.is_empty(), "{errors:?}");
     let view = std::fs::read_to_string(emitted.join("app/v2/views_articles.go")).unwrap();
-    let missing: Vec<_> = ["a.FeaturedPred()", "a.Pinned)", "last.FeaturedPred()", "n.HotPred()"].into_iter().filter(|w| !view.contains(w)).collect();
+    let missing: Vec<_> = ["a.FeaturedPred()", "a.Pinned)", "last.FeaturedPred()", "n.HotPred()", "a.SharedFlagPred()"].into_iter().filter(|w| !view.contains(w)).collect();
     assert!(missing.is_empty() && !view.contains("a.PinnedPred()"), "missing {missing:?} in {view}");
 }
 
