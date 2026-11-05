@@ -23,6 +23,8 @@ mod emit_and_run;
 #[path = "support/content_tag_options.rs"]
 #[allow(dead_code)]
 mod content_tag_options;
+#[path = "support/go_test_literal_receiver.rs"]
+mod go_test_literal_receiver;
 #[path = "support/go_action_controller_api.rs"]
 mod go_action_controller_api;
 #[path = "support/go_conditional_operand.rs"]
@@ -394,6 +396,22 @@ fn assert_content_tag_test_passes(app: emit_and_run::Overlay) {
         .expect("run go test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("--- PASS: TestContentTagRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1803: an assertion on a method of a new record parses and runs.
+#[test]
+#[ignore]
+fn an_assertion_on_a_new_records_method_runs() {
+    let (emitted, errors) = go_test_literal_receiver::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestANewArticleIsRecentAndNotFeatured", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestANewArticleIsRecentAndNotFeatured"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
 
 /// #1804: a controller under `ActionController::API` builds and answers.
