@@ -446,7 +446,17 @@ pub(super) fn ingest_model_with_enum_constants(
             for (i, mut item) in items.into_iter().enumerate() {
                 if let ModelBodyItem::Method { method, .. } = &mut item {
                     visibility.apply(&statement, method);
-                } else if let ModelBodyItem::Unknown { .. } = &item {
+                } else if let ModelBodyItem::Unknown { expr, .. } = &item {
+                    if let Some(methods) = visibility.restricted_at(&statement).and_then(|v| restricted_attr_methods(expr, &owner, v)) {
+                        for (j, method) in methods.into_iter().enumerate() {
+                            body.push(ModelBodyItem::Method {
+                                method,
+                                leading_comments: Vec::new(),
+                                leading_blank_line: leading_blank && i == 0 && j == 0,
+                            });
+                        }
+                        continue;
+                    }
                     if let Err(err) = visibility.check_model_item(&statement, file) {
                         super::survey::continue_or_fail(err)?;
                         continue;
@@ -836,6 +846,41 @@ fn expand_mattr_cattr(
     } else {
         Ok(Some(out))
     }
+}
+
+/// `private` then `attr_reader :queue_adapter` (MissionControl::Jobs::RecurringTask): the
+/// readers and writers as methods carrying that visibility, which a class-body
+/// `attr_*` statement has nowhere to hold.
+fn restricted_attr_methods(
+    expr: &Expr,
+    owner: &ClassId,
+    visibility: crate::dialect::MethodVisibility,
+) -> Option<Vec<crate::dialect::MethodDef>> {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { return None };
+    let (reader, writer) = match method.as_str() {
+        "attr_reader" => (true, false),
+        "attr_writer" => (false, true),
+        "attr_accessor" => (true, true),
+        _ => return None,
+    };
+    let mut names = Vec::new();
+    for arg in args.iter() {
+        let ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*arg.node else { return None };
+        names.push(value.clone());
+    }
+    let mut methods = Vec::new();
+    for name in &names {
+        if reader {
+            methods.push(super::library_class::synth_attr_reader(owner, name, crate::dialect::MethodReceiver::Instance));
+        }
+        if writer {
+            methods.push(super::library_class::synth_attr_writer(owner, name, crate::dialect::MethodReceiver::Instance));
+        }
+    }
+    for m in &mut methods {
+        m.visibility = visibility;
+    }
+    Some(methods)
 }
 
 fn synth_mattr_instance_reader(owner: &ClassId, name: &Symbol) -> crate::dialect::MethodDef {

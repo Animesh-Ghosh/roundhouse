@@ -530,6 +530,12 @@ impl Visibility {
         }
     }
 
+    /// The visibility other than public a statement's names were given, if any.
+    pub(super) fn restricted_at(&self, statement: &Node<'_>) -> Option<MethodVisibility> {
+        let offset = statement.location().start_offset();
+        self.values.iter().find(|((at, _), value)| *at == offset && **value != MethodVisibility::Public).map(|(_, value)| *value)
+    }
+
     pub(super) fn check_model_item(&self, statement: &Node<'_>, file: &str) -> IngestResult<()> {
         if self.values.iter().any(|((offset, _), value)| {
             *offset == statement.location().start_offset() && *value != MethodVisibility::Public
