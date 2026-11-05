@@ -19,6 +19,8 @@ use std::process::Command;
 
 #[path = "support/memoized_fields.rs"]
 mod memoized_fields;
+#[path = "support/own_not_nil.rs"]
+mod own_not_nil;
 #[path = "support/app_class_base.rs"]
 mod app_class_base;
 #[path = "support/parenless_calls.rs"]
@@ -409,6 +411,22 @@ fn run_under_tsx(emitted: &Path, script: &str) -> String {
         .expect("run tsx");
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     String::from_utf8_lossy(&run.stdout).trim().to_string()
+}
+
+#[test]
+#[ignore]
+fn real_blog_own_not_nil_runs_under_tsx() {
+    // A class's own `not_nil!` is the method it defines, as on CRuby, not
+    // type_toolkit's; the app compiles.
+    let (emitted, errors) = own_not_nil::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let out = run_under_tsx(
+        &emitted,
+        "import { Lookup } from \"./app/models/lookup.js\";\nconsole.log(JSON.stringify([Lookup.read(\"ada\"), Lookup.read(null)]));\n",
+    );
+    assert_eq!(out, own_not_nil::SUMMARY);
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("real-blog with its own not_nil!", &emitted);
 }
 
 #[test]

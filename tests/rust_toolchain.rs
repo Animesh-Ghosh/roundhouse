@@ -28,6 +28,8 @@ mod emit_and_run;
 #[path = "support/content_tag_options.rs"]
 #[allow(dead_code)]
 mod content_tag_options;
+#[path = "support/rust_bare_model.rs"]
+mod rust_bare_model;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -583,4 +585,23 @@ fn content_tag_with_options_renders() {
         .expect("run cargo test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("content_tag_renders ... ok"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1711: a model with no validations, no timestamp columns, or neither
+/// builds, and the generated app's `cargo test` passes, its saving test
+/// included.
+#[test]
+#[ignore]
+fn a_model_without_validations_or_timestamps_builds_and_saves() {
+    for (validated, timestamped) in rust_bare_model::VARIANTS {
+        let (emitted, errors) = rust_bare_model::app(validated, timestamped).emit(roundhouse::project::BuildTarget::Rust);
+        assert!(errors.is_empty(), "{errors:?}");
+        let output = Command::new("cargo").arg("test").current_dir(&*emitted).output().expect("run cargo test");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("an_account_saves ... ok"),
+            "validated: {validated}, timestamped: {timestamped}\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
