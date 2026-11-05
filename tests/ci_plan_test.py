@@ -1460,6 +1460,15 @@ class Results(unittest.TestCase):
         loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * ci.SPINEL_TOOLCHAIN_THREADS
         self.assertLess(max(loads) - min(loads), max(ci.SPINEL_TOOLCHAIN_SECONDS.values()))
 
+    def test_spinel_toolchain_shards_keep_a_shared_build_on_one_shard(self):
+        tests = [f"t{i:02}" for i in range(40)]
+        units = [["t01", "t07", "t13", "t19", "t25"], ["t02", "t30"], ["t03", "missing"]]
+        shards = [ci.spinel_toolchain_shard(tests, k, units=units) for k in range(ci.SPINEL_TOOLCHAIN_SHARDS)]
+        self.assertEqual(sorted(t for s in shards for t in s), sorted(tests))
+        for unit in units:
+            present = [t for t in unit if t in tests]
+            self.assertEqual(sum(all(t in s for t in present) for s in shards), 1, unit)
+
     def test_toolchain_shard_prints_nothing_for_an_empty_selection(self):
         out = subprocess.run(
             ["python3", spec.origin, "toolchain-shard", "--shard", "0"],
