@@ -5529,6 +5529,42 @@ impl HtmlSafeMarks {
                 macro_shadows(e, c);
             }
         }
+        // A concern's `included do` block defines its methods on each
+        // class whose includes reach it, ahead of or after the class's own
+        // `def` by source position: they shadow on the includer.
+        let redefs: crate::det::HashMap<String, Vec<String>> = app
+            .concern_included_redefs
+            .iter()
+            .map(|(m, names)| (m.0.as_str().to_string(), names.iter().map(|n| n.as_str().to_string()).collect()))
+            .collect();
+        if !redefs.is_empty() {
+            let includers: Vec<String> = classes.keys().cloned().collect();
+            for includer in includers {
+                let mut queue = classes[&includer].includes.clone();
+                let mut seen: crate::det::HashSet<String> = queue.iter().cloned().collect();
+                let mut names = Vec::new();
+                let mut i = 0;
+                while i < queue.len() {
+                    let m = queue[i].clone();
+                    i += 1;
+                    names.extend(redefs.get(&m).into_iter().flatten().cloned());
+                    let nested = classes.get(&m).map(|k| k.includes.clone()).unwrap_or_default();
+                    let spliced = app
+                        .concern_model_items
+                        .get(&ClassId(Symbol::from(m.as_str())))
+                        .map(|items| crate::analyze::body_includes(items).into_iter().map(|c| c.0.as_str().to_string()).collect())
+                        .unwrap_or_else(Vec::new);
+                    for n in nested.into_iter().chain(spliced) {
+                        if seen.insert(n.clone()) {
+                            queue.push(n);
+                        }
+                    }
+                }
+                if let Some(c) = classes.get_mut(&includer) {
+                    c.shadows.extend(names);
+                }
+            }
+        }
         HtmlSafeMarks { classes, marked: app.html_safe_method_defs.iter().cloned().collect() }
     }
 

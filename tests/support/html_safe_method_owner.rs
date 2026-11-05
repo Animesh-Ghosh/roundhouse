@@ -29,20 +29,22 @@ pub const VIEW: &str = concat!(
     "N:<%= @shelf.first %>\n",
     "O:<%= Loud.badge %>\n",
     "V:<%= Fmt.badge %>\n",
+    "H:<%= @recon.label %>\n",
+    "L:<%= @relaid.label %>\n",
 );
 
 pub const RENDERS: &[&str] = &[
     "A:<b>a</b>", "C:&lt;c&gt;", "F:<s>", "P:&lt;p&gt;", "U:<u>", "X:&lt;c&gt;", "Z:<u>",
     "B:<b>", "S:&lt;x&gt;", "M:&lt;m&gt;", "Y:<y>", "T:&lt;t1&gt;", "W:<t2>", "I:&lt;i2&gt;",
     "R:&lt;f&gt;", "E:&lt;r&gt;", "G:&lt;d&gt;", "Q:&lt;q&gt;",
-    "N:&lt;e&gt;", "O:&lt;o&gt;", "V:<v>",
+    "N:&lt;e&gt;", "O:&lt;o&gt;", "V:<v>", "H:&lt;cr&gt;",
 ];
 
 /// What trusting a mark too widely wrote: another class's `label`,
 /// another module's `badge`, `label` on an `Article | Comment` receiver
 /// (only `Article` has the marked one), and each value whose closer
 /// definition shadows a marked one, unescaped.
-pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>"];
+pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>", "H:<cr>", "H:<b>", "L:<cr>", "L:<l>"];
 
 /// real-blog with `GET /probe` rendering `VIEW`:
 /// - `Article#label` and `ApplicationRecord#tag_html` return html-safe
@@ -67,6 +69,11 @@ pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t
 ///   whose `first` comes first; `Loud < Twin2` extends `Quiet`, whose
 ///   plain `badge` answers `Loud.badge` ahead of `Twin2.badge`;
 /// - `Fmt.badge` is an `extend self` module's html-safe method;
+/// - `Relabel`'s `included do` block defines a plain `label` on its
+///   includer: on `Recon < Base`, over `Base#label`, and on `Relaid`,
+///   after `Relaid`'s own html-safe `label`. Rails 8.1.4 renders
+///   `L:&lt;cr&gt;`; the emitted `Relaid` answers with its own `label`,
+///   so the line only checks that neither value is written unescaped;
 /// - `ApplicationRecord#body` is html-safe, and `articles.body` is a
 ///   column. Rails 8.1.4 renders `K:<j>`: Active Record doesn't generate
 ///   a reader that a class between the model and `ActiveRecord::Base`
@@ -107,10 +114,13 @@ pub fn app() -> emit_and_run::Overlay {
         .write("lib/quiet.rb", "module Quiet\n  def badge\n    \"<o>\"\n  end\nend\n")
         .write("lib/loud.rb", "class Loud < Twin2\n  extend Quiet\nend\n")
         .write("lib/fmt.rb", "module Fmt\n  extend self\n\n  def badge\n    \"<v>\".html_safe\n  end\nend\n")
+        .write("app/models/concerns/relabel.rb", "module Relabel\n  extend ActiveSupport::Concern\n\n  included do\n    def label\n      \"<cr>\"\n    end\n  end\nend\n")
+        .write("lib/recon.rb", "class Recon < Base\n  include Relabel\nend\n")
+        .write("lib/relaid.rb", "class Relaid\n  def label\n    \"<l>\".html_safe\n  end\n\n  include Relabel\nend\n")
         .write("app/models/concerns/labelled.rb", "module Labelled\n  extend ActiveSupport::Concern\n\n  def shiny\n    \"<y>\".html_safe\n  end\nend\n")
         .write(
             "app/controllers/probes_controller.rb",
-            "class ProbesController < ApplicationController\n  def show\n    @article = Article.new\n    @comment = Comment.new\n    @base = Base.new\n    @special = Special.new\n    @mixed = Mixed.new\n    @twin2 = Twin2.new\n    @fronted = Fronted.new\n    @readered = Readered.new\n    @delegating = Delegating.new\n    @shelf = Shelf.new\n  end\nend\n",
+            "class ProbesController < ApplicationController\n  def show\n    @article = Article.new\n    @comment = Comment.new\n    @base = Base.new\n    @special = Special.new\n    @mixed = Mixed.new\n    @twin2 = Twin2.new\n    @fronted = Fronted.new\n    @readered = Readered.new\n    @delegating = Delegating.new\n    @shelf = Shelf.new\n    @recon = Recon.new\n    @relaid = Relaid.new\n  end\nend\n",
         )
         .write("app/views/probes/show.html.erb", VIEW)
         .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe\", to: \"probes#show\", as: :probe\n")
