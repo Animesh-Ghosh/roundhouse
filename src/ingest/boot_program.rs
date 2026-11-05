@@ -78,12 +78,13 @@ pub(super) fn build<V: Vfs + ?Sized>(
     // application's, so an engine's statements come first.
     let (host, engines): (Vec<_>, Vec<_>) = initializer_ledger::ledger(vfs, dir, path_gems, &no_engines)
         .into_iter()
-        .partition(|file| file.findings.iter().all(|f| f.path.starts_with("config/")));
+        .partition(|file| !file.findings.iter().any(is_engine_initializer));
     for file in engines.into_iter().chain(host) {
+        let engine = file.findings.iter().any(is_engine_initializer);
         let wanted: Vec<(String, u32)> = file
             .findings
             .iter()
-            .filter(|f| f.path.starts_with("config/initializers/") || is_engine_initializer_constant(f))
+            .filter(|f| if engine { is_engine_initializer_constant(f) } else { f.path.starts_with("config/initializers/") })
             .filter(|f| matches!(initializer_ledger::holder_of(&f.targets, lock, app_namespaces), Holder::App))
             .map(|f| (f.path.clone(), f.start))
             .collect();
@@ -103,7 +104,7 @@ pub(super) fn build<V: Vfs + ?Sized>(
             // An engine's statement is taken only as the constant write it
             // is: the ledger names a `begin`'s writes, not the `ensure`
             // or `rescue` that would run with them.
-            if !path.starts_with("config/") && node.as_constant_write_node().is_none() && node.as_constant_path_write_node().is_none() {
+            if engine && node.as_constant_write_node().is_none() && node.as_constant_path_write_node().is_none() {
                 continue;
             }
             let end = node.location().end_offset() as u32;
@@ -157,14 +158,19 @@ pub(super) fn build<V: Vfs + ?Sized>(
     Ok(taken)
 }
 
+/// A statement of an engine's initializer, by its ledger owner: the
+/// engine's path can itself be under `config/` (`config/engines/x`).
+fn is_engine_initializer(finding: &initializer_ledger::Finding) -> bool {
+    finding.owner.starts_with("engine ") && finding.owner.ends_with(" initializer")
+}
+
 /// A top-level constant write in an engine's `config/initializers`
 /// (`Tracer = Telemetry.tracer("app")`): Rails `load`s the file at boot
 /// like the host's, binding the name on Object before any app code runs.
 /// Only the write is taken; an engine initializer's other statements stay
 /// on the ledger.
 fn is_engine_initializer_constant(finding: &initializer_ledger::Finding) -> bool {
-    finding.owner.starts_with("engine ")
-        && finding.owner.ends_with(" initializer")
+    is_engine_initializer(finding)
         && finding.path.contains("/config/initializers/")
         && !finding.targets.is_empty()
         && finding.targets.iter().all(|target| target.starts_with("const="))

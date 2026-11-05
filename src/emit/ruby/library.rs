@@ -10975,19 +10975,42 @@ pub(super) fn walk_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
 
 /// [`walk_const_paths`], for what runs as the expression does: not the
 /// body of a closure it stores (`-> { … }`, `proc { … }`, `lambda { … }`,
-/// `Proc.new { … }`), which runs when something calls it. A block a call
+/// `Proc.new { … }`), which runs when something calls it, unless the
+/// expression calls it right there (`(-> { … }).call`). A block a call
 /// runs now (`map`, `each`) is walked, as `partition_deferred_constants`
 /// reads it.
 fn walk_load_time_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
+    /// The body of a stored closure literal.
+    fn stored_body(e: &Expr) -> Option<&Expr> {
+        let block = match &*e.node {
+            ExprNode::Lambda { .. } => return Some(e),
+            ExprNode::Send { recv, method, block: Some(block), .. }
+                if matches!(method.as_str(), "proc" | "lambda")
+                    || (method.as_str() == "new"
+                        && matches!(
+                            recv.as_ref().map(|r| &*r.node),
+                            Some(ExprNode::Const { path }) if path.len() == 1 && path[0].as_str() == "Proc"
+                        )) =>
+            {
+                block
+            }
+            _ => return None,
+        };
+        Some(block)
+    }
     match &*e.node {
         ExprNode::Lambda { .. } => {}
         ExprNode::Send { recv, method, args, block, .. } => {
-            let stores_block = matches!(method.as_str(), "proc" | "lambda")
-                || (method.as_str() == "new"
-                    && matches!(
-                        recv.as_ref().map(|r| &*r.node),
-                        Some(ExprNode::Const { path }) if path.len() == 1 && path[0].as_str() == "Proc"
-                    ));
+            let stores_block = stored_body(e).is_some();
+            // `(-> { … }).call`, `.()`, `[]`, `yield`: the closure runs now.
+            if matches!(method.as_str(), "call" | "[]" | "yield" | "===") {
+                if let Some(closure) = recv.as_ref().and_then(stored_body) {
+                    match &*closure.node {
+                        ExprNode::Lambda { body, .. } => walk_load_time_const_paths(body, out),
+                        _ => walk_load_time_const_paths(closure, out),
+                    }
+                }
+            }
             for child in recv.iter().chain(args.iter()) {
                 walk_load_time_const_paths(child, out);
             }

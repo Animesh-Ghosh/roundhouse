@@ -227,6 +227,26 @@ fn a_grouped_value_is_the_constant_s() {
     assert_eq!(run.stdout.lines().last(), Some("[2, \"constant\", nil]"), "{}", run.stdout);
 }
 
+/// A lambda called where it is written runs as the file loads, so what
+/// it names is required.
+#[test]
+fn a_lambda_called_in_place_loads_what_it_names() {
+    let run = run_files(
+        &[
+            ("app/models/answer.rb", "Answer = (-> { Widget::VALUE }).call
+"),
+            ("app/models/widget.rb", "class Widget
+  VALUE = 1
+end
+"),
+        ],
+        "p Answer
+",
+    );
+    run.assert_passes();
+    assert_eq!(run.stdout.lines().last(), Some("1"), "{}", run.stdout);
+}
+
 /// `labels.rb` is `Labels`'s file, whatever its first constant, and a read
 /// of any constant in it requires it.
 #[test]
@@ -266,11 +286,14 @@ fn the_rbs_sidecar_declares_the_constants() {
         .write("app/models/named.rb", "module Named\n  def self.x\n    1\n  end\nend\n")
         .write("app/models/remote_thing.rb", "RemoteThing = Thing\n")
         .write("app/models/old_named.rb", "OldNamed = Named\n")
+        .write("app/models/second_thing.rb", "SecondThing = RemoteThing\n")
         .write("app/models/labels.rb", "Labels = [\"a\"].freeze\n")
         .emit(BuildTarget::Ruby);
     assert!(errors.is_empty(), "{errors:?}");
     let sig = |name: &str| std::fs::read_to_string(emitted.join(format!("sig/app/models/{name}.rbs"))).unwrap();
     assert_eq!(sig("remote_thing"), "class RemoteThing = ::Thing\n");
     assert_eq!(sig("old_named"), "module OldNamed = ::Named\n");
+    // An alias of an alias, which analysis types as the class it names.
+    assert_eq!(sig("second_thing"), "class SecondThing = ::RemoteThing\n");
     assert_eq!(sig("labels"), "Labels: Array[String]\n");
 }

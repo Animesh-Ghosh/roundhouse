@@ -67,26 +67,36 @@ fn render_file_constants(lc: &LibraryClass, classes: &[LibraryClass]) -> String 
     let mut s = String::new();
     for (name, value) in &lc.constants {
         let name = name.as_str();
-        // A read of the class itself, which analysis types as the
-        // class's name (`Thing` for `RemoteThing = Thing`).
-        let alias = match (&*value.node, &value.ty) {
-            (ExprNode::Const { path }, Some(Ty::Class { id, .. })) => {
-                let target = path.iter().map(|segment| segment.as_str()).collect::<Vec<_>>().join("::");
-                let target = target.trim_start_matches("::").to_string();
-                (id.0.as_str() == target).then_some(target)
-            }
-            _ => None,
-        };
-        match (alias, &value.ty) {
-            (Some(target), _) => {
-                let keyword = if classes.iter().any(|class| class.is_module && class.name.0.as_str() == target) { "module" } else { "class" };
-                writeln!(s, "{keyword} {name} = ::{target}").unwrap();
+        match (aliased(value, classes, 0), &value.ty) {
+            (Some((written, class)), _) => {
+                let keyword = if classes.iter().any(|lc| lc.is_module && lc.name.0.as_str() == class) { "module" } else { "class" };
+                writeln!(s, "{keyword} {name} = ::{written}").unwrap();
             }
             (None, Some(ty)) if !matches!(ty, Ty::SelfInstance) => writeln!(s, "{name}: {}", ty_to_rbs(ty)).unwrap(),
             _ => writeln!(s, "{name}: untyped").unwrap(),
         }
     }
     s
+}
+
+/// The written target of a class or module alias, and the class it names:
+/// a read of the class itself, which analysis types as the class's name
+/// (`Thing` for `RemoteThing = Thing`), or of another such alias in a file
+/// of constants alone (`SecondThing = RemoteThing`, also typed `Thing`).
+fn aliased(value: &Expr, classes: &[LibraryClass], depth: usize) -> Option<(String, String)> {
+    let (ExprNode::Const { path }, Some(Ty::Class { id, .. })) = (&*value.node, &value.ty) else { return None };
+    let written = path.iter().map(|segment| segment.as_str()).collect::<Vec<_>>().join("::");
+    let written = written.trim_start_matches("::").to_string();
+    if id.0.as_str() == written {
+        return Some((written, id.0.as_str().to_string()));
+    }
+    let (_, other) = classes
+        .iter()
+        .filter(|lc| lc.is_file_constants())
+        .flat_map(|lc| &lc.constants)
+        .find(|(name, _)| name.as_str() == written)?;
+    let (_, class) = (depth < 8).then(|| aliased(other, classes, depth + 1)).flatten()?;
+    Some((written, class))
 }
 
 /// Compute the `sig/`-rooted destination path for a `.rb` source path.

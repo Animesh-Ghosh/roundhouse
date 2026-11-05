@@ -118,3 +118,27 @@ fn an_engine_initializer_constant_inside_a_begin_is_not_taken() {
     assert!(out.lines().any(|l| l.contains("unconsumed_initializer") && l.contains("01_audit.rb:1")), "{out}");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn an_engine_under_config_is_still_an_engine() {
+    // The engine is told apart from the host by its ledger owner, not its
+    // path: a path gem at `config/engines/telemetry` has initializers under
+    // `config/` too, and its `begin` still is not taken.
+    let lock = LOCK.replace("remote: engines/telemetry", "remote: config/engines/telemetry");
+    let run = emit_and_run::empty_app()
+        .write("roundhouse.yml", "")
+        .write("Gemfile.lock", &lock)
+        .write("config/engines/telemetry/lib/telemetry/engine.rb", "module Telemetry\n  class Engine < ::Rails::Engine\n  end\nend\n")
+        .write(
+            "config/engines/telemetry/app/models/telemetry/audit.rb",
+            "module Telemetry\n  class Audit\n    def self.log(label)\n      puts \"audit:#{label}\"\n    end\n  end\nend\n",
+        )
+        .write(
+            "config/engines/telemetry/config/initializers/00_tracing.rb",
+            "TRACE_LIMIT = 50\nbegin\n  AUDITED = 1\nensure\n  Telemetry::Audit.log(:loaded)\nend\n",
+        )
+        .write("app/models/report.rb", "class Report\n  def self.run\n    TRACE_LIMIT + 1\n  end\nend\n")
+        .run_ruby("p Report.run\n");
+    run.assert_passes();
+    assert_eq!(run.stdout.lines().collect::<Vec<_>>(), ["51"], "{}", run.stderr);
+}
