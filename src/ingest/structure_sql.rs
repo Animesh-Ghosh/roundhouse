@@ -1007,6 +1007,29 @@ fn skip_quoted_or_comment(bytes: &[u8], i: usize) -> Option<usize> {
                 j += 1;
             }
         }
+        // PostgreSQL's escape string, `E'…'`: a backslash escapes the next
+        // byte, so `E'it\'s'` is one literal. Only where the `E` starts a
+        // token, not where it ends an identifier (which may hold `$` or non-ASCII).
+        Some(b'E' | b'e')
+            if bytes.get(i + 1) == Some(&b'\'')
+                && (i == 0
+                    || !(bytes[i - 1].is_ascii_alphanumeric()
+                        || matches!(bytes[i - 1], b'_' | b'$')
+                        || bytes[i - 1] >= 0x80)) =>
+        {
+            let mut j = i + 2;
+            loop {
+                if j >= bytes.len() {
+                    return Some(bytes.len());
+                }
+                match bytes[j] {
+                    b'\\' => j += 2,
+                    b'\'' if bytes.get(j + 1) == Some(&b'\'') => j += 2,
+                    b'\'' => return Some(j + 1),
+                    _ => j += 1,
+                }
+            }
+        }
         Some(b'"') => {
             let mut j = i + 1;
             loop {
