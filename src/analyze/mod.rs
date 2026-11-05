@@ -1090,6 +1090,10 @@ impl Analyzer {
         // `instance_methods` since dispatch consults both tables and
         // parse_app_signatures doesn't yet distinguish singleton vs
         // instance; per-kind separation is a follow-up when it matters.
+        let rbs_only_classes: HashSet<ClassId> = app.rbs_signatures.keys()
+            .filter(|id| !classes.contains_key(*id))
+            .cloned()
+            .collect();
         for (class_id, methods) in &app.rbs_signatures {
             let cls = classes.entry(class_id.clone()).or_default();
             for (name, ty) in methods {
@@ -1312,7 +1316,7 @@ impl Analyzer {
         if !source_methods.instance_method(&connection, "indexes") {
             classes.get_mut(&connection).unwrap().instance_methods.remove(&Symbol::from("indexes"));
         }
-        let data_factories = data::register(app, &const_resolver, &mut classes);
+        let data_factories = data::register(app, &const_resolver, &mut classes, &rbs_only_classes);
         let data_factories_without_custom_initialize = app
             .library_classes
             .iter()
@@ -7443,10 +7447,6 @@ pub(crate) fn instantiate_return_kind(
         ReturnKind::Int => Ty::Int,
         ReturnKind::IntOrNil => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         ReturnKind::Bool => Ty::Bool,
-        ReturnKind::HashSymStr => Ty::Hash {
-            key: std::sync::Arc::new(Ty::Sym),
-            value: std::sync::Arc::new(Ty::Str),
-        },
         ReturnKind::HashStrUntyped => Ty::Hash {
             key: std::sync::Arc::new(Ty::Str),
             value: std::sync::Arc::new(Ty::Untyped),
