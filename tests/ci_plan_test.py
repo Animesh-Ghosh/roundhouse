@@ -134,6 +134,23 @@ class Routing(unittest.TestCase):
                 self.assertIn("spinel-framework", plan["jobs"])
                 self.assertIn("class_object_return_rbs", plan["spinel_tests"])
 
+    def test_chunked_body_sources_select_the_native_suite(self):
+        for path in [
+            "runtime/spinel/tep/chunked_body.rb", "runtime/spinel/tep/request.rb",
+            "runtime/spinel/tep/parser.rb", "runtime/spinel/tep/net.rb", "runtime/spinel/tep/tep.rb",
+            "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
+            "runtime/spinel/tep/server_scheduled.rb", "tests/tep_server_harness.rb",
+            "tests/spinel_chunked_body.rs", "tests/spinel_chunked_body.rb",
+            "tests/spinel_chunked_body_native.rb", "tests/spinel_chunked_body_native_check.rb",
+            "tests/spinel_chunked_body_app_check.rb",
+            "tests/spinel_chunked_body_puma.rb", "tests/spinel_chunked_body_timing.rb",
+            "tests/support/server_check_io.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("spinel_chunked_body", plan["spinel_tests"])
+
     def test_stream_error_sources_select_the_native_suite(self):
         for path in [
             "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
