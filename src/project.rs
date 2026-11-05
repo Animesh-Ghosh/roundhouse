@@ -7582,15 +7582,24 @@ enum RequireTarget {
     Spinel,
 }
 
-/// Standard libraries in `ingest::app`'s requirable list that Spinel has
-/// no package or native module for: `spinel` warns "is not available in
-/// Spinel" for each, and an app binary's `--strict-require` (from `spin
-/// flags`) makes that fatal. The spinel tree leaves them out, as it did
-/// before app requires were carried; the ruby family loads them all.
-const SPINEL_LACKS: &[&str] = &[
-    "delegate", "English", "etc", "io/nonblock", "io/wait", "ipaddr", "observer", "pp",
-    "weakref",
-];
+/// Standard libraries in `ingest::app`'s requirable list that the spinel
+/// tree's boot.rb must not require, as it did not before app requires were
+/// carried; the ruby family loads them all. `delegate`, `English`, `etc`
+/// and `io/nonblock`: Spinel has no package or native module, warns "is
+/// not available in Spinel" for each, and an app binary's
+/// `--strict-require` (from `spin flags`) makes that fatal. `ipaddr`: the
+/// spinel tree keeps the port (`runtime/ruby/ipaddr.rb`), and requiring
+/// `packages/ipaddr` beside it defines IPAddr twice; the ruby family swaps
+/// the port for the stdlib (`IPADDR_STDLIB`) instead. `pp`: Spinel has the
+/// package, but a program that requires it without calling `pp` is refused
+/// ("class layout: @group_stack is `sp_PolyArray *` in PP but
+/// `sp_PtrArray *` in its ancestor PrettyPrint"), and boot.rb is that program.
+/// `observer`: Spinel has the package, but in a tree this size its
+/// `require` alone makes type inference run its 128 rounds without
+/// settling (the compile takes five times as long), and a class that
+/// includes Observable and notifies a String fails the C compile inside
+/// the package; both measured on real-blog's spinel tree at 1f1865664.
+const SPINEL_LACKS: &[&str] = &["delegate", "English", "etc", "io/nonblock", "ipaddr", "observer", "pp"];
 
 /// The app's own standard-library requires ([`App::app_requires`]) at
 /// the head of `boot.rb`, ahead of everything that file loads. Twice on
