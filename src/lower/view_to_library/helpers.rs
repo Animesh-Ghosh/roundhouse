@@ -242,6 +242,98 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             let wrapped = view_helpers_call("word_wrap", args);
             Some(view_helpers_call("html_escape", vec![wrapped]))
         }
+        // `content_tag_html` with the content escaped here: the runtime's
+        // `content_tag` is that, but its optional `content` makes Go's
+        // signature variadic `interface{}`, which takes no options map.
+        // The name is checked and the options written through
+        // `render_attrs` there, so the String is appended unescaped. The
+        // options take the block form's shape: a positional Hash (Crystal
+        // binds no keyword to `opts`), with a literal `class:` Array
+        // space-joined.
+        ContentTag { name, content, opts } => {
+            // Rails escapes the content unless it is html-safe: an
+            // `x.html_safe` or `raw(x)` (`x.to_s.html_safe`), an escape the
+            // template applied (`h(x)`), or a helper
+            // whose call here is markup (`link_to`, a nested `content_tag`,
+            // `turbo_stream_from`'s element, `content_for`'s capture),
+            // or already escaped (`truncate`, `word_wrap`, `pluralize`, each
+            // lowered to `html_escape(…)`). The other kinds (`dom_id`) are
+            // escaped like any String.
+            let is_helper_markup = |e: &Expr| matches!(&*e.node,
+                ExprNode::Send { recv: None, method, args, block: None, parenthesized }
+                    if matches!(
+                        super::walker::classify_template_helper(method.as_str(), args, *parenthesized, ctx),
+                        Some(LinkTo { .. } | LinkToIf { .. } | ButtonTo { .. } | ContentTag { .. }
+                            | CsrfMetaTags | CspMetaTag | StylesheetLinkTag { .. }
+                            | JavascriptImportmapTags { .. } | EngineImportmapTags { .. }
+                            | TurboStreamFrom { .. } | ContentForGetter { .. }
+                            | Truncate { .. } | WordWrap { .. } | Pluralize { .. })
+                    ));
+            let helper_markup = is_helper_markup(content);
+            let raw_value = match &*content.node {
+                ExprNode::Send { recv: None, method, args, block: None, .. }
+                    if method.as_str() == "raw" && args.len() == 1 && !ctx.is_local("raw") =>
+                {
+                    Some(args[0].clone())
+                }
+                _ => None,
+            };
+            // An escape the template already applied (`h(x)`,
+            // `ERB::Util.html_escape(x)`) is html-safe in Rails too: escaped
+            // here once, through the view helpers' `html_escape`.
+            let escaped_value = match &*content.node {
+                ExprNode::Send { recv: None, method, args, block: None, .. }
+                    if method.as_str() == "h" && args.len() == 1 && !ctx.is_local("h") =>
+                {
+                    Some(&args[0])
+                }
+                ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+                    if matches!(method.as_str(), "html_escape" | "h")
+                        && args.len() == 1
+                        && matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ERB", "Util"])) =>
+                {
+                    Some(&args[0])
+                }
+                _ => None,
+            };
+            let content = match raw_value.or_else(|| super::walker::html_safe_value(content, ctx)) {
+                Some(safe) => lit_str_coerce(rewrite_helpers_in_expr(&safe, ctx)),
+                None if helper_markup => lit_str_coerce(rewrite_helpers_in_expr(content, ctx)),
+                None => {
+                    // `h` leaves an html-safe argument as it is
+                    // (`h(x.html_safe)`, `h(raw(x))`, `h(content_tag(…))`,
+                    // a helper's markup as the bare content takes it).
+                    let safe_arg = escaped_value.and_then(|v| match &*v.node {
+                        ExprNode::Send { recv: None, method, args, block: None, .. }
+                            if method.as_str() == "raw" && args.len() == 1 && !ctx.is_local("raw") =>
+                        {
+                            Some(args[0].clone())
+                        }
+                        _ if is_helper_markup(v) => Some(v.clone()),
+                        _ => super::walker::html_safe_value(v, ctx),
+                    });
+                    match safe_arg {
+                        Some(safe) => lit_str_coerce(rewrite_helpers_in_expr(&safe, ctx)),
+                        None => {
+                            let text = lit_str_coerce(rewrite_helpers_in_expr(escaped_value.unwrap_or(content), ctx));
+                            view_helpers_call("html_escape", vec![text])
+                        }
+                    }
+                }
+            };
+            let mut args = vec![rewrite_helpers_in_expr(name, ctx), content];
+            if let Some(o) = opts {
+                let o = match &*o.node {
+                    ExprNode::Hash { entries, kwargs } => Expr::new(o.span, ExprNode::Hash {
+                        entries: entries.iter().map(|(k, v)| (k.clone(), super::form_with::simplify_opts_value(k, v))).collect(),
+                        kwargs: *kwargs,
+                    }),
+                    _ => (*o).clone(),
+                };
+                args.push(rewrite_helpers_in_expr(&o, ctx));
+            }
+            Some(view_helpers_call("content_tag_html", args))
+        }
         ContentForGetter { slot } => Some(view_helpers_call(
             "content_for_get",
             vec![lit_sym(Symbol::from(*slot))],
