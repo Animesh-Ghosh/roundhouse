@@ -35,6 +35,8 @@ pub const VIEW: &str = concat!(
     "D:<%= content_tag(:span, @article.label) %>\n",
     "w1:<%= @opted.label %>\n",
     "w2:<%= @opted2.label %>\n",
+    "s1:<%= @sent.inner_label %>\n",
+    "s2:<%= @sent2.inner_label %>\n",
 );
 
 pub const RENDERS: &[&str] = &[
@@ -50,7 +52,7 @@ pub const RENDERS: &[&str] = &[
 /// (only `Article` has the marked one), and each value whose closer
 /// definition shadows a marked one, unescaped, also as `content_tag`'s
 /// content.
-pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>", "H:<cr>", "H:<b>", "L:<cr>", "L:<l>", "J:<span><c></span>", "w1:<ow>", "w1:<b>", "w2:<ow>", "w2:<b>"];
+pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t1>", "I:<i2>", "R:<g>", "R:<f>", "E:<r>", "G:<d>", "K:<k>", "Q:<q>", "N:<e>", "N:<w>", "O:<o>", "O:<t2>", "H:<cr>", "H:<b>", "L:<cr>", "L:<l>", "J:<span><c></span>", "w1:<ow>", "w1:<b>", "w2:<ow>", "w2:<b>", "s1:<d>", "s1:<il>", "s2:<d>", "s2:<il>"];
 
 /// real-blog with `GET /probe` rendering `VIEW`:
 /// - `Article#label` and `ApplicationRecord#tag_html` return html-safe
@@ -87,6 +89,10 @@ pub const ABSENT: &[&str] = &["C:<c>", "P:<p>", "X:<c>", "S:<x>", "M:<m>", "T:<t
 ///   its implicit receiver. Rails 8.1.4 renders `&lt;ow&gt;` for both;
 ///   the emitted classes answer with `Base#label`, so the lines only
 ///   check that neither value is written unescaped;
+/// - `Sent < Base` and `Sent2 < Base` make that call through `send` and
+///   `public_send`, with `prefix: :inner`, over `Base#inner_label`, which
+///   is html-safe. Rails 8.1.4 renders `&lt;d&gt;`; the lines check that
+///   neither `<d>` nor `<il>` is written unescaped;
 /// - `ApplicationRecord#body` is html-safe, and `articles.body` is a
 ///   column. Rails 8.1.4 renders `K:<j>`: Active Record doesn't generate
 ///   a reader that a class between the model and `ActiveRecord::Base`
@@ -112,7 +118,7 @@ pub fn app() -> emit_and_run::Overlay {
         )
         .write("lib/formatting.rb", "module Formatting\n  def self.badge\n    \"<s>\".html_safe\n  end\nend\n")
         .write("lib/plain.rb", "module Plain\n  def self.badge\n    \"<p>\"\n  end\nend\n")
-        .write("lib/base.rb", "class Base\n  def label\n    \"<b>\".html_safe\n  end\n\n  def first\n    \"<w>\".html_safe\n  end\nend\n")
+        .write("lib/base.rb", "class Base\n  def label\n    \"<b>\".html_safe\n  end\n\n  def first\n    \"<w>\".html_safe\n  end\n\n  def inner_label\n    \"<il>\".html_safe\n  end\nend\n")
         .write("lib/special.rb", "class Special < Base\n  def label\n    \"<x>\"\n  end\nend\n")
         .write("lib/plainer.rb", "module Plainer\n  def label\n    \"<m>\"\n  end\nend\n")
         .write("lib/mixed.rb", "class Mixed < Base\n  include Plainer\nend\n")
@@ -132,11 +138,13 @@ pub fn app() -> emit_and_run::Overlay {
         .write("lib/relaid.rb", "class Relaid\n  def label\n    \"<l>\".html_safe\n  end\n\n  include Relabel\nend\n")
         .write("lib/inner_ow.rb", "class InnerOw\n  def label\n    \"<ow>\"\n  end\nend\n")
         .write("lib/opted.rb", "class Opted < Base\n  with_options to: :inner do |o|\n    o.delegate :label\n  end\n\n  def inner\n    InnerOw.new\n  end\nend\n")
+        .write("lib/sent.rb", "class Sent < Base\n  send(:with_options, prefix: :inner) { |o| o.delegate :label, to: :x }\n\n  def x\n    InnerLabel.new\n  end\nend\n")
+        .write("lib/sent2.rb", "class Sent2 < Base\n  public_send(:with_options, prefix: :inner) { |o| o.delegate :label, to: :x }\n\n  def x\n    InnerLabel.new\n  end\nend\n")
         .write("lib/opted2.rb", "class Opted2 < Base\n  with_options to: :inner do\n    delegate :label\n  end\n\n  def inner\n    InnerOw.new\n  end\nend\n")
         .write("app/models/concerns/labelled.rb", "module Labelled\n  extend ActiveSupport::Concern\n\n  def shiny\n    \"<y>\".html_safe\n  end\nend\n")
         .write(
             "app/controllers/probes_controller.rb",
-            "class ProbesController < ApplicationController\n  def show\n    @article = Article.new\n    @comment = Comment.new\n    @base = Base.new\n    @special = Special.new\n    @mixed = Mixed.new\n    @twin2 = Twin2.new\n    @fronted = Fronted.new\n    @readered = Readered.new\n    @delegating = Delegating.new\n    @shelf = Shelf.new\n    @recon = Recon.new\n    @relaid = Relaid.new\n    @opted = Opted.new\n    @opted2 = Opted2.new\n  end\nend\n",
+            "class ProbesController < ApplicationController\n  def show\n    @article = Article.new\n    @comment = Comment.new\n    @base = Base.new\n    @special = Special.new\n    @mixed = Mixed.new\n    @twin2 = Twin2.new\n    @fronted = Fronted.new\n    @readered = Readered.new\n    @delegating = Delegating.new\n    @shelf = Shelf.new\n    @recon = Recon.new\n    @relaid = Relaid.new\n    @opted = Opted.new\n    @opted2 = Opted2.new\n    @sent = Sent.new\n    @sent2 = Sent2.new\n  end\nend\n",
         )
         .write("app/views/probes/show.html.erb", VIEW)
         .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe\", to: \"probes#show\", as: :probe\n")

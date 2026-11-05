@@ -5411,14 +5411,15 @@ fn macro_shadows(e: &crate::expr::Expr, c: &mut MarkClass) {
     let is_const = |a: &crate::expr::Expr| matches!(&*a.node, ExprNode::Const { .. });
     match method.as_str() {
         "send" | "public_send" | "__send__" => {
-            // `send(:attr_reader, :label)` is the call it names.
+            // `send(:attr_reader, :label)` is the call it names, with its
+            // block (`send(:with_options, …) { |o| … }`).
             match args.split_first() {
                 Some((m, rest)) if name(m).is_some() => {
                     let node = ExprNode::Send {
                         recv: None,
                         method: crate::ident::Symbol::from(name(m).unwrap().as_str()),
                         args: rest.to_vec(),
-                        block: None,
+                        block: block.clone(),
                         parenthesized: true,
                     };
                     macro_shadows(&crate::expr::Expr::new(e.span, node), c);
@@ -6465,6 +6466,16 @@ mod tests {
         assert!(!c.opaque && c.shadows.contains("inner_label"), "{:?}", c.shadows);
         let c = read_class_call(block_call("concerning", vec![lit_sym(Symbol::from("Labels"))], &[], vec![class_call("attr_reader", vec![label()])]));
         assert!(!c.opaque && c.shadows.contains("label"));
+    }
+
+    #[test]
+    fn a_sent_call_keeps_its_block() {
+        let prefix = opts(&[("prefix", lit_sym(Symbol::from("inner")))]);
+        let inner = on(var("o"), "delegate", vec![lit_sym(Symbol::from("label")), opts(&[("to", lit_sym(Symbol::from("x")))])]);
+        for m in ["send", "public_send", "__send__"] {
+            let c = read_class_call(block_call(m, vec![lit_sym(Symbol::from("with_options")), prefix.clone()], &["o"], vec![inner.clone()]));
+            assert!(!c.opaque && c.shadows.contains("inner_label"), "{m}: {:?}", c.shadows);
+        }
     }
 
     #[test]
