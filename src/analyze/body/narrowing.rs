@@ -148,7 +148,7 @@ pub(super) fn extract_narrowing_with(cond: &Expr, probe: &Probe) -> Option<Narro
                 }
                 ("is_a?" | "kind_of?" | "instance_of?", [arg]) => {
                     let key = var_key(target)?;
-                    let ty = const_to_ty(arg)?;
+                    let ty = const_to_ty(arg).or_else(|| self_class_arg(arg))?;
                     Some(NarrowPred::IsA(key, ty))
                 }
                 // `if x.attr`: a bare read of a stable member is a truthiness
@@ -263,6 +263,15 @@ fn var_key(e: &Expr, probe: &Probe) -> Option<VarKey> {
                 None => Some(VarKey::Local(method.clone())),
             }
         }
+        _ => None,
+    }
+}
+
+/// `x.is_a?(self)` in a class method, as fugit's `Cron.parse` opens with
+/// `return s if s.is_a?(self)`: the class the method's `self` is.
+fn self_class_arg(e: &Expr) -> Option<Ty> {
+    match (&*e.node, &e.ty) {
+        (ExprNode::SelfRef, Some(ty @ Ty::Class { .. })) => Some(ty.clone()),
         _ => None,
     }
 }

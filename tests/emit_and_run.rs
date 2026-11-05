@@ -129,6 +129,8 @@ mod source_gem_load_order;
 mod unresolved_param_rbs;
 #[path = "emit_and_run/unknown_receiver_param_rbs.rs"]
 mod unknown_receiver_param_rbs;
+#[path = "emit_and_run/is_a_self_narrowing.rs"]
+mod is_a_self_narrowing;
 #[path = "emit_and_run/source_gem_facade.rs"]
 mod source_gem_facade;
 #[path = "support/for_loops.rs"]
