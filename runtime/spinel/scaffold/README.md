@@ -61,7 +61,7 @@ discussed in [OriPekelman/tep#6](https://github.com/OriPekelman/tep/issues/6)
 System tools to install once. All available via standard package
 managers:
 
-- **Ruby 3.4 or later** with bundler (ships with Ruby).
+- **Ruby 4.0.9 or later** with bundler (ships with Ruby).
 - **Node.js + npm** — Tailwind CSS build for the asset pipeline.
 - **SQLite system library** — preinstalled on macOS;
   `apt install libsqlite3-dev` on Ubuntu / Debian. The `sqlite3`

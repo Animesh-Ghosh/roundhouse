@@ -131,7 +131,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              Roda/Sequel; everything else is a `ROUNDHOUSE-TODO` comment \
              carrying the original Rails source for manual conversion.\n\n\
              ## Prerequisites\n\
-             - Ruby 3.4+ (with bundler)\n\
+             - Ruby 4.0.9+ (with bundler)\n\
              - SQLite (system library)\n\n\
              ## Install dependencies\n\
              ```sh\n\
@@ -159,7 +159,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              specimen — see `SPECIMEN.md` for the full architecture \
              document (layout, runtime, ruleset, limitations).\n\n\
              ## Prerequisites\n\
-             - Ruby 3.4+ (with bundler)\n\
+             - Ruby 4.0.9+ (with bundler)\n\
              - Node.js + npm — Tailwind/Turbo asset build (only when the \
              source app ships stylesheets/JS; a JS-less app skips this)\n\
              - SQLite (system library)\n\n\
@@ -12357,10 +12357,9 @@ pub fn missing_bundled_requires(files: &[(String, String)]) -> Vec<String> {
 /// **Not spinel-only, though it lived inside `spin_shape` until now.**
 /// The two CRuby autoloads are the ones a dev box hides: `Pathname()`
 /// (campfire's `app/helpers/cable_helper.rb` calls the Kernel
-/// conversion method) resolves bare on Ruby 4.0 and raises on 3.4, and
-/// 3.4 is what the scaffold README claims and what
-/// `campfire-conformance` pins — two test files died on a clean runner
-/// that passed on a laptop. The other eight raise on every CRuby, so
+/// conversion method) resolved bare on Ruby 4.0 and raised on 3.4, the minimum this was
+/// written against — two test files died on a clean runner that passed
+/// on a laptop. The other eight raise on every CRuby, so
 /// the ruby family needs this table at least as much as spinel does.
 ///
 /// The three conditions mirror spinel's own check: the constant is

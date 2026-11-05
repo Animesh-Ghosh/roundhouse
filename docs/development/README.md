@@ -11,8 +11,8 @@ Install Rust through rustup; the selected toolchain is
 `rust-version`. Keep the stack budgets in [`.cargo/config.toml`](../../.cargo/config.toml).
 Toolchain upgrades need native and browser/WASM verification.
 
-Use the MRI line in [`.ruby-version`](../../.ruby-version). CI selects its
-latest patch through `env.MRI_RUBY` in the workflow; `bin/rh doctor` reads
+Use the MRI version in [`.ruby-version`](../../.ruby-version). CI pins the same
+patch through `env.MRI_RUBY` in the workflow; `bin/rh doctor` reads
 the local minimum from that file. Git and Ruby run `bin/rh verify --plan`; execution
 also needs Cargo. Python 3 is optional for its hosted-coverage preview.
 The default suite loads Ruby gems as well as Rust code. Prepare them and
