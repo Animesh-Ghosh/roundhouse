@@ -20704,6 +20704,25 @@ mod concern_with_options;
 #[path = "emit_and_run/content_tag_block.rs"]
 mod content_tag_block;
 
+#[path = "support/html_safe_method_owner.rs"]
+mod html_safe_method_owner;
+
+/// A marked method is written unescaped only on a receiver that has the
+/// marked definition; another class's method of that name is escaped.
+#[test]
+fn an_html_safe_method_is_trusted_by_its_owner() {
+    html_safe_method_owner::app()
+        .write("test/controllers/probes_controller_test.rb", &html_safe_method_owner::integration_test())
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn an_html_safe_method_is_trusted_by_its_owner_on_spinel() {
+    html_safe_method_owner::app().run_spinel(&html_safe_method_owner::render_script()).assert_passes();
+}
+
 #[path = "support/content_tag_options.rs"]
 mod content_tag_options;
 
