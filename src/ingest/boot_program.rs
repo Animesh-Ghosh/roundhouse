@@ -48,6 +48,7 @@ pub(super) type Taken = crate::det::HashSet<(String, u32)>;
 pub(super) fn build<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
+    path_gems: &[std::path::PathBuf],
     app: &mut App,
     lock: Option<&crate::gems::Lockfile>,
     app_namespaces: &crate::det::HashSet<String>,
@@ -70,14 +71,19 @@ pub(super) fn build<V: Vfs + ?Sized>(
         class_ivar_initializers: Vec::new(),
     };
     let no_engines = crate::det::HashSet::default();
-    let class_body_reads = class_body_constant_reads(vfs, dir);
+    let class_body_reads = class_body_constant_reads(vfs, dir, path_gems);
     // Top-level constants an earlier boot statement assigned: this program's own, free to fill.
     let mut defined: crate::det::HashSet<String> = crate::det::HashSet::default();
-    for file in initializer_ledger::ledger(vfs, dir, &[], &no_engines) {
+    // Rails runs each engine's `load_config_initializers` before the
+    // application's, so an engine's statements come first.
+    let (host, engines): (Vec<_>, Vec<_>) = initializer_ledger::ledger(vfs, dir, path_gems, &no_engines)
+        .into_iter()
+        .partition(|file| file.findings.iter().all(|f| f.path.starts_with("config/")));
+    for file in engines.into_iter().chain(host) {
         let wanted: Vec<(String, u32)> = file
             .findings
             .iter()
-            .filter(|f| f.path.starts_with("config/initializers/"))
+            .filter(|f| f.path.starts_with("config/initializers/") || is_engine_initializer_constant(f))
             .filter(|f| matches!(initializer_ledger::holder_of(&f.targets, lock, app_namespaces), Holder::App))
             .map(|f| (f.path.clone(), f.start))
             .collect();
@@ -145,6 +151,19 @@ pub(super) fn build<V: Vfs + ?Sized>(
     Ok(taken)
 }
 
+/// A top-level constant write in an engine's `config/initializers`
+/// (`Tracer = Telemetry.tracer("app")`): Rails `load`s the file at boot
+/// like the host's, binding the name on Object before any app code runs.
+/// Only the write is taken; an engine initializer's other statements stay
+/// on the ledger.
+fn is_engine_initializer_constant(finding: &initializer_ledger::Finding) -> bool {
+    finding.owner.starts_with("engine ")
+        && finding.owner.ends_with(" initializer")
+        && finding.path.contains("/config/initializers/")
+        && !finding.targets.is_empty()
+        && finding.targets.iter().all(|target| target.starts_with("const="))
+}
+
 /// The first segment of each constant the predicate names (`SolidCache` in
 /// `SolidCache.configuration`, `Foo` in `Foo::Bar`, `File` in `::File`).
 fn constant_roots(node: &ruby_prism::Node<'_>) -> Vec<String> {
@@ -199,7 +218,11 @@ fn written_constants(node: &ruby_prism::Node<'_>) -> Vec<String> {
 
 /// The constants app/ and lib/ read while their files load: outside a
 /// method body or a lambda, which run later.
-fn class_body_constant_reads<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::det::HashSet<String> {
+fn class_body_constant_reads<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    path_gems: &[std::path::PathBuf],
+) -> crate::det::HashSet<String> {
     struct Reads(crate::det::HashSet<String>);
     impl<'pr> ruby_prism::Visit<'pr> for Reads {
         fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
@@ -217,8 +240,13 @@ fn class_body_constant_reads<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> crate::det
         }
     }
     let mut reads = Reads(crate::det::HashSet::default());
-    for root in ["app", "lib"] {
-        let Ok(files) = super::app::read_rb_files(vfs, &dir.join(root)) else { continue };
+    // An engine's app/ and lib/ load at boot as the host's do.
+    let roots = ["app", "lib"]
+        .iter()
+        .map(|root| dir.join(root))
+        .chain(path_gems.iter().flat_map(|gem| [gem.join("app"), gem.join("lib")]));
+    for root in roots {
+        let Ok(files) = super::app::read_rb_files(vfs, &root) else { continue };
         for file in files {
             let Ok(bytes) = vfs.read(&file) else { continue };
             let parsed = super::prism::parse_silent(&bytes);
