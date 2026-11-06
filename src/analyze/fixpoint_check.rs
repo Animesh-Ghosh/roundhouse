@@ -595,6 +595,8 @@ impl Analyzer {
             });
             line["harvest_untie_cut"] =
                 serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.untie_cuts);
+            let (cycles, widened) = self.settle.counts();
+            line["settled"] = serde_json::json!({"cycles": cycles, "widened": widened});
         }
         eprintln!("rh-fixpoint: {line}");
     }
