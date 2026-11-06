@@ -569,7 +569,7 @@ fn ground_prefixed_sends(body: &mut Expr, methods: &[MethodDef], owner: &str) {
 mod tests {
     use std::path::PathBuf;
 
-    const HOOKED: &str = "module Outer\n  module Helpers\n    def shout(s)\n      s.upcase\n    end\n  end\nend\n\nmodule Hook\n  def self.included(base)\n    base.instance_eval { extend Outer::Helpers }\n  end\nend\n\nmodule Parser\n  include Hook\nend\n";
+    const HOOKED: &str = "module Outer\n  module Helpers\n    def shout(s)\n      s.upcase\n    end\n  end\nend\n\nmodule Hook\n  def self.included(base)\n    base.instance_eval { extend Outer::Helpers }\n  end\nend\n\nmodule Parser\n  include Hook\n\n  def self.parse(s)\n    shout(s)\n  end\nend\n";
 
     fn library_class_names(extra: &str) -> Vec<String> {
         let tree = [(PathBuf::from("app/lib/parser.rb"), format!("{HOOKED}{extra}").into_bytes())].into_iter().collect();
