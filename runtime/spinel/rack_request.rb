@@ -14,7 +14,8 @@ module Rack
     HTTP_FORWARDED = "HTTP_FORWARDED"
     # rack's default `ip_filter`: loopback, the private IPv4 and IPv6
     # ranges, `localhost` and a UNIX socket are trusted proxies.
-    VALID_IPV4_OCTET = "\\.(25[0-5]|2[0-4][0-9]|[01]?[0-9]?[0-9])"
+    # Not a bare pattern: rack interpolates a Regexp, which groups itself, so `{3}` repeats the whole octet.
+    VALID_IPV4_OCTET = "(?:\\.(25[0-5]|2[0-4][0-9]|[01]?[0-9]?[0-9]))"
     TRUSTED_PROXIES = [
       Regexp.new("\\A127#{VALID_IPV4_OCTET}{3}\\z"),
       /\A::1\z/,

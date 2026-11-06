@@ -121,3 +121,33 @@ fn the_spinel_tree_stacks_the_railtie_middleware() {
     assert!(attack.contains("class Configuration\n"), "{attack}");
     assert!(attack.contains("module StoreProxy\n    class RedisProxy < Rack::Attack::BaseProxy"), "{attack}");
 }
+
+// Not through an emitted app: the ruby family loads rack's own Rack::Request, so only Spinel runs the port.
+#[test]
+fn the_spinel_rack_request_port_finds_the_client_rack_finds() {
+    let rack = std::process::Command::new("ruby").args(["-rrack", "-e", "1"]).status();
+    if !rack.is_ok_and(|s| s.success()) {
+        eprintln!("skipping: ruby with the rack gem not available");
+        return;
+    }
+    let envs = r#"[
+  { "REMOTE_ADDR" => "127.0.0.1", "HTTP_X_FORWARDED_FOR" => "198.51.100.2" },
+  { "REMOTE_ADDR" => "127.0.0.1", "HTTP_X_FORWARDED_FOR" => "192.0.2.9, 10.0.0.1" },
+  { "REMOTE_ADDR" => "10.1.2.3", "HTTP_X_FORWARDED_FOR" => "192.0.2.9, 172.16.0.4, 192.168.1.1" },
+  { "REMOTE_ADDR" => "127.0.0.1", "HTTP_FORWARDED" => "for=\"[2001:db8::1]:4711\"" },
+  { "REMOTE_ADDR" => "127.0.0.1", "HTTP_X_FORWARDED_FOR" => "unknown, 127.0.0.2" },
+  { "REMOTE_ADDR" => "127.0.0.1" },
+  { "REMOTE_ADDR" => "203.0.113.5", "HTTP_X_FORWARDED_FOR" => "198.51.100.2" },
+  { "REMOTE_ADDR" => "172.32.0.1" },
+].each { |env| p Rack::Request.new(env).ip }
+"#;
+    let run = |prelude: String| {
+        let out = std::process::Command::new("ruby").args(["-e", &(prelude + envs)]).output().expect("spawn ruby");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let port = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/spinel/rack_request.rb");
+    let ported = run(format!("load {:?}\n", port.display().to_string()));
+    let rack = run("require \"rack\"\n".to_string());
+    assert_eq!(ported, rack);
+}
