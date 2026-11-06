@@ -21142,6 +21142,37 @@ fn a_pure_helper_method_of_one_controller_is_refused_in_the_others() {
     assert!(errors[0].contains("`helper_method :content_tag`"), "{errors:?}");
 }
 
+/// `ApplicationController`'s arg-pure `helper_method :content_tag` doesn't
+/// serve the templates of a subclass that overrides the method: Rails'
+/// `helper_method` calls it on the rendering controller, so the override
+/// wins there, with or without its own `helper_method`, and so does a
+/// concern's. The call is refused.
+#[test]
+fn a_base_controllers_pure_helper_method_with_an_override_is_refused() {
+    let base = "class ApplicationController < ActionController::Base\n  helper_method :content_tag\n\n  def content_tag(name, text)\n    \"pure:\" + text\n  end\n\n";
+    let own = "  def content_tag(name, text)\n    @own ||= \"own:\"\n    @own + text\n  end\n\n";
+    let probes = "class ProbesController < ApplicationController\n";
+    for (label, header, concern) in [
+        ("declared override", format!("{probes}  helper_method :content_tag\n\n{own}"), false),
+        ("bare override", format!("{probes}{own}"), false),
+        ("concern override", format!("{probes}  include Tagging\n\n"), true),
+    ] {
+        let overlay = html_safe_method_owner::app()
+            .write("app/views/probes/show.html.erb", "L0:<%= content_tag(:i, \"c\") %>\n")
+            .edit("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n", base)
+            .edit("app/controllers/probes_controller.rb", probes, &header);
+        let overlay = if concern {
+            overlay.write("app/controllers/concerns/tagging.rb", &format!("module Tagging\n  extend ActiveSupport::Concern\n\n{own}end\n"))
+        } else {
+            overlay
+        };
+        let errors: Vec<String> =
+            overlay.check_errors().into_iter().filter(|e| e.contains("isn't decided statically")).collect();
+        assert_eq!(errors.len(), 1, "{label}: {errors:?}");
+        assert!(errors[0].contains("`helper_method :content_tag`"), "{label}: {errors:?}");
+    }
+}
+
 /// A template no request reaches keeps its errors as warnings, as analysis
 /// does, so its `simple_format` doesn't fail another target's build.
 #[test]

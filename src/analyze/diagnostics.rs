@@ -484,12 +484,17 @@ fn unlowered_simple_format(app: &App) -> Vec<Diagnostic> {
 /// template, by one controller's class-side clone. That is, the name's
 /// `helper_method_index` entry is missing, is an app helper's (whose
 /// insert overwrites a clone), or is a controller that isn't every app
-/// controller or an ancestor of it. Rails calls the controller's method
-/// in the templates that controller and its subclasses render, and the
-/// app helper's or ActionView's in the others. Which controller renders a
-/// template isn't decided statically (`render template:` reaches any of
-/// them), so the call is refused rather than routed one way for every
-/// template.
+/// controller or an ancestor of it. The clone doesn't serve every template
+/// either when another controller, or a module that isn't an app helper
+/// (a concern), defines the name, or another controller marks it with
+/// `helper_method`. Rails' `helper_method` calls the method on the
+/// controller that renders the template, so a subclass's override wins in
+/// its templates, with or without its own `helper_method`. Rails calls the
+/// controller's method in the templates that controller and its
+/// subclasses render, and the app helper's or ActionView's in the others.
+/// Which controller renders a template isn't decided statically (`render
+/// template:` reaches any of them), so the call is refused rather than
+/// routed one way for every template.
 fn controller_shadowed_view_helpers(app: &App) -> Vec<Diagnostic> {
     // `owner` is `controller` or one of its ancestors.
     let descends = |controller: &crate::dialect::Controller, owner: &ClassId| {
@@ -510,8 +515,20 @@ fn controller_shadowed_view_helpers(app: &App) -> Vec<Diagnostic> {
         .into_iter()
         .filter(|n| {
             let name = Symbol::from(*n);
+            let overridden = |owner: &ClassId| {
+                app.controllers.iter().filter(|c| c.name != *owner).any(|c| {
+                    c.actions().any(|a| a.name == name)
+                        || crate::lower::controller_to_library::helper_method_marked_names(c).contains(&name)
+                }) || app.library_classes.iter().any(|lc| {
+                    lc.is_module
+                        && !app.helper_modules.contains(&lc.name)
+                        && lc.methods.iter().any(|m| m.name == name && matches!(m.receiver, crate::dialect::MethodReceiver::Instance))
+                })
+            };
             let everywhere = app.helper_method_index.get(&name).is_some_and(|owner| {
-                app.controllers.iter().any(|c| c.name == *owner) && app.controllers.iter().all(|c| descends(c, owner))
+                app.controllers.iter().any(|c| c.name == *owner)
+                    && app.controllers.iter().all(|c| descends(c, owner))
+                    && !overridden(owner)
             });
             app.view_visible_controller_methods.contains(&name) && !everywhere
         })
