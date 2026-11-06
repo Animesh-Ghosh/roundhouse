@@ -14,8 +14,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FORMAT_VERSION = 1
-WEIGHTS = ROOT / "ci/unit-test-weights.json"
-WEIGHTS_VERSION = 1
 Case = tuple[str, str]
 
 
@@ -71,8 +69,7 @@ def parse_inventory(data: dict, *, partitioned: bool = False) -> tuple[dict[Case
         if (not isinstance(binary, str) or not binary or not isinstance(suite, dict)
                 or suite.get("binary-id") != binary or suite.get("status") != "listed"
                 or not isinstance(suite.get("testcases"), dict)):
-            raise ContractError(f"malformed or unlisted Nextest suite: {binary!r} "
-                                f"({suite.get('status') if isinstance(suite, dict) else type(suite).__name__})")
+            raise ContractError("malformed or unlisted Nextest suite")
         if suite.get("binary-name") == "all_tests" and suite.get("kind") == "test":
             bundled = bool(suite["testcases"])
         for name, case in suite["testcases"].items():
@@ -93,7 +90,7 @@ def parse_inventory(data: dict, *, partitioned: bool = False) -> tuple[dict[Case
                     raise ContractError("an ignored test was selected")
             elif status == "matches":
                 selected.add(identity)
-            elif not partitioned or match.get("reason") not in {"partition", "expression"}:
+            elif not partitioned or match.get("reason") != "partition":
                 raise ContractError(f"active test omitted by a non-partition filter: {identity}")
             cases[identity] = ignored
     if not bundled:
@@ -169,109 +166,6 @@ def check_partition_coverage(cases: dict[Case, bool], partitions: list[set[Case]
         raise ContractError("test partitions omit active cases")
 
 
-IDENTIFIER = re.compile(r"[A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)*")
-BINARY = re.compile(r"[A-Za-z0-9_-]+(?:::[A-Za-z0-9_/-]+)?")
-Group = tuple[str, str]
-
-
-def group_of(identity: Case) -> Group:
-    binary, name = identity
-    if BINARY.fullmatch(binary) is None or IDENTIFIER.fullmatch(name) is None:
-        raise ContractError(f"test identity cannot be placed in a filter: {identity}")
-    return binary, name.rpartition("::")[0]
-
-
-def load_weights(path: Path) -> dict[Group, float]:
-    data = json.loads(path.read_text())
-    if (not isinstance(data, dict) or data.get("version") != WEIGHTS_VERSION
-            or not isinstance(data.get("seconds_per_case"), dict)):
-        raise ContractError("unsupported unit test weights")
-    weights: dict[Group, float] = {}
-    for binary, parents in data["seconds_per_case"].items():
-        if not isinstance(parents, dict):
-            raise ContractError("malformed unit test weights")
-        for parent, seconds in parents.items():
-            if type(seconds) not in (int, float) or seconds < 0:
-                raise ContractError("malformed unit test weights")
-            weights[(binary, parent)] = float(seconds)
-    if not weights:
-        raise ContractError("empty unit test weights")
-    return weights
-
-
-def balanced_groups(cases: dict[Case, bool], weights: dict[Group, float], count: int) -> list[list[Group]]:
-    """Longest-first greedy over test modules, so each shard gets about the same measured time."""
-    validate_shard(0, count)
-    sizes: dict[Group, int] = {}
-    for identity, ignored in cases.items():
-        if not ignored:
-            group = group_of(identity)
-            sizes[group] = sizes.get(group, 0) + 1
-    fallback = sum(weights.values()) / len(weights)
-    cost = {group: size * weights.get(group, fallback) for group, size in sizes.items()}
-    shards: list[list[Group]] = [[] for _ in range(count)]
-    loads = [0.0] * count
-    for group in sorted(cost, key=lambda group: (-cost[group], group)):
-        index = min(range(count), key=lambda index: (loads[index], index))
-        shards[index].append(group)
-        loads[index] += cost[group]
-    return shards
-
-
-def group_filter(groups: list[Group], binaries: set[str]) -> str:
-    if not groups:
-        raise ContractError("assigned test partition is empty")
-    # A binary_id that is false for a whole binary, even one with no tests, makes Nextest skip listing it.
-    clauses = [f"(binary_id(={binary}) & test(/^$/))" for binary in sorted(binaries)]
-    for binary, parent in sorted(groups):
-        pattern = f"^{parent}::[^:]+$" if parent else "^[^:]+$"
-        clauses.append(f"(binary_id(={binary}) & test(/{pattern}/))")
-    return " | ".join(clauses)
-
-
-def encode_weights(weights: dict[Group, float]) -> dict:
-    table: dict[str, dict[str, float]] = {}
-    for (binary, parent), seconds in sorted(weights.items()):
-        table.setdefault(binary, {})[parent] = round(seconds, 3)
-    return {"version": WEIGHTS_VERSION, "seconds_per_case": table}
-
-
-def chosen_weights(candidates: list[Path]) -> tuple[Path, dict[Group, float]]:
-    """The first readable table among the recorded ones, else the checked-in seed."""
-    for path in [*candidates, WEIGHTS]:
-        try:
-            return path, load_weights(path)
-        except (OSError, ValueError, ContractError) as error:
-            if path == WEIGHTS:
-                raise
-            print(f"unit weights: ignoring {path}: {error}", file=sys.stderr)
-    raise ContractError("no unit test weights")
-
-
-def weights(args: argparse.Namespace) -> int:
-    """Average seconds per case of each test module, from the JUnit reports of a finished unit run."""
-    import xml.etree.ElementTree as ElementTree
-    totals: dict[Group, list[float]] = {}
-    for report in args.junit:
-        for testcase in ElementTree.parse(report).iter("testcase"):
-            group = group_of((testcase.get("classname", ""), testcase.get("name", "")))
-            entry = totals.setdefault(group, [0.0, 0])
-            entry[0] += float(testcase.get("time", "0"))
-            entry[1] += 1
-    if not totals:
-        raise ContractError("no test cases in the JUnit reports")
-    measured = {group: seconds / size for group, (seconds, size) in totals.items()}
-    merged = dict(measured)
-    if args.previous is not None:
-        _source, previous = chosen_weights([args.previous])
-        # A module this run did not report (a lost shard upload) keeps its last measurement.
-        merged = {**previous, **{group: (previous[group] + seconds) / 2 if group in previous else seconds
-                                 for group, seconds in measured.items()}}
-    write_json(args.out, encode_weights(merged))
-    print(f"unit weights: {len(totals)} modules measured, {len(merged)} recorded")
-    return 0
-
-
 def source_sha() -> str:
     locations = {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"}
@@ -323,14 +217,11 @@ def build(args: argparse.Namespace) -> int:
         "target": str(target), "archive_sha256": digest(archive), "shard_count": args.shard_count,
         "tests": encode_cases(cases),
     })
-    source, table = chosen_weights(args.weights)
-    write_json(args.weights_out, encode_weights(table))
-    print(f"unit archive: {len(cases)} identities, {sum(not ignored for ignored in cases.values())} active; "
-          f"shard weights from {source}")
+    print(f"unit archive: {len(cases)} identities, {sum(not ignored for ignored in cases.values())} active")
     return 0
 
 
-def extract(archive: Path, inventory: Path, shard_count: int | None) -> tuple[dict, dict[Case, bool], list[str], set[str]]:
+def extract(archive: Path, inventory: Path, shard_count: int | None) -> tuple[dict, dict[Case, bool], list[str]]:
     """Check the archive against its producer inventory, extract it, and return its metadata flags."""
     target = target_directory()
     manifest = json.loads(inventory.read_text())
@@ -345,17 +236,15 @@ def extract(archive: Path, inventory: Path, shard_count: int | None) -> tuple[di
         raise ContractError("extracted tests or ignored states differ from producer inventory")
     metadata = ["--cargo-metadata", str(target / "nextest/cargo-metadata.json"),
                 "--binaries-metadata", str(target / "nextest/binaries-metadata.json")]
-    return manifest, expected, metadata, set(extracted["rust-suites"])
+    return manifest, expected, metadata
 
 
 def run(args: argparse.Namespace, report: dict) -> int:
     validate_shard(args.shard_index, args.shard_count)
-    manifest, expected, metadata, binaries = extract(args.archive, args.inventory, args.shard_count)
-    filters = [group_filter(groups, binaries)
-               for groups in balanced_groups(expected, load_weights(args.weights), args.shard_count)]
+    manifest, expected, metadata = extract(args.archive, args.inventory, args.shard_count)
     partitions = []
-    for expression in filters:
-        listed = list_tests([*metadata, "-E", expression])
+    for index in range(args.shard_count):
+        listed = list_tests([*metadata, "--partition", f"hash:{index + 1}/{args.shard_count}"])
         identities, selected = parse_inventory(listed, partitioned=True)
         if identities != expected:
             raise ContractError("partition inventory differs from producer inventory")
@@ -367,7 +256,8 @@ def run(args: argparse.Namespace, report: dict) -> int:
     report.update(coverage_verified=True, source_sha=manifest["source_sha"], total_cases=len(expected),
                   ignored_cases=sum(expected.values()), selected_cases=len(selected),
                   selected=[{"binary": binary, "name": name} for binary, name in sorted(selected)])
-    command = nextest("run", *metadata, "--profile", "ci", "-E", filters[args.shard_index], "--no-fail-fast",
+    command = nextest("run", *metadata, "--profile", "ci", "--partition",
+                      f"hash:{args.shard_index + 1}/{args.shard_count}", "--no-fail-fast",
                       "--ignore-default-filter", "--run-ignored", "default", "--retries", "0", "--no-tests", "fail")
     check_command(command)
     return 0
@@ -419,7 +309,7 @@ def listed_matches(data: dict) -> set[Case]:
 def select(args: argparse.Namespace, report: dict) -> int:
     """Run named ignored suites from the archive instead of compiling them again."""
     selectors = [parse_selector(text) for text in args.select]
-    manifest, expected, metadata, _binaries = extract(args.archive, args.inventory, None)
+    manifest, expected, metadata = extract(args.archive, args.inventory, None)
     wanted = ignored_selection(expected, selectors)
     expression = selection_filter(selectors)
     filters = ["--ignore-default-filter", "--run-ignored", "only", "-E", expression]
@@ -444,24 +334,17 @@ def main(argv: list[str] | None = None) -> int:
     producer.add_argument("--inventory", type=Path, required=True)
     producer.add_argument("--shard-count", type=int, default=4)
     producer.add_argument("--timings", action=argparse.BooleanOptionalAction, default=True)
-    producer.add_argument("--weights", type=Path, action="append", default=[], help="recorded weights to prefer")
-    producer.add_argument("--weights-out", type=Path, required=True)
     consumer = modes.add_parser("run", help="validate and run one case partition from an archive")
     consumer.add_argument("--archive", type=Path, required=True)
     consumer.add_argument("--inventory", type=Path, required=True)
     consumer.add_argument("--shard-index", type=int, required=True)
     consumer.add_argument("--shard-count", type=int, required=True)
     consumer.add_argument("--report", type=Path, required=True)
-    consumer.add_argument("--weights", type=Path, required=True)
     chooser = modes.add_parser("select", help="run named ignored suites from an archive")
     chooser.add_argument("--archive", type=Path, required=True)
     chooser.add_argument("--inventory", type=Path, required=True)
     chooser.add_argument("--select", action="append", required=True, metavar="SUITE[:SUBSTRING]")
     chooser.add_argument("--report", type=Path, required=True)
-    weigher = modes.add_parser("weights", help="refresh per-module test weights from JUnit reports")
-    weigher.add_argument("--out", type=Path, default=WEIGHTS)
-    weigher.add_argument("--previous", type=Path)
-    weigher.add_argument("junit", type=Path, nargs="+")
     args = parser.parse_args(argv)
     report = {"status": "not-run", "coverage_verified": False}
     if args.mode == "run":
@@ -471,8 +354,6 @@ def main(argv: list[str] | None = None) -> int:
             status = build(args)
         elif args.mode == "run":
             status = run(args, report)
-        elif args.mode == "weights":
-            status = weights(args)
         else:
             status = select(args, report)
     except ChildFailure as error:
