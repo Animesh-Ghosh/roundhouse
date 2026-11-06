@@ -18,6 +18,8 @@ unsafe extern "C" {
     fn mi_is_in_heap_region(p: *const std::ffi::c_void) -> bool;
 }
 
+/// Asks mimalloc about one block of each kind a transpile allocates: a small
+/// box, a large vector, a string, and a vector grown by reallocation.
 #[test]
 fn rust_allocations_come_from_mimalloc() {
     let small = Box::new(7u64);
