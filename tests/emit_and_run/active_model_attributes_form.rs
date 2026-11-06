@@ -4,7 +4,8 @@
 //! through each attribute's casting writer, `:integer` `"7"` is 7,
 //! `:string` 12 is `"12"`, a `:datetime` date string is that day at UTC
 //! midnight, `:boolean` `"0"` is false; an `attr_accessor` beside them is
-//! assigned as given; validations read the cast value.
+//! assigned as given; validations read the cast value. An attribute is
+//! nil until written, so `present?` on it can be false.
 //!
 //! The model path's Attributes API cast only `:boolean`, and the include
 //! was reported as unresolved.
@@ -23,6 +24,10 @@ const FORM: &str = r#"class Form::Confirm
   attr_accessor :note
 
   validates :label, presence: true
+
+  def count_given?
+    count.present?
+  end
 end
 "#;
 
@@ -40,6 +45,9 @@ check("attr_accessor", f.note, "x")
 f.count = "08"
 check("writer casts", f.count, 8)
 check("valid", f.valid?, true)
+check("a written integer is present", f.count_given?, true)
+check("an unwritten integer is not present", Form::Confirm.new.count_given?, false)
+check("a blank String casts to nil", Form::Confirm.new(count: "").count_given?, false)
 blank = Form::Confirm.new(label: "")
 check("validation reads the cast value", blank.valid?, false)
 puts "ActiveModel form attributes passed"
