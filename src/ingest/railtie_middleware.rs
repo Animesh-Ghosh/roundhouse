@@ -14,7 +14,7 @@
 //! arguments or placed with `insert_before` / `insert_after` is
 //! reported as unsupported instead of left out.
 
-use std::collections::HashSet;
+use crate::det::HashSet;
 use std::path::{Path, PathBuf};
 
 use ruby_prism::Node;
@@ -104,7 +104,7 @@ fn resolve(u: &Use, defined: &HashSet<String>) -> Option<String> {
 }
 
 fn defined_constants<V: Vfs + ?Sized>(vfs: &V, files: &[PathBuf]) -> HashSet<String> {
-    let mut defined = HashSet::new();
+    let mut defined = HashSet::default();
     for file in files {
         let Ok(bytes) = vfs.read(file) else { continue };
         let parsed = super::prism::parse_silent(&bytes);
