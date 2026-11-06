@@ -18,6 +18,52 @@ use crate::span::Span;
 use crate::{ClassId, Symbol};
 
 use super::expr::{ingest_expr, ingest_expr_strict};
+
+/// A def hoisted out of a concern's `included do` that also includes modules (`include_hoists`).
+struct IncludedHoist {
+    owner: String,
+    name: Symbol,
+    span: Span,
+    includes: Vec<String>,
+}
+
+thread_local! {
+    static INCLUDED_HOISTS: std::cell::RefCell<Vec<IncludedHoist>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The hoisted defs a module the same `included do` includes also defines: Ruby defines the block's
+/// def on the includer, ahead of that module, where the hoisted copy on the concern sits behind it.
+pub(in crate::ingest) fn included_hoist_conflicts(classes: &[LibraryClass]) -> Vec<crate::diagnostic::Diagnostic> {
+    let hoists = INCLUDED_HOISTS.with(|h| std::mem::take(&mut *h.borrow_mut()));
+    let mut out = Vec::new();
+    for hoist in hoists {
+        // A module the program does not define (Comparable) may define the name too: as unsafe as one that does.
+        let found = hoist.includes.iter().find(|written| {
+            let written = written.trim_start_matches("::");
+            let mut scope = Some(hoist.owner.as_str());
+            let mut candidates = Vec::new();
+            while let Some(prefix) = scope {
+                candidates.push(format!("{prefix}::{written}"));
+                scope = prefix.rsplit_once("::").map(|(p, _)| p);
+            }
+            candidates.push(written.to_string());
+            let module = candidates.iter().find_map(|name| classes.iter().find(|lc| lc.name.0.as_str() == name));
+            module.is_none_or(|lc| lc.methods.iter().any(|m| m.name == hoist.name && m.receiver == MethodReceiver::Instance))
+        });
+        if let Some(module) = found {
+            out.push(crate::diagnostic::Diagnostic::unsupported(
+                hoist.span,
+                None,
+                crate::diagnostic::NESTED_DEF,
+                format!(
+                    "`def {}` in `included do` is the includer's own method in Ruby, ahead of `{module}`, which may define it too; carried on the concern it would lose to that module",
+                    hoist.name.as_str()
+                ),
+            ));
+        }
+    }
+    out
+}
 use super::visibility::{self, Visibility};
 use super::util::{
     class_name_path, constant_id_str, constant_path_is_rooted, constant_path_of,
@@ -3298,14 +3344,22 @@ fn walk_decl_body_with_visibility<'pr>(
                     && block.parameters().is_none()
                     && let Some(block_body) = block.body()
                     && let inner_stmts = flatten_statements(block_body)
-                    // A module the block includes sits ahead of this one, so a
-                    // hoisted def would lose to it where the includer's own wins.
-                    && !inner_stmts.iter().any(|inner| {
-                        inner.as_call_node().is_some_and(|c| {
-                            c.receiver().is_none() && matches!(constant_id_str(&c.name()), "include" | "prepend")
-                        })
-                    })
                 {
+                    // A module the block includes sits ahead of this one, so a hoisted def would lose to
+                    // it where the includer's own wins: hoisted anyway, and checked once every module is
+                    // known (`included_hoist_conflicts`).
+                    let block_includes: Vec<String> = inner_stmts
+                        .iter()
+                        .filter_map(|inner| {
+                            let c = inner.as_call_node().or_else(|| {
+                                inner.as_if_node().and_then(|i| i.statements()).and_then(|st| st.body().iter().next()).and_then(|n| n.as_call_node())
+                            })?;
+                            (c.receiver().is_none() && matches!(constant_id_str(&c.name()), "include" | "prepend")).then_some(c)
+                        })
+                        .flat_map(|c| {
+                            c.arguments().map(|a| a.arguments().iter().filter_map(|arg| constant_path_of(&arg)).map(|p| p.join("::")).collect::<Vec<_>>()).unwrap_or_default()
+                        })
+                        .collect();
                     let mut hoisted: Vec<(u32, u32)> = Vec::new();
                     for inner in inner_stmts {
                         // `class << self` here opens the includer's singleton:
@@ -3344,6 +3398,15 @@ fn walk_decl_body_with_visibility<'pr>(
                         visibility.apply(&inner, &mut m);
                         if class_side {
                             m.receiver = MethodReceiver::Class;
+                        } else if !block_includes.is_empty() {
+                            INCLUDED_HOISTS.with(|h| {
+                                h.borrow_mut().push(IncludedHoist {
+                                    owner: owner.0.as_str().to_string(),
+                                    name: m.name.clone(),
+                                    span: m.name_span,
+                                    includes: block_includes.clone(),
+                                })
+                            });
                         }
                         out.methods.push(m);
                         hoisted.push((inner.location().start_offset() as u32, inner.location().end_offset() as u32));
