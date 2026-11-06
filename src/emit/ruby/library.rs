@@ -9396,8 +9396,8 @@ fn emit_library_class_decl_inner(
     // `replays_foreign_class_body`. After the constants (a captured
     // call may reference one) and before the methods.
     //
-    // A plain class (no superclass, or a built-in one) or a module that
-    // `extend`s an app module replays that `extend` and the calls to the module's methods
+    // A plain class (no superclass, or a built-in one) that `extend`s an app
+    // module replays that `extend` and the calls to the module's methods
     // after it (`app_extension_calls`); every other call stays dropped.
     // Preserved external-gem `include`s are emitted separately and filtered
     // out of both the foreign replay list and the dropped-call reports.
@@ -10233,6 +10233,9 @@ fn replays_foreign_class_body(lc: &LibraryClass, app: &App, classes: &[LibraryCl
 /// not one of them. Anything else stays dropped and reported
 /// (`replays_foreign_class_body`).
 fn app_extension_calls<'a>(lc: &'a LibraryClass, app: &App, classes: &'a [LibraryClass]) -> Vec<&'a Expr> {
+    if lc.is_module {
+        return Vec::new();
+    }
     let app_module = |path: &[Symbol]| -> Option<&LibraryClass> {
         // `written_names` has already rewritten this path in place to
         // Rubydex's resolved answer (or left it as written when Rubydex

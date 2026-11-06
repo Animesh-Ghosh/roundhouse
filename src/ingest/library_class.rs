@@ -37,19 +37,7 @@ pub(in crate::ingest) fn included_hoist_conflicts(classes: &[LibraryClass]) -> V
     let hoists = INCLUDED_HOISTS.with(|h| std::mem::take(&mut *h.borrow_mut()));
     let mut out = Vec::new();
     for hoist in hoists {
-        // A module the program does not define (Comparable) may define the name too: as unsafe as one that does.
-        let found = hoist.includes.iter().find(|written| {
-            let written = written.trim_start_matches("::");
-            let mut scope = Some(hoist.owner.as_str());
-            let mut candidates = Vec::new();
-            while let Some(prefix) = scope {
-                candidates.push(format!("{prefix}::{written}"));
-                scope = prefix.rsplit_once("::").map(|(p, _)| p);
-            }
-            candidates.push(written.to_string());
-            let module = candidates.iter().find_map(|name| classes.iter().find(|lc| lc.name.0.as_str() == name));
-            module.is_none_or(|lc| lc.methods.iter().any(|m| m.name == hoist.name && m.receiver == MethodReceiver::Instance))
-        });
+        let found = hoist.includes.iter().find(|written| module_may_define(classes, &hoist.owner, written, &hoist.name, &mut Vec::new()));
         if let Some(module) = found {
             out.push(crate::diagnostic::Diagnostic::unsupported(
                 hoist.span,
@@ -63,6 +51,54 @@ pub(in crate::ingest) fn included_hoist_conflicts(classes: &[LibraryClass]) -> V
         }
     }
     out
+}
+fn module_may_define(classes: &[LibraryClass], owner: &str, written: &str, name: &Symbol, seen: &mut Vec<String>) -> bool {
+    let rooted = written.starts_with("::");
+    let written = written.trim_start_matches("::");
+    let mut candidates = Vec::new();
+    let mut scope = (!rooted).then_some(owner);
+    while let Some(prefix) = scope {
+        candidates.push(format!("{prefix}::{written}"));
+        scope = prefix.rsplit_once("::").map(|(p, _)| p);
+    }
+    candidates.push(written.to_string());
+    let Some(resolved) = candidates.into_iter().find(|c| classes.iter().any(|lc| lc.name.0.as_str() == c)) else {
+        // A module the program does not define (Comparable) may define the name too: as unsafe as one that does.
+        return true;
+    };
+    if seen.contains(&resolved) {
+        return false;
+    }
+    seen.push(resolved.clone());
+    // Every reopen: each declaration of the module is an entry of its own.
+    let decls: Vec<&LibraryClass> = classes.iter().filter(|lc| lc.name.0.as_str() == resolved).collect();
+    decls.iter().any(|lc| lc.methods.iter().any(|m| m.name == *name && m.receiver == MethodReceiver::Instance))
+        || decls.iter().flat_map(|lc| lc.includes.iter()).any(|inc| module_may_define(classes, &resolved, inc.0.as_str(), name, seen))
+}
+// A computed module (`include Foo.for(:x)`) is kept as a name no module has, so the hoist beside it is refused.
+fn collect_block_includes(node: &Node<'_>, out: &mut Vec<String>) {
+    if let Some(c) = node.as_call_node() {
+        if c.receiver().is_none_or(|r| r.as_self_node().is_some()) && matches!(constant_id_str(&c.name()).as_ref(), "include" | "prepend") {
+            for arg in c.arguments().map(|a| a.arguments().iter().collect::<Vec<_>>()).unwrap_or_default() {
+                out.push(constant_path_of(&arg).map(|p| p.join("::")).unwrap_or_else(|| "<computed module>".to_string()));
+            }
+        }
+        return;
+    }
+    let branches: Vec<Node<'_>> = if let Some(n) = node.as_if_node() {
+        [n.statements().map(|s| s.as_node()), n.subsequent()].into_iter().flatten().collect()
+    } else if let Some(n) = node.as_unless_node() {
+        [n.statements().map(|s| s.as_node()), n.else_clause().map(|e| e.as_node())].into_iter().flatten().collect()
+    } else if let Some(n) = node.as_else_node() {
+        n.statements().map(|s| s.as_node()).into_iter().collect()
+    } else if let Some(n) = node.as_statements_node() {
+        n.body().iter().collect()
+    } else {
+        Vec::new()
+    };
+    for branch in &branches {
+        collect_block_includes(branch, out);
+    }
 }
 use super::visibility::{self, Visibility};
 use super::util::{
@@ -3345,21 +3381,10 @@ fn walk_decl_body_with_visibility<'pr>(
                     && let Some(block_body) = block.body()
                     && let inner_stmts = flatten_statements(block_body)
                 {
-                    // A module the block includes sits ahead of this one, so a hoisted def would lose to
-                    // it where the includer's own wins: hoisted anyway, and checked once every module is
-                    // known (`included_hoist_conflicts`).
-                    let block_includes: Vec<String> = inner_stmts
-                        .iter()
-                        .filter_map(|inner| {
-                            let c = inner.as_call_node().or_else(|| {
-                                inner.as_if_node().and_then(|i| i.statements()).and_then(|st| st.body().iter().next()).and_then(|n| n.as_call_node())
-                            })?;
-                            (c.receiver().is_none() && matches!(constant_id_str(&c.name()), "include" | "prepend")).then_some(c)
-                        })
-                        .flat_map(|c| {
-                            c.arguments().map(|a| a.arguments().iter().filter_map(|arg| constant_path_of(&arg)).map(|p| p.join("::")).collect::<Vec<_>>()).unwrap_or_default()
-                        })
-                        .collect();
+                    let mut block_includes = Vec::new();
+                    for inner in &inner_stmts {
+                        collect_block_includes(inner, &mut block_includes);
+                    }
                     let mut hoisted: Vec<(u32, u32)> = Vec::new();
                     for inner in inner_stmts {
                         // `class << self` here opens the includer's singleton:

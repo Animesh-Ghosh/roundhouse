@@ -25,20 +25,42 @@ use crate::expr::ExprNode;
 pub(super) fn mark(app: &mut App) {
     let modules: HashSet<String> =
         app.library_classes.iter().filter(|lc| lc.is_module && lc.origin.is_none()).map(|lc| lc.name.0.as_str().to_string()).collect();
+    let mut module_methods: std::collections::BTreeMap<String, HashSet<String>> = Default::default();
+    for lc in app.library_classes.iter().filter(|lc| lc.is_module && lc.origin.is_none()) {
+        module_methods
+            .entry(lc.name.0.as_str().to_string())
+            .or_default()
+            .extend(lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(|m| m.name.as_str().to_string()));
+    }
     // Where the source has it, a module's or a class's: the emit otherwise drops a module's, and runs a class's after a `@@x = …` written before it.
     for lc in app.library_classes.iter_mut().filter(|lc| lc.origin.is_none()) {
         let owner = lc.name.0.as_str().to_string();
+        let mut extended: Vec<String> = Vec::new();
         for expr in &mut lc.unknown_calls {
-            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { continue };
+            let ExprNode::Send { recv, method, args, block: None, .. } = &*expr.node else { continue };
+            if !recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) || expr.span.is_synthetic() {
+                continue;
+            }
             let known = |a: &crate::expr::Expr| match &*a.node {
                 ExprNode::Const { path } => {
                     let rooted = path.first().is_some_and(|s| s.as_str().is_empty());
                     let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
-                    modules.contains(&written) || (!rooted && modules.contains(&format!("{owner}::{written}")))
+                    let nested = format!("{owner}::{written}");
+                    if !rooted && modules.contains(&nested) { Some(nested) } else { modules.contains(&written).then_some(written) }
                 }
-                _ => false,
+                _ => None,
             };
-            if method.as_str() == "extend" && !args.is_empty() && args.iter().all(known) && !expr.span.is_synthetic() {
+            if method.as_str() == "extend" {
+                // A mixed `extend Registry, Enumerable` is left whole to the dropped-call report: replaying half of it reorders the ancestors.
+                let found: Option<Vec<String>> = args.iter().map(known).collect();
+                if let Some(found) = found.filter(|f| !f.is_empty()) {
+                    extended.extend(found);
+                    expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
+                }
+                continue;
+            }
+            // `module GrantFlow; extend Registry; register(:code, …)`: the registry is filled as the body loads.
+            if lc.is_module && extended.iter().any(|m| module_methods.get(m).is_some_and(|ms| ms.contains(method.as_str()))) {
                 expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
             }
         }

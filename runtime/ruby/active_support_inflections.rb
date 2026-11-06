@@ -38,8 +38,7 @@ module ActiveSupport
   # `String#strip_heredoc`: Rails removes `scan(/^[ \t]*(?=\S)/).min` from each line's start,
   # the least indentation by String order, not by length, of the lines that are not blank.
   def self.strip_heredoc(text)
-    s = text.to_s
-    lines = s.split("\n", -1)
+    lines = text.split("\n", -1)
     least = ""
     found = false
     lines.each do |line|
@@ -56,8 +55,9 @@ module ActiveSupport
         found = true
       end
     end
-    return s if least.empty?
-    lines.map { |line| line.start_with?(least) ? line[least.length, line.length - least.length].to_s : line }.join("\n")
+    out = least.empty? ? text.dup : lines.map { |line| line.start_with?(least) ? line[least.length, line.length - least.length].to_s : line }.join("\n")
+    out.freeze if text.frozen?
+    out
   end
 
   def self.demodulize(text)

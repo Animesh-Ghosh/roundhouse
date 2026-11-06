@@ -778,10 +778,11 @@ fn a_module_that_extends_a_registry_answers_its_calls() {
         )
         .write(
             "app/models/grant_flows.rb",
-            "module GrantFlows\n  extend FlowRegistry\n\n  register(:code, \"authorization code\")\n  register(:token, \"implicit\")\nend\n",
+            "module GrantFlows\n  self.extend FlowRegistry\n\n  register(:code, \"authorization code\")\n  CODE = get(:code)\n  register(:token, \"implicit\")\nend\n",
         )
         .run_ruby(
             r##"raise "GrantFlows.get: #{GrantFlows.get(:code).inspect}" unless GrantFlows.get(:code) == "authorization code" && GrantFlows.get(:token) == "implicit"
+raise "a constant between the calls: #{GrantFlows::CODE.inspect}" unless GrantFlows::CODE == "authorization code"
 puts "registry module passed"
 "##,
         );
@@ -796,11 +797,12 @@ fn strip_heredoc_runs_in_emitted_ruby() {
     let run = emit_and_run::real_blog()
         .write(
             "app/models/heredoc_probe.rb",
-            "class HeredocProbe\n  def self.message(name)\n    <<-TEXT.strip_heredoc\n      Hello #{name},\n        indented\n\n      bye\n    TEXT\n  end\n\n  def self.mixed\n    \" \\t a\\n\\t  b\\n\".strip_heredoc\n  end\nend\n",
+            "class HeredocProbe\n  def self.message(name)\n    <<-TEXT.strip_heredoc\n      Hello #{name},\n        indented\n\n      bye\n    TEXT\n  end\n\n  def self.mixed\n    \" \\t a\\n\\t  b\\n\".strip_heredoc\n  end\n\n  def self.copies\n    plain = +\"a\\nb\\n\"\n    out = plain.strip_heredoc\n    out << \"x\"\n    frozen = \"  a\\n\".dup.freeze\n    [plain, out.equal?(plain), frozen.strip_heredoc.frozen?, (+\"  a\\n\").strip_heredoc.frozen?]\n  end\nend\n",
         )
         .run_ruby(
             r##"raise "strip_heredoc: #{HeredocProbe.message("Ann").inspect}" unless HeredocProbe.message("Ann") == "Hello Ann,\n  indented\n\nbye\n"
 raise "strip_heredoc by String order: #{HeredocProbe.mixed.inspect}" unless HeredocProbe.mixed == " \t a\nb\n"
+raise "strip_heredoc copies and keeps frozenness: #{HeredocProbe.copies.inspect}" unless HeredocProbe.copies == ["a\nb\n", false, true, false]
 puts "strip_heredoc passed"
 "##,
         );
@@ -10312,6 +10314,7 @@ fn included_block_defs_beside_an_include_hoist_unless_the_module_defines_them() 
             "test/models/shouty_test.rb",
             "require \"test_helper\"\n\nclass ShoutyTest < ActiveSupport::TestCase\n  test \"a def beside an include runs on the includer\" do\n    assert_equal \"HImodule\", Article.new(title: \"hi\").shout\n  end\nend\n",
         )
+        .run_test("test/models/shouty_test.rb")
         .assert_passes();
     let errors = emit_and_run::real_blog()
         .write("app/models/concerns/shouty/tone.rb", helper)

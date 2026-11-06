@@ -352,6 +352,7 @@ mod tests {
         "deconstantize",
         "foreign_key",
         "remove",
+        "strip_heredoc",
         "ordinalize",
         "parameterize",
     ];

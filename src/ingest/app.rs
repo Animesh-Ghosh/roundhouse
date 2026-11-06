@@ -3051,7 +3051,6 @@ end
     // `attribute :x, :type` under `include ActiveModel::Attributes` -> real
     // casting accessors, before anything reads the class's methods.
     super::active_model_attributes::lower_active_model_attributes(&mut app);
-    app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);
     super::library_concern_items::splice(&mut app);
     super::thread_mattr::lower_thread_mattr(&mut app);
     // Alba declarations become ordinary property-reading methods before
@@ -3126,6 +3125,8 @@ end
     super::channel_callbacks::lower_channel_callbacks(&mut app);
     super::channel_callbacks::lower_channel_names(&mut app);
     super::on_load_reopen::apply_pending(&mut app);
+    // Not beside the hoists: forwardable, delegate and carried includes give an included module methods and ancestors later.
+    app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);
     splice_concerns_into_models(&mut app, &concern_class_method_spans);
     splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
     let owned_validate_calls = decline_owned_validate_calls(&mut app, &sources, &concern_class_method_spans, &const_resolver.for_sources(&sources));
