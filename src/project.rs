@@ -9684,6 +9684,8 @@ fn spinel_gem_middleware(classes: &[String]) -> String {
 # The Rack middleware the app's gems put on Rails' stack from their
 # Railties (`App::gem_middlewares`), outermost first, between Rails'
 # RequestId and the routes. Written by `project::spinel_gem_middleware`.
+require "stringio"
+
 module GemMiddleware
   # The rest of the stack under the gems' middleware: Rails' routes, for one request.
   class App
@@ -9697,9 +9699,16 @@ module GemMiddleware
     end
 
     def call(env)
+      # Not the request's own path: a middleware above may have rewritten PATH_INFO, and Rails routes the rewritten one.
+      @req.path = env["PATH_INFO"].to_s
       Main.dispatch_request(@req, @res, @request_obj)
-      @tuple = [@res.status, @res.headers, [@res.body]]
+      @body = [@res.body]
+      @tuple = [@res.status, @res.headers, @body]
       @tuple
+    end
+
+    def body
+      @body
     end
   end
 
@@ -9707,12 +9716,18 @@ module GemMiddleware
     app = App.new(req, res, request_obj)
     # Built per request, not once as Rails does: the app at its bottom holds this request's objects, and a shared one has nowhere typed to keep them.
     response = {stacked}.call(GemMiddleware.env_of(req, request_obj))
-    return nil if response.equal?(app.tuple)
     res.status = response[0].to_i
-    response[1].each {{ |name, value| res.headers[name.to_s] = value.to_s }}
-    body = +""
-    response[2].each {{ |part| body << part.to_s }}
-    res.body = body
+    # Not copied onto itself: the routes' own headers Hash already holds any change, and a list value would turn into its text.
+    response[1].each {{ |name, value| res.headers[name.to_s] = value.to_s }} unless response[1].equal?(res.headers)
+    # Not rebuilt from the routes' own body: it may be no String (a file a controller sends).
+    return nil if response[2].equal?(app.body)
+    begin
+      body = +""
+      response[2].each {{ |part| body << part.to_s }}
+      res.body = body
+    ensure
+      response[2].close if response[2].respond_to?(:close)
+    end
     nil
   end
 
@@ -9729,6 +9744,7 @@ module GemMiddleware
       key = name.upcase.tr("-", "_")
       env[key == "CONTENT_TYPE" || key == "CONTENT_LENGTH" ? key : "HTTP_" + key] = value
     end
+    env["rack.input"] = StringIO.new(req.raw_body.to_s)
     env["action_dispatch.request_id"] = request_obj.request_id.to_s
     env
   end

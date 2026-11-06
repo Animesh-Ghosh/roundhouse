@@ -40,7 +40,7 @@ pub(super) fn mark(app: &mut App, source_gem_classes: &crate::det::HashSet<Strin
         })
         .collect();
     // Not a name some class of the app declares as a constant: a relative read of it (Sponge's `MAX_DNS_TIME`) finds it.
-    let declared: crate::det::HashSet<String> = app
+    let mut declared: crate::det::HashSet<String> = app
         .library_classes
         .iter()
         .flat_map(|c| c.constants.iter().map(|(n, _)| n.as_str().to_string()))
@@ -52,6 +52,18 @@ pub(super) fn mark(app: &mut App, source_gem_classes: &crate::det::HashSet<Strin
             _ => None,
         })))
         .collect();
+    // Nor one an initializer assigns, under a condition or not: a gem's `defined?(APP_GATE)` sees it at run time.
+    fn assigned_constants(e: &Expr, out: &mut crate::det::HashSet<String>) {
+        if let ExprNode::Assign { target: crate::expr::LValue::Const { path }, .. } = &*e.node
+            && let Some(root) = path.iter().find(|p| !p.as_str().is_empty())
+        {
+            out.insert(root.as_str().to_string());
+        }
+        e.node.for_each_child(&mut |c| assigned_constants(c, out));
+    }
+    for stmt in &app.boot_program {
+        assigned_constants(stmt, &mut declared);
+    }
     // Not a constant some gem of the app, Ruby's standard library or the app itself may define: only one nothing could.
     let absent = |written: &[&Symbol]| {
         let Some(root) = written.first().map(|r| r.as_str()) else { return false };
