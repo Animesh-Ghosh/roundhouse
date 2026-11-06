@@ -21081,23 +21081,30 @@ fn an_app_defined_simple_format_is_left_to_the_app() {
 /// templates that controller renders, and ActionView's in the others. That
 /// isn't decided statically, so each call is refused: one error per call,
 /// whether the rendering controller declares it, another controller does,
-/// or an ancestor does. A template no request reaches gets a warning.
+/// or an ancestor does. An app helper of the same name is no owner either:
+/// Rails calls the controller's in its templates and the helper's in the
+/// others. A template no request reaches gets a warning.
 #[test]
 fn a_controller_helper_method_shadowing_a_view_helper_is_refused() {
     let own = "  helper_method :simple_format, :pluralize, :content_tag\n\n  def simple_format(text, html_options = {}, options = {})\n    @own ||= \"own:\"\n    @own + text\n  end\n\n  def pluralize(count, word)\n    @own ||= \"own:\"\n    @own + word\n  end\n\n  def content_tag(name, text)\n    @own ||= \"own:\"\n    @own + text\n  end\n\n";
+    let helper = "module ApplicationHelper\n  def simple_format(text, html_options = {}, options = {})\n    \"helper:\" + text\n  end\n\n  def pluralize(count, word)\n    \"helper:\" + word\n  end\n\n  def content_tag(name, text)\n    \"helper:\" + text\n  end\nend\n";
     let view = "L0:<%= simple_format(\"a\", {}, sanitize: false) %>|<%= pluralize(2, \"b\") %>|<%= content_tag(:i, \"c\") %>\n";
-    for (file, header) in [
-        ("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n"),
-        ("app/controllers/comments_controller.rb", "class CommentsController < ApplicationController\n"),
-        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n"),
+    for (file, header, with_helper) in [
+        ("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n", false),
+        ("app/controllers/comments_controller.rb", "class CommentsController < ApplicationController\n", false),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n", false),
+        ("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n", true),
+        ("app/controllers/comments_controller.rb", "class CommentsController < ApplicationController\n", true),
     ] {
         // The fixture's own templates call `pluralize` too: the probe's
         // calls are what an empty probe doesn't refuse.
         let refused = |view: &str| -> Vec<String> {
-            html_safe_method_owner::app()
+            let overlay = html_safe_method_owner::app()
                 .write("app/views/probes/show.html.erb", view)
                 .write("app/views/articles/orphan.html.erb", view)
-                .edit(file, header, &format!("{header}{own}"))
+                .edit(file, header, &format!("{header}{own}"));
+            let overlay = if with_helper { overlay.write("app/helpers/application_helper.rb", helper) } else { overlay };
+            overlay
                 .check_errors()
                 .into_iter()
                 .filter(|e| e.contains("isn't decided statically"))
@@ -21105,7 +21112,7 @@ fn a_controller_helper_method_shadowing_a_view_helper_is_refused() {
         };
         let baseline = refused("L0:\n");
         let errors: Vec<String> = refused(view).into_iter().filter(|e| !baseline.contains(e)).collect();
-        assert_eq!(errors.len(), 3, "{file}: {errors:?}");
+        assert_eq!(errors.len(), 3, "{file} (helper: {with_helper}): {errors:?}");
         for name in ["simple_format", "pluralize", "content_tag"] {
             assert!(errors.iter().any(|e| e.contains(&format!("`helper_method :{name}`"))), "{file}: {name}: {errors:?}");
         }

@@ -480,18 +480,24 @@ fn unlowered_simple_format(app: &App) -> Vec<Diagnostic> {
 }
 
 /// A call to `pluralize`, `content_tag` or `simple_format` where a
-/// controller's `helper_method` of that name has no helper-side owner
-/// (`helper_method_index`). Rails calls the controller's method in the
-/// templates that controller renders and ActionView's in the others, and
-/// which controller renders a template isn't decided statically
-/// (`render template:` reaches any of them). So the call is refused
+/// controller's `helper_method` of that name isn't served by that
+/// controller's own class-side clone: the name has no entry in
+/// `helper_method_index`, or an app helper's (whose insert overwrites a
+/// clone). Rails calls the controller's method in the templates that
+/// controller renders, and the app helper's or ActionView's in the
+/// others. Which controller renders a template isn't decided statically
+/// (`render template:` reaches any of them), so the call is refused
 /// rather than routed one way for every template.
 fn controller_shadowed_view_helpers(app: &App) -> Vec<Diagnostic> {
     let names: Vec<&str> = ["pluralize", "content_tag", "simple_format"]
         .into_iter()
         .filter(|n| {
             let name = Symbol::from(*n);
-            app.view_visible_controller_methods.contains(&name) && !app.helper_method_index.contains_key(&name)
+            let cloned = app
+                .helper_method_index
+                .get(&name)
+                .is_some_and(|owner| app.controllers.iter().any(|c| c.name == *owner));
+            app.view_visible_controller_methods.contains(&name) && !cloned
         })
         .collect();
     if names.is_empty() {
@@ -507,7 +513,7 @@ fn controller_shadowed_view_helpers(app: &App) -> Vec<Diagnostic> {
                 None,
                 method.as_str(),
                 format!(
-                    "a controller's `helper_method :{0}` is called in the templates that controller renders, and ActionView's `{0}` in the others; which controller renders a template isn't decided statically",
+                    "a controller's `helper_method :{0}` is called in the templates that controller renders, and an app helper's or ActionView's `{0}` in the others; which controller renders a template isn't decided statically",
                     method.as_str()
                 ),
             );

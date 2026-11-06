@@ -489,8 +489,8 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // An app override owns pluralize, content_tag or simple_format,
     // including nested ERB calls. Qualify it before the framework
     // classifier consumes bare Sends. A controller's `helper_method` of
-    // one of these names that has no helper-side owner is refused
-    // instead (`analyze::diagnostics::controller_shadowed_view_helpers`).
+    // one of these names that isn't served by its own class-side clone is
+    // refused instead (`analyze::diagnostics::controller_shadowed_view_helpers`).
     for helper in ["pluralize", "content_tag", "simple_format"] {
         let Some(owner) = app.helper_method_index.get(&Symbol::from(helper)) else { continue };
         fn qualify_helper(e: &mut Expr, helper: &str, owner: &ClassId) {
