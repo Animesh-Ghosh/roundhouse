@@ -2129,7 +2129,10 @@ fn url_discard(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     if matches!(&*url.node, ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef) {
         return None;
     }
-    if let ExprNode::Send { recv: None, method, args, .. } = &*url.node
+    // Only the bare spelling reads a local (Prism's shape for a partial
+    // local): `url()` or `url { … }` calls the method of that name even
+    // where a local has it, and is kept with its effects.
+    if let ExprNode::Send { recv: None, method, args, block: None, parenthesized: false, .. } = &*url.node
         && args.is_empty()
         && ctx.binds_local(method.as_str())
     {

@@ -21022,6 +21022,30 @@ fn link_to_if_evaluates_its_arguments_as_rails_on_spinel() {
         .assert_passes();
 }
 
+/// A partial local named `url` and an explicit `url()` to the app helper of
+/// that name: the call runs, with its effect, when no link is made; the
+/// bare `url` reads the local. Spinel doesn't build the probe (the link's
+/// url reads the local as a record, `url_path(url.id)`), so it is checked
+/// on the Ruby target, and in the emitted partial.
+#[test]
+fn link_to_if_calls_an_explicit_url_beside_a_url_local() {
+    url_call_app()
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_if_eval_order::URL_CALL_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+    let (emitted, _) = url_call_app().emit(roundhouse::project::BuildTarget::Ruby);
+    let part = std::fs::read_to_string(emitted.join("app/views/probes/_part.rb")).expect("probes/_part.rb");
+    assert!(part.contains("_ = UrlProbeHelper.url") && part.matches("_ = ").count() == 1, "{part}");
+}
+
+fn url_call_app() -> emit_and_run::Overlay {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_if_eval_order::URL_CALL_SHOW)
+        .write("app/views/probes/_part.html.erb", link_to_if_eval_order::URL_CALL_PART)
+        .write("app/helpers/url_probe_helper.rb", link_to_if_eval_order::URL_HELPER)
+        .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+}
+
 /// A block parameter shadowing a template local only an earlier nested
 /// body assigned is refused, with the reason; one assigned in an `each`
 /// block, or at the top level as well, lowers.

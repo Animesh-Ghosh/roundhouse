@@ -72,3 +72,21 @@ pub const NESTED_LOWERED: &[&str] = &[
     "<% [1].each do |i| %><% x = \"o\" %><% end %><%= link_to_if Tracker.no, \"i\", \"/u\" do |x| %>[<%= x %>]<% end %>\n",
     "<% x = \"p\" %><% if Tracker.yes %><% x = \"o\" %><% end %><%= link_to_if Tracker.no, \"i\", \"/u\" do |x| %>[<%= x %>]<% end %>|<%= x %>\n",
 ];
+
+/// A partial local named `url` beside an app helper `url`, which logs a
+/// `u` (`URL_HELPER`): the bare `url` reads the local, and `url()` calls
+/// the helper, whose effect Rails 8.1.4 runs before it picks a branch.
+/// `URL_CALL_SHOW` renders the partial with the local. No line makes a
+/// link: the link's url classifies a local named `url` as a record
+/// (`url_path(url.id)`), which neither the Ruby target nor Spinel builds.
+pub const URL_CALL_PART: &str = concat!(
+    "L0:<%= link_to_if false, \"n\", url() %>|<%= Tracker.take %>\n",
+    "L1:<%= link_to_if false, \"n\", url %>|<%= Tracker.take %>\n",
+);
+
+pub const URL_CALL_SHOW: &str = "<%= render \"probes/part\", url: \"/l\" %>";
+
+/// `app/helpers/url_probe_helper.rb`.
+pub const URL_HELPER: &str = "module UrlProbeHelper\n  def url\n    Tracker.url\n  end\nend\n";
+
+pub const URL_CALL_RENDERS: &[&str] = &["L0:n|u", "L1:n|"];
