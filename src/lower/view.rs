@@ -24,6 +24,7 @@
 //! targets; emission differs.
 
 use crate::expr::{Expr, ExprNode, Literal};
+use crate::ident::Symbol;
 
 /// Numeric and formatted counts keep their label, not `count.to_i`:
 /// a delimited count must keep its commas. Ground ERB and app helpers
@@ -68,6 +69,9 @@ pub enum ViewHelperKind<'a> {
     /// `<%= javascript_importmap_tags %>`, or with an explicit entry
     /// point (`javascript_importmap_tags "user"` — lobsters' layout).
     JavascriptImportmapTags { entry: Option<&'a Expr> },
+    /// `javascript_importmap_tags "application", importmap: M.importmap`:
+    /// an engine's own import map (`App::engine_importmaps`).
+    EngineImportmapTags { entry: &'a Expr, module: String },
     /// `<%= turbo_stream_from "channel" %>` and the multi-streamable
     /// form campfire writes (`turbo_stream_from room, :messages`). The
     /// stream NAME is spelled by `lower::broadcasts::stream_name`,
@@ -91,8 +95,16 @@ pub enum ViewHelperKind<'a> {
     /// `<%= word_wrap(text [, opts]) %>` — returns ordinary text, so
     /// the lowering must escape the result before appending it.
     WordWrap { text: &'a Expr, opts: Option<&'a Expr> },
+    /// `<%= simple_format(text, html_options, sanitize: false
+    /// [, wrapper_tag: :div]) %>`, the one form `simple_format_form`
+    /// models: the text is written as it is (Rails' `raw`), so the
+    /// result is html-safe and appended unescaped.
+    SimpleFormat { text: &'a Expr, html_opts: Option<&'a Expr>, wrapper_tag: Symbol },
     /// `<%= stylesheet_link_tag :name [, opts] %>`.
     StylesheetLinkTag { name: &'a Expr, opts: Option<&'a Expr> },
+    /// `<%= content_tag :name, content [, opts] %>`, with no block: the
+    /// escaped content's `content_tag_html`, appended as it is.
+    ContentTag { name: &'a Expr, content: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= content_for(:slot) %>` (getter, no body).
     ContentForGetter { slot: &'a str },
     /// `<% content_for :slot, "body" %>` (statement-form setter).
@@ -101,7 +113,9 @@ pub enum ViewHelperKind<'a> {
     LinkTo { text: &'a Expr, url: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= link_to_if cond, text, url [, opts] %>` — the link when the
     /// condition holds, the escaped text alone otherwise.
-    LinkToIf { cond: &'a Expr, text: &'a Expr, url: &'a Expr, opts: Option<&'a Expr> },
+    /// `link_to_unless` is the same with `negate` set: the link when the
+    /// condition doesn't hold.
+    LinkToIf { cond: &'a Expr, text: &'a Expr, url: &'a Expr, opts: Option<&'a Expr>, negate: bool },
     /// `<%= button_to text, target [, opts] %>`.
     ButtonTo { text: &'a Expr, target: &'a Expr, opts: Option<&'a Expr> },
 }
@@ -229,10 +243,11 @@ pub enum RenderPartial<'a> {
 /// there's a receiver, or when a one-arg Var/Ivar doesn't name a
 /// view-scope local (`is_local`).
 ///
-/// A block is accepted for exactly ONE shape — `render layout: "…" do …
-/// end` (`LayoutBlock`), where the block IS the render's content. Every
-/// other block-form render still returns `None`: the block would be a
-/// Rails feature nothing here models, and saying so beats guessing.
+/// A block is accepted for two shapes, both `LayoutBlock`, where the block
+/// IS the partial's `yield`: `render layout: "…" do … end` and `render
+/// "…"[, k: v] do … end`. Every other block-form render still returns
+/// `None`: the block would be a Rails feature nothing here models, and
+/// saying so beats guessing.
 pub fn classify_render_partial<'a>(
     recv: Option<&'a Expr>,
     method: &str,
@@ -245,6 +260,23 @@ pub fn classify_render_partial<'a>(
         return None;
     }
     if let Some(block) = block {
+        // `render "x"[, k: v] do … end`: Rails renders the partial with the
+        // block as its `yield`, as `render layout: "x"` does. (`render
+        // partial: "x", locals: … do` raises in Rails; it stays
+        // unrecognized.)
+        if let Some(first) = args.first()
+            && let ExprNode::Lit { value: Literal::Str { value } } = &*first.node
+        {
+            let locals = match &args[1..] {
+                [] => None,
+                [h] => match &*h.node {
+                    ExprNode::Hash { entries, .. } => Some(entries.as_slice()),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            return Some(RenderPartial::LayoutBlock { layout: value.as_str(), locals, block });
+        }
         let [arg] = args else { return None };
         let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
         return classify_render_layout(entries, block);
@@ -642,6 +674,84 @@ pub fn classify_turbo_stream_call<'a>(
     }
 }
 
+/// The arguments of a `simple_format` call the lowering models.
+pub struct SimpleFormatForm<'a> {
+    pub text: &'a Expr,
+    /// `None` for no html options or a literal `{}`.
+    pub html_opts: Option<&'a Expr>,
+    pub wrapper_tag: Symbol,
+}
+
+const SIMPLE_FORMAT_SANITIZES: &str = "Rails runs the HTML sanitizer over the text (the default `sanitize: true`), which is not modeled; pass `sanitize: false` for text that is already safe";
+const SIMPLE_FORMAT_NOT_MODELED: &str = "its arguments are not a text, html options and a literal options hash with `sanitize: false` and an optional literal `wrapper_tag:`";
+
+/// `simple_format(text, html_options, options)` with `sanitize: false`
+/// (or `nil`) in a literal options hash, or why the call is left as it
+/// is: the default runs Rails' HTML sanitizer, which removes tags and
+/// re-serializes entities, so even an escaped text isn't the
+/// unsanitized form's output (`analyze::diagnostics` refuses the call
+/// with the reason). `wrapper_tag:` is a literal Symbol or String;
+/// `sanitize_options:` and any other key are left as written.
+pub fn simple_format_form(args: &[Expr]) -> Result<SimpleFormatForm<'_>, &'static str> {
+    let opaque = |a: &Expr| {
+        matches!(
+            &*a.node,
+            ExprNode::Splat { .. }
+                | ExprNode::KeywordSplat { .. }
+                | ExprNode::ForwardArgs
+                | ExprNode::ForwardKeywords
+                | ExprNode::ForwardKeywordsWithPairs { .. }
+        )
+    };
+    fn hash_entries(a: &Expr) -> Option<&Vec<(Expr, Expr)>> {
+        match &*a.node {
+            ExprNode::Hash { entries, .. } => Some(entries),
+            _ => None,
+        }
+    }
+    if args.iter().any(opaque)
+        || args.iter().filter_map(hash_entries).any(|es| es.iter().any(|(k, v)| opaque(k) || opaque(v)))
+    {
+        return Err(SIMPLE_FORMAT_NOT_MODELED);
+    }
+    let [text, html_opts, options] = args else {
+        return match args.len() {
+            1 | 2 => Err(SIMPLE_FORMAT_SANITIZES),
+            _ => Err(SIMPLE_FORMAT_NOT_MODELED),
+        };
+    };
+    let Some(options) = hash_entries(options) else { return Err(SIMPLE_FORMAT_NOT_MODELED) };
+    let key = |k: &Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    };
+    let mut sanitize_off = false;
+    let mut wrapper_tag = Symbol::from("p");
+    for (k, v) in options {
+        match key(k).as_deref() {
+            Some("sanitize") => match &*v.node {
+                ExprNode::Lit { value: Literal::Bool { value: false } | Literal::Nil } => sanitize_off = true,
+                _ => return Err(SIMPLE_FORMAT_SANITIZES),
+            },
+            Some("wrapper_tag") => match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => wrapper_tag = value.clone(),
+                ExprNode::Lit { value: Literal::Str { value } } => wrapper_tag = Symbol::from(value.as_str()),
+                _ => return Err(SIMPLE_FORMAT_NOT_MODELED),
+            },
+            _ => return Err(SIMPLE_FORMAT_NOT_MODELED),
+        }
+    }
+    if !sanitize_off {
+        return Err(SIMPLE_FORMAT_SANITIZES);
+    }
+    let html_opts = match &*html_opts.node {
+        ExprNode::Hash { entries, .. } if entries.is_empty() => None,
+        ExprNode::Hash { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Send { .. } => Some(html_opts),
+        _ => return Err(SIMPLE_FORMAT_NOT_MODELED),
+    };
+    Ok(SimpleFormatForm { text, html_opts, wrapper_tag })
+}
+
 pub fn classify_view_helper<'a>(
     method: &str,
     args: &'a [Expr],
@@ -654,6 +764,17 @@ pub fn classify_view_helper<'a>(
         }
         ("javascript_importmap_tags", 1) => {
             Some(ViewHelperKind::JavascriptImportmapTags { entry: Some(&args[0]) })
+        }
+        ("javascript_importmap_tags", 2) => {
+            let ExprNode::Hash { entries, .. } = &*args[1].node else { return None };
+            let [(key, value)] = entries.as_slice() else { return None };
+            let is_importmap_key = matches!(&*key.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if value.as_str() == "importmap");
+            let ExprNode::Send { recv: Some(recv), method, args: margs, block: None, .. } = &*value.node else { return None };
+            let ExprNode::Const { path } = &*recv.node else { return None };
+            (is_importmap_key && method.as_str() == "importmap" && margs.is_empty()).then(|| ViewHelperKind::EngineImportmapTags {
+                entry: &args[0],
+                module: path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"),
+            })
         }
         ("turbo_stream_from", n) if n >= 1 => {
             Some(ViewHelperKind::TurboStreamFrom { streamables: args })
@@ -683,6 +804,11 @@ pub fn classify_view_helper<'a>(
             text: &args[0],
             opts: Some(&args[1]),
         }),
+        ("simple_format", _) => simple_format_form(args).ok().map(|f| ViewHelperKind::SimpleFormat {
+            text: f.text,
+            html_opts: f.html_opts,
+            wrapper_tag: f.wrapper_tag,
+        }),
         ("word_wrap", 1) => Some(ViewHelperKind::WordWrap {
             text: &args[0],
             opts: None,
@@ -699,6 +825,18 @@ pub fn classify_view_helper<'a>(
             name: &args[0],
             opts: Some(&args[1]),
         }),
+        // A Hash second argument with no third is Rails' content (it
+        // renders the Hash's `to_s`), not options: left to the generic path.
+        ("content_tag", 2) if !matches!(&*args[1].node, ExprNode::Hash { .. }) => {
+            Some(ViewHelperKind::ContentTag { name: &args[0], content: &args[1], opts: None })
+        }
+        // The options as a Hash literal, or a value typed as a Hash (an
+        // `attrs` local), which the runtime takes the same way.
+        ("content_tag", 3)
+            if matches!(&*args[2].node, ExprNode::Hash { .. }) || matches!(args[2].ty, Some(crate::ty::Ty::Hash { .. })) =>
+        {
+            Some(ViewHelperKind::ContentTag { name: &args[0], content: &args[1], opts: Some(&args[2]) })
+        }
         ("content_for", 1) => {
             let slot = extract_sym_or_str(&args[0])?;
             Some(ViewHelperKind::ContentForGetter { slot })
@@ -720,17 +858,19 @@ pub fn classify_view_helper<'a>(
             url: &args[1],
             opts: Some(&args[2]),
         }),
-        ("link_to_if", 3) => Some(ViewHelperKind::LinkToIf {
+        ("link_to_if" | "link_to_unless", 3) => Some(ViewHelperKind::LinkToIf {
             cond: &args[0],
             text: &args[1],
             url: &args[2],
             opts: None,
+            negate: method == "link_to_unless",
         }),
-        ("link_to_if", 4) => Some(ViewHelperKind::LinkToIf {
+        ("link_to_if" | "link_to_unless", 4) => Some(ViewHelperKind::LinkToIf {
             cond: &args[0],
             text: &args[1],
             url: &args[2],
             opts: Some(&args[3]),
+            negate: method == "link_to_unless",
         }),
         ("button_to", 2) => Some(ViewHelperKind::ButtonTo {
             text: &args[0],
@@ -787,6 +927,15 @@ pub enum FormBuilderMethod {
     RangeField,
     SearchField,
     TelephoneField,
+    /// `color_field`: `Tags::ColorField`, whose `render` always writes a
+    /// value — an explicit `value:`, else the record's when it holds a
+    /// `#rrggbb`, else `#000000`.
+    ColorField,
+    /// `datetime_local_field`: `Tags::DatetimeLocalField`, whose `render`
+    /// formats a time as `%Y-%m-%dT%T`. A datetime or date column's value
+    /// is formatted; the calls whose value the lowering can't format are
+    /// refused at analyze (`unlowered_form_builder_calls`).
+    DatetimeLocalField,
     FileField,
     RichTextArea,
     /// `form.fields_for :settings, obj do |nested| … end` — Rails'
@@ -930,6 +1079,8 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
         "range_field" => Some(FormBuilderMethod::RangeField),
         "search_field" => Some(FormBuilderMethod::SearchField),
         "telephone_field" | "phone_field" => Some(FormBuilderMethod::TelephoneField),
+        "color_field" => Some(FormBuilderMethod::ColorField),
+        "datetime_local_field" => Some(FormBuilderMethod::DatetimeLocalField),
         // The INPUT TAG only. Receiving the upload is Active Storage,
         // which is deferred by design — but rendering `<input
         // type="file">` needs none of it, and without this the call
@@ -971,13 +1122,15 @@ impl FormBuilderMethod {
                 | FormBuilderMethod::RangeField
                 | FormBuilderMethod::SearchField
                 | FormBuilderMethod::TelephoneField
+                | FormBuilderMethod::ColorField
+                | FormBuilderMethod::DatetimeLocalField
                 | FormBuilderMethod::FileField
         )
     }
 }
 
 /// Split a FormBuilder method's positional args into its two
-/// Rails-shaped halves: the field-name symbol and the trailing
+/// Rails-shaped halves: the field name (a Symbol or String) and the trailing
 /// options hash. `form.text_field :title, class: "..."` yields
 /// `(Some("title"), Some(&[(class, "...")]))`; `form.submit` with
 /// no args yields `(None, None)`. Emitters format the opts pairs
@@ -989,7 +1142,9 @@ pub fn classify_form_builder_args(
         return (None, None);
     }
     let (field, rest): (Option<&str>, &[Expr]) = match &*args[0].node {
+        // A String field name is the same field (`f.text_field "title"`), as the lowering reads it.
         ExprNode::Lit { value: Literal::Sym { value } } => (Some(value.as_str()), &args[1..]),
+        ExprNode::Lit { value: Literal::Str { value } } => (Some(value.as_str()), &args[1..]),
         _ => (None, args),
     };
     let opts = rest.iter().find_map(|a| match &*a.node {

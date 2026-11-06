@@ -12,12 +12,30 @@
 //!
 //!     cargo test --test go_toolchain -- --ignored --nocapture
 
+#[path = "support/scratch.rs"]
+mod scratch;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
 mod emit_and_run;
+#[path = "support/content_tag_options.rs"]
+#[allow(dead_code)]
+mod content_tag_options;
+#[path = "support/link_to_if_eval_order.rs"]
+#[allow(dead_code)]
+mod link_to_if_eval_order;
+#[path = "support/simple_format.rs"]
+mod simple_format;
+#[path = "support/go_view_predicate.rs"]
+mod go_view_predicate;
+#[path = "support/go_test_literal_receiver.rs"]
+mod go_test_literal_receiver;
+#[path = "support/go_action_controller_api.rs"]
+mod go_action_controller_api;
+#[path = "support/go_conditional_operand.rs"]
+mod go_conditional_operand;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -53,13 +71,10 @@ fn real_blog_runtime_calls_use_qualified_class_names() {
 }
 
 fn scratch_dir(fixture: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("roundhouse-go-check-{fixture}"))
+    scratch::dir(&format!("roundhouse-go-check-{fixture}"))
 }
 
 fn generate_project(fixture_path: &Path, out: &Path) {
-    if out.exists() {
-        std::fs::remove_dir_all(out).expect("clean scratch");
-    }
     std::fs::create_dir_all(out).expect("create scratch");
 
     let mut app = ingest_app(fixture_path).expect("ingest");
@@ -272,4 +287,291 @@ func TestFlashEachYieldsPopulatedFields(t *testing.T) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// #1714: a model test calling `Article.create!` and `article.persisted?`.
+fn bang_test_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().write(
+        "test/models/bang_test.rb",
+        "require \"test_helper\"\n\nclass BangTest < ActiveSupport::TestCase\n  test \"create! saves a record\" do\n    article = Article.create!(title: \"Bang\", body: \"A body long enough to pass.\")\n    assert article.persisted?\n    assert_not article.new_record?\n    draft = Article.create(title: \"\", body: \"\")\n    assert_not draft.persisted?\n  end\nend\n",
+    )
+}
+
+/// The Go test calls what the Go emit defines: a class method by its
+/// model function (`Article_create_bang`, `Article_create`), a
+/// predicate with `Pred` (`NewRecordPred()`), and a predicate the
+/// runtime's `ActiveRecord::Base` reads straight off an ivar
+/// (`persisted?`) by the field the library emit reads (`Persisted`).
+#[test]
+fn a_model_test_calls_bang_and_predicate_methods_by_their_go_names() {
+    let (emitted, errors) = bang_test_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = std::fs::read_to_string(emitted.join("app/v2/bang_test.go")).expect("bang_test.go");
+    for want in ["Article_create_bang(map", "Article_create(map", ".Persisted)", ".NewRecordPred()"] {
+        assert!(test.contains(want), "missing {want}:\n{test}");
+    }
+    assert!(!test.contains("!(map") && !test.contains("?()"), "{test}");
+}
+
+#[test]
+#[ignore]
+fn a_model_test_with_bang_and_predicate_calls_runs() {
+    let (emitted, errors) = bang_test_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestCreateSavesARecord", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestCreateSavesARecord"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A model that defines `persisted?` itself: the library emit writes it as
+/// `PersistedPred()`, and the test calls that, not the field.
+fn persisted_override_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "  validates :body, presence: true, length: { minimum: 10 }\n",
+            "  validates :body, presence: true, length: { minimum: 10 }\n\n  def persisted?\n    false\n  end\n",
+        )
+        .write(
+            "test/models/persisted_override_test.rb",
+            "require \"test_helper\"\n\nclass PersistedOverrideTest < ActiveSupport::TestCase\n  test \"the override answers\" do\n    article = Article.create!(title: \"Bang\", body: \"A body long enough to pass.\")\n    assert_not article.persisted?\n  end\nend\n",
+        )
+}
+
+#[test]
+fn a_model_test_calls_a_models_own_persisted_override() {
+    let (emitted, errors) = persisted_override_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = std::fs::read_to_string(emitted.join("app/v2/persisted_override_test.go")).expect("persisted_override_test.go");
+    assert!(test.contains("article.PersistedPred()") && !test.contains("article.Persisted)"), "{test}");
+}
+
+#[test]
+#[ignore]
+fn a_model_test_with_a_persisted_override_runs() {
+    let (emitted, errors) = persisted_override_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheOverrideAnswers", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheOverrideAnswers"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A non-block `content_tag` with options renders as Rails 8.1.4 does
+/// (#1780): the app's integration test, run by `go test`. Go's
+/// test emit has no `assert_includes`; the probe defines it.
+#[test]
+#[ignore]
+fn content_tag_with_options_renders() {
+    assert_content_tag_test_passes(content_tag_options::app(content_tag_options::VIEW));
+}
+
+/// #1771's `content_tag … do … end` with options alone: the view's options
+/// Hash literal reaches `content_tag_html` as the `map[string]interface{}`
+/// it takes, where it was a `map[string]string` that didn't compile.
+#[test]
+#[ignore]
+fn content_tag_block_with_options_renders() {
+    assert_content_tag_test_passes(content_tag_options::app_rendering(
+        "<%= content_tag :div, class: \"x\" do %>b<% end %>\n",
+        &["<div class=\"x\">b</div>"],
+    ));
+}
+
+fn assert_content_tag_test_passes(app: emit_and_run::Overlay) {
+    let (emitted, errors) = app.emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(
+        emitted.join("app/v2/assert_includes_test.go"),
+        "package v2\n\nimport \"strings\"\n\nfunc assert_includes(body string, want string) {\n\tif !strings.Contains(body, want) {\n\t\tpanic(\"missing \" + want + \" in \" + body)\n\t}\n}\n",
+    )
+    .expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestContentTagRenders", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestContentTagRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1802: a view's call to a model's own predicate builds and renders.
+#[test]
+#[ignore]
+fn a_views_model_predicate_call_runs() {
+    let (emitted, errors) = go_view_predicate::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/assert_includes_test.go"), go_view_predicate::GO_ASSERT_INCLUDES).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheIndexRenders", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheIndexRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A view's 0-arg reads of a model's own methods build and render: a
+/// trivial `attr_accessor` reader, an `Article | nil` receiver, a
+/// namespaced model, and a method whose omitted optional params take
+/// their literal Ruby defaults.
+#[test]
+#[ignore]
+fn a_views_model_method_shapes_run() {
+    let (emitted, errors) = go_view_predicate::shapes_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/assert_includes_test.go"), go_view_predicate::GO_ASSERT_INCLUDES).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheIndexRenders", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheIndexRenders"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1803: an assertion on a method of a new record parses and runs.
+#[test]
+#[ignore]
+fn an_assertion_on_a_new_records_method_runs() {
+    let (emitted, errors) = go_test_literal_receiver::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestANewArticleIsRecentAndNotFeatured", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestANewArticleIsRecentAndNotFeatured"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1804: a controller under `ActionController::API` builds and answers.
+#[test]
+#[ignore]
+fn an_api_controller_runs() {
+    let (emitted, errors) = go_action_controller_api::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestAnAPIControllerAnswers", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestAnAPIControllerAnswers"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1804: tiny-api (`ApplicationController < ActionController::API`) on
+/// Go. Nothing else builds it for Go. Its controllers embed the runtime's
+/// controller base now; the package still has other gaps (a uuid key typed
+/// as `int64`, `render json:` in a helper), so this pins only that
+/// `ActionControllerAPI` is no longer named.
+#[test]
+#[ignore]
+fn tiny_api_names_no_action_controller_api_type() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/tiny-api");
+    let scratch = scratch_dir("tiny-api");
+    generate_project(&fixture, &scratch);
+    go_mod_tidy(&scratch);
+    let vet = Command::new("go").args(["vet", "./..."]).current_dir(&scratch).output().expect("run go vet");
+    let stderr = String::from_utf8_lossy(&vet.stderr);
+    assert!(!stderr.contains("ActionControllerAPI"), "{stderr}");
+    let controller = std::fs::read_to_string(scratch.join("app/v2/application_controller.go")).unwrap();
+    assert!(controller.contains("*ActionControllerBase"), "{controller}");
+}
+
+/// #1696: the issue's reduction parses: its conditional operand of `&&`
+/// is a func literal, not an `if` in expression position.
+#[test]
+#[ignore]
+fn a_conditional_operand_of_and_parses() {
+    let (emitted, errors) = go_conditional_operand::issue_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let output = Command::new("gofmt").args(["-e", "-l", "app/v2/article.go"]).current_dir(&*emitted).output().expect("run gofmt");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A conditional operand of `&&` runs, answering as Ruby does.
+#[test]
+#[ignore]
+fn a_conditional_operand_of_and_runs() {
+    let (emitted, errors) = go_conditional_operand::note_app()
+        .remove("test/models/note_headline_test.rb")
+        .emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/note_headline_probe_test.go"), go_conditional_operand::GO_PROBE).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestNoteHeadlineProbe", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestNoteHeadlineProbe"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A conditional of non-nil scalars on the left of `||` is its own value,
+/// as in Ruby, where 0 and "" are truthy.
+#[test]
+#[ignore]
+fn a_conditional_scalar_left_of_or_is_kept() {
+    let (emitted, errors) = go_conditional_operand::or_app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/note_or_probe_test.go"), go_conditional_operand::GO_OR_PROBE).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestNoteOrProbe", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestNoteOrProbe"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// `link_to_unless`'s block form with a name that is an expression, not a
+/// call (`"a" + "b"`), in a block without a parameter and in one whose
+/// parameter the block doesn't read: the no-link branch still evaluates
+/// the name, and the generated view builds.
+#[test]
+#[ignore]
+fn a_link_to_unless_block_over_an_expression_name_builds() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<% content_for :title, \"Articles\" %>\n",
+            "<% content_for :title, \"Articles\" %>\n<% t = @articles.nil? %>\n<%= link_to_unless !t, \"a\" + \"b\", \"/x\" do %>none<% end %>\n<%= link_to_unless !t, \"c\" + \"d\", \"/x\" do |name| %>none<% end %>\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_go_passes("real-blog with link_to_unless blocks", &emitted);
+}
+
+/// #1862: `link_to_if` / `link_to_unless` evaluate the url when no link
+/// is made, and the generated view still builds and renders as Rails
+/// (`link_to_if_eval_order::STRICT_VIEW`): the app's integration test, run by `go test`.
+#[test]
+#[ignore]
+fn link_to_if_evaluates_its_url_and_renders() {
+    assert_content_tag_test_passes(content_tag_options::app_rendering(link_to_if_eval_order::STRICT_VIEW, link_to_if_eval_order::STRICT_RENDERS));
+}
+
+/// #1861: `simple_format` with `sanitize: false` renders as Rails 8.1.4
+/// does, multibyte texts included (`simple_format::VIEW`): the app's integration test, run by `go test`.
+#[test]
+#[ignore]
+fn simple_format_renders() {
+    assert_content_tag_test_passes(content_tag_options::app_rendering(simple_format::VIEW, simple_format::RENDERS));
 }

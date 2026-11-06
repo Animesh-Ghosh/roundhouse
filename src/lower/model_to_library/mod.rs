@@ -402,7 +402,7 @@ pub(crate) fn lower_models_inner_with_ruby_values(
             let ty = if spec.nested_fields.contains_key(field) {
                 crate::lower::controller_to_library::params::field_ty(spec, field)
             } else {
-                Ty::Str
+                crate::lower::controller_to_library::params::written_scalar_ty(spec, field).unwrap_or(Ty::Str)
             };
             register(field.clone(), ty);
             register(
@@ -463,6 +463,11 @@ pub(crate) fn lower_models_inner_with_ruby_values(
     } else {
         HashSet::default()
     };
+    let relation_returns = if runtime_relation == RuntimeRelation::Present {
+        crate::lower::scope_chain::build_user_method_returns(models).class
+    } else {
+        Default::default()
+    };
     let mut out = Vec::new();
     for (mut methods, _, table, model) in all_methods {
         for method in &mut methods {
@@ -490,8 +495,14 @@ pub(crate) fn lower_models_inner_with_ruby_values(
             // constant, and an inline whole-table count would bake in
             // the reading Rails does not have. Only the Ruby-family
             // entry ever names one.
+            //
+            // Held back, too, for a class method whose body answers a
+            // relation (`scope_chain::UserMethodReturns::class`): its
+            // callers chain on the result as they chain on a scope's,
+            // and the fold would answer an Array.
+            let key = (model.name.clone(), method.name.clone());
             let unfold = method.receiver == crate::dialect::MethodReceiver::Class
-                && unfolded.contains(&(model.name.clone(), method.name.clone()));
+                && (unfolded.contains(&key) || relation_returns.contains_key(&key));
             if !unfold {
                 crate::lower::arel::rewrite_arel_in_expr_with_ruby_values(
                     &mut method.body, schema, &classes, &[], ruby_read_values,
@@ -814,6 +825,18 @@ pub(crate) fn collect_model_constants(model: &Model) -> Vec<(Symbol, Expr)> {
 /// dynamic targets often run fine without it. The skip-list below must
 /// stay in sync with the claiming passes — each entry names the pass
 /// that consumes the shape.
+fn defines_methods_in_block(expr: &crate::expr::Expr) -> bool {
+    fn walk(expr: &crate::expr::Expr) -> bool {
+        if matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "define_method") {
+            return true;
+        }
+        let mut found = false;
+        expr.node.for_each_child(&mut |child| found |= walk(child));
+        found
+    }
+    matches!(&*expr.node, ExprNode::Send { block: Some(block), .. } if walk(block))
+}
+
 fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
     use crate::diagnostic::{Diagnostic, Severity};
     use crate::expr::LValue;
@@ -842,6 +865,21 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         };
         let name = method.as_str();
         if let Some(recv) = recv {
+            // `KINDS.each { |k| define_method(…) }` that `define_method_loop` could not unroll: its methods are dropped with it.
+            if defines_methods_in_block(expr) {
+                let mut d = Diagnostic::unsupported(
+                    expr.span,
+                    None,
+                    "runtime-defined method",
+                    format!(
+                        "a `define_method` loop in the body of `{}` the compile could not unroll; the methods it defines are not emitted",
+                        model.name.0.as_str()
+                    ),
+                );
+                d.severity = Severity::Warning;
+                crate::emit::diagnostics::push(d);
+                continue;
+            }
             // Class-body writes are sends too, and dropping an unclaimed
             // setting must report just like dropping a receiver-less DSL.
             if !matches!(&*recv.node, ExprNode::SelfRef)
@@ -1010,9 +1048,9 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         {
             continue;
         }
-        // 2-arg `attribute :name, :type` — claimed by
-        // markers::push_attribute_api_methods (typed virtual
-        // attributes), as is a 3-arg one whose `default:` it reads. A
+        // `attribute :name` — claimed by
+        // markers::push_attribute_api_methods (virtual attributes),
+        // with an optional type and a supported `default:`. A
         // default over an existing column (Rails makes it the column's
         // default; the column's reader is kept here, so it would be
         // dropped) or beside the model's own writer
@@ -1020,25 +1058,16 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
         // warns, as other arities do.
         if name == "attribute" {
             if let ExprNode::Send { args, .. } = &*expr.node {
-                let default_over_column = args.len() == 3
-                    && matches!(
-                        &*args[0].node,
-                        ExprNode::Lit { value: Literal::Sym { value: attr } }
-                            if schema.tables.get(&model.table.0).is_some_and(|t| t.columns.iter().any(|c| c.name == *attr))
-                    );
-                if args.len() == 2
-                    || (args.len() == 3
-                        && self::markers::attribute_api_default(&args[2]).is_some()
-                        && !default_over_column
-                        && !self::markers::default_beside_source_writer(&model.body, args))
+                if let Some(decl) = self::markers::attribute_api_decl(args)
+                    && !(decl.options.is_some()
+                        && schema.tables.get(&model.table.0).is_some_and(|t| t.columns.iter().any(|c| c.name == *decl.name)))
+                    && !self::markers::default_beside_source_writer(&model.body, args)
                 {
                     // Over a column of another type, the column's cast,
                     // reader and storage are kept
                     // (`markers::attribute_matches_column`): reported.
-                    if let (
-                        ExprNode::Lit { value: Literal::Sym { value: attr } },
-                        ExprNode::Lit { value: Literal::Sym { value: ty } },
-                    ) = (&*args[0].node, &*args[1].node)
+                    let attr = decl.name;
+                    if let Some(ty) = decl.ty
                         && !model.enums.contains_key(attr)
                         && let Some(col) = schema
                             .tables
@@ -1460,7 +1489,7 @@ fn build_methods_with_finder_inputs(
         // controller.
         if let (Some(fields), Some(spec)) = (permitted_fields, canonical) {
             self::schema::push_from_params_method(
-                &mut methods, model, fields, Some(table), &spec.class_id,
+                &mut methods, model, fields, Some(table), spec,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
             );
         }
@@ -1488,7 +1517,7 @@ fn build_methods_with_finder_inputs(
             }
             let writable = writable_permit_fields(model, Some(table), &spec.fields);
             self::schema::push_from_params_method(
-                &mut methods, model, &writable, Some(table), &spec.class_id,
+                &mut methods, model, &writable, Some(table), spec,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
             );
             let writable = writable_permit_fields(model, Some(table), &scalar);
@@ -1533,7 +1562,7 @@ fn build_methods_with_finder_inputs(
             }
             let writable = writable_permit_fields(model, None, &spec.fields);
             self::schema::push_from_params_method(
-                &mut methods, model, &writable, None, &spec.class_id,
+                &mut methods, model, &writable, None, spec,
                 factory,
             );
         }

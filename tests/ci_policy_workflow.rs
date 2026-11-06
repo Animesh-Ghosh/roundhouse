@@ -1,3 +1,5 @@
+#[path = "support/scratch.rs"]
+mod scratch;
 #[cfg(all(target_os = "linux", debug_assertions))]
 #[path = "support/test_subprocess.rs"]
 mod test_subprocess;
@@ -32,14 +34,23 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
         "browser-smoke-typescript",
         "compare",
         "compare-extra",
-        "compare-ruby",
-        "compare-ruby-next",
         "compare-jruby",
     ] {
         assert_eq!(
             jobs[name]["needs"],
             serde_yaml_ng::from_str::<serde_yaml_ng::Value>("[generate-fixture, plan]").unwrap(),
             "{name} must not wait for tests, or lose its fixture/selection"
+        );
+    }
+    // The CRuby compare jobs wait for the builds they reuse, never for tests.
+    for (name, needs) in [
+        ("compare-ruby", "[generate-fixture, plan, unit-build, build-roundhouse]"),
+        ("compare-ruby-next", "[generate-fixture, plan, unit-build]"),
+    ] {
+        assert_eq!(
+            jobs[name]["needs"],
+            serde_yaml_ng::from_str::<serde_yaml_ng::Value>(needs).unwrap(),
+            "{name} must wait only for the builds it consumes"
         );
     }
     for name in [
@@ -264,6 +275,75 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
     );
 }
 
+/// compare-ruby and compare-ruby-next once spent most of their minutes
+/// compiling Roundhouse twice (the test profile for the CRuby gates, release
+/// for `bin/rh transpile`) to run a few seconds of tests. They now run those
+/// gates from unit-build's archive and emit with build-roundhouse's binary.
+#[test]
+fn cruby_compare_jobs_run_archived_gates_and_do_not_rebuild_roundhouse() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    for (job_name, selectors) in [
+        ("compare-ruby", &["framework_tests_ruby", "uuid_key_ruby", "tiny_api:cruby_gate_", "roda_toolchain"][..]),
+        ("compare-ruby-next", &["framework_tests_ruby", "uuid_key_ruby", "tiny_api:cruby_gate_"][..]),
+    ] {
+        let job = &ci["jobs"][job_name];
+        assert_eq!(
+            job["env"]["CARGO_TARGET_DIR"].as_str(),
+            Some("${{ github.workspace }}/target"),
+            "{job_name}: the archive's paths are the producer's"
+        );
+        let steps = job["steps"].as_sequence().unwrap();
+        let bundle = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Download current-run test bundle"))
+            .unwrap_or_else(|| panic!("{job_name}: download the unit-build archive"));
+        assert_eq!(
+            bundle["with"]["artifact-ids"].as_str(),
+            Some("${{ needs.unit-build.outputs.unit-test-artifact-id }}"),
+            "{job_name}"
+        );
+        assert!(
+            steps.iter().any(|step| step["uses"].as_str() == Some("./.github/actions/setup-nextest")),
+            "{job_name}: the pinned Nextest runs the archive"
+        );
+        let gates = steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Run the CRuby gates from the unit-build archive"))
+            .and_then(|step| step["run"].as_str())
+            .unwrap_or_else(|| panic!("{job_name}: archived CRuby gates"));
+        assert!(gates.contains("python3 scripts/ci-unit-tests.py select"), "{job_name}");
+        for selector in selectors {
+            assert!(gates.contains(&format!("--select {selector}")), "{job_name}: {selector}");
+        }
+        for run in steps.iter().filter_map(|step| step["run"].as_str()) {
+            for line in run.lines().map(str::trim).filter(|line| !line.starts_with('#')) {
+                assert!(
+                    !line.contains("cargo test") && !line.contains("cargo run") && !line.contains("cargo build"),
+                    "{job_name} must not compile Roundhouse: {line}"
+                );
+            }
+        }
+    }
+    // scripts/compare's `bin/rh transpile ruby` uses the staged compiler.
+    let steps = ci["jobs"]["compare-ruby"]["steps"].as_sequence().unwrap();
+    let stage = steps
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Stage shared debug roundhouse binary"))
+        .and_then(|step| step["run"].as_str())
+        .expect("compare-ruby stages build-roundhouse's binary");
+    assert!(stage.contains("ROUNDHOUSE_BIN=${GITHUB_WORKSPACE}/roundhouse-debug-bin/roundhouse"));
+    let staged = steps
+        .iter()
+        .position(|step| step["name"].as_str() == Some("Stage shared debug roundhouse binary"))
+        .unwrap();
+    let compare = steps
+        .iter()
+        .position(|step| step["run"].as_str() == Some("scripts/compare ruby"))
+        .expect("compare-ruby runs scripts/compare ruby");
+    assert!(staged < compare, "the binary is staged before scripts/compare runs");
+}
+
 /// The strict-emit ceiling counts `error[` lines. An ingest abort prints
 /// none and exits nonzero, so the step must fail on the exit status too;
 /// a clean emit inside the ceiling must still pass.
@@ -281,8 +361,7 @@ fn strict_emit_ceiling_fails_an_ingest_abort_that_prints_no_error_line() {
         .and_then(|step| step["run"].as_str())
         .expect("strict-emit ceiling")
         .to_owned();
-    let dir = std::env::temp_dir().join(format!("roundhouse-ceiling-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
+    let dir = scratch::dir("roundhouse-ceiling");
     let step = |bin_body: &str, ceiling: &str| {
         let bin = dir.join("roundhouse");
         fs::write(&bin, format!("#!/bin/sh\n{bin_body}\n")).unwrap();
@@ -327,11 +406,7 @@ fn test_backtraces_retain_library_and_integration_source_locations() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "roundhouse-backtrace-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("roundhouse-backtrace-{unique}"));
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -638,11 +713,7 @@ fn rust_identity_ci_guard_requires_execution_and_propagates_failure() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "rust-identity-ci-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("rust-identity-ci-{unique}"));
     let cargo = root.join("cargo");
     fs::write(
         &cargo,
@@ -779,8 +850,7 @@ fn archive_smoke_reuses_setup_ruby_cache_without_skipping_readme_execution() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("archive-bundle-{}-{unique}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("archive-bundle-{unique}"));
     let output = std::process::Command::new("bash")
         .args([
             "-euo",
@@ -849,44 +919,55 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("framework-loop-{}-{unique}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("framework-loop-{unique}"));
+    // `cargo test --no-run` answers each suite's binary; the binary logs how it ran and fails for `fails`.
     let cargo = root.join("cargo");
     fs::write(
         &cargo,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CARGO_LOG\"\n[ \"$3\" != fails ]\n",
+        concat!(
+            "#!/bin/sh\n",
+            "prev=\n",
+            "for a in \"$@\"; do\n",
+            "  if [ \"$prev\" = --test ]; then\n",
+            "    printf '{\"reason\":\"compiler-artifact\",\"target\":{\"name\":\"%s\",\"kind\":[\"test\"]},\"executable\":\"%s/%s\"}\\n' \"$a\" \"$STUBS\" \"$a\"\n",
+            "  fi\n",
+            "  prev=$a\n",
+            "done\n",
+        ),
     )
     .unwrap();
     fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
+    let stubs = root.join("stubs");
+    fs::create_dir(&stubs).unwrap();
+    for name in ["first", "second", "fails", "survivor", "param_binds", "param_binds_values", "param_binds_cleanup", "framework_tests_spinel"] {
+        let stub = stubs.join(name);
+        fs::write(&stub, format!("#!/bin/sh\nprintf '{name} %s\\n' \"$*\" >> \"$RUN_LOG\"\n[ {name} != fails ]\n")).unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    }
     for (tests, expected_success, expected_log) in [
-        (
-            "first second",
-            true,
-            "test --test first -- --ignored --nocapture\ntest --test second -- --ignored --nocapture\n",
-        ),
-        (
-            "fails survivor",
-            false,
-            "test --test fails -- --ignored --nocapture\ntest --test survivor -- --ignored --nocapture\n",
-        ),
+        ("first second", true, "first --ignored --nocapture\nsecond --ignored --nocapture\n"),
+        ("fails survivor", false, "fails --ignored --nocapture\nsurvivor --ignored --nocapture\n"),
         (
             "param_binds param_binds_values param_binds_cleanup framework_tests_spinel",
             true,
             concat!(
-                "test --test param_binds -- --ignored --nocapture _spinel\n",
-                "test --test param_binds_values -- --ignored --nocapture _spinel\n",
-                "test --test param_binds_cleanup -- --ignored --nocapture _spinel\n",
-                "test --test framework_tests_spinel -- --ignored --nocapture\n",
+                "framework_tests_spinel --ignored --nocapture\n",
+                "param_binds --ignored --nocapture _spinel\n",
+                "param_binds_cleanup --ignored --nocapture _spinel\n",
+                "param_binds_values --ignored --nocapture _spinel\n",
             ),
         ),
         ("", false, ""),
     ] {
-        let log = root.join("cargo.log");
+        let log = root.join("run.log");
         fs::write(&log, "").unwrap();
         let result = Command::new("bash")
             .args(["-e", "-o", "pipefail", "-c", step["run"].as_str().unwrap()])
             .env("TESTS", tests)
-            .env("CARGO_LOG", &log)
+            .env("RUN_LOG", &log)
+            .env("STUBS", &stubs)
+            .env("RUNNER_TEMP", &root)
+            .env_remove("CI_SPINEL_TIMINGS_OUT")
             .env(
                 "PATH",
                 format!("{}:{}", root.display(), std::env::var("PATH").unwrap()),
@@ -894,7 +975,12 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
             .output()
             .unwrap();
         assert_eq!(result.status.success(), expected_success, "{result:?}");
-        assert_eq!(fs::read_to_string(log).unwrap(), expected_log);
+        // The suites run side by side, so in any order.
+        let mut ran: Vec<String> = fs::read_to_string(log).unwrap().lines().map(String::from).collect();
+        ran.sort();
+        let mut expected: Vec<&str> = expected_log.lines().collect();
+        expected.sort();
+        assert_eq!(ran, expected, "{result:?}");
     }
     fs::remove_dir_all(root).unwrap();
 }
@@ -1173,8 +1259,7 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = std::env::temp_dir().join(format!("full-preflight-{}-{unique}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    let root = scratch::dir(&format!("full-preflight-{unique}"));
     for (name, script) in [(
         "gh",
         "#!/bin/sh\nprintf 'called\\n' >> \"$GH_LOG\"\n[ \"$MOCK_SPINEL\" != unavailable ] || exit 1\nprintf '%s\\n' \"$MOCK_SPINEL\"\n",
@@ -1187,7 +1272,7 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
     for (event, repo, reference, publish, revision, expected) in [
         (
             "schedule",
-            "rubys/roundhouse",
+            "roundhouse-rb/roundhouse",
             "refs/heads/main",
             "false",
             spinel_sha,
@@ -1195,7 +1280,7 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
         ),
         (
             "schedule",
-            "rubys/roundhouse",
+            "roundhouse-rb/roundhouse",
             "refs/heads/main",
             "false",
             "unavailable",
@@ -1203,11 +1288,27 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
         ),
         (
             "schedule",
-            "rubys/roundhouse",
+            "roundhouse-rb/roundhouse",
             "refs/heads/main",
             "false",
             "malformed",
             Some(("true", "master")),
+        ),
+        (
+            "workflow_dispatch",
+            "roundhouse-rb/roundhouse",
+            "refs/heads/main",
+            "true",
+            spinel_sha,
+            Some(("true", spinel_sha)),
+        ),
+        (
+            "workflow_dispatch",
+            "contributor/roundhouse",
+            "refs/heads/main",
+            "true",
+            spinel_sha,
+            None,
         ),
         (
             "workflow_dispatch",
@@ -1218,16 +1319,24 @@ fn scheduler_preflight_executes_publication_guards_and_unknown_input_fallback() 
             Some(("false", spinel_sha)),
         ),
         (
+            "schedule",
+            "rubys/roundhouse",
+            "refs/heads/main",
+            "false",
+            spinel_sha,
+            None,
+        ),
+        (
             "workflow_dispatch",
             "rubys/roundhouse",
             "refs/heads/main",
             "true",
             spinel_sha,
-            Some(("true", spinel_sha)),
+            None,
         ),
         (
             "workflow_dispatch",
-            "rubys/roundhouse",
+            "roundhouse-rb/roundhouse",
             "refs/heads/topic",
             "true",
             spinel_sha,

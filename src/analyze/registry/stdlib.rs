@@ -52,6 +52,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("to_s", Ty::Str), ("to_path", Ty::Str), ("read", Ty::Str),
         ("readlines", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }), ("exist?", Ty::Bool),
     ]);
+    // runtime/ruby/rails.rb's `Rails::BacktraceCleaner`.
+    let cleaner = class("Rails::BacktraceCleaner");
+    register_stdlib_class(classes, "Rails::BacktraceCleaner", &[("new", cleaner)], &[
+        ("clean", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+    ]);
     register_stdlib_class(classes, "ActiveSupport", &[
         ("event_reporter", event_reporter.clone()), ("error_reporter", error_reporter.clone()),
         ("event_reporter=", event_reporter.clone()), ("error_reporter=", error_reporter.clone()),
@@ -158,6 +163,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     time_cls.class_methods.insert(Symbol::from("at"), time_ty());
     time_cls.class_methods.insert(Symbol::from("zone"), Ty::Class {
         id: ClassId(Symbol::from("Time")),
+        args: vec![].into(),
+    });
+    // `Time.zone.tzinfo`, flattened like `Time.zone.now`; `lower::time_calendar` grounds it.
+    time_cls.class_methods.insert(Symbol::from("tzinfo"), Ty::Class {
+        id: ClassId(Symbol::from("ActiveSupport::TimeZoneInfo")),
         args: vec![].into(),
     });
     time_cls.class_methods.insert(Symbol::from("find_zone"), Ty::Union {
@@ -603,21 +613,82 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("head", Ty::Int),
         ("response", Ty::Union { variants: vec![test_response, Ty::Nil].into() }),
     ]);
-    // solid_queue's queue API over the in-process queue (runtime/spinel/solid_queue.rb).
-    let sq_queue = Ty::Class { id: ClassId(Symbol::from("SolidQueue::Queue")), args: vec![].into() };
-    register_stdlib_class(classes, "SolidQueue::Queue", &[
-        ("find_by_name", sq_queue.clone()),
-        ("new", sq_queue),
-    ], &[
-        ("name", Ty::Str),
-        ("clear", Ty::Int),
-    ]);
-    let sq_relation = Ty::Class { id: ClassId(Symbol::from("SolidQueue::Semaphore::Relation")), args: vec![].into() };
-    register_stdlib_class(classes, "SolidQueue::Semaphore", &[("where", sq_relation)], &[]);
-    register_stdlib_class(classes, "SolidQueue::Semaphore::Relation", &[], &[
-        ("delete_all", Ty::Int),
-        ("count", Ty::Int),
-    ]);
+    // lib/solid_queue.rb's module settings the models read (runtime/spinel/solid_queue.rb).
+    {
+        let duration = Ty::Class { id: ClassId(Symbol::from("ActiveSupport::Duration")), args: vec![].into() };
+        let sq = classes.entry(ClassId(Symbol::from("SolidQueue"))).or_default();
+        sq.is_module = true;
+        sq.class_methods.insert(Symbol::from("holds_the_queue"), Ty::Bool);
+        sq.class_methods.insert(Symbol::from("use_skip_locked"), Ty::Bool);
+        sq.class_methods.insert(Symbol::from("preserve_finished_jobs"), Ty::Bool);
+        sq.class_methods.insert(Symbol::from("preserve_finished_jobs?"), Ty::Bool);
+        sq.class_methods.insert(Symbol::from("process_alive_threshold"), duration.clone());
+        sq.class_methods.insert(Symbol::from("clear_finished_jobs_after"), duration.clone());
+        sq.class_methods.insert(Symbol::from("default_concurrency_control_period"), duration);
+        sq.class_methods.insert(Symbol::from("connects_to"), Ty::Nil);
+        sq.class_methods.insert(Symbol::from("instrument"), Ty::Untyped);
+        sq.class_methods.insert(Symbol::from("time_zone"), Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() });
+        sq.class_methods.insert(Symbol::from("next_major_version"), Ty::Int);
+        sq.class_methods.insert(Symbol::from("deprecator"), Ty::Class { id: ClassId(Symbol::from("SolidQueue::Deprecator")), args: vec![].into() });
+    }
+    register_stdlib_class(classes, "SolidQueue::Deprecator", &[], &[("warn", Ty::Nil)]);
+    // importmap-rails' map object (runtime/spinel/importmap.rb), an engine's `mattr_accessor :importmap` default.
+    register_stdlib_class(classes, "Importmap::Map", &[("new", Ty::Class { id: ClassId(Symbol::from("Importmap::Map")), args: vec![].into() })], &[]);
+    // Ruby's `Hash.ruby2_keywords_hash(hash)`: a copy of the Hash, flagged to splat as keywords.
+    classes.entry(ClassId(Symbol::from("Hash"))).or_default().class_methods.entry(Symbol::from("ruby2_keywords_hash")).or_insert(
+        Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) },
+    );
+    // Not an element type for `ActiveJob::Arguments.deserialize`: its arguments are the wire's, any JSON value.
+    {
+        let args = classes.entry(ClassId(Symbol::from("ActiveJob::Arguments"))).or_default();
+        args.is_module = true;
+        args.class_methods.entry(Symbol::from("deserialize")).or_insert(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+        args.class_methods.entry(Symbol::from("serialize")).or_insert(Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) });
+    }
+    // `ActiveJob::Base.execute(job_data)`, the job a claimed solid_queue execution runs (runtime/spinel/solid_queue_runner.rb).
+    classes.entry(ClassId(Symbol::from("ActiveJob::Base"))).or_default().class_methods.entry(Symbol::from("execute")).or_insert(Ty::Nil);
+    // A job's fields and hooks (runtime/spinel/active_job_serialization.rb); `project::report_ruby_only_sends` refuses them off the ruby family.
+    {
+        let base = classes.entry(ClassId(Symbol::from("ActiveJob::Base"))).or_default();
+        let opt = |t: Ty| Ty::Union { variants: vec![t, Ty::Nil].into() };
+        let time = || Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![].into() };
+        for (name, ty) in [
+            ("job_id", opt(Ty::Str)), ("queue_name", opt(Ty::Str)), ("priority", opt(Ty::Int)),
+            ("scheduled_at", opt(time())), ("enqueued_at", opt(time())), ("executions", opt(Ty::Int)),
+            ("provider_job_id", Ty::Untyped), ("successfully_enqueued?", Ty::Bool),
+            ("serialize", Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) }),
+            ("run_callbacks", Ty::Untyped),
+            ("enqueue_error", opt(Ty::Class { id: ClassId(Symbol::from("ActiveJob::EnqueueError")), args: vec![].into() })),
+            ("concurrency_key", Ty::Nil),
+        ] {
+            base.instance_methods.entry(Symbol::from(name)).or_insert(ty);
+        }
+    }
+    {
+        let ar = classes.entry(ClassId(Symbol::from("ActiveRecord"))).or_default();
+        ar.is_module = true;
+        ar.class_methods.entry(Symbol::from("after_all_transactions_commit")).or_insert(Ty::Nil);
+    }
+    register_stdlib_class(classes, "SolidQueue::Processes::ProcessPrunedError", &[], &[]);
+    // solid_queue's queue API over the in-process queue (runtime/spinel/solid_queue_standin.rb).
+    // Not over solid_queue's own models: an app that carries them has them registered already, and ships without the stand-in.
+    if !classes.contains_key(&ClassId(Symbol::from("SolidQueue::Job"))) {
+        let sq_queue = Ty::Class { id: ClassId(Symbol::from("SolidQueue::Queue")), args: vec![].into() };
+        register_stdlib_class(classes, "SolidQueue::Queue", &[
+            ("find_by_name", sq_queue.clone()),
+            ("new", sq_queue),
+        ], &[
+            ("name", Ty::Str),
+            ("clear", Ty::Int),
+        ]);
+        let sq_relation = Ty::Class { id: ClassId(Symbol::from("SolidQueue::Semaphore::Relation")), args: vec![].into() };
+        register_stdlib_class(classes, "SolidQueue::Semaphore", &[("where", sq_relation)], &[]);
+        register_stdlib_class(classes, "SolidQueue::Semaphore::Relation", &[], &[
+            ("delete_all", Ty::Int),
+            ("count", Ty::Int),
+        ]);
+    }
+
     // `ActiveSupport::Cache` — `expand_cache_key` and the bounded
     // `MemoryStore`, in runtime/spinel/active_support_cache.rb (the ruby
     // family and spinel). A cached value is whatever was written.
@@ -698,6 +769,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("encode", Ty::Str),
         ("encode_without_escape", Ty::Str),
         ("decode", Ty::Untyped),
+        ("load", Ty::Untyped),
+        ("dump", Ty::Str),
         ("time_json", Ty::Str),
         ("time_fragment", Ty::Str),
         ("written", Ty::Str),
@@ -896,6 +969,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // does not define it, so `project::unavailable_class_module_construct`
         // ledgers it there.
         "Zlib::DataError", "Encoding::CompatibilityError", "Net::HTTPBadResponse",
+        // `rescue EncodingError` around a zone file's text (tzinfo's ZoneinfoDataSource).
+        "EncodingError",
         // `rescue SQLite3::Exception` — campfire's `ResponseCache` drops
         // its observer on any driver error (see `SQLite3::Database`).
         "SQLite3::Exception", "SQLite3::CantOpenException",
@@ -916,6 +991,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // of the base catches their subclasses.
     for (exc, parent) in [
         ("Date::Error", "ArgumentError"),
+        ("Zlib::Error", "StandardError"),
         ("Psych::Exception", "RuntimeError"),
         ("Psych::SyntaxError", "Psych::Exception"),
         ("Psych::DisallowedClass", "Psych::Exception"),
@@ -1032,12 +1108,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // `ActiveSupport::TimeZone` is `runtime/ruby/active_support_ext.rb`'s port; `[]` is typed in dispatch, by its argument.
     {
         let zone = || Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZone")), args: vec![].into() };
+        let tzinfo = || Ty::Class { id: ClassId(Symbol::from("ActiveSupport::TimeZoneInfo")), args: vec![].into() };
         register_stdlib_class(classes, "ActiveSupport::TimeZone", &[
             ("all", Ty::Array { elem: std::sync::Arc::new(zone()) }),
             ("lookup", Ty::Union { variants: vec![zone(), Ty::Nil].into() }),
         ], &[
             ("name", Ty::Str), ("utc_offset", Ty::Int), ("formatted_offset", Ty::Str),
-            ("to_s", Ty::Str), ("now", Ty::Time),
+            ("to_s", Ty::Str), ("now", Ty::Time), ("tzinfo", tzinfo()),
+        ]);
+        // Only `name`/`identifier` of TZInfo::Timezone: the runtime's
+        // `ActiveSupport::TimeZoneInfo` answers nothing else.
+        register_stdlib_class(classes, "ActiveSupport::TimeZoneInfo", &[], &[
+            ("name", Ty::Str), ("identifier", Ty::Str),
         ]);
     }
     register_stdlib_class(classes, crate::analyze::indifferent::CLASS, &[], &[]);
@@ -1049,8 +1131,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("deserialize", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
     ]);
     // What `Model.type_for_attribute(name)` answers on the ruby family: the column's type name, nil for no column.
+    // Not a String for `serialize`: a column without a JSON coder answers the value it was given.
     register_stdlib_class(classes, "ActiveRecord::Type::Value", &[], &[
         ("type", Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() }),
+        ("serialize", Ty::Untyped),
     ]);
     register_stdlib_class(classes, "ActiveRecord::Type::Integer", &[], &[
         ("cast", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
@@ -1215,6 +1299,14 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // Not `finish`: spinel's package has `close` only.
         ("close", Ty::Untyped),
     ]);
+    // The body typer admits only the explicit whole-message FINISH form.
+    register_stdlib_class(classes, "Zlib::Deflate", &[("new", Ty::SelfInstance)], &[
+        ("deflate", Ty::Str), ("close", Ty::Nil),
+    ]);
+    register_stdlib_class(classes, "Zlib::GzipReader", &[("new", Ty::SelfInstance)], &[
+        // Only argument-free reads are admitted by the body typer.
+        ("read", Ty::Str),
+    ]);
     // `IO` / `Process` / `Timeout` — Campfire tip names these as Consts
     // in indexed app source (`time_limited_video_previewer`, web-push
     // connection pool, unfurl deadline). They were listed in
@@ -1268,6 +1360,11 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("join", Ty::Str), ("shelljoin", Ty::Str),
         ("split", str_arr()), ("shellsplit", str_arr()), ("shellwords", str_arr()),
     ], &[]);
+    // CRuby's default gem; Spinel ships the same SpellChecker in its
+    // did_you_mean package. The dictionary can contain Strings or Symbols.
+    register_stdlib_class(classes, "DidYouMean::SpellChecker", &[
+        ("new", class("DidYouMean::SpellChecker")),
+    ], &[("correct", untyped_arr())]);
     register_stdlib_class(classes, "Process", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_MONOTONIC", &[], &[]);
     register_stdlib_class(classes, "Process::CLOCK_REALTIME", &[], &[]);
@@ -1289,12 +1386,16 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
     register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
     // `OpenSSL::HMAC.digest(OpenSSL::Digest.new("sha1"), key, data)`: rotp's one-time codes.
-    let openssl_digest = Ty::Class { id: ClassId(Symbol::from("OpenSSL::Digest")), args: vec![].into() };
-    register_stdlib_class(classes, "OpenSSL::Digest", &[("new", openssl_digest)], &[
-        ("name", Ty::Str),
-        ("digest", Ty::Str),
-        ("hexdigest", Ty::Str),
-    ]);
+    for name in ["OpenSSL::Digest", "OpenSSL::Digest::SHA1", "OpenSSL::Digest::SHA256"] {
+        let digest = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() };
+        register_stdlib_class(classes, name, &[("new", digest)], &[
+            ("name", Ty::Str), ("digest", Ty::Str), ("hexdigest", Ty::Str),
+        ]);
+        if name != "OpenSSL::Digest" {
+            register_stdlib_class(classes, name, &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
+            classes.get_mut(&ClassId(Symbol::from(name))).unwrap().parent = Some(ClassId(Symbol::from("OpenSSL::Digest")));
+        }
+    }
     let product = Ty::Class { id: ClassId(Symbol::from("Enumerator::Product")), args: vec![].into() };
     let lazy = Ty::Class { id: ClassId(Symbol::from("Enumerator::Lazy")), args: vec![].into() };
     register_stdlib_class(classes, "Enumerator::Product", &[("new", product)], &[
@@ -1346,6 +1447,30 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("eql?", Ty::Bool), ("hash", Ty::Int),
             ("to_s", Ty::Str), ("version", Ty::Str), ("prerelease?", Ty::Bool),
             ("release", version()), ("bump", version()),
+        ]);
+    }
+    {
+        let gem = classes.entry(ClassId(Symbol::from("Gem"))).or_default();
+        gem.is_module = true;
+        gem.class_methods.entry(Symbol::from("win_platform?")).or_insert(Ty::Bool);
+        gem.class_methods.entry(Symbol::from("java_platform?")).or_insert(Ty::Bool);
+        // Not a spec type: the specs are RubyGems' objects, and a compiled program activates none.
+        gem.class_methods
+            .entry(Symbol::from("loaded_specs"))
+            .or_insert(Ty::Hash { key: std::sync::Arc::new(Ty::Str), value: std::sync::Arc::new(Ty::Untyped) });
+    }
+    // Ruby's exact fraction (tzinfo's Timestamp keeps its sub-second as one); CRuby and spinel both carry it.
+    {
+        let rational = || Ty::Class { id: ClassId(Symbol::from("Rational")), args: vec![].into() };
+        register_stdlib_class(classes, "Rational", &[], &[
+            ("numerator", Ty::Int), ("denominator", Ty::Int),
+            ("to_i", Ty::Int), ("to_f", Ty::Float), ("to_r", rational()), ("to_s", Ty::Str), ("inspect", Ty::Str),
+            ("+", rational()), ("-", rational()), ("*", rational()), ("/", rational()), ("abs", rational()),
+            ("<", Ty::Bool), ("<=", Ty::Bool), (">", Ty::Bool), (">=", Ty::Bool), ("==", Ty::Bool),
+            ("<=>", Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }),
+            ("zero?", Ty::Bool), ("negative?", Ty::Bool), ("positive?", Ty::Bool),
+            ("floor", Ty::Int), ("ceil", Ty::Int), ("round", Ty::Int), ("truncate", Ty::Int),
+            ("hash", Ty::Int), ("eql?", Ty::Bool),
         ]);
     }
     register_stdlib_class(classes, "Mutex", &[], &[]);

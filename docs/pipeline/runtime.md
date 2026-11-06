@@ -1821,8 +1821,9 @@ come from the job's `perform_later` call sites, and
   envelope (`runtime/spinel/sidekiq_push.rb`, `sidekiq_redis.rb`):
   `SADD queues` and `LPUSH queue:<name>`, or `ZADD schedule` for a
   literal `set(wait:)` or `set(wait_until:)` that lands in the future.
-  Redis comes from `Sidekiq.configure_client`'s `url:` and `password:`,
-  then `REDIS_PROVIDER`, then `REDIS_URL`. The connection is one per
+  Redis comes from `Sidekiq.configure_client`'s `url:` and `password:`
+  only: an app on `:sidekiq` without a `url:` there is an error, with
+  no fallback to `REDIS_PROVIDER`, `REDIS_URL` or localhost. The connection is one per
   process, with 1-second connect and read timeouts, and a refused or
   dropped connection, the first one included, is retried once. A job
   held for COMMIT is dropped when an `after_commit` callback raises, as
@@ -1873,8 +1874,12 @@ come from the job's `perform_later` call sites, and
   receives through one `PSUBSCRIBE <channel_prefix>:*` connection
   (`runtime/spinel/sidekiq/redis_cable.rb`). On any other cable
   adapter a job's broadcasts in the worker reach no browser, with a
-  warning. Broadcasts Rails would enqueue (`broadcast_*_later`, and
-  `broadcasts_to`'s create and update) are rendered inline instead.
+  warning. `broadcasts_to`'s create and update broadcasts are pushed
+  as `Turbo::Streams::ActionBroadcastJob` with turbo-rails' arguments,
+  and the worker renders and sends them (`lower::broadcast_job`); the
+  destroy broadcast runs at once, as in Rails. An STI model's
+  `broadcasts_to`, or one whose stream or `target:` isn't a String,
+  stays inline with a `broadcast-later-inline` warning.
 - **Some argument types.** A job whose call sites pass a Hash, a Date,
   an untyped value, or nothing typed at all keeps its closure, with a
   `job-closure-fallback` warning naming the parameter. Lobsters'
@@ -3406,6 +3411,54 @@ with `Journey::Router::Utils.escape_fragment`, which leaves `/`, `?` and
 use, which percent-encodes them. Every anchor the corpus writes is a
 slug, a tag or a `dom_id`, so nothing can tell the difference today.
 
+### `default_url_options` gives a route helper its segments, in the shapes we read
+
+A URL-tenant app writes `scope ":blog"` and answers `{ path_params: {
+blog: current_blog } }` from `default_url_options`. Rails'
+`handle_positional_args` (actionpack 8.1.4, `route_set.rb:290`) then
+binds fewer positionals than the route has segments to the segments
+those options leave open, so `post_path(@post)` is `/acme/posts/1`; a
+segment the call names (`post_path(@post, blog: "x")`) is never a
+positional's, with or without the options. `lower::route_param_recall`
+binds the call the same way, and gives the controller a
+`url_options_path_parameters` method: the request's path parameters
+with the options' segments laid over them, which the call reads and the
+controller hands its views in place of the request's. It is evaluated
+per call, in the controller, as Rails evaluates `url_options`.
+
+It reads a Hash literal (`path_params:` a Hash literal too), `super`,
+`merge` of those, and `if cond` around one with no segments on the
+other branch, and a `compact`, `reject`, `slice`, … of one that gives
+no segment; each controller its own definition or the one it inherits.
+A `def default_url_options(options = {})` is read as Rails'
+`url_options` calls it, with no arguments: a read of an optional param
+is its default when that is a literal. A required param raises there,
+and a bare `super` passes the optional ones on to Base's
+`default_url_options`, which takes none, so Rails raises for both; they
+are unread, as is a read of any other param.
+Any other shape, a record value, and a value or guard that reads the
+method's own context (`super`, `yield`, `binding`, `__method__`) keeps
+the helpers' positional binding, and `check` warns at its `def`. A nil
+value leaves its segment out of the overlay, so every call needing it
+raises, as Rails raises for a nil segment (a `KeyError` here, a
+`UrlGenerationError` there); an empty String builds `//`, as Rails'
+does. Where it differs from Rails:
+
+* **A plain key is not also a query.** `{ blog: current_blog }` fills
+  the segment, but Rails also appends it to a route without one
+  (`health_path` is `/health?blog=acme`), and we do not.
+* **A false guard reads the request's segment.** Under `if
+  current_blog`, a call Rails would bind from the first segment, and
+  raise for, reads the request's `:blog`; when the guard reads the same
+  parameter it is absent too, and the read raises.
+* **Without the options, a short call with an options Hash** still
+  binds the Hash to a segment: `edit_post_path(@post, tab: "x")` builds
+  `/1/posts/{tab: "x"}/edit` where Rails raises for the missing `:id`.
+* **The views of a controller's own directory** take its options, and
+  every other view (a layout, `shared/`) ApplicationController's.
+  App helper modules, `url_for(@post)`, `polymorphic_path`,
+  `redirect_to @post` and mailers do not take the segments yet.
+
 ### An exception reported to Sentry reaches stderr, and loses its detail
 
 `Sentry.capture_exception` is a façade in `runtime/ruby/gem_facades.rb`
@@ -3434,6 +3487,63 @@ runs, because its `e` is the rescue's own local.
 Rails with the gem installed and no `SENTRY_DSN` also transmits
 nothing, so the *delivery* half of this is not a divergence for an
 unconfigured deployment; the lost detail is.
+
+### A gem's Rack middleware: rack-attack on CRuby, and on Spinel once matz/spinel#11154 lands
+
+A gem compiled from source (`ingest::auto_source_gems`) that is a Rack
+middleware runs where Rails runs it. Four general pieces carry it, none of
+them about rack-attack itself:
+
+- **Its initializer settings run.** A `config/initializers/` statement
+  whose holder is an unknown gem (`Rack::Attack.throttle(...)`) names that
+  gem's constant, which brings the gem in from source
+  (`App::boot_gem_constants`); once it is in, the statement joins the boot
+  program (`ingest::boot_program`) on both ruby-family trees, as the app's
+  own statements do.
+- **Its Railtie's `app.middleware.use(Klass)` is read**
+  (`ingest::railtie_middleware`, `App::gem_middlewares`). `use` appends, so
+  the middleware sits inside Rails' RequestId and Runtime and before the
+  routes: a response it answers itself (rack-attack's 429) carries
+  `X-Request-Id` and `X-Runtime`. CRuby stacks the real gem's class in
+  `Main.run_rack` (`runtime/spinel/scaffold/ruby_overlay/runtime/gem_middleware.rb`, written over per app); Spinel
+  builds the request's Rack env (`project::spinel_gem_middleware`) and runs
+  the stack from `Main.dispatch_app`, with the routes at its bottom. The
+  Spinel stack is built per request where Rails builds it once: the app at
+  its bottom holds that request's objects. A middleware that keeps state in
+  its own instance would see a fresh one each time. An insertion with
+  arguments, or by `insert_before` / `insert_after`, is reported
+  unsupported.
+- **The Rack pieces Rails has loaded before any gem exist first.**
+  `ActionDispatch::Journey::Router::Utils.normalize_path`
+  (`runtime/spinel/action_dispatch_journey.rb`) is required ahead of the
+  gems on both trees, as rack-attack's `PathNormalizer` tests for it while
+  it loads. On Spinel, rack 3.2's `Rack::Request` (`runtime/spinel/rack_request.rb`:
+  `ip` with its trusted-proxy and `Forwarded` / `X-Forwarded-For` reading,
+  the path and method reads) and the holding half of `SimpleDelegator`
+  (`runtime/spinel/delegate_spinel.rb`) stand in; the ruby family loads
+  rack's and Ruby's own instead. SimpleDelegator's forwarding is not
+  there: it sends by a run-time name, which Spinel does not compile, so a
+  call that needs it stays a refusal.
+- **The Spinel server records the peer.** `REMOTE_ADDR`, and so
+  `Rack::Request#ip` and `request.remote_ip`, is the connection's address
+  (`sp_net_peer_ip`, matz/spinel#11147); a UNIX-socket connection has none.
+
+The rest is the gem's own code. `Forwardable`'s `def_delegators` becomes
+forwarding methods with the target's parameters (`ingest::forwardable`).
+A constant the gem reads that no locked gem could define is Ruby's
+NameError where it runs, and `defined?(C) && …` / `if defined?(C)` guard
+like `return unless defined?(C)` (`ingest::absence_guards`). A gem class
+whose class method answers false without such a constant
+(rack-attack's `DalliProxy.handle?`) and that nothing else names is never
+instantiated, so its instance methods are left out of the Spinel tree.
+
+**Not yet on Spinel:** `Rack::Attack::Cache#store=`'s `proxy.new(store)`
+reads a Class out of `BaseProxy`'s `@@proxies`, and Spinel's class sets
+cannot yet tell the nil an element read adds from a builtin Class object,
+so the call reaches `String.new` and refuses the store (matz/spinel#11154).
+With that, the rest of the app compiles. Integration tests of the emitted
+harness call the router directly, so the middleware is not in their path
+on either tree; Rails' integration tests go through it.
 
 ### rack-mini-profiler: the panel, request, SQL and render timings on Spinel, nothing on CRuby
 
@@ -3488,10 +3598,10 @@ What differs:
 - **Only the three files the panel loads are served** from
   `/mini-profiler-resources/`; the gem's other `html/` files (speedscope,
   the templates) are a 404.
-- **The user key is empty.** The gem keys unviewed results by
-  `Rack::Request#ip`, and the Spinel server does not record the peer
-  address (`request.remote_ip` is empty on this tree generally), so every
-  client shares one list.
+- **The user key over a UNIX socket is empty.** The gem keys unviewed
+  results by `Rack::Request#ip`, the address the Spinel server reads off
+  each connection (`sp_net_peer_ip`); a UNIX-socket connection has none,
+  so its clients share one list.
 - **A response the gem sends without a Content-Type** (the results 404)
   gets the server's `text/html; charset=utf-8`.
 - **The CSP nonce attribute is empty**, as on the CRuby tree; Rails fills

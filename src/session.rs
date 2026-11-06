@@ -47,10 +47,22 @@ pub fn analyze_and_lower(app: &mut App) -> Vec<Diagnostic> {
 fn analyze_and_lower_with_target(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
     let mut analyzer = crate::analyze::Analyzer::new(app);
     analyzer.analyze(app);
+    #[cfg(feature = "memory-census")]
+    crate::memory_census::census("after analyze", app);
     app.helper_diagnostics = Some(crate::analyze::diagnose_helper_modules(app));
-    crate::timings::phase("post-analyze lowerings", || {
-        crate::lower::apply_post_analyze_lowerings_for(app, analyzer.class_registry(), target)
-    })
+    // Only the registry outlives the analysis.
+    #[cfg(feature = "memory-census")]
+    let registry = if crate::memory_census::enabled() { analyzer.census_drop() } else { analyzer.into_class_registry() };
+    #[cfg(not(feature = "memory-census"))]
+    let registry = analyzer.into_class_registry();
+    let diagnostics = crate::timings::phase("post-analyze lowerings", || {
+        crate::lower::apply_post_analyze_lowerings_for(app, &registry, target)
+    });
+    #[cfg(feature = "memory-census")]
+    if crate::memory_census::enabled() {
+        crate::memory_census::census("after lowerings", app);
+    }
+    diagnostics
 }
 
 /// [`analyze_and_lower`] for the app one target emits: the target's own
@@ -60,6 +72,7 @@ fn analyze_and_lower_with_target(app: &mut App, target: crate::build_target::Bui
 pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
     if matches!(target, crate::build_target::BuildTarget::Ruby | crate::build_target::BuildTarget::Jruby | crate::build_target::BuildTarget::Spinel) {
         app.native_library_keywords = true;
+        app.pins_unresolved_params = true;
         for class in &mut app.library_classes {
             for method in &mut class.methods {
                 for param in &mut method.params {
@@ -85,10 +98,10 @@ pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTa
         crate::ingest::nested_attributes::expand_autosave(app);
     }
     let mut refused = if target.lowers_validates_with() {
-        crate::ingest::validates_with::expand(app);
+        let mut found = crate::ingest::validates_with::expand(app);
         crate::ingest::mailer_defaults::expand(app);
         crate::ingest::has_many_hold::expand(app);
-        let mut found = crate::ingest::each_validator::expand(app, target.as_str());
+        found.extend(crate::ingest::each_validator::expand(app, target.as_str()));
         found.extend(crate::ingest::mailer_helpers::apply(app, target.as_str()));
         found.extend(crate::ingest::mailer_callbacks::expand(app, target.as_str()));
         found

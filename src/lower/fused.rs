@@ -33,10 +33,16 @@ pub fn apply_fused_independent_rewrites(app: &mut App) {
     let skip_including = super::including::app_defines_including(app);
     let fold = super::errors_full_messages::Fold::of(app);
 
+    let controllers: HashSet<crate::ident::ClassId> = app.controllers.iter().map(|c| c.name.clone()).collect();
+    let own_redirect_back = app.controllers.iter().any(|c| c.actions().any(|a| a.name.as_str() == "redirect_back"));
     super::for_each_owned_hook_body(app, &mut |owner, body| {
         let site = (owner, &fold);
+        let in_controller = !own_redirect_back && owner.is_some_and(|o| controllers.contains(o));
         walk_postorder(body, &mut |e| {
             rewrite_hook_node(e, skip_exclude, skip_in, skip_including, &site);
+            if in_controller {
+                super::redirect_back::rewrite_node(e);
+            }
         });
     });
     for view in &mut app.views {
@@ -55,8 +61,9 @@ pub fn apply_fused_independent_rewrites(app: &mut App) {
 /// `kwsplat`-expanded) argument lists, and `capture_inline` which
 /// must see `tag_builder`'s synthesized `capture` blocks.
 pub fn apply_fused_late_rewrites(app: &mut App) {
+    let skip_cache = super::rails_cache::app_binds_cache_store(app);
     super::for_each_hook_body(app, &mut |body| {
-        walk_postorder(body, &mut rewrite_late_hook_node);
+        walk_postorder(body, &mut |e| rewrite_late_hook_node(e, skip_cache));
     });
     for view in &mut app.views {
         walk_postorder(&mut view.body, &mut super::attachables_grep::rewrite_node);
@@ -322,6 +329,7 @@ pub fn apply_fused_mid_rewrites(app: &mut App) {
     let path_params = if helpers.is_empty() {
         Default::default()
     } else {
+        super::route_url_options::bare_url_helper_receivers(app, &helpers);
         super::route_url_options::helper_path_params(app)
     };
     let enum_map = super::enum_symbols::enum_columns(app);
@@ -489,6 +497,7 @@ fn rewrite_hook_node(
     super::destroy_by::rewrite_node(e);
     super::literal_append::rewrite_node(e);
     super::byte_size::rewrite_node(e);
+    super::ruby2_keywords_hash::rewrite_node(e);
     super::dirty_predicate_kwargs::rewrite_node(e);
     super::relation_select_block::rewrite_node(e);
     super::arel_attribute::rewrite_node(e);
@@ -549,12 +558,15 @@ fn rewrite_test_node(e: &mut Expr, full_messages: &super::errors_full_messages::
     super::range_enumerable::rewrite_node(e);
     super::enumerable_ext::rewrite_node(e);
     super::byte_size::rewrite_node(e);
+    super::ruby2_keywords_hash::rewrite_node(e);
     super::dirty_predicate_kwargs::rewrite_node(e);
     super::errors_full_messages::rewrite_node(e, full_messages);
 }
 
-fn rewrite_late_hook_node(e: &mut Expr) {
-    super::rails_cache::rewrite_node(e);
+fn rewrite_late_hook_node(e: &mut Expr, skip_cache: bool) {
+    if !skip_cache {
+        super::rails_cache::rewrite_node(e);
+    }
     super::capture_inline::rewrite_node(e);
     super::and_return::rewrite_node(e);
     super::case_lambda::rewrite_node(e);

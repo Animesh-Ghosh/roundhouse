@@ -110,6 +110,19 @@ Puma retains its own socket lifecycle and `puma.socket` env value. These
 mode bits control pathname-socket connections on Linux; abstract sockets
 are not supported.
 
+Literal `after_booted` and `on_booted` blocks in `config/puma.rb` run after
+the native server starts its accept threads. Registration follows the source
+order, including `if`/`unless` conditions, before any callback runs. Loading
+the emitted libraries or invoking `--help` leaves the callbacks unrun. Ruby
+and JRuby use Puma's boot event.
+
+The native hook adapter requires one process and the threaded server.
+Callbacks must have no parameters or captured config locals, and cannot use
+the Puma DSL's `self` or implicit methods. Unsupported forms and unresolved
+callback calls produce errors. Other targets report that they have no server
+boot event. Source archives and Futamura retain the original Puma config.
+Other Puma lifecycle hooks are still not run, as before.
+
 ```sh
 spin test
 ```
@@ -260,3 +273,16 @@ on, jemalloc, and Puma's default configuration — on the same machine:
 Read that page rather than a number quoted here; it changes with
 every Spinel release and the methodology is written beside the
 charts.
+
+### Raw Faye WebSockets
+
+The threaded server carries a bounded `faye-websocket` adapter over Tep: upgrade detection, text `send`,
+`rack_response`, and one callback each for `open`, `message` and `close`. Callbacks obtain a `Db` lease.
+The `ping:` interval is in seconds; zero disables it. Keyword, positional Hash and splat options are accepted. `EventMachine.schedule` runs on the calling thread.
+Subprotocols, additional constructor options, duplicate callbacks, other events and binary/non-UTF-8 sends raise.
+`on` returns nil. Event names accept Symbols or Strings. Nil close arguments use the normal defaults.
+Pre-open text sends are buffered in order, with a 16 MiB total cap; overflow raises. Buffered Strings are copied.
+Fragmented or binary input closes with 1003 before callbacks; invalid UTF-8 text closes with 1007.
+These input restrictions apply only to this facade; existing Tep and Cable behavior remains unchanged.
+Other EventMachine APIs are unavailable. This adapter does not provide reactor scheduling or Faye error events.
+Ruby and JRuby use the real gems. Tep's close-handshake deadline remains five seconds.

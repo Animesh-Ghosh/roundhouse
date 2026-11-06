@@ -135,7 +135,7 @@ module Cable
   # its subscription table on the identifier and retries a subscription
   # it never heard back about, so a dropped frame is a reconnect loop.
   def self.subscribe(ws, connection, identifier, holder)
-    name = ActionCable::Channel::Parameters.read(identifier, "channel")
+    name = ActionCable::Channel::Parameters.read(identifier, "channel").to_s
     if name.length == 0
       return Cable.reject(ws, identifier)
     end
@@ -172,7 +172,7 @@ module Cable
       Tep::APP.cable_lock.synchronize do
         Tep::APP.cable_identifiers[stream] = identifier
       end
-      Tep::Broadcast.subscribe_ws(stream, ws)
+      Tep::Broadcast.subscribe_ws(stream, ws, identifier)
     end
     # REMEMBERED, and only once the subscription is confirmed. The
     # unsubscribe callbacks are the other half of a connect storm —
@@ -733,6 +733,11 @@ module Cable
   # under the heartbeat's database lease.
   class Socket
     attr_accessor :ws
+
+    def stop_streams(identifier)
+      Tep::Broadcast.unsubscribe_ws(@ws, identifier)
+      nil
+    end
 
     def transmit(data)
       @ws.text(ActionCable.payload_json(data))

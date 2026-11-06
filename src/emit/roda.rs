@@ -299,8 +299,9 @@ fn model_for(model: &Model, schema: &Schema) -> String {
 
     let mut validate_lines: Vec<String> = Vec::new();
     let mut presence: Vec<String> = Vec::new();
+    let ordered_presence = model.validations().any(|v| v.prepend);
 
-    for item in &model.body {
+    for item in model.validation_order() {
         match item {
             ModelBodyItem::Association { assoc, .. } => {
                 lines.push(format!("  {}", association_line(assoc)));
@@ -338,7 +339,7 @@ fn model_for(model: &Model, schema: &Schema) -> String {
                     .unwrap_or_default();
                 for rule in &validation.rules {
                     match rule {
-                        ValidationRule::Presence if !custom.is_empty() => {
+                        ValidationRule::Presence if ordered_presence || !custom.is_empty() => {
                             validate_lines.push(format!("    validates_presence :{}{custom}", validation.attribute));
                         }
                         ValidationRule::Presence => {
@@ -2199,6 +2200,7 @@ mod tests {
             action: Symbol::from(action),
             as_name: String::new(),
             required_params: params.len(),
+            required_path: None,
             path_params: params,
             named: false,
             helpers_enabled: false,
@@ -2208,6 +2210,8 @@ mod tests {
             constraints: vec![],
             seg_patterns: vec![],
             refused: None,
+            format_required: false,
+            mount_root: false,
         }
     }
 

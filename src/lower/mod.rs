@@ -29,7 +29,6 @@ pub mod chain;
 pub mod controller;
 pub mod controller_test;
 pub mod nil_operand;
-pub mod where_bounds;
 pub mod fixtures;
 pub(crate) mod forwarding;
 pub mod functionalize;
@@ -107,6 +106,7 @@ pub mod job_class_side;
 pub mod transaction_after_commit;
 pub mod module_mattr_storage;
 pub mod job_payload;
+pub mod broadcast_job;
 pub mod mailer_class_side;
 pub mod mailer_templates;
 pub mod as_json_shape;
@@ -170,6 +170,8 @@ pub mod assoc_primary_key;
 pub mod has_one_builder;
 pub mod inquiry;
 pub mod byte_size;
+pub mod ruby2_keywords_hash;
+pub mod redirect_back;
 pub mod numeric_unary;
 pub mod tag_builder;
 pub mod kwsplat;
@@ -918,7 +920,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     expect_string_key::apply_expect_string_keys(app);
     ran!("expect_string_key");
     diags.extend(crate::timings::phase("post-analyze: blank", || {
-        blank::apply_blank_lowering(app)
+        blank::apply_blank_lowering_for(app, target)
     }));
     ran!("blank");
     as_json_super::apply_as_json_super_grounding(app);
@@ -945,7 +947,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("try_guard");
     record_snapshot::apply_record_snapshot_lowering(app);
     ran!("record_snapshot");
-    diags.extend(where_range_split::apply_where_range_split(app));
+    diags.extend(where_range_split::apply_where_range_split(app, target));
     ran!("where_range_split");
     for_each_hook_body(app, &mut |body| {
         fn walk(body: &mut crate::expr::Expr, registry: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>, diags: &mut Vec<crate::diagnostic::Diagnostic>) {

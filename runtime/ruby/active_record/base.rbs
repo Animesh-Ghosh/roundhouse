@@ -178,6 +178,7 @@ module ActiveRecord
     # column hash for adapter writes; `assign_from_row` populates
     # state from a fetched row (raises in Base).
     def attributes: () -> Hash[String, untyped]
+    def serializable_hash: () -> Hash[String, untyped]
     def assign_from_row: (Hash[String, untyped] _row) -> void
 
     # Saved-change tracking (ActiveModel::Dirty subset) — see save.
@@ -189,6 +190,7 @@ module ActiveRecord
     def saved_change_to_attribute: (Symbol name) -> untyped
     def changes_to_save: () -> Hash[String, untyped]
     def attribute_changed?: (String name) -> bool
+    def will_save_change_to_attribute?: (Symbol | String name) -> bool
     def changed?: () -> bool
     def has_changes_to_save?: () -> bool
     def attribute_was: (String name) -> untyped
