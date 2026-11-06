@@ -3505,7 +3505,7 @@ them about rack-attack itself:
   the middleware sits inside Rails' RequestId and Runtime and before the
   routes: a response it answers itself (rack-attack's 429) carries
   `X-Request-Id` and `X-Runtime`. CRuby stacks the real gem's class in
-  `Main.run_rack` (`runtime/gem_middleware.rb`, written per app); Spinel
+  `Main.run_rack` (`runtime/spinel/scaffold/ruby_overlay/runtime/gem_middleware.rb`, written over per app); Spinel
   builds the request's Rack env (`project::spinel_gem_middleware`) and runs
   the stack from `Main.dispatch_app`, with the routes at its bottom. The
   Spinel stack is built per request where Rails builds it once: the app at

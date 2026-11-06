@@ -218,19 +218,11 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
         }
     }
 
-    // Not every part of a class opened in many files (rack-attack's twenty `class Attack`): the first carries its nested classes, once.
-    let mut nested_written: crate::det::HashSet<&str> = crate::det::HashSet::default();
     lcs.iter()
         .filter(|lc| !is_spliced_factory(lc))
         .filter(|lc| !matches!(lc.origin, Some(LibraryClassOrigin::DataFactory { .. })))
         .filter(|lc| owner_in_this_tree(lc).is_none())
-        .map(|lc| {
-            let first = children.contains_key(lc.name.0.as_str()) && nested_written.insert(lc.name.0.as_str());
-            (lc, first)
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .flat_map(|(lc, first)| {
+        .flat_map(|lc| {
             // `underscore`, not `snake_case`: a namespaced reopen
             // (lobsters' `ActiveRecord::Base.q`, `Net::HTTP`,
             // `ShortId::CandidateId`) nests as `active_record/base.rb` —
@@ -238,7 +230,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
             // Makefile's dependency list.
             let file_stem = crate::naming::underscore(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("app/models/{file_stem}.rb"));
-            let mut files = match children.get(lc.name.0.as_str()).filter(|_| first) {
+            let mut files = match children.get(lc.name.0.as_str()) {
                 Some(kids) => emit_library_class_with_nested(lc, kids, app, classes, &factories, out_path),
                 None => emit_library_class_pair_in(lc, app, classes, &factories, out_path),
             };
