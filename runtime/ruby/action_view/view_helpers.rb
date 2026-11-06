@@ -977,7 +977,7 @@ module ActionView
     def self.stylesheet_link_tag(name, opts = EMPTY_HTML_OPTS)
       href = stylesheet_href(name.to_s)
       attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
-      "<link#{attrs}>"
+      "<link#{attrs} />"
     end
 
     # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`, type

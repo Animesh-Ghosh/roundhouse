@@ -381,9 +381,9 @@ class ViewHelpersTest < Minitest::Test
   # ── stylesheet / importmap stubs ───────────────────────────
 
   def test_stylesheet_link_tag
-    out = ViewHelpers.stylesheet_link_tag("app")
-    assert_includes out, %(rel="stylesheet")
-    assert_includes out, %(href="/assets/app.css")
+    assert_equal %(<link rel="stylesheet" href="/assets/app.css" />), ViewHelpers.stylesheet_link_tag("app")
+    assert_equal %(<link rel="stylesheet" href="/assets/app.css" data-turbo-track="reload" />),
+      ViewHelpers.stylesheet_link_tag("app", "data-turbo-track": "reload")
   end
 
   def test_javascript_importmap_tags_has_importmap_script
