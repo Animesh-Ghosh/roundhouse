@@ -186,6 +186,7 @@ fn loads(node: &Node<'_>, certain: bool, out: &mut Vec<Load>) {
     }
     // `if defined?(::Rails)` holds in a Rails app; any other condition may not.
     if let Some(i) = node.as_if_node() {
+        uncertain_loads(&i.predicate(), out);
         let rails = rails_defined(&i.predicate());
         if let Some(st) = i.statements() {
             loads(&st.as_node(), certain && rails, out);
@@ -196,6 +197,7 @@ fn loads(node: &Node<'_>, certain: bool, out: &mut Vec<Load>) {
         return;
     }
     if let Some(u) = node.as_unless_node() {
+        uncertain_loads(&u.predicate(), out);
         let rails = rails_defined(&u.predicate());
         if !rails && let Some(st) = u.statements() {
             loads(&st.as_node(), false, out);
@@ -230,6 +232,10 @@ fn loads(node: &Node<'_>, certain: bool, out: &mut Vec<Load>) {
             out.push(Load { feature, relative: name == "require_relative", autoload: name == "autoload", certain });
         }
         return;
+    }
+    // Not passed over: a require in an argument (`puts(require …)`) runs with the call.
+    if let Some(args) = call.arguments() {
+        uncertain_loads(&args.as_node(), out);
     }
     // Not run as the file loads: a block hands its body to a method that decides when, or whether.
     if let Some(block) = call.block().and_then(|b| b.as_block_node())
@@ -527,6 +533,11 @@ mod tests {
         // A require a short-circuit decides may not run.
         let (classes, diags) = read(&[("/gem/lib/gem.rb", &with("ENV[\"ON\"] && require(\"gem/railtie\")\n")), ("/gem/lib/gem/railtie.rb", &rt)]);
         assert!(classes.is_empty() && diags.len() == 1, "{classes:?} {diags:?}");
+        // A require in a condition or an argument runs; read as uncertain, it is reported rather than left out.
+        for req in ["if require(\"gem/railtie\")\n  nil\nend\n", "puts(require(\"gem/railtie\"))\n"] {
+            let (classes, diags) = read(&[("/gem/lib/gem.rb", &with(req)), ("/gem/lib/gem/railtie.rb", &rt)]);
+            assert!(classes.is_empty() && diags.len() == 1, "{req}: {classes:?} {diags:?}");
+        }
         // An uncertain Railtie that inserts no middleware changes no stack.
         let quiet = railtie("    initializer \"gem.ar\" do |app|\n      ActiveSupport.on_load(:active_record) { }\n    end");
         let (classes, diags) = read(&[("/gem/lib/gem.rb", &with("require \"gem/railtie\" if defined?(Rails) && Rails::VERSION::MAJOR >= 3\n")), ("/gem/lib/gem/railtie.rb", &quiet)]);
