@@ -114,8 +114,8 @@ pub(super) fn ingest_model_with_enum_constants(
         // class attribute its abstract base set.
         if prefix.is_empty()
             && !from_module
-            && let Some(parent) = class.superclass().and_then(|n| constant_path_of(&n))
-            && let Some(inherited) = base_prefixes.get(&model_bases.resolve_superclass(&scope, &parent))
+            && let Some(parent) = model_bases.resolve_class_superclass(&scope, &class)
+            && let Some(inherited) = base_prefixes.get(&parent)
         {
             prefix = inherited.clone();
         }
@@ -484,12 +484,9 @@ pub(super) fn ingest_model_with_enum_constants(
         .superclass()
         .map(|n| super::util::node_span(&n, file))
         .unwrap_or_default();
-    let parent = class.superclass().and_then(|n| {
-        constant_path_of(&n).map(|p| {
-            let resolved = model_bases.resolve_superclass(&scope, &p);
-            ClassId(Symbol::from(model_bases.emit_superclass(&resolved)))
-        })
-    });
+    let parent = model_bases
+        .resolve_class_superclass(&scope, &class)
+        .map(|resolved| ClassId(Symbol::from(model_bases.emit_superclass(&resolved))));
 
     let class_loc = class.location();
     Ok(Some(Model {

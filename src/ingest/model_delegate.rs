@@ -271,6 +271,11 @@ fn model_zero_argument_surface(
         return surface.clone();
     }
 
+    // A parent chain that loops (`class A < B`, `class B < A`) does not run
+    // in Ruby, but analyzing it must not recurse forever: the model in
+    // progress answers empty to anything that reaches it again.
+    cache.insert(model.name.clone(), MethodSurface::default());
+
     let mut surface = MethodSurface::default();
     if let Some(parent) = &model.parent {
         if let Some(parent_model) = models.get(parent) {

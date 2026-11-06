@@ -120,6 +120,50 @@ fn conventional_names_and_prefixes_keep_their_binding() {
     }
 }
 
+/// GitLab's `Ci::ApplicationRecord` answers its prefix from a class method, so
+/// its models read `ci_group_variables`, not a `group_variables` no schema has.
+#[test]
+fn a_prefix_defined_as_a_class_method_reaches_the_class_and_its_models() {
+    let schema = r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "ci_group_variables" do |t|
+    t.string "key", null: false
+  end
+end
+"#;
+    for declaration in [
+        "def self.table_name_prefix\n      'ci_'\n    end",
+        "class << self\n      def table_name_prefix\n        'ci_'\n      end\n    end",
+    ] {
+        let base = format!(
+            "module Ci\n  class ApplicationRecord < ::ApplicationRecord\n    \
+             self.abstract_class = true\n    {declaration}\n  end\nend\n"
+        );
+        let files: HashMap<PathBuf, Vec<u8>> = [
+            ("db/schema.rb", schema),
+            (
+                "app/models/application_record.rb",
+                "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n",
+            ),
+            ("app/models/ci/application_record.rb", base.as_str()),
+            (
+                "app/models/ci/group_variable.rb",
+                "module Ci\n  class GroupVariable < Ci::ApplicationRecord\n  end\nend\n",
+            ),
+        ]
+        .into_iter()
+        .map(|(p, s)| (PathBuf::from(p), s.as_bytes().to_vec()))
+        .collect();
+        let app = ingest_app_from_tree(files).expect("ingest");
+        let model = app
+            .models
+            .iter()
+            .find(|m| m.name.0.as_str() == "Ci::GroupVariable")
+            .expect("the model");
+        assert_eq!(model.table.0.as_str(), "ci_group_variables");
+        assert_eq!(model.attributes.fields[&Symbol::from("key")], Ty::Str);
+    }
+}
+
 #[test]
 fn unsupported_table_writes_are_ledgered_instead_of_guessed() {
     for declaration in [

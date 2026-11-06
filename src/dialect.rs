@@ -1403,6 +1403,10 @@ pub struct GraphqlObjectType {
     /// methods are checked (search_object calls the rest).
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolver: bool,
+    /// Class-level calls along its chain the ingest pass did not read, so
+    /// the coverage line can name them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread_macros: Vec<Symbol>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1422,6 +1426,10 @@ pub struct GraphqlField {
     /// The synthesized method holding the value graphql-ruby would
     /// resolve, or why there is none.
     pub resolution: GraphqlResolution,
+    /// Extensions its field class applies to every field that could not be
+    /// shown to keep the value, so the coverage line can name them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unproven_extensions: Vec<Symbol>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
