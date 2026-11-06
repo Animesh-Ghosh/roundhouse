@@ -20969,6 +20969,7 @@ mod link_to_unless;
 fn link_to_unless_and_the_block_form_render_as_rails() {
     html_safe_method_owner::app()
         .write("app/views/probes/show.html.erb", link_to_unless::VIEW)
+        .write("lib/tracker.rb", link_to_unless::TRACKER)
         .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_unless::RENDERS))
         .run_test("test/controllers/probes_controller_test.rb")
         .assert_passes();
@@ -20979,6 +20980,7 @@ fn link_to_unless_and_the_block_form_render_as_rails() {
 fn link_to_unless_and_the_block_form_render_as_rails_on_spinel() {
     html_safe_method_owner::app()
         .write("app/views/probes/show.html.erb", link_to_unless::VIEW)
+        .write("lib/tracker.rb", link_to_unless::TRACKER)
         .run_spinel(&helper_escape_at_output::render_script(link_to_unless::RENDERS))
         .assert_passes();
 }

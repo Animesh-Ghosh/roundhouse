@@ -21,7 +21,13 @@ pub const VIEW: &str = concat!(
     "L9:<%= link_to_unless t, \"<c>\", \"/x\" do %>none<% end %>\n",
     "L10:<%= link_to_unless @article.nil?, \"<c>\", \"/x\" %>\n",
     "L11:<%= link_to_unless t, @article.label + @comment.label, \"/x\" %>\n",
+    "L12:<%= link_to_unless t, Tracker.label, \"/x\" do %>none<% end %>|<%= Tracker.take %>\n",
 );
+
+/// `lib/tracker.rb`: `Tracker.label` logs an `n` and returns `"a"`;
+/// `Tracker.take` returns the log and clears it. L12 checks that a block
+/// without a parameter still evaluates the name, as Rails does.
+pub const TRACKER: &str = "module Tracker\n  LOG = []\n\n  def self.label\n    LOG << \"n\"\n    \"a\"\n  end\n\n  def self.take\n    out = LOG.join\n    LOG.clear\n    out\n  end\nend\n";
 
 pub const RENDERS: &[&str] = &[
     "L0:<a href=\"/x\">&lt;c&gt;</a>",
@@ -36,4 +42,5 @@ pub const RENDERS: &[&str] = &[
     "L9:none",
     "L10:<a href=\"/x\">&lt;c&gt;</a>",
     "L11:<b>a</b>&lt;c&gt;",
+    "L12:none|n",
 ];

@@ -1994,7 +1994,8 @@ fn bind_before_block(e: Expr, site: u32, bound: &mut usize, stmts: &mut Vec<Expr
 /// `link_to_if`'s and `link_to_unless`'s block form: the link the
 /// blockless form writes when the condition says to link, and otherwise
 /// the block's body, walked against the view's accumulator with its
-/// parameter bound to the name. `None` for a block this doesn't take
+/// parameter bound to the name (a block without one still evaluates the
+/// name, as Rails does). `None` for a block this doesn't take
 /// (one that isn't template markup, or has more than one parameter).
 fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCtx) -> Option<Vec<Expr>> {
     let ExprNode::Lambda { params, rest_param, extra_params, body, .. } = &*block.node else {
@@ -2024,7 +2025,17 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
             ));
             ctx.with_locals([p.as_str().to_string()])
         }
-        None => ctx.with_locals(std::iter::empty()),
+        None => {
+            // Rails evaluates the name whether or not the block takes it,
+            // as the blockless form's text does: a name that can do
+            // something (a call) is still made, its value unused. A
+            // literal, a local or an ivar does nothing, and Go rejects an
+            // unused value that isn't a call.
+            if !matches!(&*text.node, ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+                captured.push(rewrite_helpers_in_expr(text, ctx));
+            }
+            ctx.with_locals(std::iter::empty())
+        }
     };
     captured.extend(walk_body(body, &inner_ctx));
     let shown = if captured.len() == 1 { captured.pop().unwrap() } else { seq(captured) };
