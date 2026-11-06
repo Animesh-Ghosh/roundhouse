@@ -495,6 +495,34 @@ fn unlowered_simple_format(app: &App) -> Vec<Diagnostic> {
 /// Which controller renders a template isn't decided statically (`render
 /// template:` reaches any of them), so the call is refused rather than
 /// routed one way for every template.
+/// A `link_to_if` / `link_to_unless` block parameter shadowing a template
+/// local that only an earlier nested body (an `if` branch, a `case` arm)
+/// assigned: Ruby keeps that local after the block, and the lowering's
+/// save and restore would read it where a compiled target's scope doesn't
+/// have it, so the block isn't lowered
+/// (`lower::view_to_library::link_to_if_params_shadowing_nested_locals`).
+fn link_to_if_params_shadowing_nested_locals(app: &App) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for view in &app.views {
+        for (span, method) in crate::lower::view_to_library::link_to_if_params_shadowing_nested_locals(&view.body) {
+            if span.is_synthetic() {
+                continue;
+            }
+            let mut d = Diagnostic::unsupported(
+                span,
+                None,
+                method.as_str(),
+                "a `link_to_if`/`link_to_unless` block parameter shadows a template local assigned in an earlier nested block; not modeled".to_string(),
+            );
+            if app.unreachable_views.contains(&view.name) {
+                d.severity = crate::diagnostic::Severity::Warning;
+            }
+            out.push(d);
+        }
+    }
+    out
+}
+
 fn controller_shadowed_view_helpers(app: &App) -> Vec<Diagnostic> {
     // `owner` is `controller` or one of its ancestors.
     let descends = |controller: &crate::dialect::Controller, owner: &ClassId| {
@@ -896,6 +924,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     out.extend(unlowered_time_tags(app));
     out.extend(unlowered_simple_format(app));
     out.extend(controller_shadowed_view_helpers(app));
+    out.extend(link_to_if_params_shadowing_nested_locals(app));
     out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));

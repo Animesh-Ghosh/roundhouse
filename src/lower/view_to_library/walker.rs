@@ -57,18 +57,100 @@ pub(super) fn walk_body(body: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         }
         out.extend(lowered);
         // A template local assigned here is in scope for the statements
-        // after it (`ViewCtx::assigned_locals`).
-        if let ExprNode::Assign { target: LValue::Var { name, .. }, .. }
-        | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } = &*stmt.node
-            && name.as_str() != "_buf"
-            && !ctx.assigned_locals.iter().any(|n| n == name.as_str())
-        {
+        // after it (`ViewCtx::assigned_locals`), and so is one assigned
+        // inside this statement's nested bodies (`nested_assigned_locals`).
+        let (top, nested) = assigned_names(stmt);
+        let top: Vec<String> = top.into_iter().filter(|n| !ctx.assigned_locals.contains(n)).collect();
+        let nested: Vec<String> = nested.into_iter().filter(|n| !ctx.nested_assigned_locals.contains(n)).collect();
+        if !top.is_empty() || !nested.is_empty() {
             let mut next = ctx.clone();
-            next.assigned_locals.push(name.as_str().to_string());
+            next.assigned_locals.extend(top);
+            next.nested_assigned_locals.extend(nested);
             shadowed = Some(next);
         }
     }
     out
+}
+
+/// The template locals `stmt` assigns that stay in scope after it: those
+/// it assigns itself (`x = …`, `x ||= …`, `a, x = …`), and those its
+/// nested statement bodies assign (an `if` branch, a `case` arm, a
+/// `while`). A block's or lambda's body is its own scope, as in Ruby, and
+/// is left out. `_buf` is the ERB buffer, not a template local.
+fn assigned_names(stmt: &Expr) -> (Vec<String>, Vec<String>) {
+    fn own(e: &Expr) -> Vec<String> {
+        let names: Vec<&Symbol> = match &*e.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => vec![name],
+            ExprNode::MultiAssign { targets, .. } => targets
+                .iter()
+                .filter_map(|t| match t {
+                    LValue::Var { name, .. } => Some(name),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        names.into_iter().filter(|n| n.as_str() != "_buf").map(|n| n.as_str().to_string()).collect()
+    }
+    fn nested(e: &Expr, out: &mut Vec<String>) {
+        e.node.for_each_child(&mut |c| {
+            if matches!(&*c.node, ExprNode::Lambda { .. }) {
+                return;
+            }
+            for n in own(c) {
+                if !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+            nested(c, out);
+        });
+    }
+    let top = own(stmt);
+    let mut inner = Vec::new();
+    nested(stmt, &mut inner);
+    inner.retain(|n| !top.contains(n));
+    (top, inner)
+}
+
+/// The `link_to_if` / `link_to_unless` blocks in `body` whose parameter
+/// shadows a template local assigned only inside an earlier statement's
+/// nested body (`<% if c %><% x = 1 %><% end %>… do |x|`). Ruby keeps
+/// that local after the block; the lowering's save and restore would read
+/// it where a compiled target's scope doesn't have it, so the block is
+/// refused instead (`emit_link_to_if_block`). The same statement-order
+/// walk as `walk_body`'s.
+pub(crate) fn link_to_if_params_shadowing_nested_locals(body: &Expr) -> Vec<(Span, String)> {
+    fn visit(e: &Expr, top: &[String], nested: &[String], out: &mut Vec<(Span, String)>) {
+        if let ExprNode::Seq { exprs } = &*e.node {
+            let (mut top, mut nested) = (top.to_vec(), nested.to_vec());
+            for stmt in exprs {
+                visit(stmt, &top, &nested, out);
+                let (t, n) = assigned_names(stmt);
+                top.extend(t);
+                nested.extend(n);
+            }
+            return;
+        }
+        if let ExprNode::Send { recv: None, method, block: Some(block), .. } = &*e.node
+            && matches!(method.as_str(), "link_to_if" | "link_to_unless")
+            && let ExprNode::Lambda { params, .. } = &*block.node
+            && let Some(p) = params.first()
+            && refuses_param(p.as_str(), top, nested)
+        {
+            out.push((e.span, method.as_str().to_string()));
+        }
+        e.node.for_each_child(&mut |c| visit(c, top, nested, out));
+    }
+    let mut out = Vec::new();
+    visit(body, &[], &[], &mut out);
+    out
+}
+
+/// A block parameter shadowing a local assigned only in an earlier nested
+/// body (`link_to_if_params_shadowing_nested_locals`).
+fn refuses_param(p: &str, top: &[String], nested: &[String]) -> bool {
+    !top.iter().any(|n| n == p) && nested.iter().any(|n| n == p)
 }
 
 fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
@@ -2093,12 +2175,16 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
         Expr::new(Span::synthetic(), ExprNode::Assign { target: LValue::Var { id: VarId(0), name }, value })
     };
     let inner_ctx = match params.first() {
+        // Refused (`analyze::diagnostics`) where it shadows a local an
+        // earlier nested body assigned: not lowered.
+        Some(p) if refuses_param(p.as_str(), &ctx.assigned_locals, &ctx.nested_assigned_locals) => return None,
         Some(p) => {
             let name = rewrite_helpers_in_expr(text, ctx);
             let fresh = |base: &str| {
                 let mut temp = base.to_string();
                 while ctx.is_local(&temp)
                     || ctx.assigned_locals.contains(&temp)
+                    || ctx.nested_assigned_locals.contains(&temp)
                     || [text, url, body].into_iter().any(|e| reads_name(e, &temp))
                 {
                     temp.push('_');
@@ -2235,6 +2321,7 @@ mod tests {
             locals: Vec::new(),
             ivar_params: Vec::new(),
             assigned_locals: Vec::new(),
+            nested_assigned_locals: Vec::new(),
             arg_name: String::new(),
             resource_dir: String::new(),
             accumulator: "io".to_string(),

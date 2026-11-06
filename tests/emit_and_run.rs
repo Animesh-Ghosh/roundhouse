@@ -21022,6 +21022,27 @@ fn link_to_if_evaluates_its_arguments_as_rails_on_spinel() {
         .assert_passes();
 }
 
+/// A block parameter shadowing a template local only an earlier nested
+/// body assigned is refused, with the reason; one assigned in an `each`
+/// block, or at the top level as well, lowers.
+#[test]
+fn link_to_if_shadowing_a_nested_local_is_refused() {
+    let refusals = |markup: &str| -> Vec<String> {
+        html_safe_method_owner::app()
+            .write("app/views/probes/show.html.erb", markup)
+            .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+            .check_errors()
+            .into_iter()
+            .filter(|e| e.contains("earlier nested block"))
+            .collect()
+    };
+    let refused = refusals(link_to_if_eval_order::NESTED_REFUSED);
+    assert!(refused.len() == 1 && refused[0].contains("link_to_if not supported"), "{refused:?}");
+    for markup in link_to_if_eval_order::NESTED_LOWERED {
+        assert!(refusals(markup).is_empty(), "{markup}");
+    }
+}
+
 #[path = "support/simple_format.rs"]
 mod simple_format;
 

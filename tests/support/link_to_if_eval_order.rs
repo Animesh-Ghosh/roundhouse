@@ -21,6 +21,7 @@ pub const VIEW: &str = concat!(
     "<% x = \"o\" %>L12:<%= link_to_if Tracker.yes, \"i\", Tracker.at(x) do |x| %>[<%= x %>]<% end %>|<%= Tracker.take %>\n",
     "<% x = \"o\" %>L13:<%= link_to_if Tracker.no, \"i\", Tracker.at(x) do |x| %>[<%= x %>]<% end %>|<%= x %>|<%= Tracker.take %>\n",
     "<% x = \"o\" %>L14:<%= link_to_unless Tracker.yes, \"i\", \"/u\" do |x| %><% x = \"w\" %>[<%= x %>]<% end %>|<%= x %>\n",
+    "<% a, m = \"q\", \"o\" %>L15:<%= link_to_if Tracker.no, \"i\", \"/u\" do |m| %>[<%= m %>]<% end %>|<%= m %>|<%= a %>\n",
 );
 
 /// `lib/tracker.rb`.
@@ -42,6 +43,7 @@ pub const RENDERS: &[&str] = &[
     "L12:<a href=\"/o\">i</a>|co",
     "L13:[i]|o|co",
     "L14:[w]|o",
+    "L15:[i]|o|q",
 ];
 
 /// The strict targets' probe: a url that is a String sum, so its discard
@@ -59,3 +61,14 @@ pub const STRICT_VIEW: &str = concat!(
 );
 
 pub const STRICT_RENDERS: &[&str] = &["L0:a\n", "L1:b\n", "L2:none\n", "L3:[d]\n", "L4:<a href=\"/w\">e</a>\n", "L5:[f]\n", "L6:[g]|/p\n", "L7:none|z"];
+
+/// A block parameter shadowing a template local that only an earlier
+/// nested body assigned, which Rails 8.1.4 keeps after the block
+/// (`[i]|o`): refused. A block's own body is its scope, so one assigned
+/// in an `each` is not, nor one assigned at the top level too.
+pub const NESTED_REFUSED: &str = "<% if Tracker.yes %><% x = \"o\" %><% end %><%= link_to_if Tracker.no, \"i\", \"/u\" do |x| %>[<%= x %>]<% end %>|<%= x %>\n";
+
+pub const NESTED_LOWERED: &[&str] = &[
+    "<% [1].each do |i| %><% x = \"o\" %><% end %><%= link_to_if Tracker.no, \"i\", \"/u\" do |x| %>[<%= x %>]<% end %>\n",
+    "<% x = \"p\" %><% if Tracker.yes %><% x = \"o\" %><% end %><%= link_to_if Tracker.no, \"i\", \"/u\" do |x| %>[<%= x %>]<% end %>|<%= x %>\n",
+];
