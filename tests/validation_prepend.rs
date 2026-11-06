@@ -1087,3 +1087,32 @@ fn external_prepend_constants_keep_generated_validations_natively() {
     let refs: Vec<_> = files.iter().map(|(path, source)| (path.as_str(), source.as_str())).collect();
     app(&refs).run_spinel_with_db("record = Item.new(name: '')\nraise 'validation skipped' if record.valid?\nraise record.errors.to_a.inspect unless record.errors.to_a == ['tail', 'x', 'x']\n").assert_passes();
 }
+
+#[test]
+fn unresolved_prepend_warns_only_for_retained_validation_callbacks() {
+    let script = "record = Item.new(name: '')\nputs record.valid?\nputs record.errors.to_a.join('|')\n";
+    for owned in [false, true] {
+        let mut files = external_prepend_files("direct", "true");
+        let model = &mut files.iter_mut().find(|(path, _)| path == "app/models/item.rb").unwrap().1;
+        let own_method = if owned { "  def self.validate(*names, prepend: false)\n  end\n" } else { "" };
+        *model = model.replace("prepend: Settings::FLAG", "prepend: flag").replacen(
+            "class Item < ApplicationRecord\n",
+            &format!("class Item < ApplicationRecord\n  def self.flag\n    true\n  end\n{own_method}"), 1);
+        let Some(oracle) = initialized_validation_oracle(&files, script) else { return };
+        assert_eq!(oracle, if owned { "true" } else { "false\nx|tail" });
+        let refs: Vec<_> = files.iter().map(|(path, source)| (path.as_str(), source.as_str())).collect();
+        let run = app(&refs).run_ruby(script);
+        run.assert_passes();
+        assert_eq!(run.stdout.trim(), if owned { "true" } else { "false\ntail|x" });
+
+        let mut tree: roundhouse::vfs::FileTree = files.iter().map(|(path, source)|
+            (std::path::PathBuf::from(path), source.as_bytes().to_vec())).collect();
+        tree.insert("app/models/application_record.rb".into(), BASE.as_bytes().to_vec());
+        tree.insert("db/schema.rb".into(), SCHEMA.as_bytes().to_vec());
+        let (_, diagnostics) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_app_from_tree(tree));
+        let count = diagnostics.iter().filter(|diagnostic| matches!(&diagnostic.kind,
+            roundhouse::diagnostic::DiagnosticKind::IgnoredValidatorOption { validator, option, .. }
+                if validator.as_str() == "validate" && option.as_str() == "prepend")).count();
+        assert_eq!(count, if owned { 0 } else { 1 }, "{diagnostics:?}");
+    }
+}

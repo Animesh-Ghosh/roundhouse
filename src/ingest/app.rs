@@ -3098,6 +3098,15 @@ end
         crate::dialect::replace_validation_callbacks(&mut model.body);
     }
     super::sti_validations::apply(&mut app, sti_validations, &owned_validate_calls);
+    // An app-owned macro, or a call with other unsupported options, did not
+    // keep a validation. Report its scheduling fallback only if a callback
+    // with that source span remains (including another concern includer).
+    super::prism::retain(|diagnostic| {
+        !matches!(&diagnostic.kind, crate::diagnostic::DiagnosticKind::IgnoredValidatorOption { validator, option, .. }
+            if validator.as_str() == "validate" && option.as_str() == "prepend")
+            || app.models.iter().any(|model| model.body.iter().any(|item|
+                matches!(item, crate::dialect::ModelBodyItem::Validation { span, .. } if *span == diagnostic.span)))
+    });
     super::acts_as_votable::expand_acts_as_votable(&mut app)?;
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;
