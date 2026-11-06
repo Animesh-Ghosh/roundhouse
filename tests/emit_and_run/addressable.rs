@@ -88,9 +88,26 @@ puts "addressable passed"
 fn app() -> emit_and_run::Overlay {
     let fixture = roundhouse::fixtures::real_blog();
     let gemfile = std::fs::read_to_string(fixture.join("Gemfile")).unwrap() + "gem \"addressable\"\n";
-    let lock = std::fs::read_to_string(fixture.join("Gemfile.lock"))
+    // Not the fixture's own pins: it locks addressable only as capybara's dependency, at whatever version its lock resolved.
+    let mut lock: String = std::fs::read_to_string(fixture.join("Gemfile.lock"))
         .unwrap()
-        .replacen("DEPENDENCIES\n", "DEPENDENCIES\n  addressable\n", 1);
+        .lines()
+        .map(|line| match GEMS.iter().find(|(name, _)| line.starts_with(&format!("    {name} ("))) {
+            Some((name, version)) => format!("    {name} ({version})\n"),
+            None => format!("{line}\n"),
+        })
+        .collect();
+    for (name, version) in GEMS {
+        if !lock.contains(&format!("\n    {name} (")) {
+            let spec = if name == "addressable" {
+                format!("    {name} ({version})\n      public_suffix (>= 2.0.2, < 8.0)\n")
+            } else {
+                format!("    {name} ({version})\n")
+            };
+            lock = lock.replacen("\n\nPLATFORMS", &format!("\n{spec}\nPLATFORMS"), 1);
+        }
+    }
+    let lock = lock.replacen("DEPENDENCIES\n", "DEPENDENCIES\n  addressable\n", 1);
     let mut overlay = emit_and_run::real_blog()
         .write("Gemfile", &gemfile)
         .write("Gemfile.lock", &lock)

@@ -672,12 +672,12 @@ end
 /// and one standing as a statement still becomes the reassignment.
 #[test]
 fn a_bang_whose_value_is_read_stays_a_bang_call() {
-    let out = emit_app_file(
+    let out = emit_app(
         &[
             ("db/schema.rb", SCHEMA),
             (
-                "app/models/path_tidy.rb",
-                r#"class PathTidy
+                "app/models/user.rb",
+                r#"class User < ApplicationRecord
   def self.tidy(path)
     normalized = path.dup
     loop do
@@ -692,7 +692,6 @@ end
 "#,
             ),
         ],
-        "path_tidy.rb",
     );
     assert!(out.contains("mod ||= normalized.gsub!("), "{out}");
     assert!(out.contains("normalized = normalized.strip"), "{out}");
