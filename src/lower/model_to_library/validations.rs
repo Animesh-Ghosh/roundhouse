@@ -35,8 +35,8 @@ pub(super) fn push_validate_method(
         .flat_map(|(_, attrs)| attrs.into_iter().map(|a| a.name))
         .collect();
 
-    // One pass in declaration order: Rails checks a `belongs_to` where it is declared, among the `validates`, so its error lists there.
-    for item in &model.body {
+    // Unprepended validations and belongs_to checks keep declaration order.
+    for item in model.validation_order() {
         let span = item.span();
         match item {
             crate::dialect::ModelBodyItem::Validation { validation: v, .. } => {
