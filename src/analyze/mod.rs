@@ -1823,7 +1823,8 @@ impl Analyzer {
         });
         // Not done at the restamp: lobsters' `upvoter_score` kept the `String` its view site saw before `comment_score_for_user` widened to `Integer | String`.
         // Both loops share one budget of FIXPOINT_CAP production passes: on an app whose production loop ran to its cap, the params or returns here may never settle, and a cap per loop spent up to 12 × 12 full passes.
-        let mut returns_settled = true;
+        // Not settled after a capped absorb: its last harvest may have moved a return that no production body has been typed against.
+        let mut returns_settled = rounds.absorb != LoopEnd::RanToCap;
         // One round past the cap: every round that goes on spends a pass, so round FIXPOINT_CAP only re-joins what the last restamp typed, then stops.
         for round in 0..=FIXPOINT_CAP {
             rounds.restamp.rounds = round + 1;

@@ -415,6 +415,37 @@ fn a_chain_of_view_fed_helper_params_takes_one_restamp_pass_per_helper() {
     assert_eq!(settled.rounds.restamp, Restamp { end: LoopEnd::Settled(4), rounds: 5, passes: 4 });
 }
 
+/// `shown`'s param is `nil` from production and gains `String` from the
+/// view, so the absorb loop retypes the chain below it, one method a round,
+/// and runs out of rounds before the end of the chain.
+fn chained_helper(links: usize) -> String {
+    let mut helper = String::from("module ScoreHelper\n  def shown(label) = label\n\n  def chain_0 = shown(nil)\n");
+    for i in 1..=links {
+        helper.push_str(&format!("  def chain_{i} = chain_{}\n", i - 1));
+    }
+    helper + "end\n"
+}
+
+/// The restamp's first re-join moves no param, but the absorb loop stopped
+/// on its cap with returns still moving, so the restamp retypes production
+/// before it can settle.
+#[test]
+fn a_capped_absorb_loop_is_followed_by_a_restamp_pass() {
+    let helper = chained_helper(16);
+    let settled = analyze(
+        &[
+            ("app/controllers/trees_controller.rb", "class TreesController < ApplicationController\n  def index\n  end\nend\n"),
+            ("app/helpers/score_helper.rb", helper.as_str()),
+            ("app/views/trees/index.html.erb", "<%= shown(\"a\") %>\n"),
+        ],
+        &[],
+    );
+    assert!(settled.errors.is_empty(), "errors: {:#?}", settled.errors);
+    assert_eq!(settled.rounds.absorb, LoopEnd::RanToCap);
+    assert!(settled.rounds.restamp.passes >= 1, "restamp: {:?}", settled.rounds.restamp);
+    assert_ne!(settled.rounds.restamp.end, LoopEnd::Settled(0));
+}
+
 /// The call sites live in the class, so analysis sees the same feedback
 /// as the controllers above.
 const TREE_WALK: &str = r#"
