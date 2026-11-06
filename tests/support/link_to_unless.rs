@@ -4,7 +4,8 @@
 //! shown, when no link is made. Each line of `VIEW` is tagged `L<n>:`,
 //! and `RENDERS` is what Rails 8.1.4 renders after the tag. The view is
 //! the html-safe owner probe's app, whose `Article#label` returns
-//! `"<b>a</b>".html_safe`; `t` is true and `f` false, both at runtime.
+//! `"<b>a</b>".html_safe` and `Comment#label` `"<c>"`; `t` is true and
+//! `f` false, both at runtime.
 
 pub const VIEW: &str = concat!(
     "<% t = !@article.nil? %><% f = @article.nil? %>\n",
@@ -19,6 +20,7 @@ pub const VIEW: &str = concat!(
     "L8:<%= link_to_if t, \"<c>\", \"/x\" do |name| %>[<%= name %>]<% end %>\n",
     "L9:<%= link_to_unless t, \"<c>\", \"/x\" do %>none<% end %>\n",
     "L10:<%= link_to_unless @article.nil?, \"<c>\", \"/x\" %>\n",
+    "L11:<%= link_to_unless t, @article.label + @comment.label, \"/x\" %>\n",
 );
 
 pub const RENDERS: &[&str] = &[
@@ -33,4 +35,5 @@ pub const RENDERS: &[&str] = &[
     "L8:<a href=\"/x\">&lt;c&gt;</a>",
     "L9:none",
     "L10:<a href=\"/x\">&lt;c&gt;</a>",
+    "L11:<b>a</b>&lt;c&gt;",
 ];
