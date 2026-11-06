@@ -33,7 +33,7 @@ pub type ScopeRegistry = HashMap<ClassId, HashMap<Symbol, Vec<Param>>>;
 /// Per-model UNIQUE key column sets — the conflict targets an
 /// `insert_all` has to skip on (see the inlining in [`rewrite`]).
 ///
-/// Only indexes whose every column is NOT NULL are carried. A unique
+/// Column guards carry only indexes whose every column is NOT NULL. A unique
 /// index over a nullable column is a conflict target the guard cannot
 /// read: `where(col: nil)` asks for rows whose column IS NULL, which is
 /// a different question from "no value here" and, in SQLite, is not
@@ -45,16 +45,14 @@ pub type UniqueKeys = HashMap<ClassId, ModelUniqueKeys>;
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ModelUniqueKeys {
     pub columns: Vec<UniqueKey>,
-    /// Expression keys cannot be read by the per-column conflict guard.
-    pub requires_atomic_insert_all: bool,
+    /// Constraints the row-wise bulk path cannot preserve. App-defined
+    /// methods keep their own behavior instead of receiving this refusal.
+    pub insert_all_refusal: Option<&'static str>,
+    pub insert_all_bang_refusal: Option<&'static str>,
 }
 
-/// One unique index the guard reads: its columns, and the predicate of
-/// a partial one (`where:`), which only conflicts with the rows it
-/// selects. The predicate is the one the SQLite DDL renders
-/// ([`crate::emit::shared::schema_sql::Dialect::index_predicate`]), so
-/// the guard and the index agree; an index whose predicate SQLite isn't
-/// trusted to run is unique over every row in both.
+/// A schema key's columns and normalized SQLite predicate. The existing
+/// service-call guard tests partial predicates only on existing rows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UniqueKey {
     pub columns: Vec<Symbol>,
@@ -66,8 +64,15 @@ pub fn build_unique_keys(app: &crate::App) -> UniqueKeys {
     let mut out: UniqueKeys = HashMap::default();
     for m in &app.models {
         let Some(table) = app.schema.tables.get(&m.table.0) else { continue };
-        let requires_atomic_insert_all = table.indexes.iter().any(|i| i.unique && i.expression.is_some())
-            && !crate::analyze::source_class_method(app, &m.name, "insert_all");
+        let refusal = if table.indexes.iter().any(|i| i.unique && i.expression.is_some()) {
+            Some("a unique expression index requires atomic conflict handling")
+        } else if !table.check_constraints.is_empty() {
+            Some("a CHECK constraint requires an atomic batch")
+        } else {
+            None
+        };
+        let insert_all_refusal = refusal.filter(|_| !crate::analyze::source_class_method(app, &m.name, "insert_all"));
+        let insert_all_bang_refusal = refusal.filter(|_| !crate::analyze::source_class_method(app, &m.name, "insert_all!"));
         let not_null = |name: &Symbol| {
             table.columns.iter().any(|c| &c.name == name && !c.nullable)
         };
@@ -94,8 +99,8 @@ pub fn build_unique_keys(app: &crate::App) -> UniqueKeys {
         if !primary.is_empty() && !keys.iter().any(|k| k.columns == primary && k.predicate.is_none()) {
             keys.push(UniqueKey { columns: primary, predicate: None });
         }
-        if !keys.is_empty() || requires_atomic_insert_all {
-            out.insert(m.name.clone(), ModelUniqueKeys { columns: keys, requires_atomic_insert_all });
+        if !keys.is_empty() || insert_all_refusal.is_some() || insert_all_bang_refusal.is_some() {
+            out.insert(m.name.clone(), ModelUniqueKeys { columns: keys, insert_all_refusal, insert_all_bang_refusal });
         }
     }
     out
@@ -3660,9 +3665,9 @@ fn var_expr(span: crate::span::Span, name: &Symbol) -> Expr {
 /// ```
 ///
 /// One `unless` per unique key, OR'd, so a table with two unique
-/// indexes skips a row conflicting on either. A partial index adds its
-/// predicate, `.where("(revoked_at IS NULL)")`, so only a row it covers
-/// counts as a conflict. A model with no usable unique key (none
+/// indexes skips a row conflicting on either. A partial predicate is tested
+/// only on the existing row, preserving this path's existing limitation.
+/// A model with no usable unique key (none
 /// declared, or every one of them nullable — see [`UniqueKeys`]) keeps
 /// the bare save: there is nothing to conflict on that this can read.
 fn guard_on_unique_keys(
@@ -3672,6 +3677,9 @@ fn guard_on_unique_keys(
     save: Expr,
     ctx: &Ctx<'_>,
 ) -> Expr {
+    // Relation-taking bodies previously had no column-key registry. Carry
+    // the new constraint refusals there without adding a column guard.
+    if ctx.scope_body.is_some() { return save; }
     let Some(keys) = ctx.unique_keys.get(model) else { return save };
     let mut cond: Option<Expr> = None;
     for key in &keys.columns {
@@ -4784,15 +4792,25 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 // the same read-then-write shape `increment!` already
                 // carries, and under single-threaded dispatch the window
                 // it opens is not observable. Ledgered with the rest.
-                if method.as_str() == "insert_all" && args.len() == 1 && block.is_none() {
-                    if ctx.unique_keys.get(&m).is_some_and(|keys| keys.requires_atomic_insert_all) {
+                let rowwise_bulk = block.is_none() && match method.as_str() {
+                    "insert_all" => args.len() == 1,
+                    "insert_all!" => !args.is_empty() && args.len() <= 2 && insert_all_bang_returning(args.get(1)).is_some(),
+                    _ => false,
+                };
+                if rowwise_bulk {
+                    let refusal = ctx.unique_keys.get(&m).and_then(|keys| {
+                        if method.as_str() == "insert_all" { keys.insert_all_refusal } else { keys.insert_all_bang_refusal }
+                    });
+                    if let Some(reason) = refusal {
                         crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
-                            span, None, "insert_all",
-                            format!("{m}.insert_all with a unique expression index requires atomic conflict handling; row-wise lowering does not support it"),
+                            span, None, method.as_str(),
+                            format!("{m}.{method} with {reason}; row-wise lowering does not support it"),
                         ));
                         *expr = put(span, Some(r), method, args, block, parenthesized);
                         return None;
                     }
+                }
+                if method.as_str() == "insert_all" && args.len() == 1 && block.is_none() {
                     let attrs = Symbol::from("__attrs");
                     let build = syn(
                         span,

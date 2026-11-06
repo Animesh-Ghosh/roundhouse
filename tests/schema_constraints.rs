@@ -339,7 +339,7 @@ puts 'Rails skips expression conflicts'
 }
 
 #[test]
-fn expression_bulk_refusal_is_narrow_to_builtin_skipping_writes() {
+fn expression_bulk_refusal_is_narrow_to_builtin_bulk_writes() {
     use roundhouse::project::BuildTarget;
     let call = "Member.insert_all([{age: 18, email: 'One@example.test'}, {age: 18, email: 'one@example.test'}])";
     for owner in [
@@ -353,8 +353,10 @@ fn expression_bulk_refusal_is_narrow_to_builtin_skipping_writes() {
     }
     let bang = call.replace("insert_all(", "insert_all!(");
     let (_, errors) = expression_bulk_app(&bang).emit(BuildTarget::Spinel);
-    assert!(!errors.iter().any(|d| d.contains("unique expression index")), "{errors:?}");
-    expression_bulk_app(call).write("db/schema.rb", &SCHEMA.replace("unique: true", "unique: false"))
+    assert!(errors.iter().any(|d| d.contains("unique expression index")), "{errors:?}");
+    let nonunique = SCHEMA.replace("unique: true", "unique: false")
+        .replace("t.check_constraint \"age >= 18\", name: \"members_adult\"", "");
+    expression_bulk_app(call).write("db/schema.rb", &nonunique)
         .run_ruby("Member.import_members\nraise unless Member.count == 2").assert_passes();
 }
 
@@ -412,4 +414,182 @@ fn association_scope_rewrite_keeps_expression_conflict_information() {
         &mut body, &member.name, &roundhouse::Symbol::from("__rel"), &scopes, &models, &assocs, &keys,
     ));
     assert!(diagnostics.iter().any(|d| d.message.contains("unique expression index")), "{diagnostics:?}");
+}
+
+fn bulk_schema(declaration: &str) -> String {
+    format!("ActiveRecord::Schema[8.1].define do\n create_table :members do |t|\n t.string :email, null: false\n t.integer :age\n t.integer :active\n {declaration}\n end\nend\n")
+}
+
+fn assert_bulk_refusal(declaration: &str, call: &str, expected_rows: usize, reason: &str) {
+    use roundhouse::project::BuildTarget;
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let fixture = expression_bulk_app(call).write("db/schema.rb", &bulk_schema(declaration));
+        let (_, analyzed, errors) = fixture.emit_with_app(target);
+        let refusal = errors.iter().find(|d| d.message.contains(reason) && d.message.contains("row-wise"));
+        if target == BuildTarget::Ruby && refusal.is_none() {
+            // On the published head, execute the accepted lowering too:
+            // the partial-index case loses a row, and rejected batches keep one.
+            let script = format!("begin\n Member.import_members\nrescue StandardError\nend\nraise \"expected {expected_rows} rows, got #{{Member.count}}\" unless Member.count == {expected_rows}\n");
+            expression_bulk_app(call).write("db/schema.rb", &bulk_schema(declaration))
+                .run_ruby(&script).assert_passes();
+        }
+        let refusal = refusal.expect("row-wise bulk writes must refuse an unsupported constraint");
+        let file = &analyzed.sources[(refusal.span.file.0 - 1) as usize];
+        assert!(file.path.ends_with("app/services/member_importer.rb"), "{}", file.path);
+        assert!(file.text[refusal.span.start as usize..refusal.span.end as usize].contains(call));
+    }
+}
+
+fn partial_column_bulk_app() -> emit_and_run::Overlay {
+    let rows = "[{email: 'same', active: 1}, {email: 'same', active: 0}]";
+    let duplicates = "[{email: 'same', active: 1}, {email: 'same', active: 1}]";
+    app().write("db/schema.rb", &bulk_schema("t.index :email, unique: true, where: 'active = 1'"))
+        .write("app/models/member.rb", &format!("class Member < ActiveRecord::Base\n scope :imported, -> {{ Member.insert_all({rows}); all }}\n scope :imported_bang, -> {{ Member.insert_all!({rows}); all }}\n scope :duplicates, -> {{ Member.insert_all({duplicates}); all }}\n def self.import_members; MemberImporter.run; end\n def self.import_bang; MemberImporter.run_bang; end\nend\n"))
+        .write("app/services/member_importer.rb", &format!("class MemberImporter\n def self.run; Member.insert_all({rows}); end\n def self.run_bang; Member.insert_all!({rows}); end\nend\n"))
+}
+
+const PARTIAL_COLUMN_BASELINE: &str = r#"
+Member.import_members
+raise 'service guard behavior changed' unless Member.count == 1
+Member.delete_all
+Member.import_bang
+raise 'service bang behavior changed' unless Member.count == 2
+Member.delete_all
+Member.imported
+raise 'a column guard was added to the scope body' unless Member.count == 2
+Member.delete_all
+Member.imported_bang
+raise 'scope bang behavior changed' unless Member.count == 2
+Member.delete_all
+failed = false
+begin
+  Member.duplicates
+rescue StandardError
+  failed = true
+end
+raise 'scope duplicate behavior changed' unless failed && Member.count == 1
+puts 'partial column paths retain main behavior'
+"#;
+
+#[test]
+fn partial_column_bulk_paths_keep_main_behavior() {
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Spinel] {
+        let (_, errors) = partial_column_bulk_app().emit(target);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+    partial_column_bulk_app().run_ruby(PARTIAL_COLUMN_BASELINE).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn native_partial_column_bulk_paths_keep_main_behavior() {
+    partial_column_bulk_app().run_spinel_with_db(PARTIAL_COLUMN_BASELINE).assert_passes();
+}
+
+#[test]
+fn scope_bulk_refusals_cover_only_introduced_constraints() {
+    for (declaration, reason) in [("t.check_constraint 'age >= 18'", "CHECK constraint"), ("t.index 'lower(email)', unique: true", "unique expression index")] {
+        for method in ["insert_all", "insert_all!"] {
+            let source = format!("class Member < ActiveRecord::Base\n scope :imported, -> {{ Member.{method}([{{email: 'One', age: 18}}, {{email: 'one', age: 17}}]); all }}\nend\n");
+            for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Spinel] {
+                let (_, analyzed, errors) = app().write("db/schema.rb", &bulk_schema(declaration)).write("app/models/member.rb", &source).emit_with_app(target);
+                let refusal = errors.iter().find(|d| d.message.contains(reason) && d.message.contains(method)).expect("introduced constraints must be refused in scope bodies");
+                let file = &analyzed.sources[(refusal.span.file.0 - 1) as usize];
+                assert!(file.path.ends_with("app/models/member.rb"));
+                assert!(file.text[refusal.span.start as usize..refusal.span.end as usize].contains(method));
+            }
+        }
+    }
+}
+
+#[test]
+fn check_insert_all_batch_cannot_leave_a_successful_prefix() {
+    assert_bulk_refusal("t.check_constraint 'age >= 18'", "Member.insert_all([{email: 'one', age: 18}, {email: 'two', age: 17}])", 0, "CHECK constraint");
+}
+
+#[test]
+fn check_insert_all_bang_batch_cannot_leave_a_successful_prefix() {
+    assert_bulk_refusal("t.check_constraint 'age >= 18'", "Member.insert_all!([{email: 'one', age: 18}, {email: 'two', age: 17}])", 0, "CHECK constraint");
+}
+
+#[test]
+fn expression_insert_all_bang_batch_cannot_leave_a_successful_prefix() {
+    assert_bulk_refusal("t.index 'lower(email)', unique: true", "Member.insert_all!([{email: 'One'}, {email: 'one'}])", 0, "unique expression index");
+}
+
+const BULK_ATOMIC_CONTRACT: &str = r#"
+Member.insert_all([{email: 'same', active: 1}, {email: 'same', active: 0}])
+raise 'partial index excluded the incoming inactive row' unless Member.count == 2
+Member.delete_all
+failed = false
+begin
+  Member.insert_all([{email: 'one', age: 18}, {email: 'two', age: 17}])
+rescue StandardError
+  failed = true
+end
+raise 'insert_all retained a successful prefix' unless failed && Member.count == 0
+failed = false
+begin
+  Member.insert_all!([{email: 'one', age: 18}, {email: 'two', age: 17}])
+rescue StandardError
+  failed = true
+end
+raise 'insert_all! retained a successful prefix' unless failed && Member.count == 0
+puts 'partial incoming row inserts; rejected batches leave no prefix'
+"#;
+
+fn atomic_bulk_app() -> emit_and_run::Overlay {
+    app().write("db/schema.rb", &bulk_schema("t.index :email, unique: true, where: 'active = 1'\n t.check_constraint 'age >= 18'"))
+        .write("app/models/member.rb", "class Member < ActiveRecord::Base\nend\n")
+}
+
+fn atomic_bulk_runtime_contract() -> String {
+    format!("{BULK_ATOMIC_CONTRACT}\n{}", r#"
+Db.exec("CREATE UNIQUE INDEX members_lower ON members (lower(email))")
+failed = false
+begin
+  Member.insert_all!([{email: 'One'}, {email: 'one'}])
+rescue StandardError
+  failed = true
+end
+raise 'expression conflict retained a prefix' unless failed && Member.count == 0
+"#)
+}
+
+#[test]
+fn unlowered_ruby_bulk_writes_keep_atomic_runtime_behavior() {
+    atomic_bulk_app().run_ruby(&atomic_bulk_runtime_contract()).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn native_unlowered_bulk_writes_keep_atomic_runtime_behavior() {
+    atomic_bulk_app().run_spinel_with_db(&atomic_bulk_runtime_contract()).assert_passes();
+}
+
+#[test]
+fn rails_bulk_writes_keep_partial_incoming_rows_and_atomic_batches() {
+    let helper = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
+    let schema = bulk_schema("t.index :email, unique: true, where: 'active = 1'\n t.check_constraint 'age >= 18'");
+    let script = format!(r#"
+require {helper:?}
+RailsOracle.activate("activerecord", sqlite3: ">= 2.9")
+require 'active_record'
+ActiveRecord::Base.establish_connection(adapter: 'sqlite3', database: ':memory:')
+ActiveRecord::Schema.verbose = false
+{schema}
+class Member < ActiveRecord::Base; end
+{BULK_ATOMIC_CONTRACT}
+ActiveRecord::Base.connection.add_index :members, 'lower(email)', unique: true, name: 'members_lower'
+failed = false
+begin
+  Member.insert_all!([{{email: 'One'}}, {{email: 'one'}}])
+rescue ActiveRecord::RecordNotUnique
+  failed = true
+end
+raise 'expression conflict retained a prefix' unless failed && Member.count == 0
+"#);
+    let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("rejected batches leave no prefix"));
 }
