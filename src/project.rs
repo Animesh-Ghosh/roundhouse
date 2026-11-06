@@ -9186,7 +9186,9 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         // These newly admitted class objects are retained by Ruby/JRuby only.
         if target != "jruby"
             && expr.decisions & crate::expr::RUNTIME_CLASS_OBJECT != 0
-            && let crate::expr::ExprNode::Send { method, .. } = &*expr.node
+            && let crate::expr::ExprNode::Send { method, args, block, .. } = &*expr.node
+            // Not a bare `Module.new` on Spinel, which makes an anonymous module (addressable's `NONE` sentinel); a body or a superclass is still refused.
+            && !(target == "spinel" && method.as_str() == "new" && args.is_empty() && block.is_none())
         {
             emit::diagnostics::report_unsupported(
                 expr.span,
@@ -9702,13 +9704,15 @@ module GemMiddleware
       # Not the request's own path: a middleware above may have rewritten PATH_INFO, and Rails routes the rewritten one.
       @req.path = env["PATH_INFO"].to_s
       Main.dispatch_request(@req, @res, @request_obj)
-      @body = [@res.body]
+      @routes_body = @res.body
+      @body = [@routes_body]
       @tuple = [@res.status, @res.headers, @body]
       @tuple
     end
 
-    def body
-      @body
+    # The routes' own body, as they left it: the same Array holding the same String.
+    def routes_body?(body)
+      body.equal?(@body) && @body.length == 1 && @body[0].equal?(@routes_body)
     end
   end
 
@@ -9717,18 +9721,36 @@ module GemMiddleware
     # Built per request, not once as Rails does: the app at its bottom holds this request's objects, and a shared one has nowhere typed to keep them.
     response = {stacked}.call(GemMiddleware.env_of(req, request_obj))
     res.status = response[0].to_i
-    # Not copied onto itself: the routes' own headers Hash already holds any change, and a list value would turn into its text.
-    response[1].each {{ |name, value| res.headers[name.to_s] = value.to_s }} unless response[1].equal?(res.headers)
+    # Not merged into the routes' headers: a response of the middleware's own carries only its own.
+    GemMiddleware.replace_headers(res, response[1]) unless response[1].equal?(res.headers)
     # Not rebuilt from the routes' own body: it may be no String (a file a controller sends).
-    return nil if response[2].equal?(app.body)
+    return nil if app.routes_body?(response[2])
     begin
       body = +""
       response[2].each {{ |part| body << part.to_s }}
       res.body = body
+      res.file_path = +""
+      res.streaming = false
     ensure
       response[2].close if response[2].respond_to?(:close)
     end
     nil
+  end
+
+  def self.replace_headers(res, headers)
+    res.headers = Tep.str_hash
+    res.set_cookies.pop while res.set_cookies.length > 0
+    res.header_fields.pop while res.header_fields.length > 0
+    headers.each do |name, value|
+      key = name.to_s
+      # Not one header line: Rack 3 gives a repeated header as an Array, and Set-Cookie as one per line.
+      values = value.is_a?(Array) ? value.map {{ |part| part.to_s }} : value.to_s.split("\n")
+      if key.downcase == "set-cookie"
+        values.each {{ |cookie| res.set_cookies << cookie }}
+      else
+        res.headers[key] = values.join(", ")
+      end
+    end
   end
 
   # The Rack env a server builds for the request, as Puma does.

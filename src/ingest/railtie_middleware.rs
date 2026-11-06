@@ -75,13 +75,18 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, gem_libs: &[PathBuf]) -> (Vec<Strin
                 let lexical: Vec<String> = std::iter::once(own.join("::")).chain(nesting).collect();
                 // Not `file_id` alone: a file library ingest has not registered yet answers no file.
                 let file_id = super::sources::register(&name, &String::from_utf8_lossy(&bytes));
-                if loaded == Loading::Autoload {
+                if matches!(loaded, Loading::Autoload | Loading::Unknown) {
                     let loc = class.location();
+                    let why = if loaded == Loading::Autoload {
+                        "a Railtie only autoloaded: whether the app loads it, and so runs its initializers, is not known here"
+                    } else {
+                        "a Railtie in a gem with no entry file to follow: whether Bundler's require loads it is not known here"
+                    };
                     diags.push(Diagnostic::unsupported(
                         Span { file: file_id, start: loc.start_offset() as u32, end: loc.end_offset() as u32 },
                         None,
                         "railtie middleware",
-                        "a Railtie only autoloaded: whether the app loads it, and so runs its initializers, is not known here".to_string(),
+                        why.to_string(),
                     ));
                     continue;
                 }
@@ -125,40 +130,58 @@ enum Loading {
     Required,
     Autoload,
     Never,
+    /// No entry file to start from, so whether Bundler's require reaches it is not known.
+    Unknown,
 }
 
-/// Whether the gem loads `file`: an entry file at the top of lib, or one some other file requires or autoloads.
+/// Whether Bundler's `require` of the gem reaches `file`: from the entry file (`lib/<name>.rb`, or the
+/// dashed name's nested path), through each `require` and `require_relative` it runs, transitively.
 fn loading<V: Vfs + ?Sized>(vfs: &V, lib: &Path, files: &[PathBuf], file: &Path) -> Loading {
-    let Ok(rel) = file.strip_prefix(lib) else { return Loading::Never };
-    if rel.components().count() == 1 {
-        return Loading::Required;
+    let dir = lib.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    // `rack-attack-6.7.0`: the gem's name is what precedes its version.
+    let name = match dir.rfind(|c: char| c == '-') {
+        Some(i) if dir[i + 1..].starts_with(|c: char| c.is_ascii_digit()) => dir[..i].to_string(),
+        _ => dir.clone(),
+    };
+    let entries: Vec<PathBuf> =
+        [name.clone(), name.replace('-', "/")].iter().map(|n| lib.join(format!("{n}.rb"))).filter(|p| files.contains(p)).collect();
+    if entries.is_empty() {
+        return Loading::Unknown;
     }
-    let feature = rel.with_extension("").to_string_lossy().replace('\\', "/");
-    let mut autoloaded = false;
-    for other in files.iter().filter(|f| f.as_path() != file) {
-        let Ok(bytes) = vfs.read(other) else { continue };
-        let text = String::from_utf8_lossy(&bytes);
-        for line in text.lines() {
+    let mut reached: Vec<PathBuf> = entries.clone();
+    let mut autoloaded: Vec<PathBuf> = Vec::new();
+    let mut queue = entries;
+    while let Some(at) = queue.pop() {
+        let Ok(bytes) = vfs.read(&at) else { continue };
+        for line in String::from_utf8_lossy(&bytes).lines() {
             let line = line.trim_start();
             let Some(quoted) = line.split(['"', '\'']).nth(1) else { continue };
-            let named = if line.starts_with("require_relative") {
-                let base = other.parent().unwrap_or(lib).join(quoted);
-                normalize(&base).strip_prefix(lib).ok().map(|p| p.to_string_lossy().replace('\\', "/"))
+            let target = if line.starts_with("require_relative") {
+                normalize(&at.parent().unwrap_or(lib).join(quoted))
             } else if line.starts_with("require") || line.starts_with("autoload") {
-                Some(quoted.to_string())
+                lib.join(quoted)
             } else {
-                None
+                continue;
             };
-            if named.as_deref().map(|n| n.trim_end_matches(".rb")) == Some(feature.as_str()) {
-                if line.starts_with("autoload") {
-                    autoloaded = true;
-                } else {
-                    return Loading::Required;
-                }
+            let target = if target.extension().is_some_and(|e| e == "rb") { target } else { target.with_extension("rb") };
+            if !files.contains(&target) {
+                continue;
+            }
+            if line.starts_with("autoload") {
+                autoloaded.push(target);
+            } else if !reached.contains(&target) {
+                reached.push(target.clone());
+                queue.push(target);
             }
         }
     }
-    if autoloaded { Loading::Autoload } else { Loading::Never }
+    if reached.iter().any(|p| p == file) {
+        Loading::Required
+    } else if autoloaded.iter().any(|p| p == file) {
+        Loading::Autoload
+    } else {
+        Loading::Never
+    }
 }
 
 fn normalize(path: &Path) -> PathBuf {
@@ -333,8 +356,16 @@ mod tests {
     fn a_railtie_nothing_loads_inserts_nothing() {
         let rt = railtie("    initializer \"gem.middleware\" do |app|\n      app.middleware.use(Middleware)\n    end");
         let entry = ENTRY.replace("require \"gem/railtie\"\n", "");
-        let (classes, diags) = read(&[("/gem/lib/gem.rb", &entry), ("/gem/lib/gem/railtie.rb", &rt)]);
+        // Required only by a file the entry never loads.
+        let unused = "require_relative \"railtie\"\n";
+        let (classes, diags) =
+            read(&[("/gem/lib/gem.rb", &entry), ("/gem/lib/gem/railtie.rb", &rt), ("/gem/lib/gem/unused.rb", unused)]);
         assert!(classes.is_empty() && diags.is_empty(), "{classes:?} {diags:?}");
+        // Reached through a file the entry requires.
+        let entry = ENTRY.replace("require \"gem/railtie\"", "require \"gem/unused\"");
+        let (classes, _) =
+            read(&[("/gem/lib/gem.rb", &entry), ("/gem/lib/gem/railtie.rb", &rt), ("/gem/lib/gem/unused.rb", unused)]);
+        assert_eq!(classes, ["Gem::Middleware"]);
     }
 
     #[test]
