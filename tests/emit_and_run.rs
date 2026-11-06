@@ -21038,6 +21038,14 @@ fn link_to_if_shadowing_a_nested_local_is_refused() {
     };
     let refused = refusals(link_to_if_eval_order::NESTED_REFUSED);
     assert!(refused.len() == 1 && refused[0].contains("link_to_if not supported"), "{refused:?}");
+    // Emitted anyway (`--allow-unsupported`), the call raises where it
+    // runs: not the blockless helper, which would drop the block.
+    let (emitted, _) = html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_if_eval_order::NESTED_REFUSED)
+        .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let view = std::fs::read_to_string(emitted.join("app/views/probes/show.rb")).expect("probes/show.rb");
+    assert!(view.contains("raise(\"link_to_if's block parameter `x` shadows") && !view.contains("link_to_if("), "{view}");
     for markup in link_to_if_eval_order::NESTED_LOWERED {
         assert!(refusals(markup).is_empty(), "{markup}");
     }

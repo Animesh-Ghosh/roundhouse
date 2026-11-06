@@ -1324,6 +1324,23 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     } = &*inner.node
     {
         if matches!(method.as_str(), "link_to_if" | "link_to_unless") && !ctx.is_local(method.as_str()) {
+            // Refused (`analyze::diagnostics`): a raise where it runs, as a
+            // refused gem constant lowers (`gem_refusal`), not the blockless
+            // helper the generic arm below would leave, which drops the block.
+            if let ExprNode::Lambda { params, .. } = &*block.node
+                && let Some(p) = params.first()
+                && refuses_param(p.as_str(), &ctx.assigned_locals, &ctx.nested_assigned_locals)
+            {
+                return vec![send(
+                    None,
+                    "raise",
+                    vec![lit_str(format!(
+                        "{method}'s block parameter `{p}` shadows a template local assigned in an earlier nested block; not modeled"
+                    ))],
+                    None,
+                    true,
+                )];
+            }
             if let Some(stmts) = emit_link_to_if_block(method.as_str(), sa, block, ctx) {
                 return stmts;
             }
