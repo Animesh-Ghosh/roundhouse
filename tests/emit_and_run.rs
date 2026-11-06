@@ -766,6 +766,50 @@ fn model_concern_delegate_through_belongs_to_runs() {
     assert!(run.stdout.contains("model concern delegate passed"));
 }
 
+/// A module that has no def of its own but extends one, and fills itself
+/// from its body (doorkeeper's `GrantFlow`: `extend Registry`, then
+/// `register(...)`), is a module code calls, not a bare namespace.
+#[test]
+fn a_module_that_extends_a_registry_answers_its_calls() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/flow_registry.rb",
+            "module FlowRegistry\n  def register(name, label)\n    flows[name] = label\n  end\n\n  def get(name)\n    flows[name]\n  end\n\n  def flows\n    @flows ||= {}\n  end\nend\n",
+        )
+        .write(
+            "app/models/grant_flows.rb",
+            "module GrantFlows\n  self.extend FlowRegistry\n\n  register(:code, \"authorization code\")\n  CODE = get(:code)\n  register(:token, \"implicit\")\nend\n",
+        )
+        .run_ruby(
+            r##"raise "GrantFlows.get: #{GrantFlows.get(:code).inspect}" unless GrantFlows.get(:code) == "authorization code" && GrantFlows.get(:token) == "implicit"
+raise "a constant between the calls: #{GrantFlows::CODE.inspect}" unless GrantFlows::CODE == "authorization code"
+puts "registry module passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("registry module passed"));
+}
+
+/// `String#strip_heredoc` as Rails takes it: the least indentation of a
+/// line that is not blank, by String order, off each line's start.
+#[test]
+fn strip_heredoc_runs_in_emitted_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/heredoc_probe.rb",
+            "class HeredocProbe\n  def self.message(name)\n    <<-TEXT.strip_heredoc\n      Hello #{name},\n        indented\n\n      bye\n    TEXT\n  end\n\n  def self.mixed\n    \" \\t a\\n\\t  b\\n\".strip_heredoc\n  end\n\n  def self.copies\n    plain = +\"a\\nb\\n\"\n    out = plain.strip_heredoc\n    out << \"x\"\n    frozen = \"  a\\n\".dup.freeze\n    [plain, out.equal?(plain), frozen.strip_heredoc.frozen?, (+\"  a\\n\").strip_heredoc.frozen?]\n  end\nend\n",
+        )
+        .run_ruby(
+            r##"raise "strip_heredoc: #{HeredocProbe.message("Ann").inspect}" unless HeredocProbe.message("Ann") == "Hello Ann,\n  indented\n\nbye\n"
+raise "strip_heredoc by String order: #{HeredocProbe.mixed.inspect}" unless HeredocProbe.mixed == " \t a\nb\n"
+raise "strip_heredoc copies and keeps frozenness: #{HeredocProbe.copies.inspect}" unless HeredocProbe.copies == ["a\nb\n", false, true, false]
+puts "strip_heredoc passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("strip_heredoc passed"));
+}
+
 #[test]
 fn active_support_many_block_and_squish_bang_run_in_emitted_ruby() {
     let run = emit_and_run::real_blog()
@@ -10252,6 +10296,47 @@ fn included_block_defs_that_would_lose_their_precedence_stay_refused() {
     }
 }
 
+/// A block that includes a module the program defines hoists its defs
+/// when that module defines none of their names (doorkeeper's model
+/// mixins), and reports the one it does define: there the block's def is
+/// the includer's own in Ruby, ahead of the module.
+#[test]
+fn included_block_defs_beside_an_include_hoist_unless_the_module_defines_them() {
+    let helper = "module Shouty::Tone\n  def tone\n    \"module\"\n  end\nend\n";
+    emit_and_run::real_blog()
+        .write("app/models/concerns/shouty/tone.rb", helper)
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include ::Shouty::Tone\n    def shout\n      title.upcase + tone\n    end\n  end\nend\n",
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+        .write(
+            "test/models/shouty_test.rb",
+            "require \"test_helper\"\n\nclass ShoutyTest < ActiveSupport::TestCase\n  test \"a def beside an include runs on the includer\" do\n    assert_equal \"HImodule\", Article.new(title: \"hi\").shout\n  end\nend\n",
+        )
+        .run_test("test/models/shouty_test.rb")
+        .assert_passes();
+    let errors = emit_and_run::real_blog()
+        .write("app/models/concerns/shouty/tone.rb", helper)
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include ::Shouty::Tone\n    def tone\n      \"block\"\n    end\n  end\nend\n",
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("nested def")), "{errors:?}");
+    // An include inside a begin body is the block's include too.
+    let errors = emit_and_run::real_blog()
+        .write("app/models/concerns/shouty/tone.rb", helper)
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    begin\n      include ::Shouty::Tone\n    rescue NameError\n      nil\n    end\n    def tone\n      \"block\"\n    end\n  end\nend\n",
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("nested def")), "{errors:?}");
+}
+
 /// The inner concern's own `included do` runs on the includer too: its
 /// scope is declared on the model.
 #[test]
@@ -12987,14 +13072,11 @@ puts "string inflections passed"
 
 /// #293: `tableize` needs Rails' plural rules, which the runtime does not
 /// carry (its `pluralize_word` keeps a word that ends in "s", where Rails
-/// answers "statuses"), and `strip_heredoc` has no runtime body. Both are
-/// refused at check time, not emitted onto a String no runtime reopens.
+/// answers "statuses"). It is refused at check time, not emitted onto a
+/// String no runtime reopens.
 #[test]
 fn string_extensions_without_a_runtime_body_are_refused() {
-    for (call, method) in [
-        (r#""Status".tableize"#, "tableize"),
-        (r#""  gear\n  boxes\n".strip_heredoc"#, "strip_heredoc"),
-    ] {
+    for (call, method) in [(r#""Status".tableize"#, "tableize")] {
         let errors = emit_and_run::real_blog()
             .edit(
                 "app/models/article.rb",
@@ -20709,6 +20791,8 @@ mod solid_queue_surface;
 mod controller_surface;
 #[path = "emit_and_run/rack_attack.rs"]
 mod rack_attack;
+#[path = "support/addressable_gem.rs"]
+mod addressable_gem;
 #[path = "emit_and_run/addressable.rs"]
 mod addressable;
 #[path = "emit_and_run/solid_queue_worker.rs"]

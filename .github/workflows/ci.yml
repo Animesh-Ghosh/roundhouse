@@ -1854,6 +1854,11 @@ jobs:
           ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
+      - name: Install gems compiled from their source
+        run: |
+          # addressable and its public_suffix, built natively (tests/spinel_toolchain/addressable.rs).
+          gem install --no-document --ignore-dependencies public_suffix -v 7.0.5
+          gem install --no-document --ignore-dependencies addressable -v 2.9.0
       # One process per test, as many as libtest's threads, so each test's seconds are its own.
       - name: run spinel_toolchain ignored suite (${{ matrix.shard }})
         env:
