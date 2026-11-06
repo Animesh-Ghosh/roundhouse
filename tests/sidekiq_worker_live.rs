@@ -28,7 +28,7 @@
 //! One thread: the tests flush and fill the same scratch database, as
 //! `sidekiq_push_live` does. The Spinel tests need a spinel-redis with
 //! `brpop` (v0.3.1), for the scheduler `script` and `evalsha` (v0.3.2),
-//! and for the dead-set write `multi` (v0.4.0).
+//! and for the dead-set write `multi` (v0.3.3).
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
