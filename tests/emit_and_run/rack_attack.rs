@@ -115,7 +115,7 @@ fn the_spinel_tree_stacks_the_railtie_middleware() {
     let (tree, errors) = app().emit(BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:#?}");
     let stack = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
-    assert!(stack.contains("Rack::Attack.new(app).call(GemMiddleware.env_of(req, request_obj))"), "{stack}");
+    assert!(stack.contains("@stack ||= Rack::Attack.new(App.new)"), "{stack}");
     let attack = std::fs::read_to_string(tree.join("app/models/rack/attack.rb")).expect("the compiled gem");
     // Each nested class under its own namespace.
     assert!(attack.contains("class Configuration\n"), "{attack}");
@@ -159,7 +159,7 @@ fn the_spinel_adapter_sends_the_response_the_middleware_returns() {
     assert!(errors.is_empty(), "{errors:#?}");
     let adapter = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb"))
         .expect("gem_middleware.rb")
-        .replace("Rack::Attack.new(app)", "Probe.new(app)");
+        .replace("Rack::Attack.new(App.new)", "Probe.new(App.new)");
     let script = format!(
         r#"{adapter}
 module Tep
@@ -178,7 +178,14 @@ module Main
   end
 end
 class Probe
-  def initialize(app) = @app = app
+  class << self
+    attr_accessor :built
+  end
+  self.built = 0
+  def initialize(app)
+    Probe.built += 1
+    @app = app
+  end
   def call(env)
     env["PATH_INFO"] = env["PATH_INFO"].sub("/old", "/new")
     status, headers, body = response = @app.call(env)
@@ -202,6 +209,8 @@ res = run("/element")
 raise "element: #{{res.to_h}}" unless res.body == "element" && res.headers["x-routes"] == "/element"
 res = run("/old/page")
 raise "path: #{{res.to_h}}" unless res.body == "routes body" && res.headers["x-routes"] == "/new/page"
+# Built once, as Rails builds its stack, not per request.
+raise "built #{{Probe.built}} times" unless Probe.built == 1
 puts "adapter passed"
 "#
     );
