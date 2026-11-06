@@ -706,3 +706,21 @@ fn content_tag_with_options_renders() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("pass 1"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
+
+/// `link_to_unless`'s block form with a name that is an expression, not a
+/// call (`"a" + "b"`), in a block without a parameter and in one whose
+/// parameter the block doesn't read: the no-link branch still evaluates
+/// the name, and the generated view type-checks.
+#[test]
+#[ignore]
+fn a_link_to_unless_block_over_an_expression_name_tsc_passes() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<% content_for :title, \"Articles\" %>\n",
+            "<% content_for :title, \"Articles\" %>\n<% t = @articles.nil? %>\n<%= link_to_unless !t, \"a\" + \"b\", \"/x\" do %>none<% end %>\n<%= link_to_unless !t, \"c\" + \"d\", \"/x\" do |name| %>none<% end %>\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_tsc_passes("real-blog with link_to_unless blocks", &emitted);
+}

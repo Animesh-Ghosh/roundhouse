@@ -2013,6 +2013,18 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
     let ExprNode::If { cond, then_branch: linked, .. } = &*blockless.node else {
         return None;
     };
+    // Rails evaluates the name whether or not the block takes it, as the
+    // blockless form's text does. A discard (`_ = …`) evaluates it where
+    // the block may not read it: Go rejects an unused local, and an
+    // unused value that isn't a call. Go, Rust and Kotlin each write the
+    // discard their own way. Without a parameter, a literal, a local or
+    // an ivar does nothing and is left out.
+    let discard = |value: Expr| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign { target: LValue::Var { id: VarId(0), name: Symbol::from("_") }, value },
+        )
+    };
     let mut captured = Vec::new();
     let inner_ctx = match params.first() {
         Some(p) => {
@@ -2023,16 +2035,12 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
                     value: rewrite_helpers_in_expr(text, ctx),
                 },
             ));
+            captured.push(discard(var_ref(p.clone())));
             ctx.with_locals([p.as_str().to_string()])
         }
         None => {
-            // Rails evaluates the name whether or not the block takes it,
-            // as the blockless form's text does: a name that can do
-            // something (a call) is still made, its value unused. A
-            // literal, a local or an ivar does nothing, and Go rejects an
-            // unused value that isn't a call.
             if !matches!(&*text.node, ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
-                captured.push(rewrite_helpers_in_expr(text, ctx));
+                captured.push(discard(rewrite_helpers_in_expr(text, ctx)));
             }
             ctx.with_locals(std::iter::empty())
         }
