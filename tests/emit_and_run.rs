@@ -20784,6 +20784,8 @@ mod solid_queue_surface;
 mod controller_surface;
 #[path = "emit_and_run/rack_attack.rs"]
 mod rack_attack;
+#[path = "support/addressable_gem.rs"]
+mod addressable_gem;
 #[path = "emit_and_run/addressable.rs"]
 mod addressable;
 #[path = "emit_and_run/solid_queue_worker.rs"]
