@@ -766,6 +766,29 @@ fn model_concern_delegate_through_belongs_to_runs() {
     assert!(run.stdout.contains("model concern delegate passed"));
 }
 
+/// A module that has no def of its own but extends one, and fills itself
+/// from its body (doorkeeper's `GrantFlow`: `extend Registry`, then
+/// `register(...)`), is a module code calls, not a bare namespace.
+#[test]
+fn a_module_that_extends_a_registry_answers_its_calls() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/flow_registry.rb",
+            "module FlowRegistry\n  def register(name, label)\n    flows[name] = label\n  end\n\n  def get(name)\n    flows[name]\n  end\n\n  def flows\n    @flows ||= {}\n  end\nend\n",
+        )
+        .write(
+            "app/models/grant_flows.rb",
+            "module GrantFlows\n  extend FlowRegistry\n\n  register(:code, \"authorization code\")\n  register(:token, \"implicit\")\nend\n",
+        )
+        .run_ruby(
+            r##"raise "GrantFlows.get: #{GrantFlows.get(:code).inspect}" unless GrantFlows.get(:code) == "authorization code" && GrantFlows.get(:token) == "implicit"
+puts "registry module passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("registry module passed"));
+}
+
 /// `String#strip_heredoc` as Rails takes it: the least indentation of a
 /// line that is not blank, by String order, off each line's start.
 #[test]
