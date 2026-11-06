@@ -577,9 +577,11 @@ jobs:
           ruby-version: ${{ env.MRI_RUBY }}
       # These gates exercise the actual gems, not optional runtime fallbacks.
       - name: System libvips for the emitted ruby-vips processor
+        # One shard in most runs drew a slow mirror and waited 4-5 min on these debs.
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips42
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
           gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt rest-client elastic-apm
@@ -1162,8 +1164,9 @@ jobs:
       - name: System libvips
         # Same slow-mirror bound as libvips-dev (#590) / campfire-conformance.
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 sqlite3
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips42 sqlite3
       - name: Cache the prepared oracle
         id: oracle
         uses: actions/cache@v6
@@ -1574,8 +1577,9 @@ jobs:
         name: Install libvips (ruby-vips binds it through FFI) and ffmpeg
         # libvips42 and ffmpeg are a slow apt install on a shared runner.
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 ffmpeg
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips42 ffmpeg
       # concurrent-ruby, net-http-persistent, web-push: WebPush::Pool
       # loads them. concurrent-ruby is named even though sentry-ruby
       # also depends on it.
