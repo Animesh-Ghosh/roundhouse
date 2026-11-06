@@ -622,6 +622,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
 }
 
 fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[String]) -> IngestResult<App> {
+    // Not left from an earlier ingest in this process: the hoists are checked against this app's modules.
+    super::library_class::included_hoist_conflicts(&[]);
     super::sources::reset();
     super::each_validator::reset();
     let _source_root = super::sources::set_root(dir);
@@ -3335,6 +3337,8 @@ end
     super::container_specialize::specialize(&mut app);
     super::unreachable_views::mark(&mut app);
     super::settled_conditionals::settle(&mut app);
+    // Not beside the hoists: later passes give an included module methods and ancestors (forwardable, carried includes, props bases, the queue adapter reader) or take an inactive branch's away.
+    app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);
     super::job_class_lookup::rewrite(&mut app);
     super::uncalled_definers::mark(&mut app);
     super::absence_guards::mark(&mut app, &source_gem_classes);

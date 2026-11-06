@@ -1053,8 +1053,16 @@ module ActionView
   
     def self.stylesheet_link_tag(name, opts = EMPTY_HTML_OPTS)
       href = stylesheet_href(name.to_s)
-      attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
-      "<link#{attrs} />"
+      given = opts.to_h
+      # Rel, href, then the options, as Rails writes them. Not through
+      # `render_attrs`, whose Hash iteration Swift sorts by key (its
+      # Dictionary keeps no order), which would put href first. An option
+      # that replaces either attribute takes the merge, as Rails' does.
+      if given.key?(:rel) || given.key?(:href)
+        attrs = render_attrs({ rel: "stylesheet", href: href }.merge(given))
+        return "<link#{attrs} />"
+      end
+      "<link rel=\"stylesheet\" href=\"#{html_escape(href)}\"#{render_attrs(given)} />"
     end
 
     # Rails 8.1.4's `path_to_stylesheet` (actionview `asset_path`, type

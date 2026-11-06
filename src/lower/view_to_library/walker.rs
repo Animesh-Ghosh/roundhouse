@@ -56,8 +56,101 @@ pub(super) fn walk_body(body: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             e.inherit_span(stmt.span);
         }
         out.extend(lowered);
+        // A template local assigned here is in scope for the statements
+        // after it (`ViewCtx::assigned_locals`), and so is one assigned
+        // inside this statement's nested bodies (`nested_assigned_locals`).
+        let (top, nested) = assigned_names(stmt);
+        let top: Vec<String> = top.into_iter().filter(|n| !ctx.assigned_locals.contains(n)).collect();
+        let nested: Vec<String> = nested.into_iter().filter(|n| !ctx.nested_assigned_locals.contains(n)).collect();
+        if !top.is_empty() || !nested.is_empty() {
+            let mut next = ctx.clone();
+            next.assigned_locals.extend(top);
+            next.nested_assigned_locals.extend(nested);
+            shadowed = Some(next);
+        }
     }
     out
+}
+
+/// The template locals `stmt` assigns that stay in scope after it: those
+/// it assigns itself (`x = …`, `x ||= …`, `a, x = …`), and those its
+/// nested statement bodies assign (an `if` branch, a `case` arm, a
+/// `while`). A block's or lambda's body is its own scope, as in Ruby, and
+/// is left out. `_buf` is the ERB buffer, not a template local.
+fn assigned_names(stmt: &Expr) -> (Vec<String>, Vec<String>) {
+    fn own(e: &Expr) -> Vec<String> {
+        let names: Vec<&Symbol> = match &*e.node {
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } => vec![name],
+            ExprNode::MultiAssign { targets, .. } => targets
+                .iter()
+                .filter_map(|t| match t {
+                    LValue::Var { name, .. } => Some(name),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        names.into_iter().filter(|n| n.as_str() != "_buf").map(|n| n.as_str().to_string()).collect()
+    }
+    fn nested(e: &Expr, out: &mut Vec<String>) {
+        e.node.for_each_child(&mut |c| {
+            if matches!(&*c.node, ExprNode::Lambda { .. }) {
+                return;
+            }
+            for n in own(c) {
+                if !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+            nested(c, out);
+        });
+    }
+    let top = own(stmt);
+    let mut inner = Vec::new();
+    nested(stmt, &mut inner);
+    inner.retain(|n| !top.contains(n));
+    (top, inner)
+}
+
+/// The `link_to_if` / `link_to_unless` blocks in `body` whose parameter
+/// shadows a template local assigned only inside an earlier statement's
+/// nested body (`<% if c %><% x = 1 %><% end %>… do |x|`). Ruby keeps
+/// that local after the block; the lowering's save and restore would read
+/// it where a compiled target's scope doesn't have it, so the block is
+/// refused instead (`emit_link_to_if_block`). The same statement-order
+/// walk as `walk_body`'s.
+pub(crate) fn link_to_if_params_shadowing_nested_locals(body: &Expr) -> Vec<(Span, String)> {
+    fn visit(e: &Expr, top: &[String], nested: &[String], out: &mut Vec<(Span, String)>) {
+        if let ExprNode::Seq { exprs } = &*e.node {
+            let (mut top, mut nested) = (top.to_vec(), nested.to_vec());
+            for stmt in exprs {
+                visit(stmt, &top, &nested, out);
+                let (t, n) = assigned_names(stmt);
+                top.extend(t);
+                nested.extend(n);
+            }
+            return;
+        }
+        if let ExprNode::Send { recv: None, method, block: Some(block), .. } = &*e.node
+            && matches!(method.as_str(), "link_to_if" | "link_to_unless")
+            && let ExprNode::Lambda { params, .. } = &*block.node
+            && let Some(p) = params.first()
+            && refuses_param(p.as_str(), top, nested)
+        {
+            out.push((e.span, method.as_str().to_string()));
+        }
+        e.node.for_each_child(&mut |c| visit(c, top, nested, out));
+    }
+    let mut out = Vec::new();
+    visit(body, &[], &[], &mut out);
+    out
+}
+
+/// A block parameter shadowing a local assigned only in an earlier nested
+/// body (`link_to_if_params_shadowing_nested_locals`).
+fn refuses_param(p: &str, top: &[String], nested: &[String]) -> bool {
+    !top.iter().any(|n| n == p) && nested.iter().any(|n| n == p)
 }
 
 fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
@@ -1122,6 +1215,11 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     if let ExprNode::Send { recv: None, method, args: sa, block: None, parenthesized } = &*inner.node {
         if let Some(kind) = classify_template_helper(method.as_str(), sa, *parenthesized, ctx) {
             if let Some(call) = emit_view_helper_call(&kind, ctx) {
+                if let ViewHelperKind::LinkToIf { url, negate, .. } = &kind
+                    && let Some(stmts) = link_to_if_statement(&call, url, *negate, ctx)
+                {
+                    return stmts;
+                }
                 return vec![accumulator_append_call(call, ctx)];
             }
         }
@@ -1226,6 +1324,23 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     } = &*inner.node
     {
         if matches!(method.as_str(), "link_to_if" | "link_to_unless") && !ctx.is_local(method.as_str()) {
+            // Refused (`analyze::diagnostics`): a raise where it runs, as a
+            // refused gem constant lowers (`gem_refusal`), not the blockless
+            // helper the generic arm below would leave, which drops the block.
+            if let ExprNode::Lambda { params, .. } = &*block.node
+                && let Some(p) = params.first()
+                && refuses_param(p.as_str(), &ctx.assigned_locals, &ctx.nested_assigned_locals)
+            {
+                return vec![send(
+                    None,
+                    "raise",
+                    vec![lit_str(format!(
+                        "{method}'s block parameter `{p}` shadows a template local assigned in an earlier nested block; not modeled"
+                    ))],
+                    None,
+                    true,
+                )];
+            }
             if let Some(stmts) = emit_link_to_if_block(method.as_str(), sa, block, ctx) {
                 return stmts;
             }
@@ -1996,6 +2111,56 @@ fn bind_before_block(e: Expr, site: u32, bound: &mut usize, stmts: &mut Vec<Expr
     }
 }
 
+/// `_ = value`: Ruby's discard, which evaluates `value` and keeps nothing.
+/// Go rejects an unused local, and an unused value that isn't a call; Go,
+/// Rust and Kotlin each write the discard their own way.
+fn discard(value: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign { target: LValue::Var { id: VarId(0), name: Symbol::from("_") }, value },
+    )
+}
+
+/// The discard of a `link_to_if` / `link_to_unless` url when no link is
+/// made: Rails evaluates it before it picks a branch. A literal, a local,
+/// an ivar or a constant does nothing and is left out; a route helper is
+/// kept, since Rails raises for a key it lacks.
+fn url_discard(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
+    if matches!(&*url.node, ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef) {
+        return None;
+    }
+    // Only the bare spelling reads a local (Prism's shape for a partial
+    // local): `url()` or `url { … }` calls the method of that name even
+    // where a local has it, and is kept with its effects.
+    if let ExprNode::Send { recv: None, method, args, block: None, parenthesized: false, .. } = &*url.node
+        && args.is_empty()
+        && ctx.binds_local(method.as_str())
+    {
+        return None;
+    }
+    Some(discard(rewrite_helpers_in_expr(url, ctx)))
+}
+
+/// A blockless `<%= link_to_if/unless … %>` as statements: the link, or
+/// the name followed by the url's discard, so the url is evaluated, after
+/// the name, whether or not a link is made (#1862). Rails evaluates both
+/// before it writes either; a raise between them aborts the render, so
+/// what is written is the same. `None` when the url has nothing to
+/// evaluate, and the value form stays.
+fn link_to_if_statement(call: &Expr, url: &Expr, negate: bool, ctx: &ViewCtx) -> Option<Vec<Expr>> {
+    let ExprNode::If { cond, then_branch, else_branch } = &*call.node else {
+        return None;
+    };
+    let url = url_discard(url, ctx)?;
+    let append = |e: &Expr| accumulator_append_call(e.clone(), ctx);
+    let (then_branch, else_branch) = if negate {
+        (seq(vec![append(then_branch), url]), append(else_branch))
+    } else {
+        (append(then_branch), seq(vec![append(else_branch), url]))
+    };
+    Some(vec![Expr::new(Span::synthetic(), ExprNode::If { cond: cond.clone(), then_branch, else_branch })])
+}
+
 /// `link_to_if`'s and `link_to_unless`'s block form: the link the
 /// blockless form writes when the condition says to link, and otherwise
 /// the block's body, walked against the view's accumulator with its
@@ -2019,27 +2184,54 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
         return None;
     };
     // Rails evaluates the name whether or not the block takes it, as the
-    // blockless form's text does. A discard (`_ = …`) evaluates it where
-    // the block may not read it: Go rejects an unused local, and an
-    // unused value that isn't a call. Go, Rust and Kotlin each write the
-    // discard their own way. Without a parameter, a literal, a local or
-    // an ivar does nothing and is left out.
-    let discard = |value: Expr| {
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Assign { target: LValue::Var { id: VarId(0), name: Symbol::from("_") }, value },
-        )
-    };
+    // blockless form's text does, and then the url, before the block
+    // runs. A discard (`_ = …`) evaluates the name where the block may not
+    // read it. Without a parameter, a literal, a local or an ivar does
+    // nothing and is left out.
     let mut captured = Vec::new();
+    let mut url_read = url_discard(url, ctx);
+    let mut restore = None;
+    let assign = |name: Symbol, value: Expr| {
+        Expr::new(Span::synthetic(), ExprNode::Assign { target: LValue::Var { id: VarId(0), name }, value })
+    };
     let inner_ctx = match params.first() {
+        // Refused (`analyze::diagnostics`) where it shadows a local an
+        // earlier nested body assigned: not lowered.
+        Some(p) if refuses_param(p.as_str(), &ctx.assigned_locals, &ctx.nested_assigned_locals) => return None,
         Some(p) => {
-            captured.push(Expr::new(
-                Span::synthetic(),
-                ExprNode::Assign {
-                    target: LValue::Var { id: VarId(0), name: p.clone() },
-                    value: rewrite_helpers_in_expr(text, ctx),
-                },
-            ));
+            let name = rewrite_helpers_in_expr(text, ctx);
+            let fresh = |base: &str| {
+                let mut temp = base.to_string();
+                while ctx.is_local(&temp)
+                    || ctx.assigned_locals.contains(&temp)
+                    || ctx.nested_assigned_locals.contains(&temp)
+                    || [text, url, body].into_iter().any(|e| reads_name(e, &temp))
+                {
+                    temp.push('_');
+                }
+                Symbol::from(temp.as_str())
+            };
+            // A local the parameter shadows keeps its value after the
+            // block, as a Ruby block parameter leaves it, assignments to
+            // the parameter inside included: saved before the binding and
+            // restored after the body (#1874).
+            if ctx.is_local(p.as_str()) || ctx.assigned_locals.iter().any(|n| n == p.as_str()) {
+                let saved = fresh("_link_saved");
+                captured.push(assign(saved.clone(), var_ref(p.clone())));
+                restore = Some(assign(p.clone(), var_ref(saved)));
+            }
+            // A url reading a template local the parameter shadows
+            // (`<% x = "o" %>… Tracker.at(x) do |x|`) reads the outer
+            // one, as in Rails: the name goes to a temp no one else reads,
+            // then the url, and the parameter is bound last (#1874).
+            if url_read.as_ref().is_some_and(|u| reads_name(u, p.as_str())) {
+                let temp = fresh("_link_name");
+                captured.push(assign(temp.clone(), name));
+                captured.extend(url_read.take());
+                captured.push(assign(p.clone(), var_ref(temp)));
+            } else {
+                captured.push(assign(p.clone(), name));
+            }
             captured.push(discard(var_ref(p.clone())));
             ctx.with_locals([p.as_str().to_string()])
         }
@@ -2050,11 +2242,28 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
             ctx.with_locals(std::iter::empty())
         }
     };
+    captured.extend(url_read);
     captured.extend(walk_body(body, &inner_ctx));
+    captured.extend(restore);
     let shown = if captured.len() == 1 { captured.pop().unwrap() } else { seq(captured) };
     let link = accumulator_append_call(linked.clone(), ctx);
     let (then_branch, else_branch) = if negate { (shown, link) } else { (link, shown) };
     Some(vec![Expr::new(Span::synthetic(), ExprNode::If { cond: cond.clone(), then_branch, else_branch })])
+}
+
+/// Whether `e` reads or binds the local `name`: a `Var`, an assignment
+/// to it, a bare argument-less `Send` (Prism's shape for a local it hasn't
+/// seen assigned), or a block parameter.
+fn reads_name(e: &Expr, name: &str) -> bool {
+    let here = match &*e.node {
+        ExprNode::Var { name: n, .. } | ExprNode::Assign { target: LValue::Var { name: n, .. }, .. } => n.as_str() == name,
+        ExprNode::Send { recv: None, method, args, block: None, .. } => args.is_empty() && method.as_str() == name,
+        ExprNode::Lambda { params, .. } => params.iter().any(|p| p.as_str() == name),
+        _ => false,
+    };
+    let mut found = here;
+    e.node.for_each_child(&mut |c| found = found || reads_name(c, name));
+    found
 }
 
 /// Whether a helper's block is template markup: it writes the ERB buffer
@@ -2131,6 +2340,8 @@ mod tests {
         ViewCtx {
             locals: Vec::new(),
             ivar_params: Vec::new(),
+            assigned_locals: Vec::new(),
+            nested_assigned_locals: Vec::new(),
             arg_name: String::new(),
             resource_dir: String::new(),
             accumulator: "io".to_string(),

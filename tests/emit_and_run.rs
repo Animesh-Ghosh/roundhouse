@@ -766,6 +766,50 @@ fn model_concern_delegate_through_belongs_to_runs() {
     assert!(run.stdout.contains("model concern delegate passed"));
 }
 
+/// A module that has no def of its own but extends one, and fills itself
+/// from its body (doorkeeper's `GrantFlow`: `extend Registry`, then
+/// `register(...)`), is a module code calls, not a bare namespace.
+#[test]
+fn a_module_that_extends_a_registry_answers_its_calls() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/flow_registry.rb",
+            "module FlowRegistry\n  def register(name, label)\n    flows[name] = label\n  end\n\n  def get(name)\n    flows[name]\n  end\n\n  def flows\n    @flows ||= {}\n  end\nend\n",
+        )
+        .write(
+            "app/models/grant_flows.rb",
+            "module GrantFlows\n  self.extend FlowRegistry\n\n  register(:code, \"authorization code\")\n  CODE = get(:code)\n  register(:token, \"implicit\")\nend\n",
+        )
+        .run_ruby(
+            r##"raise "GrantFlows.get: #{GrantFlows.get(:code).inspect}" unless GrantFlows.get(:code) == "authorization code" && GrantFlows.get(:token) == "implicit"
+raise "a constant between the calls: #{GrantFlows::CODE.inspect}" unless GrantFlows::CODE == "authorization code"
+puts "registry module passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("registry module passed"));
+}
+
+/// `String#strip_heredoc` as Rails takes it: the least indentation of a
+/// line that is not blank, by String order, off each line's start.
+#[test]
+fn strip_heredoc_runs_in_emitted_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/heredoc_probe.rb",
+            "class HeredocProbe\n  def self.message(name)\n    <<-TEXT.strip_heredoc\n      Hello #{name},\n        indented\n\n      bye\n    TEXT\n  end\n\n  def self.mixed\n    \" \\t a\\n\\t  b\\n\".strip_heredoc\n  end\n\n  def self.copies\n    plain = +\"a\\nb\\n\"\n    out = plain.strip_heredoc\n    out << \"x\"\n    frozen = \"  a\\n\".dup.freeze\n    [plain, out.equal?(plain), frozen.strip_heredoc.frozen?, (+\"  a\\n\").strip_heredoc.frozen?]\n  end\nend\n",
+        )
+        .run_ruby(
+            r##"raise "strip_heredoc: #{HeredocProbe.message("Ann").inspect}" unless HeredocProbe.message("Ann") == "Hello Ann,\n  indented\n\nbye\n"
+raise "strip_heredoc by String order: #{HeredocProbe.mixed.inspect}" unless HeredocProbe.mixed == " \t a\nb\n"
+raise "strip_heredoc copies and keeps frozenness: #{HeredocProbe.copies.inspect}" unless HeredocProbe.copies == ["a\nb\n", false, true, false]
+puts "strip_heredoc passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("strip_heredoc passed"));
+}
+
 #[test]
 fn active_support_many_block_and_squish_bang_run_in_emitted_ruby() {
     let run = emit_and_run::real_blog()
@@ -10252,6 +10296,47 @@ fn included_block_defs_that_would_lose_their_precedence_stay_refused() {
     }
 }
 
+/// A block that includes a module the program defines hoists its defs
+/// when that module defines none of their names (doorkeeper's model
+/// mixins), and reports the one it does define: there the block's def is
+/// the includer's own in Ruby, ahead of the module.
+#[test]
+fn included_block_defs_beside_an_include_hoist_unless_the_module_defines_them() {
+    let helper = "module Shouty::Tone\n  def tone\n    \"module\"\n  end\nend\n";
+    emit_and_run::real_blog()
+        .write("app/models/concerns/shouty/tone.rb", helper)
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include ::Shouty::Tone\n    def shout\n      title.upcase + tone\n    end\n  end\nend\n",
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+        .write(
+            "test/models/shouty_test.rb",
+            "require \"test_helper\"\n\nclass ShoutyTest < ActiveSupport::TestCase\n  test \"a def beside an include runs on the includer\" do\n    assert_equal \"HImodule\", Article.new(title: \"hi\").shout\n  end\nend\n",
+        )
+        .run_test("test/models/shouty_test.rb")
+        .assert_passes();
+    let errors = emit_and_run::real_blog()
+        .write("app/models/concerns/shouty/tone.rb", helper)
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    include ::Shouty::Tone\n    def tone\n      \"block\"\n    end\n  end\nend\n",
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("nested def")), "{errors:?}");
+    // An include inside a begin body is the block's include too.
+    let errors = emit_and_run::real_blog()
+        .write("app/models/concerns/shouty/tone.rb", helper)
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    begin\n      include ::Shouty::Tone\n    rescue NameError\n      nil\n    end\n    def tone\n      \"block\"\n    end\n  end\nend\n",
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("nested def")), "{errors:?}");
+}
+
 /// The inner concern's own `included do` runs on the includer too: its
 /// scope is declared on the model.
 #[test]
@@ -12987,14 +13072,11 @@ puts "string inflections passed"
 
 /// #293: `tableize` needs Rails' plural rules, which the runtime does not
 /// carry (its `pluralize_word` keeps a word that ends in "s", where Rails
-/// answers "statuses"), and `strip_heredoc` has no runtime body. Both are
-/// refused at check time, not emitted onto a String no runtime reopens.
+/// answers "statuses"). It is refused at check time, not emitted onto a
+/// String no runtime reopens.
 #[test]
 fn string_extensions_without_a_runtime_body_are_refused() {
-    for (call, method) in [
-        (r#""Status".tableize"#, "tableize"),
-        (r#""  gear\n  boxes\n".strip_heredoc"#, "strip_heredoc"),
-    ] {
+    for (call, method) in [(r#""Status".tableize"#, "tableize")] {
         let errors = emit_and_run::real_blog()
             .edit(
                 "app/models/article.rb",
@@ -20709,6 +20791,8 @@ mod solid_queue_surface;
 mod controller_surface;
 #[path = "emit_and_run/rack_attack.rs"]
 mod rack_attack;
+#[path = "support/addressable_gem.rs"]
+mod addressable_gem;
 #[path = "emit_and_run/addressable.rs"]
 mod addressable;
 #[path = "emit_and_run/solid_queue_worker.rs"]
@@ -21048,6 +21132,85 @@ fn link_to_unless_and_the_block_form_render_as_rails_on_spinel() {
         .write("lib/tracker.rb", link_to_unless::TRACKER)
         .run_spinel(&helper_escape_at_output::render_script(link_to_unless::RENDERS))
         .assert_passes();
+}
+
+#[path = "support/link_to_if_eval_order.rs"]
+#[allow(dead_code)]
+mod link_to_if_eval_order;
+
+/// `link_to_if` and `link_to_unless` evaluate the condition, the name and
+/// the url, in that order, whether or not they link, and before the block.
+#[test]
+fn link_to_if_evaluates_its_arguments_as_rails() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_if_eval_order::VIEW)
+        .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_if_eval_order::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_if_evaluates_its_arguments_as_rails_on_spinel() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_if_eval_order::VIEW)
+        .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+        .run_spinel(&helper_escape_at_output::render_script(link_to_if_eval_order::RENDERS))
+        .assert_passes();
+}
+
+/// A partial local named `url` and an explicit `url()` to the app helper of
+/// that name: the call runs, with its effect, when no link is made; the
+/// bare `url` reads the local. Spinel doesn't build the probe (the link's
+/// url reads the local as a record, `url_path(url.id)`), so it is checked
+/// on the Ruby target, and in the emitted partial.
+#[test]
+fn link_to_if_calls_an_explicit_url_beside_a_url_local() {
+    url_call_app()
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_if_eval_order::URL_CALL_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+    let (emitted, _) = url_call_app().emit(roundhouse::project::BuildTarget::Ruby);
+    let part = std::fs::read_to_string(emitted.join("app/views/probes/_part.rb")).expect("probes/_part.rb");
+    assert!(part.contains("_ = UrlProbeHelper.url") && part.matches("_ = ").count() == 1, "{part}");
+}
+
+fn url_call_app() -> emit_and_run::Overlay {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_if_eval_order::URL_CALL_SHOW)
+        .write("app/views/probes/_part.html.erb", link_to_if_eval_order::URL_CALL_PART)
+        .write("app/helpers/url_probe_helper.rb", link_to_if_eval_order::URL_HELPER)
+        .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+}
+
+/// A block parameter shadowing a template local only an earlier nested
+/// body assigned is refused, with the reason; one assigned in an `each`
+/// block, or at the top level as well, lowers.
+#[test]
+fn link_to_if_shadowing_a_nested_local_is_refused() {
+    let refusals = |markup: &str| -> Vec<String> {
+        html_safe_method_owner::app()
+            .write("app/views/probes/show.html.erb", markup)
+            .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+            .check_errors()
+            .into_iter()
+            .filter(|e| e.contains("earlier nested block"))
+            .collect()
+    };
+    let refused = refusals(link_to_if_eval_order::NESTED_REFUSED);
+    assert!(refused.len() == 1 && refused[0].contains("link_to_if not supported"), "{refused:?}");
+    // Emitted anyway (`--allow-unsupported`), the call raises where it
+    // runs: not the blockless helper, which would drop the block.
+    let (emitted, _) = html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_if_eval_order::NESTED_REFUSED)
+        .write("lib/tracker.rb", link_to_if_eval_order::TRACKER)
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    let view = std::fs::read_to_string(emitted.join("app/views/probes/show.rb")).expect("probes/show.rb");
+    assert!(view.contains("raise(\"link_to_if's block parameter `x` shadows") && !view.contains("link_to_if("), "{view}");
+    for markup in link_to_if_eval_order::NESTED_LOWERED {
+        assert!(refusals(markup).is_empty(), "{markup}");
+    }
 }
 
 #[path = "support/simple_format.rs"]

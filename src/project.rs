@@ -9737,7 +9737,7 @@ fn drop_solid_queue_standin(app: &App, files: &mut Vec<(String, String)>) {
 /// `use` middleware (`App::gem_middlewares`): the request as a Rack env,
 /// through the stack, with the routes at the bottom.
 fn spinel_gem_middleware(classes: &[String]) -> String {
-    let stacked = classes.iter().rev().fold("app".to_string(), |inner, class| format!("{class}.new({inner})"));
+    let stacked = classes.iter().rev().fold("App.new".to_string(), |inner, class| format!("{class}.new({inner})"));
     format!(
         r#"# frozen_string_literal: true
 # The Rack middleware the app's gems put on Rails' stack from their
@@ -9746,25 +9746,32 @@ fn spinel_gem_middleware(classes: &[String]) -> String {
 require "stringio"
 
 module GemMiddleware
-  # The rest of the stack under the gems' middleware: Rails' routes, for one request.
+  # The rest of the stack under the gems' middleware: Rails' routes.
   class App
-    attr_reader :tuple
+    def call(env)
+      exchange = env["roundhouse.exchange"]
+      raise TypeError, "no roundhouse.exchange in the Rack env" unless exchange.is_a?(Exchange)
+      # Not the request's own path: a middleware above may have rewritten PATH_INFO, and Rails routes the rewritten one.
+      exchange.route(env["PATH_INFO"].to_s)
+    end
+  end
 
+  # Not on App's own ivars: the stack is shared by every request the threaded server runs at once.
+  class Exchange
     def initialize(req, res, request_obj)
       @req = req
       @res = res
       @request_obj = request_obj
-      @tuple = nil
+      @routes_body = nil
+      @body = nil
     end
 
-    def call(env)
-      # Not the request's own path: a middleware above may have rewritten PATH_INFO, and Rails routes the rewritten one.
-      @req.path = env["PATH_INFO"].to_s
+    def route(path)
+      @req.path = path
       Main.dispatch_request(@req, @res, @request_obj)
       @routes_body = @res.body
       @body = [@routes_body]
-      @tuple = [@res.status, @res.headers, @body]
-      @tuple
+      [@res.status, @res.headers, @body]
     end
 
     # The routes' own body, as they left it: the same Array holding the same String.
@@ -9773,15 +9780,25 @@ module GemMiddleware
     end
   end
 
+  STACK_LOCK = Mutex.new
+
+  # Not at load: Rails builds the stack after the initializers, which configure the middleware.
+  def self.stack
+    return @stack if @stack
+    # Not a bare `||=`: two first requests at once would each build a stack and run its constructors twice.
+    STACK_LOCK.synchronize {{ @stack ||= {stacked} }}
+  end
+
   def self.dispatch(req, res, request_obj)
-    app = App.new(req, res, request_obj)
-    # Built per request, not once as Rails does: the app at its bottom holds this request's objects, and a shared one has nowhere typed to keep them.
-    response = {stacked}.call(GemMiddleware.env_of(req, request_obj))
+    exchange = Exchange.new(req, res, request_obj)
+    env = GemMiddleware.env_of(req, request_obj)
+    env["roundhouse.exchange"] = exchange
+    response = GemMiddleware.stack.call(env)
     res.status = response[0].to_i
     # Not merged into the routes' headers: a response of the middleware's own carries only its own.
     GemMiddleware.replace_headers(res, response[1]) unless response[1].equal?(res.headers)
     # Not rebuilt from the routes' own body: it may be no String (a file a controller sends).
-    return nil if app.routes_body?(response[2])
+    return nil if exchange.routes_body?(response[2])
     begin
       body = +""
       response[2].each {{ |part| body << part.to_s }}

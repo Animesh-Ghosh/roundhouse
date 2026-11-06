@@ -145,6 +145,9 @@ pub struct App {
     /// The insertions it could not read, reported by analyze.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gem_middleware_refusals: Vec<crate::diagnostic::Diagnostic>,
+    /// A def hoisted out of a concern's `included do` that a module the same block includes also defines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub included_hoist_conflicts: Vec<crate::diagnostic::Diagnostic>,
     /// Pins from `config/importmap.rb`, expanded (each
     /// `pin_all_from` has been resolved into explicit per-file
     /// pins via `app/javascript/**` walking). Consumed by the
@@ -1252,6 +1255,7 @@ impl App {
             boot_gem_constants: Vec::new(),
             gem_middlewares: Vec::new(),
             gem_middleware_refusals: Vec::new(),
+            included_hoist_conflicts: Vec::new(),
             importmap: None,
             engine_importmaps: Vec::new(),
             inertia: None,

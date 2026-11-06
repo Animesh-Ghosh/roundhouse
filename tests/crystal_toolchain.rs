@@ -32,6 +32,9 @@ mod ts_controller_ivars;
 #[path = "support/content_tag_options.rs"]
 #[allow(dead_code)]
 mod content_tag_options;
+#[path = "support/link_to_if_eval_order.rs"]
+#[allow(dead_code)]
+mod link_to_if_eval_order;
 #[path = "support/simple_format.rs"]
 mod simple_format;
 #[path = "support/link_to_computed_url.rs"]
@@ -452,6 +455,19 @@ fn pluralize_in_a_template_is_escaped() {
     }
     for absent in pluralize_escape::ABSENT {
         assert!(!stdout.contains(absent), "unexpected {absent} in\n{stdout}");
+    }
+}
+
+/// #1862: `link_to_if` / `link_to_unless` evaluate the url when no link
+/// is made, and the generated view still builds and renders as Rails
+/// (`link_to_if_eval_order::STRICT_VIEW`): the page rendered by the built app.
+#[test]
+#[ignore]
+fn link_to_if_evaluates_its_url_and_renders() {
+    let (ok, stdout, stderr) = render_probe(content_tag_options::app_rendering(link_to_if_eval_order::STRICT_VIEW, link_to_if_eval_order::STRICT_RENDERS));
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in link_to_if_eval_order::STRICT_RENDERS {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
     }
 }
 
