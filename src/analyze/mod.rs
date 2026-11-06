@@ -11242,7 +11242,7 @@ pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
         if elements.len() < 2 || elements.iter().any(|e| matches!(&*e.node, ExprNode::Splat { .. })) {
             return None;
         }
-        let tys: Vec<Ty> = elements.iter().map(|e| e.ty.clone()).collect::<Option<_>>()?;
+        let tys: Vec<Ty> = elements.iter().map(Analyzer::class_object_return_ty).collect::<Option<_>>()?;
         if tys.iter().any(|t| matches!(t, Ty::Var { .. })) {
             return None;
         }
