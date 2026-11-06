@@ -259,3 +259,110 @@ fn unnamed_check_can_be_removed_by_rails_generated_name() {
         }
     }
 }
+
+#[test]
+fn roda_column_indexes_omit_postgres_only_predicates_before_sqlite_boot() {
+    for unique in [false, true] {
+        let source = format!("ActiveRecord::Schema[8.1].define do\n create_table :members do |t|\n t.string :email\n t.integer :state\n t.index [:email], unique: {unique}, where: \"(state = ANY (ARRAY[2, 3]))\"\n end\nend");
+        let mut app = roundhouse::App::default();
+        app.schema = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap();
+        let files = roundhouse::emit::roda::emit(&app);
+        let migration = files.iter().find(|f| f.path.to_string_lossy().contains("create_members")).unwrap();
+        let script = "begin; gem 'sequel', '>= 5.0'; rescue Gem::LoadError; puts 'skip: Sequel is unavailable'; exit; end; require 'sequel'; require 'sequel/extensions/migration'; db = Sequel.sqlite; eval(ARGV.fetch(0)).apply(db, :up); db[:members].insert(email: 'one@example.test', state: 2); raise unless db[:members].count == 1";
+        let out = emit_and_run::ruby().args(["-e", script, &migration.content]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(!migration.content.contains("ANY"), "{}", migration.content);
+        let pg = render_schema_statements_for(&app.schema, Dialect::Postgres).unwrap().join(";\n");
+        assert!(pg.contains("WHERE (state = ANY (ARRAY[2, 3]))"), "{pg}");
+    }
+}
+
+fn expression_bulk_app(body: &str) -> emit_and_run::Overlay {
+    app().write("app/models/member.rb", "class Member < ActiveRecord::Base\n  scope :adult, -> { where(age: 18) }\n  def self.import_members\n    MemberImporter.run\n  end\nend\n")
+        .write("app/services/member_importer.rb", &format!("class MemberImporter\n  def self.run\n    {body}\n  end\nend\n"))
+}
+
+#[test]
+fn insert_all_with_unique_expression_index_is_refused_at_its_source() {
+    use roundhouse::project::BuildTarget;
+    let call = "Member.insert_all([{age: 18, email: 'One@example.test'}, {age: 18, email: 'one@example.test'}])";
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let (_, analyzed, errors) = expression_bulk_app(call).emit_with_app(target);
+        let refusal = errors.iter().find(|d| d.message.contains("insert_all") && d.message.contains("unique expression index"));
+        let refusal = refusal.expect("inlined bulk inserts must not raise where Rails skips duplicates");
+        let file = &analyzed.sources[(refusal.span.file.0 - 1) as usize];
+        assert!(file.path.ends_with("app/services/member_importer.rb"), "{}", file.path);
+        assert!(file.text[refusal.span.start as usize..refusal.span.end as usize].contains(call));
+    }
+}
+
+#[test]
+fn emitted_ruby_insert_all_skips_expression_conflicts() {
+    let call = "Member.insert_all([{age: 18, email: 'One@example.test'}, {age: 18, email: 'one@example.test'}])";
+    expression_bulk_app(call).edit("app/models/member.rb", "  scope :adult, -> { where(age: 18) }\n", "")
+        .run_ruby("Member.import_members\nraise unless Member.count == 1").assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn native_unlowered_insert_all_skips_expression_conflicts() {
+    let call = "Member.insert_all([{age: 18, email: 'One@example.test'}, {age: 18, email: 'one@example.test'}])";
+    expression_bulk_app(call).edit("app/models/member.rb", "  scope :adult, -> { where(age: 18) }\n", "")
+        .run_spinel_with_db("Member.import_members\nraise unless Member.count == 1").assert_passes();
+}
+
+#[test]
+fn rails_insert_all_skips_unique_expression_conflicts() {
+    let helper = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
+    let script = format!(r#"
+require {helper:?}
+unless RailsOracle.available?("activerecord", sqlite3: ">= 2.9")
+  puts "skip: Rails oracle and sqlite3 are unavailable"
+  exit
+end
+RailsOracle.activate("activerecord", sqlite3: ">= 2.9")
+require "active_record"
+ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
+ActiveRecord::Schema.verbose = false
+{SCHEMA}
+class Member < ActiveRecord::Base; end
+result = Member.insert_all([{{age: 18, email: 'One@example.test'}}, {{age: 18, email: 'one@example.test'}}])
+raise 'wrong insert result' unless result.rows.length == 1 && Member.count == 1
+Member.insert_all([{{age: 18, email: 'one@example.test'}}])
+raise 'existing conflict was not skipped' unless Member.count == 1
+puts 'Rails skips expression conflicts'
+"#);
+    let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Rails skips expression conflicts") || stdout.contains("skip:"), "{stdout}");
+}
+
+#[test]
+fn expression_bulk_refusal_is_narrow_to_builtin_skipping_writes() {
+    use roundhouse::project::BuildTarget;
+    let call = "Member.insert_all([{age: 18, email: 'One@example.test'}, {age: 18, email: 'one@example.test'}])";
+    for owner in [
+        "class Member < ActiveRecord::Base\n scope :adult, -> { where(age: 18) }\n def self.insert_all(rows); 42; end\n def self.import_members; MemberImporter.run; end\nend",
+        "class BulkBase < ActiveRecord::Base\n self.abstract_class = true\n def self.insert_all(rows); 42; end\nend\nclass Member < BulkBase\n scope :adult, -> { where(age: 18) }\n def self.import_members; MemberImporter.run; end\nend",
+    ] {
+        for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+            let (_, errors) = expression_bulk_app(call).write("app/models/member.rb", owner).emit(target);
+            assert!(!errors.iter().any(|d| d.contains("unique expression index")), "{errors:?}");
+        }
+    }
+    let bang = call.replace("insert_all(", "insert_all!(");
+    let (_, errors) = expression_bulk_app(&bang).emit(BuildTarget::Spinel);
+    assert!(!errors.iter().any(|d| d.contains("unique expression index")), "{errors:?}");
+    expression_bulk_app(call).write("db/schema.rb", &SCHEMA.replace("unique: true", "unique: false"))
+        .run_ruby("Member.import_members\nraise unless Member.count == 2").assert_passes();
+}
+
+#[test]
+fn rooted_expression_bulk_call_is_refused_or_uses_the_atomic_runtime() {
+    let call = "::Member.insert_all([{age: 18, email: 'One@example.test'}, {age: 18, email: 'one@example.test'}])";
+    let (_, errors) = expression_bulk_app(call).emit(roundhouse::project::BuildTarget::Ruby);
+    if !errors.iter().any(|d| d.contains("unique expression index")) {
+        expression_bulk_app(call).run_ruby("Member.import_members\nraise unless Member.count == 1").assert_passes();
+    }
+}

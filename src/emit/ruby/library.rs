@@ -2088,7 +2088,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     let _span = crate::timings::begin("scope lowering: setup");
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
     let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
-    let unique_keys = crate::lower::scope_chain::build_unique_keys(&app.models, &app.schema);
+    let unique_keys = crate::lower::scope_chain::build_unique_keys(app);
     let regs = crate::lower::scope_chain::Registries {
         scopes: &scopes,
         models: &models,

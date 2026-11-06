@@ -780,7 +780,7 @@ class Routing(unittest.TestCase):
         # must too when that file is the only change.
         self.assertEqual(
             ci.select(["src/emit/ruby/library.rs"])["spinel_tests"],
-            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel"],
+            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_constraints"],
         )
         self.assertEqual(
             ci.select(["runtime/spinel/db.rb"])["spinel_tests"],
@@ -941,6 +941,7 @@ class Routing(unittest.TestCase):
             "tests/schema_constraints.rs", "tests/support/schema_constraints_schema.rb",
             "tests/support/schema_constraints_contract.rb", "src/schema.rs", "src/ingest/schema.rs",
             "src/emit/shared/schema_sql.rs", "src/lower/model_to_library/schema.rs", "src/lower/scope_chain.rs",
+            "src/emit/roda.rs", "src/emit/ruby/library.rs",
         ]:
             with self.subTest(path=path):
                 plan = ci.select([path])
