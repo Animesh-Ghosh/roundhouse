@@ -27,12 +27,14 @@ fn emitted_posts_views() -> String {
 end
 "#),
         ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
-        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :posts, only: [:index]\n  get \"/archive\", to: \"posts#archive\"\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  resources :posts, only: [:index]\n  get \"/archive\", to: \"posts#archive\"\n  get \"/featured\", to: \"posts#featured\"\nend\n"),
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
-        ("app/controllers/posts_controller.rb", "class PostsController < ApplicationController\n  def index\n    @posts = Post.all\n  end\n\n  def archive\n    @posts = Post.all\n  end\nend\n"),
+        ("app/controllers/posts_controller.rb", "class PostsController < ApplicationController\n  def index\n    @posts = Post.all\n  end\n\n  def archive\n    @posts = Post.all\n  end\n\n  def featured\n    @posts = Post.all\n  end\nend\n"),
         ("app/views/posts/index.html.erb", "<ul><%= render @posts %></ul>\n"),
         ("app/views/posts/archive.html.erb", "<p><%= @posts.size %></p>\n<ul><%= render @posts %></ul>\n"),
         ("app/views/posts/_post.html.erb", "<li><%= post.title %></li>\n"),
+        ("app/views/posts/featured.html.erb", "<%= render partial: \"posts/listing\", locals: { posts: @posts } %>\n"),
+        ("app/views/posts/_listing.html.erb", "<%# locals: (posts:) -%>\n<ul>\n<% posts.each do |post| %>\n  <li><%= post.title %></li>\n<% end %>\n</ul>\n"),
     ];
     let tree: HashMap<PathBuf, Vec<u8>> = files
         .into_iter()
@@ -67,6 +69,22 @@ fn single_read_collection_param_is_declared_mut() {
     assert!(
         index.contains("posts.iter_mut().for_each("),
         "the single read borrows the param itself:\n{index}"
+    );
+}
+
+/// A strict-locals partial reads its local as a bare name, which the
+/// view lowerer emits as a receiverless Send rather than a Var.
+#[test]
+fn partial_local_read_as_each_receiver_is_declared_mut() {
+    let src = emitted_posts_views();
+    let listing = view_fn(&src, "listing");
+    assert!(
+        listing.starts_with("pub fn listing(mut posts: Vec<Post>"),
+        "a partial local borrowed by `iter_mut()` must be `mut`:\n{listing}"
+    );
+    assert!(
+        listing.contains("posts.iter_mut().for_each("),
+        "the bare local read borrows the param itself:\n{listing}"
     );
 }
 

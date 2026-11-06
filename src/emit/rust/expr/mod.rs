@@ -1079,9 +1079,16 @@ fn emit_expr_inner(e: &Expr) -> String {
                         // No clone to borrow from (a single read, or a
                         // mutating block): the param binding itself is
                         // borrowed mutably, so the signature must
-                        // declare it `mut`.
+                        // declare it `mut`. A view reads a bare param
+                        // as a receiverless Send (`emit_send`).
                         if iter_chain == ".iter_mut()" {
-                            if let ExprNode::Var { name, .. } = &*r.node {
+                            let param = match &*r.node {
+                                ExprNode::Var { name, .. } => Some(name),
+                                ExprNode::Send { recv: None, method, args, block: None, .. }
+                                    if args.is_empty() => Some(method),
+                                _ => None,
+                            };
+                            if let Some(name) = param {
                                 if recv_s == util::escape_rust_keyword(name.as_str())
                                     && param_ty(name.as_str()).is_some()
                                 {

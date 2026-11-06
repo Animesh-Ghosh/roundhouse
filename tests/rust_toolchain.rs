@@ -410,10 +410,7 @@ fn filters_that_read_action_name_compile() {
 #[test]
 #[ignore]
 fn single_read_collection_render_compiles() {
-    let app_dir = scratch_dir("single-read-render-app");
-    if app_dir.exists() {
-        std::fs::remove_dir_all(&app_dir).expect("clean app copy");
-    }
+    let app_dir = scratch_dir("single-read-render-app").join("app");
     let copied = Command::new("cp")
         .arg("-R")
         .arg(roundhouse::fixtures::real_blog())
