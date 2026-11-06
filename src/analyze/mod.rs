@@ -10511,13 +10511,17 @@ fn register_attr_accessors(body: &[ModelBodyItem], methods: &mut HashMap<Symbol,
 /// and presence predicate typed per the `:type` symbol — same shape as
 /// `typed_store`, reusing its type map. A bare `attribute :name` with no
 /// type, or an unrecognized type, falls back to `Untyped` (gradual).
+/// The reader is nilable: the value is nil until written, and each of
+/// these types casts nil to nil.
 fn register_ar_attributes(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {
     for (name, ty) in crate::lower::model_to_library::markers::attribute_api_decls(body) {
         let ty = ty
             .as_ref()
             .and_then(|t| typed_store_ty(t.as_str()))
             .unwrap_or(Ty::Untyped);
-        methods.entry(name.clone()).or_insert(ty.clone());
+        let reader_ty =
+            if matches!(ty, Ty::Untyped) { Ty::Untyped } else { Ty::Union { variants: vec![ty.clone(), Ty::Nil].into() } };
+        methods.entry(name.clone()).or_insert(reader_ty);
         let setter = Symbol::from(format!("{}=", name.as_str()));
         methods.entry(setter).or_insert(ty.clone());
         let predicate = Symbol::from(format!("{}?", name.as_str()));
