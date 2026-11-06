@@ -766,6 +766,25 @@ fn model_concern_delegate_through_belongs_to_runs() {
     assert!(run.stdout.contains("model concern delegate passed"));
 }
 
+/// `String#strip_heredoc` as Rails takes it: the least indentation of a
+/// line that is not blank, by String order, off each line's start.
+#[test]
+fn strip_heredoc_runs_in_emitted_ruby() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/heredoc_probe.rb",
+            "class HeredocProbe\n  def self.message(name)\n    <<-TEXT.strip_heredoc\n      Hello #{name},\n        indented\n\n      bye\n    TEXT\n  end\n\n  def self.mixed\n    \" \\t a\\n\\t  b\\n\".strip_heredoc\n  end\nend\n",
+        )
+        .run_ruby(
+            r##"raise "strip_heredoc: #{HeredocProbe.message("Ann").inspect}" unless HeredocProbe.message("Ann") == "Hello Ann,\n  indented\n\nbye\n"
+raise "strip_heredoc by String order: #{HeredocProbe.mixed.inspect}" unless HeredocProbe.mixed == " \t a\nb\n"
+puts "strip_heredoc passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("strip_heredoc passed"));
+}
+
 #[test]
 fn active_support_many_block_and_squish_bang_run_in_emitted_ruby() {
     let run = emit_and_run::real_blog()
