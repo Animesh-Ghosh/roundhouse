@@ -480,24 +480,40 @@ fn unlowered_simple_format(app: &App) -> Vec<Diagnostic> {
 }
 
 /// A call to `pluralize`, `content_tag` or `simple_format` where a
-/// controller's `helper_method` of that name isn't served by that
-/// controller's own class-side clone: the name has no entry in
-/// `helper_method_index`, or an app helper's (whose insert overwrites a
-/// clone). Rails calls the controller's method in the templates that
-/// controller renders, and the app helper's or ActionView's in the
-/// others. Which controller renders a template isn't decided statically
-/// (`render template:` reaches any of them), so the call is refused
-/// rather than routed one way for every template.
+/// controller's `helper_method` of that name isn't served, in every
+/// template, by one controller's class-side clone. That is, the name's
+/// `helper_method_index` entry is missing, is an app helper's (whose
+/// insert overwrites a clone), or is a controller that isn't every app
+/// controller or an ancestor of it. Rails calls the controller's method
+/// in the templates that controller and its subclasses render, and the
+/// app helper's or ActionView's in the others. Which controller renders a
+/// template isn't decided statically (`render template:` reaches any of
+/// them), so the call is refused rather than routed one way for every
+/// template.
 fn controller_shadowed_view_helpers(app: &App) -> Vec<Diagnostic> {
+    // `owner` is `controller` or one of its ancestors.
+    let descends = |controller: &crate::dialect::Controller, owner: &ClassId| {
+        let mut current = Some(controller);
+        let mut seen = crate::det::HashSet::default();
+        while let Some(c) = current {
+            if c.name == *owner {
+                return true;
+            }
+            if !seen.insert(c.name.0.as_str()) {
+                break;
+            }
+            current = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| o.name == *p));
+        }
+        false
+    };
     let names: Vec<&str> = ["pluralize", "content_tag", "simple_format"]
         .into_iter()
         .filter(|n| {
             let name = Symbol::from(*n);
-            let cloned = app
-                .helper_method_index
-                .get(&name)
-                .is_some_and(|owner| app.controllers.iter().any(|c| c.name == *owner));
-            app.view_visible_controller_methods.contains(&name) && !cloned
+            let everywhere = app.helper_method_index.get(&name).is_some_and(|owner| {
+                app.controllers.iter().any(|c| c.name == *owner) && app.controllers.iter().all(|c| descends(c, owner))
+            });
+            app.view_visible_controller_methods.contains(&name) && !everywhere
         })
         .collect();
     if names.is_empty() {
