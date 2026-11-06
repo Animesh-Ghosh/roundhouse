@@ -60,7 +60,11 @@ pub(super) fn mark(app: &mut App) {
                 continue;
             }
             // `module GrantFlow; extend Registry; register(:code, …)`: the registry is filled as the body loads.
-            if lc.is_module && extended.iter().any(|m| module_methods.get(m).is_some_and(|ms| ms.contains(method.as_str()))) {
+            // Not one that reads a local: the body's local assignments are not carried, so the replay would raise NameError.
+            if lc.is_module
+                && args.iter().all(reads_no_local)
+                && extended.iter().any(|m| module_methods.get(m).is_some_and(|ms| ms.contains(method.as_str())))
+            {
                 expr.decisions |= crate::expr::REPLAYED_CLASS_BODY;
             }
         }
@@ -334,6 +338,12 @@ fn plain_value(expr: &crate::expr::Expr) -> bool {
     let mut children = true;
     expr.node.for_each_child(&mut |child| children &= plain_value(child));
     allowed && children
+}
+
+fn reads_no_local(expr: &crate::expr::Expr) -> bool {
+    let mut clean = !matches!(&*expr.node, ExprNode::Var { .. });
+    expr.node.for_each_child(&mut |child| clean &= reads_no_local(child));
+    clean
 }
 
 fn literal_argument(expr: &crate::expr::Expr) -> bool {

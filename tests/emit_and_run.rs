@@ -10325,6 +10325,16 @@ fn included_block_defs_beside_an_include_hoist_unless_the_module_defines_them() 
         .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
         .check_errors();
     assert!(errors.iter().any(|e| e.contains("nested def")), "{errors:?}");
+    // An include inside a begin body is the block's include too.
+    let errors = emit_and_run::real_blog()
+        .write("app/models/concerns/shouty/tone.rb", helper)
+        .write(
+            "app/models/concerns/shouty.rb",
+            "module Shouty\n  extend ActiveSupport::Concern\n  included do\n    begin\n      include ::Shouty::Tone\n    rescue NameError\n      nil\n    end\n    def tone\n      \"block\"\n    end\n  end\nend\n",
+        )
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Shouty\n")
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("nested def")), "{errors:?}");
 }
 
 /// The inner concern's own `included do` runs on the includer too: its

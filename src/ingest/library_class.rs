@@ -91,6 +91,20 @@ fn collect_block_includes(node: &Node<'_>, out: &mut Vec<String>) {
         [n.statements().map(|s| s.as_node()), n.else_clause().map(|e| e.as_node())].into_iter().flatten().collect()
     } else if let Some(n) = node.as_else_node() {
         n.statements().map(|s| s.as_node()).into_iter().collect()
+    } else if let Some(n) = node.as_begin_node() {
+        let mut parts: Vec<Node<'_>> = n.statements().map(|s| s.as_node()).into_iter().collect();
+        let mut rescue = n.rescue_clause();
+        while let Some(r) = rescue {
+            parts.extend(r.statements().map(|s| s.as_node()));
+            rescue = r.subsequent();
+        }
+        parts.extend(n.else_clause().map(|e| e.as_node()));
+        parts.extend(n.ensure_clause().and_then(|e| e.statements()).map(|s| s.as_node()));
+        parts
+    } else if let Some(n) = node.as_case_node() {
+        n.conditions().iter().chain(n.else_clause().map(|e| e.as_node())).collect()
+    } else if let Some(n) = node.as_when_node() {
+        n.statements().map(|s| s.as_node()).into_iter().collect()
     } else if let Some(n) = node.as_statements_node() {
         n.body().iter().collect()
     } else {

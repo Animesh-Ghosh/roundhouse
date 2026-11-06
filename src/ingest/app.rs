@@ -3125,8 +3125,6 @@ end
     super::channel_callbacks::lower_channel_callbacks(&mut app);
     super::channel_callbacks::lower_channel_names(&mut app);
     super::on_load_reopen::apply_pending(&mut app);
-    // Not beside the hoists: forwardable, delegate and carried includes give an included module methods and ancestors later.
-    app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);
     splice_concerns_into_models(&mut app, &concern_class_method_spans);
     splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
     let owned_validate_calls = decline_owned_validate_calls(&mut app, &sources, &concern_class_method_spans, &const_resolver.for_sources(&sources));
@@ -3234,6 +3232,8 @@ end
     // gone by then — a base's ancestry is the one thing the tree
     // cannot see for itself.
     super::library_class::expand_props_bases(&mut app);
+    // Not beside the hoists: forwardable, delegate, carried includes and props bases give an included module methods and ancestors later.
+    app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);
     // After both: the chain is complete, so a repeated declaration can
     // find the one it replaces.
     dedup_repeated_filters(&mut app);
