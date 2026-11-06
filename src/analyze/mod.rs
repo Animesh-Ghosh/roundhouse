@@ -1823,7 +1823,8 @@ impl Analyzer {
         });
         // Not done at the restamp: lobsters' `upvoter_score` kept the `String` its view site saw before `comment_score_for_user` widened to `Integer | String`.
         // Both loops share one budget of FIXPOINT_CAP production passes: on an app whose production loop ran to its cap, the params or returns here may never settle, and a cap per loop spent up to 12 × 12 full passes.
-        let mut returns_settled = true;
+        // Not settled after a capped absorb: its last harvest may have moved a return that no production body has been typed against.
+        let mut returns_settled = rounds.absorb != LoopEnd::RanToCap;
         // One round past the cap: every round that goes on spends a pass, so round FIXPOINT_CAP only re-joins what the last restamp typed, then stops.
         for round in 0..=FIXPOINT_CAP {
             rounds.restamp.rounds = round + 1;
@@ -1832,35 +1833,28 @@ impl Analyzer {
             self.overlay_test_params(app);
             self.apply_pinned_params();
             // Not pinned while the loop still moves: a `Var` mid-loop may be an argument the next round types.
-            if self.inferred_params == before && !(app.pins_unresolved_params && self.pin_open_params()) {
-                if returns_settled {
-                    rounds.restamp.end = LoopEnd::Settled(round);
-                }
+            if self.inferred_params == before && returns_settled && !(app.pins_unresolved_params && self.pin_open_params()) {
+                rounds.restamp.end = LoopEnd::Settled(round);
                 break;
             }
             if rounds.restamp.passes == FIXPOINT_CAP {
                 break;
             }
             crate::timings::phase("typing passes (after view param restamp)", || {
-                // Not one production pass: a helper return the new params move is read by production callers typed before its harvest.
-                loop {
-                    rounds.restamp.passes += 1;
-                    let hints = self.capture_dirty_hints();
-                    self.run_typing_passes(
-                        app,
-                        &dynamic_render_ivars,
-                        &existing_view_names,
-                        &module_methods,
-                        &module_includes,
-                        &parent_link_by_name,
-                        TypingMode::Production { dirty: None },
-                    );
-                    self.harvest_returns_to_registry(app, true);
-                    returns_settled = self.inference_matches(&hints.sig);
-                    if returns_settled || rounds.restamp.passes == FIXPOINT_CAP {
-                        break;
-                    }
-                }
+                // Not retyped until the returns settle before the next re-join: every round then ended on a pass that only confirmed its returns, so a chain of view-fed helpers took two passes per helper instead of one.
+                rounds.restamp.passes += 1;
+                let hints = self.capture_dirty_hints();
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                    TypingMode::Production { dirty: None },
+                );
+                self.harvest_returns_to_registry(app, true);
+                returns_settled = self.inference_matches(&hints.sig);
                 self.run_typing_passes(
                     app,
                     &dynamic_render_ivars,
