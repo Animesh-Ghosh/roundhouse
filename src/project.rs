@@ -9198,7 +9198,9 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         // These newly admitted class objects are retained by Ruby/JRuby only.
         if target != "jruby"
             && expr.decisions & crate::expr::RUNTIME_CLASS_OBJECT != 0
-            && let crate::expr::ExprNode::Send { method, .. } = &*expr.node
+            && let crate::expr::ExprNode::Send { method, args, block, .. } = &*expr.node
+            // Not a bare `Module.new` on Spinel, which makes an anonymous module (addressable's `NONE` sentinel); a body or a superclass is still refused.
+            && !(target == "spinel" && method.as_str() == "new" && args.is_empty() && block.is_none())
         {
             emit::diagnostics::report_unsupported(
                 expr.span,
@@ -11479,8 +11481,15 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         .filter(|dep| matches!(crate::gems::fate_of(dep), crate::gems::GemFate::Unknown))
         .map(|dep| crate::gems::GemEntry { name: dep.clone(), version: lock.version_of(dep).map(str::to_string), fate: crate::gems::GemFate::Unknown })
         .collect();
+    let ported = crate::gems::ported_runtime_constants();
+    // Not only the gems the catalog knows nothing of: one it only types (addressable) has no body on this tree either, and Bundler loads the real one.
+    let modeled = census
+        .gems
+        .iter()
+        .filter(|g| g.fate == crate::gems::GemFate::Modeled && !ported.contains(&crate::gems::namespace_of(&g.name)));
     let needed: Vec<_> = census
         .unknown()
+        .chain(modeled)
         .chain(source_deps.iter())
         .filter(|gem| {
             // Fail-closed: a GIT-sourced unknown must not be rewritten as a

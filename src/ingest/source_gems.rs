@@ -55,7 +55,8 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
         };
         // Not lexical first: a `..` after a linked app dir resolves through the link, as the OS reads it
         let installed = vfs.canonical(&installed).unwrap_or_else(|| normalize(&installed));
-        let files = required_files(vfs, &installed, name, lock.gemfile_requires.get(name))?;
+        let native = |feature: &str| native_feature(vfs, &roots, lock, name, feature);
+        let files = required_files(vfs, &installed, name, lock.gemfile_requires.get(name), &native)?;
         gems.push(SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files });
     }
     Ok(gems)
@@ -89,11 +90,36 @@ pub(super) fn framework_models<V: Vfs + ?Sized>(vfs: &V, dir: &Path, lock: Optio
     (!files.is_empty()).then(|| SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files })
 }
 
+/// Whether `feature` is a locked gem's whose C extension the Spinel tree
+/// cannot build and whose namespace no runtime port stands in for (idn-ruby's
+/// `idn`): Ruby on that tree raises LoadError where it is required.
+fn native_feature<V: Vfs + ?Sized>(vfs: &V, roots: &[PathBuf], lock: &Lockfile, from: &str, feature: &str) -> bool {
+    let head = feature.split('/').next().unwrap_or(feature);
+    lock.specs.iter().any(|(gem, version)| {
+        gem != from
+            && (gem == head || gem.split('-').next() == Some(head))
+            && !crate::gems::namespace_candidates(gem).iter().any(|ns| crate::gems::ported_runtime_constants().contains(ns))
+            && crate::i18n::gems::installed_gem(vfs, roots, gem, version).is_some_and(|dir| vfs.is_dir(&dir.join("ext")))
+    })
+}
+
+/// A file that requires such a feature at its top level, unconditionally:
+/// loading it raises before anything in it is defined.
+fn requires_native(text: &str, native: &dyn Fn(&str) -> bool) -> bool {
+    text.lines().any(|line| {
+        let Some(rest) = line.strip_prefix("require ") else { return false };
+        let rest = rest.trim();
+        let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'');
+        quote.and_then(|q| rest[1..].split(q).next()).is_some_and(native)
+    })
+}
+
 fn required_files<V: Vfs + ?Sized>(
     vfs: &V,
     gem: &Path,
     name: &str,
     gemfile_requires: Option<&Vec<String>>,
+    native: &dyn Fn(&str) -> bool,
 ) -> Result<BTreeSet<PathBuf>, String> {
     let lib = gem.join("lib");
     // Not the gem's name when the app's Gemfile says what Bundler requires (svg-graph has no `svg-graph.rb`).
@@ -126,6 +152,11 @@ fn required_files<V: Vfs + ?Sized>(
             continue;
         }
         let text = vfs.read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        // Not carried: on the Spinel tree its require raises LoadError, and a `rescue LoadError` takes the other file (addressable's IDNA picks pure.rb).
+        if requires_native(&text, native) {
+            seen.remove(file.strip_prefix(gem).unwrap());
+            continue;
+        }
         // Not only what is required: a Zeitwerk loader autoloads every file under its root dirs by its constant name.
         if let Some((roots, ignored)) = zeitwerk_dirs(&text, file.parent().unwrap(), &lib) {
             let mut dirs = roots;

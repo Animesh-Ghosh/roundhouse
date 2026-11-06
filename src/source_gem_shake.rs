@@ -385,7 +385,10 @@ impl Walk<'_, '_> {
     fn run(&mut self) {
         loop {
             if let Some((context, name)) = self.consts.pop() {
-                if let Some(c) = self.gems.resolve(context.as_deref(), &name) {
+                // A value constant (`CharacterClasses::UNRESERVED`) is its owner's: the owner's body defines it.
+                if let Some(c) = self.gems.resolve(context.as_deref(), &name)
+                    .or_else(|| name.rsplit_once("::").and_then(|(owner, _)| self.gems.resolve(context.as_deref(), owner)))
+                {
                     self.class(c);
                 }
             } else if let Some(c) = self.new_classes.pop() {
@@ -678,6 +681,7 @@ mod tests {
             let mut changed = false;
             for (context, name) in std::mem::take(&mut consts) {
                 if let Some(c) = resolve(context.as_deref(), &name)
+                    .or_else(|| name.rsplit_once("::").and_then(|(owner, _)| resolve(context.as_deref(), owner)))
                     && live_classes.insert(c)
                 {
                     changed = true;

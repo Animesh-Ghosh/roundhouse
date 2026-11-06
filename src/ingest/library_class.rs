@@ -3113,6 +3113,41 @@ fn walk_decl_body_with_visibility<'pr>(
                 super::error_site::note(&err, span.start as usize, span.end as usize);
                 return Err(err);
             }
+            // `alias_method :unescape, :unencode` in the singleton names a
+            // `def self.unencode` the class body defined before it
+            // (addressable's URI): the singleton walk saw only its own defs.
+            if own {
+                let mut kept = Vec::new();
+                for call in std::mem::take(&mut inner.unknown_calls) {
+                    let pair = match &*call.node {
+                        crate::expr::ExprNode::Send { recv: None, method, args, block: None, .. } if method.as_str() == "alias_method" => {
+                            match args.as_slice() {
+                                [to, from] => match (&*to.node, &*from.node) {
+                                    (
+                                        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value: to } },
+                                        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value: from } },
+                                    ) => Some((to.as_str().to_string(), from.as_str().to_string())),
+                                    _ => None,
+                                },
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    let source = pair.as_ref().and_then(|(_, from)| {
+                        out.methods.iter().chain(inner.methods.iter()).rev().find(|m| m.name.as_str() == from && m.receiver == MethodReceiver::Class)
+                    });
+                    match (pair.as_ref(), source) {
+                        (Some((to, _)), Some(source)) => {
+                            let mut copy = copy_aliased_method(source, to);
+                            copy.name_span = call.span;
+                            inner.methods.push(copy);
+                        }
+                        _ => kept.push(call),
+                    }
+                }
+                inner.unknown_calls = kept;
+            }
             // The class's own singleton: its statements run, and its
             // constants live, there (`expr::SINGLETON_BODY`).
             if own {

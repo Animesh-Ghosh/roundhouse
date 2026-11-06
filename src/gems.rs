@@ -1076,7 +1076,7 @@ pub fn loads_by_gem_name(gem: &str) -> bool {
 /// hand-written version of the rule, and every private gem that follows
 /// the same convention needed its own entry to be attributable at all —
 /// which, by definition, it cannot have here.
-fn namespace_candidates(gem: &str) -> Vec<String> {
+pub(crate) fn namespace_candidates(gem: &str) -> Vec<String> {
     let mut candidates = vec![namespace_of(gem)];
     if let Some((head, _)) = gem.split_once('-') {
         let first = camelize(head);
