@@ -71,7 +71,8 @@ def parse_inventory(data: dict, *, partitioned: bool = False) -> tuple[dict[Case
         if (not isinstance(binary, str) or not binary or not isinstance(suite, dict)
                 or suite.get("binary-id") != binary or suite.get("status") != "listed"
                 or not isinstance(suite.get("testcases"), dict)):
-            raise ContractError("malformed or unlisted Nextest suite")
+            raise ContractError(f"malformed or unlisted Nextest suite: {binary!r} "
+                                f"({suite.get('status') if isinstance(suite, dict) else type(suite).__name__})")
         if suite.get("binary-name") == "all_tests" and suite.get("kind") == "test":
             bundled = bool(suite["testcases"])
         for name, case in suite["testcases"].items():
@@ -220,7 +221,7 @@ def balanced_groups(cases: dict[Case, bool], weights: dict[Group, float], count:
 def group_filter(groups: list[Group], binaries: set[str]) -> str:
     if not groups:
         raise ContractError("assigned test partition is empty")
-    # A binary_id that is false for a whole binary makes Nextest skip listing it, so every binary keeps a per-test clause.
+    # A binary_id that is false for a whole binary, even one with no tests, makes Nextest skip listing it.
     clauses = [f"(binary_id(={binary}) & test(/^$/))" for binary in sorted(binaries)]
     for binary, parent in sorted(groups):
         pattern = f"^{parent}::[^:]+$" if parent else "^[^:]+$"
@@ -329,7 +330,7 @@ def build(args: argparse.Namespace) -> int:
     return 0
 
 
-def extract(archive: Path, inventory: Path, shard_count: int | None) -> tuple[dict, dict[Case, bool], list[str]]:
+def extract(archive: Path, inventory: Path, shard_count: int | None) -> tuple[dict, dict[Case, bool], list[str], set[str]]:
     """Check the archive against its producer inventory, extract it, and return its metadata flags."""
     target = target_directory()
     manifest = json.loads(inventory.read_text())
@@ -344,13 +345,12 @@ def extract(archive: Path, inventory: Path, shard_count: int | None) -> tuple[di
         raise ContractError("extracted tests or ignored states differ from producer inventory")
     metadata = ["--cargo-metadata", str(target / "nextest/cargo-metadata.json"),
                 "--binaries-metadata", str(target / "nextest/binaries-metadata.json")]
-    return manifest, expected, metadata
+    return manifest, expected, metadata, set(extracted["rust-suites"])
 
 
 def run(args: argparse.Namespace, report: dict) -> int:
     validate_shard(args.shard_index, args.shard_count)
-    manifest, expected, metadata = extract(args.archive, args.inventory, args.shard_count)
-    binaries = {binary for binary, _name in expected}
+    manifest, expected, metadata, binaries = extract(args.archive, args.inventory, args.shard_count)
     filters = [group_filter(groups, binaries)
                for groups in balanced_groups(expected, load_weights(args.weights), args.shard_count)]
     partitions = []
@@ -419,7 +419,7 @@ def listed_matches(data: dict) -> set[Case]:
 def select(args: argparse.Namespace, report: dict) -> int:
     """Run named ignored suites from the archive instead of compiling them again."""
     selectors = [parse_selector(text) for text in args.select]
-    manifest, expected, metadata = extract(args.archive, args.inventory, None)
+    manifest, expected, metadata, _binaries = extract(args.archive, args.inventory, None)
     wanted = ignored_selection(expected, selectors)
     expression = selection_filter(selectors)
     filters = ["--ignore-default-filter", "--run-ignored", "only", "-E", expression]
