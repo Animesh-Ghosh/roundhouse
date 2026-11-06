@@ -14,6 +14,17 @@ pub(super) fn mark(app: &mut App) {
         .chain(app.library_classes.iter().map(|c| c.name.0.as_str().to_string()))
         .chain(app.controllers.iter().map(|c| c.name.0.as_str().to_string()))
         .collect();
+    // A root the app's own classes answer to: a whole name, the first
+    // segment of a nested one, or the last segment of a nested one.
+    let own_roots: crate::det::HashSet<&str> = own
+        .iter()
+        .flat_map(|o| {
+            let nested = o.contains("::");
+            let first = o.split("::").next().filter(|_| nested);
+            let last = o.rsplit("::").next().filter(|_| nested);
+            std::iter::once(o.as_str()).chain(first).chain(last)
+        })
+        .collect();
     // Not a name some class of the app declares as a constant: a relative read of it (Sponge's `MAX_DNS_TIME`) finds it.
     let declared: crate::det::HashSet<String> = app
         .library_classes
@@ -33,7 +44,7 @@ pub(super) fn mark(app: &mut App) {
         let full = written.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::");
         index.owners(&full).is_empty()
             && !crate::gems::is_stdlib_namespace(root)
-            && !own.iter().any(|o| o == root || o.starts_with(&format!("{root}::")) || o.ends_with(&format!("::{root}")))
+            && !own_roots.contains(root)
             && !declared.contains(root)
     };
     // A relative read is looked up from each namespace the class sits in, innermost first.
