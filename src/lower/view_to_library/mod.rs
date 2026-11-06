@@ -486,9 +486,10 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // present?") and downstream emitters don't need target-specific
     // `defined?` knowledge.
     let mut rewritten = rewritten;
-    // An app override owns pluralize or content_tag, including nested ERB
-    // calls. Qualify it before the framework classifier consumes bare Sends.
-    for helper in ["pluralize", "content_tag"] {
+    // An app override owns pluralize, content_tag or simple_format,
+    // including nested ERB calls. Qualify it before the framework
+    // classifier consumes bare Sends.
+    for helper in ["pluralize", "content_tag", "simple_format"] {
         let Some(owner) = app.helper_method_index.get(&Symbol::from(helper)) else { continue };
         fn qualify_helper(e: &mut Expr, helper: &str, owner: &ClassId) {
             e.node.for_each_child_mut(&mut |c| qualify_helper(c, helper, owner));
@@ -1611,6 +1612,7 @@ pub(crate) fn insert_framework_stubs(
         ("button_to", &[("text", &untyped), ("href", &Ty::Str), ("opts", &any_hash)]),
         ("stylesheet_link_tag", &[("name", &Ty::Str), ("opts", &any_hash)]),
         ("content_tag_html", &[("name", &Ty::Sym), ("html", &Ty::Str), ("opts", &any_hash)]),
+        ("simple_format", &[("text", &Ty::Str), ("wrapper_tag", &Ty::Sym), ("opts", &any_hash)]),
     ];
     for (name, params) in opts_hash_helpers {
         let param_pairs: Vec<(Symbol, Ty)> = params

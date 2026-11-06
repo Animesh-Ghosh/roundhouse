@@ -32,6 +32,8 @@ mod ts_controller_ivars;
 #[path = "support/content_tag_options.rs"]
 #[allow(dead_code)]
 mod content_tag_options;
+#[path = "support/simple_format.rs"]
+mod simple_format;
 #[path = "support/link_to_if_escape.rs"]
 #[allow(dead_code)]
 mod link_to_if_escape;
@@ -448,5 +450,17 @@ fn pluralize_in_a_template_is_escaped() {
     }
     for absent in pluralize_escape::ABSENT {
         assert!(!stdout.contains(absent), "unexpected {absent} in\n{stdout}");
+    }
+}
+
+/// #1861: `simple_format` with `sanitize: false` renders as Rails 8.1.4
+/// does, multibyte texts included (`simple_format::VIEW`): the page rendered by the built app.
+#[test]
+#[ignore]
+fn simple_format_renders() {
+    let (ok, stdout, stderr) = render_probe(content_tag_options::app_rendering(simple_format::VIEW, simple_format::RENDERS));
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in simple_format::RENDERS {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
     }
 }

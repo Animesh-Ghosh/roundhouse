@@ -234,6 +234,22 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             let truncated = view_helpers_call("truncate", args);
             Some(view_helpers_call("html_escape", vec![truncated]))
         }
+        // Rails' `simple_format` with `sanitize: false` writes the text as
+        // it is (`raw`) inside each paragraph's tag and returns an html-safe
+        // buffer: appended as it is. The text gets `.to_s` as `truncate`'s
+        // does (a nullable column read; Rails renders nil as one empty
+        // paragraph, as it does ""). A literal `nil` is that `""` already.
+        SimpleFormat { text, html_opts, wrapper_tag } => {
+            let text = match &*text.node {
+                ExprNode::Lit { value: Literal::Nil } => lit_str(String::new()),
+                _ => lit_str_coerce((*text).clone()),
+            };
+            let mut args = vec![text, lit_sym(wrapper_tag.clone())];
+            if let Some(o) = html_opts {
+                args.push((*o).clone());
+            }
+            Some(view_helpers_call("simple_format", args))
+        }
         WordWrap { text, opts } => {
             let mut args = vec![lit_str_coerce((*text).clone())];
             if let Some(o) = opts {

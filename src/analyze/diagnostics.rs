@@ -435,6 +435,50 @@ fn unlowered_time_tags(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+/// A `simple_format` the view lowering leaves as written: any form but
+/// `sanitize: false` in a template (`lower::view::simple_format_form`
+/// gives the reason), and every call in a library class, which nothing
+/// lowers (an `include ActionView::Helpers::TextHelper` there doesn't
+/// define it, #1824). No runtime defines the bare call, so it is refused
+/// rather than reaching the emit. The app's own `simple_format` is a call
+/// like any other.
+fn unlowered_simple_format(app: &App) -> Vec<Diagnostic> {
+    let name = Symbol::from("simple_format");
+    if app.helper_method_index.contains_key(&name) || app.view_visible_controller_methods.contains(&name) {
+        return Vec::new();
+    }
+    fn visit(expr: &Expr, site: Option<bool>, out: &mut Vec<Diagnostic>) {
+        if !expr.span.is_synthetic()
+            && let ExprNode::Send { recv: None, method, args, .. } = &*expr.node
+            && method.as_str() == "simple_format"
+        {
+            // `Some(unreachable)` for a template, `None` for a library class.
+            let reason = match site {
+                Some(_) => crate::lower::view::simple_format_form(args).err(),
+                None => Some("a library class's `simple_format` is not lowered (only a template's `sanitize: false` form is)"),
+            };
+            if let Some(reason) = reason {
+                let mut d = Diagnostic::unsupported(expr.span, None, "simple_format", reason);
+                if site == Some(true) {
+                    d.severity = crate::diagnostic::Severity::Warning;
+                }
+                out.push(d);
+            }
+        }
+        expr.node.for_each_child(&mut |child| visit(child, site, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(&view.body, Some(app.unreachable_views.contains(&view.name)), &mut out);
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            visit(&method.body, None, &mut out);
+        }
+    }
+    out
+}
+
 /// Builder methods the view lowering serves outside
 /// `classify_form_builder_method`.
 const FORM_BUILDER_HANDLED_ELSEWHERE: &[&str] = &["object"];
@@ -760,6 +804,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     out.extend(unlowered_current_page(app));
     out.extend(helper_stylesheet_link_tags(app));
     out.extend(unlowered_time_tags(app));
+    out.extend(unlowered_simple_format(app));
     out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));

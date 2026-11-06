@@ -23,6 +23,8 @@ mod emit_and_run;
 #[path = "support/content_tag_options.rs"]
 #[allow(dead_code)]
 mod content_tag_options;
+#[path = "support/simple_format.rs"]
+mod simple_format;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -552,4 +554,12 @@ fn a_link_to_unless_block_over_an_expression_name_builds() {
         .emit(roundhouse::project::BuildTarget::Go);
     assert!(errors.is_empty(), "{errors:?}");
     assert_go_passes("real-blog with link_to_unless blocks", &emitted);
+}
+
+/// #1861: `simple_format` with `sanitize: false` renders as Rails 8.1.4
+/// does, multibyte texts included (`simple_format::VIEW`): the app's integration test, run by `go test`.
+#[test]
+#[ignore]
+fn simple_format_renders() {
+    assert_content_tag_test_passes(content_tag_options::app_rendering(simple_format::VIEW, simple_format::RENDERS));
 }
