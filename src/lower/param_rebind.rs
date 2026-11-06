@@ -177,6 +177,15 @@ fn collect_unsafe_writes(
         collect_unsafe_writes(&value, params, out, in_unsafe_scope);
         return;
     }
+    // Not splittable either: `rescue => p` and a pattern's `in p` bind the parameter where this pass renames no binder.
+    let mut bound: Vec<Symbol> = Vec::new();
+    match &*expr.node {
+        ExprNode::BeginRescue { rescues, .. } => bound.extend(rescues.iter().filter_map(|r| r.binding.clone())),
+        ExprNode::CaseMatch { arms, .. } => arms.iter().for_each(|arm| arm.pattern.bound_names(&mut bound)),
+        ExprNode::MatchPredicate { pattern, .. } | ExprNode::MatchRequired { pattern, .. } => pattern.bound_names(&mut bound),
+        _ => {}
+    }
+    out.extend(bound.into_iter().filter(|name| params.contains(name)));
     match &*expr.node {
         ExprNode::Assign {
             target: LValue::Var { name, .. },

@@ -697,3 +697,24 @@ end
     assert!(out.contains("mod ||= normalized.gsub!("), "{out}");
     assert!(out.contains("normalized = normalized.strip"), "{out}");
 }
+
+/// A parameter a `rescue => name` binds after a rebind: split, the rescue
+/// wrote the binder while the reads after it took the fresh local.
+#[test]
+fn a_parameter_a_rescue_binds_stays_whole() {
+    let out = emit_classes(
+        r#"class Fetch
+  def self.run(err)
+    err = err.to_s
+    begin
+      raise ArgumentError, "x"
+    rescue ArgumentError => err
+      nil
+    end
+    err
+  end
+end
+"#,
+    );
+    assert!(!out.contains("__rh_err"), "{out}");
+}

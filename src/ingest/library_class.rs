@@ -3134,8 +3134,13 @@ fn walk_decl_body_with_visibility<'pr>(
                         }
                         _ => None,
                     };
+                    // Not a def written after the alias: Ruby's alias_method copies what exists at its line.
                     let source = pair.as_ref().and_then(|(_, from)| {
-                        out.methods.iter().chain(inner.methods.iter()).rev().find(|m| m.name.as_str() == from && m.receiver == MethodReceiver::Class)
+                        out.methods.iter().chain(inner.methods.iter()).rev().find(|m| {
+                            m.name.as_str() == from
+                                && m.receiver == MethodReceiver::Class
+                                && (m.name_span.file != call.span.file || m.name_span.start < call.span.start)
+                        })
                     });
                     match (pair.as_ref(), source) {
                         (Some((to, _)), Some(source)) => {

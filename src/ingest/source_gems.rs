@@ -55,7 +55,8 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
         };
         // Not lexical first: a `..` after a linked app dir resolves through the link, as the OS reads it
         let installed = vfs.canonical(&installed).unwrap_or_else(|| normalize(&installed));
-        let native = |feature: &str| native_feature(vfs, &roots, lock, name, feature);
+        let native_features = native_features(vfs, &roots, lock, name);
+        let native = |feature: &str| native_features.contains(feature);
         let files = required_files(vfs, &installed, name, lock.gemfile_requires.get(name), &native)?;
         gems.push(SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files });
     }
@@ -90,28 +91,67 @@ pub(super) fn framework_models<V: Vfs + ?Sized>(vfs: &V, dir: &Path, lock: Optio
     (!files.is_empty()).then(|| SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files })
 }
 
-/// Whether `feature` is a locked gem's whose C extension the Spinel tree
-/// cannot build and whose namespace no runtime port stands in for (idn-ruby's
-/// `idn`): Ruby on that tree raises LoadError where it is required.
-fn native_feature<V: Vfs + ?Sized>(vfs: &V, roots: &[PathBuf], lock: &Lockfile, from: &str, feature: &str) -> bool {
-    let head = feature.split('/').next().unwrap_or(feature);
-    lock.specs.iter().any(|(gem, version)| {
-        gem != from
-            && (gem == head || gem.split('-').next() == Some(head))
-            && !crate::gems::namespace_candidates(gem).iter().any(|ns| crate::gems::ported_runtime_constants().contains(ns))
-            && crate::i18n::gems::installed_gem(vfs, roots, gem, version).is_some_and(|dir| vfs.is_dir(&dir.join("ext")))
-    })
+/// The features locked gems build as C extensions the Spinel tree cannot build, and whose namespace
+/// no runtime port stands in for (idn-ruby's `idn`): Ruby on that tree raises LoadError where one is
+/// required. A feature is a gem's when its `ext/**/extconf.rb` makes it (`create_makefile('idn')`).
+fn native_features<V: Vfs + ?Sized>(vfs: &V, roots: &[PathBuf], lock: &Lockfile, from: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for (gem, version) in &lock.specs {
+        if gem == from || crate::gems::namespace_candidates(gem).iter().any(|ns| crate::gems::ported_runtime_constants().contains(ns)) {
+            continue;
+        }
+        let Some(dir) = crate::i18n::gems::installed_gem(vfs, roots, gem, version) else { continue };
+        let mut dirs = vec![dir.join("ext")];
+        while let Some(at) = dirs.pop() {
+            let Ok(entries) = vfs.read_dir(&at) else { continue };
+            for entry in entries {
+                if vfs.is_dir(&entry) {
+                    dirs.push(entry);
+                } else if entry.file_name().is_some_and(|n| n == "extconf.rb")
+                    && let Ok(text) = vfs.read_to_string(&entry)
+                {
+                    for line in text.lines() {
+                        if let Some(rest) = line.trim_start().strip_prefix("create_makefile")
+                            && let Some(feature) = rest.split(['"', '\'']).nth(1)
+                        {
+                            out.insert(feature.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
-/// A file that requires such a feature at its top level, unconditionally:
-/// loading it raises before anything in it is defined.
+/// A file that requires such a feature where it always runs as the file loads: at the top level or in a
+/// module or class body, under no condition and outside any `begin … rescue`. Loading it raises first.
 fn requires_native(text: &str, native: &dyn Fn(&str) -> bool) -> bool {
-    text.lines().any(|line| {
-        let Some(rest) = line.strip_prefix("require ") else { return false };
-        let rest = rest.trim();
-        let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'');
-        quote.and_then(|q| rest[1..].split(q).next()).is_some_and(native)
-    })
+    fn walk(node: &ruby_prism::Node<'_>, native: &dyn Fn(&str) -> bool) -> bool {
+        if let Some(p) = node.as_program_node() {
+            return walk(&p.statements().as_node(), native);
+        }
+        if let Some(st) = node.as_statements_node() {
+            return st.body().iter().any(|child| walk(&child, native));
+        }
+        if let Some(m) = node.as_module_node() {
+            return m.body().is_some_and(|b| walk(&b, native));
+        }
+        if let Some(c) = node.as_class_node() {
+            return c.body().is_some_and(|b| walk(&b, native));
+        }
+        if let Some(b) = node.as_begin_node() {
+            return b.rescue_clause().is_none() && b.statements().is_some_and(|st| walk(&st.as_node(), native));
+        }
+        let Some(call) = node.as_call_node() else { return false };
+        if call.receiver().is_some() || call.name().as_slice() != b"require" {
+            return false;
+        }
+        let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        matches!(args.as_slice(), [arg] if arg.as_string_node().is_some_and(|s| native(&String::from_utf8_lossy(s.unescaped()))))
+    }
+    let parsed = super::prism::parse_silent(text.as_bytes());
+    walk(&parsed.node(), native)
 }
 
 fn required_files<V: Vfs + ?Sized>(
