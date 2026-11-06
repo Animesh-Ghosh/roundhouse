@@ -105,15 +105,17 @@ end
     assert_eq!(parent_of(&app, "Ci::Build"), "Ci::ApplicationRecord");
 }
 
+/// Classes that only inherit from each other never reach `ActiveRecord::Base`,
+/// so they are not models, and nothing that delegates to them walks the loop.
+/// The walk's own guard is pinned in `model_delegate.rs`.
 #[test]
-fn a_parent_cycle_does_not_overflow_the_delegate_walk() {
+fn classes_in_a_parent_cycle_are_not_models() {
     let app = ingest(&[
         ("app/models/application_record.rb", APPLICATION_RECORD),
         (
             "app/models/a.rb",
             "class A < B
   self.abstract_class = true
-  delegate :full_path, to: :project
 end
 ",
         ),
@@ -121,11 +123,19 @@ end
             "app/models/b.rb",
             "class B < A
   self.abstract_class = true
-  delegate :other_path, to: :project
+end
+",
+        ),
+        (
+            "app/models/holder.rb",
+            "class Holder < ApplicationRecord
+  belongs_to :a
+  delegate :label, to: :a
 end
 ",
         ),
     ]);
-    // Reaching here is the assertion: the walk used to recurse forever.
-    let _ = app;
+    let names: Vec<_> = app.models.iter().map(|m| m.name.0.as_str()).collect();
+    assert!(!names.contains(&"A") && !names.contains(&"B"), "{names:?}");
+    assert!(names.contains(&"Holder"), "{names:?}");
 }

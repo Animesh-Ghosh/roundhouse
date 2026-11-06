@@ -259,7 +259,7 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
                 let unvouched = decl
                     .app_options
                     .iter()
-                    .find(|o| !field_class.is_some_and(|f| f.vouches_for(o)));
+                    .find(|o| !field_class.as_ref().is_some_and(|f| f.vouches_for(o)));
                 // An `extension` in the field's block runs around this field alone.
                 let unkept_extension = decl.extensions.iter().any(|path| {
                     field_class::extension_keeps_value(&ctx, path, &class.name) != Some(true)
@@ -339,7 +339,8 @@ pub(super) fn lower_graphql_types(app: &mut crate::App) {
                     list,
                     resolution,
                     unproven_extensions: field_class
-                        .map(|f| f.unproven.clone())
+                        .as_ref()
+                        .map(|f| f.unproven())
                         .unwrap_or_default(),
                 };
                 fields.push((field, body));

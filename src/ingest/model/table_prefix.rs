@@ -219,25 +219,38 @@ pub fn inherited_table_prefixes(own: &TablePrefixes, pairs: &[(String, String)])
 /// class's own prefix, which wins over any namespace module's.
 pub(super) fn explicit_table_prefix(body: ruby_prism::Node<'_>) -> Option<String> {
     let stmts = flatten_statements(body);
-    let defined = stmts.iter().find_map(|stmt| {
+    // As in Ruby, the last definition wins; a computed one is simply unknown.
+    let mut defined = None;
+    for stmt in &stmts {
         if let Some(def) = stmt.as_def_node() {
-            def.receiver()
-                .is_some_and(|r| r.as_self_node().is_some())
-                .then(|| literal_prefix(&def))
-                .flatten()
-        } else {
-            let sclass = stmt.as_singleton_class_node()?;
-            sclass.expression().as_self_node()?;
-            flatten_statements(sclass.body()?).iter().find_map(|inner| {
-                let def = inner.as_def_node()?;
-                if def.receiver().is_some() {
-                    return None;
+            if def.receiver().is_some_and(|r| r.as_self_node().is_some()) {
+                record_prefix_definition(&def, &mut defined);
+            }
+        } else if let Some(sclass) = stmt.as_singleton_class_node() {
+            if sclass.expression().as_self_node().is_none() {
+                continue;
+            }
+            let Some(body) = sclass.body() else { continue };
+            for inner in flatten_statements(body) {
+                if let Some(def) = inner.as_def_node().filter(|d| d.receiver().is_none()) {
+                    record_prefix_definition(&def, &mut defined);
                 }
-                literal_prefix(&def)
-            })
+            }
         }
-    });
-    defined.or_else(|| explicit_class_setting(stmts, "table_name_prefix="))
+    }
+    match defined {
+        Some(prefix) => prefix,
+        None => explicit_class_setting(stmts, "table_name_prefix="),
+    }
+}
+
+fn record_prefix_definition(
+    def: &ruby_prism::DefNode<'_>,
+    defined: &mut Option<Option<String>>,
+) {
+    if constant_id_str(&def.name()) == "table_name_prefix" {
+        *defined = Some(literal_prefix(def));
+    }
 }
 
 fn explicit_class_setting(stmts: Vec<ruby_prism::Node<'_>>, setter: &str) -> Option<String> {

@@ -688,6 +688,118 @@ fn a_failure_behind_proven_extensions_stays_an_error() {
     assert_eq!(failure.severity, Severity::Error, "{}", failure.message);
 }
 
+/// A field class that cannot be read leaves every field through it in doubt,
+/// including a field with no option for it to consume.
+#[test]
+fn a_field_class_that_cannot_be_read_is_named_for_every_field() {
+    for body in [
+        "    prepend SomeGem::Field\n",
+        "    def resolve(object, args, ctx)\n      nil\n    end\n",
+        "    def setup\n      extension some_extension\n    end\n",
+    ] {
+        let class = base_field(body);
+        let post = post_type("    field :nothing_has_this, String, null: true\n");
+        let app = analyzed(&[
+            ("app/graphql/types/post_type.rb", &post),
+            ("app/graphql/types/base_object.rb", BASE_OBJECT_WITH_FIELD_CLASS),
+            ("app/graphql/types/base_field.rb", &class),
+        ]);
+        let line = coverage_line(&app);
+        assert!(line.contains("not shown to keep the value: Types::BaseField on"), "{body}: {line}");
+        let failure = diagnose(&app)
+            .into_iter()
+            .find(|d| d.message.contains("`nothing_has_this`"))
+            .expect("the failure stays visible");
+        assert_eq!(failure.severity, Severity::Info, "{body}: {}", failure.message);
+        assert!(failure.message.contains("`Types::BaseField`"), "{}", failure.message);
+    }
+}
+
+fn line_for_declared_field_class(declaration: &str) -> String {
+    let post = post_type("    field :title, String, null: false\n");
+    let base = format!(
+        "module Types\n  class BaseObject < GraphQL::Schema::Object\n    {declaration}\n  end\nend\n"
+    );
+    coverage_line(&analyzed(&[
+        ("app/graphql/types/post_type.rb", &post),
+        ("app/graphql/types/base_object.rb", &base),
+    ]))
+}
+
+/// A gem's field class is out of sight; graphql-ruby's own is the default.
+#[test]
+fn a_field_class_out_of_sight_is_named_and_the_default_is_not() {
+    let line = line_for_declared_field_class("field_class SomeGem::Field");
+    assert!(line.contains("not shown to keep the value: SomeGem::Field on"), "{line}");
+    let line = line_for_declared_field_class("field_class field_class_for(self)");
+    assert!(line.contains("a computed `field_class`"), "{line}");
+    for default in ["GraphQL::Schema::Field", "::GraphQL::Schema::Field"] {
+        let line = line_for_declared_field_class(&format!("field_class {default}"));
+        assert!(!line.contains("not shown"), "{default}: {line}");
+    }
+}
+
+fn line_with_extension_body(body: &str) -> String {
+    let extension = format!("class CustomExtension < GraphQL::Schema::FieldExtension\n{body}\nend\n");
+    let class = base_field("    def setup\n      extension CustomExtension\n    end\n");
+    title_with_option(
+        &class,
+        "authorize: :read_post",
+        &[("app/graphql/custom_extension.rb", &extension)],
+    )
+}
+
+/// `resolve` keeps the value only by answering what the block answers.
+#[test]
+fn an_extension_resolve_keeps_the_value_only_by_answering_the_yield() {
+    let resolve = |body: &str| {
+        line_with_extension_body(&format!(
+            "  def resolve(object:, arguments:, context:)\n{body}\n  end"
+        ))
+    };
+    for kept in [
+        "    yield(object, arguments)",
+        "    raise 'nope' if arguments.nil?\n    yield(object, arguments)",
+        "    return yield(object, arguments) if context\n    yield(object, arguments)",
+    ] {
+        let line = resolve(kept);
+        assert!(!line.contains("not shown"), "{kept}: {line}");
+    }
+    for replaced in [
+        "    nil",
+        "    yield(object, arguments)\n    nil",
+        "    yield(object, arguments).to_s",
+        "    yield(other_object, arguments)",
+        "    return nil if context\n    yield(object, arguments)",
+    ] {
+        let line = resolve(replaced);
+        assert!(line.contains("not shown to keep the value: CustomExtension on"), "{replaced}: {line}");
+    }
+}
+
+/// `after_resolve` must not change `value`, whether by reassigning it or in
+/// place. Reading it is fine.
+#[test]
+fn an_extension_after_resolve_that_changes_its_value_is_named() {
+    let after = |body: &str| {
+        line_with_extension_body(&format!("  def after_resolve(value:, **rest)\n{body}\n    value\n  end"))
+    };
+    let line = after("    log(value.size)");
+    assert!(!line.contains("not shown"), "{line}");
+    for changed in [
+        "    value ||= []",
+        "    value += [1]",
+        "    value << 1",
+        "    value.push(1)",
+        "    value.map!(&:to_s)",
+        "    value[0] = 1",
+        "    value.name = 'x'",
+    ] {
+        let line = after(changed);
+        assert!(line.contains("not shown to keep the value: CustomExtension on"), "{changed}: {line}");
+    }
+}
+
 /// A class-level call this pass does not know is named with how many types
 /// make it; the pass does not act on what it might mean.
 #[test]
