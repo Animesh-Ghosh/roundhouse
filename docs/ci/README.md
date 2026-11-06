@@ -100,9 +100,20 @@ Dependencies stay optimized. Local test defaults and production profiles
 stay unchanged.
 
 Each job checks the source SHA, archive digest, workspace paths, case identities,
-and ignored states before execution. The four hash partitions must be disjoint
+and ignored states before execution. The four partitions must be disjoint
 and cover every active case. An empty combined suite or incomplete inventory
 fails the job. Build artifacts are shared; test results are never reused.
+
+The partitions are balanced by measured time, not by a hash of test names.
+Whole test modules are assigned to shards, longest first. A module's cost is
+its active case count times its recorded seconds per case; a module with no
+record costs the mean. `unit-build` restores the seconds that main's
+`unit-timings` job keeps in the Actions cache, falls back to the checked-in
+seed [`ci/unit-test-weights.json`](../../ci/unit-test-weights.json), and ships
+the table in the bundle so every shard computes the same split.
+`unit-timings` runs only on main. It averages that run's JUnit seconds into
+the recorded table. Refresh the seed with `ci-unit-tests.py weights` and the
+`unit-test-results-*` reports of a main run.
 
 Producer and consumer workspace paths stay identical because existing tests
 embed source and executable paths. Test binaries retain embedded backtrace line

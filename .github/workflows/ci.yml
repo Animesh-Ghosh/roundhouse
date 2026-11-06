@@ -510,12 +510,21 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      # Restored once here and shipped in the bundle: shards restoring it themselves could see different saves.
+      - name: Restore recorded unit test seconds
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: .ci-timings/unit-weights.json
+          key: unit-weights-${{ github.run_id }}
+          restore-keys: unit-weights-
       - name: Build the complete test archive and inventory
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-build-resources/build" -- \
             python3 scripts/ci-unit-tests.py build \
               --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
-              --inventory "$RUNNER_TEMP/unit-tests/inventory.json" --shard-count 4
+              --inventory "$RUNNER_TEMP/unit-tests/inventory.json" --shard-count 4 \
+              --weights .ci-timings/unit-weights.json --weights-out "$RUNNER_TEMP/unit-tests/weights.json"
       - name: Check documentation tests
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-build-resources/docs" -- \
@@ -530,6 +539,7 @@ jobs:
           path: |
             ${{ runner.temp }}/unit-tests/unit-tests.tar.zst
             ${{ runner.temp }}/unit-tests/inventory.json
+            ${{ runner.temp }}/unit-tests/weights.json
           if-no-files-found: error
           retention-days: 1
       - name: Upload test build timings
@@ -602,6 +612,7 @@ jobs:
             python3 scripts/ci-unit-tests.py run \
               --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
               --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+              --weights "$RUNNER_TEMP/unit-tests/weights.json" \
               --shard-index ${{ strategy.job-index }} --shard-count ${{ strategy.job-total }} \
               --report "$RUNNER_TEMP/unit-resources/tests/shard.json"
       - name: Upload unit test results
@@ -3778,6 +3789,36 @@ jobs:
           path: .ci-timings/spinel-timings.json
           key: spinel-timings-${{ github.run_id }}-${{ github.run_attempt }}
 
+  unit-timings:
+    needs: [plan, unit]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.unit.result != 'skipped' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Restore recorded unit test seconds
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: .ci-timings/unit-weights.json
+          key: unit-weights-${{ github.run_id }}
+          restore-keys: unit-weights-
+      - name: Collect this run's test reports
+        uses: actions/download-artifact@v8
+        with:
+          pattern: unit-test-results-*
+          path: unit-results
+      - name: Average them into the recorded seconds
+        run: |
+          previous=()
+          if [ -f .ci-timings/unit-weights.json ]; then previous=(--previous .ci-timings/unit-weights.json); fi
+          python3 scripts/ci-unit-tests.py weights "${previous[@]}" --out .ci-timings/unit-weights.json unit-results/*/junit.xml
+      - name: Save recorded unit test seconds
+        uses: actions/cache/save@v6
+        with:
+          path: .ci-timings/unit-weights.json
+          key: unit-weights-${{ github.run_id }}-${{ github.run_attempt }}
+
   archive-results:
     needs: [plan, build-site, campfire-archive-build, smoke, spinel-smoke, campfire-smoke, campfire-smoke-docker]
     if: ${{ !cancelled() && needs.plan.result == 'success' && contains(fromJSON(needs.plan.outputs.jobs), 'archive-results') }}
@@ -3936,7 +3977,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain-plan, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain-plan, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, unit-timings, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

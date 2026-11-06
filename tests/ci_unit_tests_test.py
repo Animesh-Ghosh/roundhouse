@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -267,6 +268,101 @@ class IgnoredSuiteSelectionTests(unittest.TestCase):
                           ("roundhouse::all_tests", "spinel_toolchain::native")})
         with self.assertRaises(unit.ContractError):
             unit.listed_matches({})
+
+
+class UnitBalanceTests(unittest.TestCase):
+    def setUp(self):
+        self.cases = {
+            ("roundhouse", "registry::resolves"): False,
+            ("roundhouse", "registry::native_only"): True,
+            ("roundhouse", "top_level"): False,
+            ("roundhouse::all_tests", "emit_and_run::slow::a"): False,
+            ("roundhouse::all_tests", "emit_and_run::slow::b"): False,
+            ("roundhouse::all_tests", "real_blog::zero_errors"): False,
+            ("roundhouse::all_tests", "fresh::unmeasured"): False,
+        }
+        self.weights = {("roundhouse", "registry"): 1.0, ("roundhouse", ""): 1.0,
+                        ("roundhouse::all_tests", "emit_and_run::slow"): 5.0,
+                        ("roundhouse::all_tests", "real_blog"): 3.0}
+
+    def test_partition_by_expression_is_accepted_only_when_partitioned(self):
+        data = inventory()
+        data["rust-suites"]["roundhouse"]["testcases"]["registry::resolves"]["filter-match"] = {
+            "status": "mismatch", "reason": "expression"}
+        _cases, selected = unit.parse_inventory(data, partitioned=True)
+        self.assertNotIn(("roundhouse", "registry::resolves"), selected)
+        with self.assertRaises(unit.ContractError):
+            unit.parse_inventory(data)
+
+    def test_every_active_module_lands_in_exactly_one_shard_by_measured_time(self):
+        shards = unit.balanced_groups(self.cases, self.weights, 2)
+        flat = [group for shard in shards for group in shard]
+        self.assertEqual(len(flat), len(set(flat)))
+        self.assertEqual(set(flat), {unit.group_of(identity) for identity, ignored in self.cases.items()
+                                     if not ignored})
+        self.assertEqual(shards[0], [("roundhouse::all_tests", "emit_and_run::slow")])
+        self.assertEqual(shards, unit.balanced_groups(dict(reversed(self.cases.items())), self.weights, 2))
+
+    def test_an_unmeasured_module_costs_the_mean_case(self):
+        shards = unit.balanced_groups({("roundhouse::all_tests", "fresh::unmeasured"): False,
+                                       ("roundhouse", "registry::resolves"): False},
+                                      {("roundhouse", "registry"): 1.0, ("x", "y"): 9.0}, 2)
+        self.assertEqual(shards[0], [("roundhouse::all_tests", "fresh")])
+
+    def test_filter_names_each_module_directly_and_never_an_empty_shard(self):
+        self.assertEqual(
+            unit.group_filter([("roundhouse::all_tests", "emit_and_run::slow"), ("roundhouse", "")]),
+            "(binary_id(=roundhouse) & test(/^[^:]+$/)) | "
+            "(binary_id(=roundhouse::all_tests) & test(/^emit_and_run::slow::[^:]+$/))")
+        with self.assertRaises(unit.ContractError):
+            unit.group_filter([])
+
+    def test_identities_that_a_filter_cannot_spell_are_rejected(self):
+        for identity in (("roundhouse", "a::b c"), ("roundhouse", "a/b"), ("bad id", "a")):
+            with self.assertRaises(unit.ContractError):
+                unit.group_of(identity)
+
+    def test_weights_round_trip_from_junit_and_the_checked_in_table_loads(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            junit = Path(temporary) / "junit.xml"
+            junit.write_text('<testsuites><testsuite>'
+                             '<testcase classname="roundhouse::all_tests" name="m::a" time="1.0"/>'
+                             '<testcase classname="roundhouse::all_tests" name="m::b" time="3.0"/>'
+                             '</testsuite></testsuites>')
+            out = Path(temporary) / "weights.json"
+            self.assertEqual(unit.main(["weights", "--out", str(out), str(junit)]), 0)
+            self.assertEqual(unit.load_weights(out), {("roundhouse::all_tests", "m"): 2.0})
+        self.assertTrue(unit.load_weights(unit.WEIGHTS))
+
+    def test_recorded_weights_average_with_this_run_and_keep_unreported_modules(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            previous = root / "previous.json"
+            previous.write_text(json.dumps(unit.encode_weights(
+                {("roundhouse::all_tests", "m"): 4.0, ("roundhouse::all_tests", "gone"): 1.0})))
+            junit = root / "junit.xml"
+            junit.write_text('<testsuites><testsuite>'
+                             '<testcase classname="roundhouse::all_tests" name="m::a" time="2.0"/>'
+                             '<testcase classname="roundhouse::all_tests" name="new::a" time="5.0"/>'
+                             '</testsuite></testsuites>')
+            out = root / "out.json"
+            self.assertEqual(unit.main(["weights", "--previous", str(previous), "--out", str(out), str(junit)]), 0)
+            self.assertEqual(unit.load_weights(out), {("roundhouse::all_tests", "m"): 3.0,
+                                                      ("roundhouse::all_tests", "gone"): 1.0,
+                                                      ("roundhouse::all_tests", "new"): 5.0})
+
+    def test_an_unreadable_recorded_table_falls_back_to_the_checked_in_seed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            broken = Path(temporary) / "broken.json"
+            broken.write_text("{")
+            missing = Path(temporary) / "missing.json"
+            with patch("sys.stderr"):
+                source, table = unit.chosen_weights([missing, broken])
+            self.assertEqual(source, unit.WEIGHTS)
+            self.assertEqual(table, unit.load_weights(unit.WEIGHTS))
+            good = Path(temporary) / "good.json"
+            good.write_text(json.dumps(unit.encode_weights({("roundhouse", "x"): 1.5})))
+            self.assertEqual(unit.chosen_weights([missing, good]), (good, {("roundhouse", "x"): 1.5}))
 
 
 if __name__ == "__main__":
