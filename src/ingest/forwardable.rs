@@ -248,7 +248,9 @@ fn synthesize(owner: &ClassId, forwards: &[Forward]) -> Vec<MethodDef> {
     let mut src = format!("class {}\n", owner.0.as_str());
     for f in forwards {
         let def = if f.side == MethodReceiver::Class { format!("self.{}", f.name) } else { f.name.clone() };
-        let call = if f.method.ends_with('=') {
+        // Not every name ending in `=`: `[]=`, `==` and `<=` take their own arguments.
+        let writer = f.method.strip_suffix('=').and_then(|n| n.chars().last()).is_some_and(|c| c.is_alphanumeric() || c == '_' || !c.is_ascii());
+        let call = if writer {
             // Not `@t.x=(...)`: Ruby parses no forwarding into an attribute write.
             format!("  def {def}(value)\n    {}.{}(value)\n  end\n", f.ivar, f.method)
         } else if let Some((formals, actuals)) = &f.params {

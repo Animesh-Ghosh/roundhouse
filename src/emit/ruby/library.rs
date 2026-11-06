@@ -1002,7 +1002,11 @@ fn within_namespaces(block: String, parent: &str, child: &str, classes: &[Librar
     let Some((_, between)) = segments.split_last() else { return block };
     // Already inside them: `unwrapped` kept the source's own `module StoreProxy`.
     let first = block.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
-    if between.is_empty() || first.starts_with(&format!("module {}", between[0])) || first.starts_with(&format!("class {}", between[0])) {
+    // Not a bare prefix test: `module StoreProxyHelpers` would pass for `StoreProxy`.
+    let opens = |kw: &str| {
+        first.strip_prefix(&format!("{kw} {}", between.first().copied().unwrap_or(""))).is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', ';']))
+    };
+    if between.is_empty() || opens("module") || opens("class") {
         return block;
     }
     let mut out = String::new();
