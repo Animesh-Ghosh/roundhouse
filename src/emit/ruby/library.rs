@@ -5123,15 +5123,16 @@ fn rewrite_helper_calls(
 
     // Cases 3/4: a bare call resolving to an app or framework helper module.
     let path: Option<Vec<Symbol>> = match &*expr.node {
-        ExprNode::Send { recv: None, method, args, block, .. } => {
+        ExprNode::Send { recv: None, method, args, block, parenthesized } => {
             // A method's own PARAM shadows the helper index only as a BARE
-            // reference (no args, no block) — that's a local read. `tag(x)`
-            // or `tag { }` is a method call that still needs helper
-            // qualification, so a same-named param must NOT capture it
-            // (that dropped the qualification → latent NameError). Real
-            // own-METHODS shadow at any arity (a self-dispatch).
+            // reference (no args, no block, no parens) — that's a local
+            // read. `tag(x)`, `tag()` or `tag { }` is a method call that
+            // still needs helper qualification, so a same-named param must
+            // NOT capture it (that dropped the qualification → latent
+            // NameError, or a partial local read in place of the helper's
+            // call). Real own-METHODS shadow at any arity (a self-dispatch).
             let param_shadow =
-                own_params.contains(method) && args.is_empty() && block.is_none();
+                own_params.contains(method) && args.is_empty() && block.is_none() && !parenthesized;
             if own_methods.contains(method) || param_shadow {
                 // Self wins: a bare call naming a method the enclosing
                 // class itself defines is a self-dispatch (Tag#to_param's
