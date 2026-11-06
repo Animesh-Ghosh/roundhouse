@@ -19,6 +19,8 @@ pub const VIEW: &str = concat!(
     "<% x = \"o\" %>L10:<%= link_to_if Tracker.no, Tracker.label, Tracker.at(x) do |x| %>[<%= x %>]<% end %>|<%= Tracker.take %>\n",
     "<% x = \"o\" %>L11:<%= link_to_unless Tracker.yes, Tracker.label, Tracker.at(x) do |x| %>[<%= x %>]<% end %>|<%= Tracker.take %>\n",
     "<% x = \"o\" %>L12:<%= link_to_if Tracker.yes, \"i\", Tracker.at(x) do |x| %>[<%= x %>]<% end %>|<%= Tracker.take %>\n",
+    "<% x = \"o\" %>L13:<%= link_to_if Tracker.no, \"i\", Tracker.at(x) do |x| %>[<%= x %>]<% end %>|<%= x %>|<%= Tracker.take %>\n",
+    "<% x = \"o\" %>L14:<%= link_to_unless Tracker.yes, \"i\", \"/u\" do |x| %><% x = \"w\" %>[<%= x %>]<% end %>|<%= x %>\n",
 );
 
 /// `lib/tracker.rb`.
@@ -38,6 +40,8 @@ pub const RENDERS: &[&str] = &[
     "L10:[a]|cno",
     "L11:[a]|cno",
     "L12:<a href=\"/o\">i</a>|co",
+    "L13:[i]|o|co",
+    "L14:[w]|o",
 ];
 
 /// The strict targets' probe: a url that is a String sum, so its discard
@@ -50,6 +54,8 @@ pub const STRICT_VIEW: &str = concat!(
     "L3:<%= link_to_if !t, \"d\", \"/\" + \"z\" do |name| %>[<%= name %>]<% end %>\n",
     "L4:<%= link_to_if t, \"e\", \"/\" + \"w\" %>\n",
     "<% x = \"/o\" %>L5:<%= link_to_if !t, \"f\", x + \"u\" do |x| %>[<%= x %>]<% end %>\n",
+    "<% y = \"/p\" %>L6:<%= link_to_if !t, \"g\", \"/\" + \"q\" do |y| %>[<%= y %>]<% end %>|<%= y %>\n",
+    "<% z = \"z\" %>L7:<%= link_to_unless t, \"h\", \"/\" + \"r\" do |z| %>none<% end %>|<%= z %>\n",
 );
 
-pub const STRICT_RENDERS: &[&str] = &["L0:a\n", "L1:b\n", "L2:none\n", "L3:[d]\n", "L4:<a href=\"/w\">e</a>\n", "L5:[f]"];
+pub const STRICT_RENDERS: &[&str] = &["L0:a\n", "L1:b\n", "L2:none\n", "L3:[d]\n", "L4:<a href=\"/w\">e</a>\n", "L5:[f]\n", "L6:[g]|/p\n", "L7:none|z"];

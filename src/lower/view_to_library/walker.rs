@@ -56,6 +56,17 @@ pub(super) fn walk_body(body: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             e.inherit_span(stmt.span);
         }
         out.extend(lowered);
+        // A template local assigned here is in scope for the statements
+        // after it (`ViewCtx::assigned_locals`).
+        if let ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+        | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } = &*stmt.node
+            && name.as_str() != "_buf"
+            && !ctx.assigned_locals.iter().any(|n| n == name.as_str())
+        {
+            let mut next = ctx.clone();
+            next.assigned_locals.push(name.as_str().to_string());
+            shadowed = Some(next);
+        }
     }
     out
 }
@@ -2077,22 +2088,38 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
     // nothing and is left out.
     let mut captured = Vec::new();
     let mut url_read = url_discard(url, ctx);
+    let mut restore = None;
     let assign = |name: Symbol, value: Expr| {
         Expr::new(Span::synthetic(), ExprNode::Assign { target: LValue::Var { id: VarId(0), name }, value })
     };
     let inner_ctx = match params.first() {
         Some(p) => {
             let name = rewrite_helpers_in_expr(text, ctx);
+            let fresh = |base: &str| {
+                let mut temp = base.to_string();
+                while ctx.is_local(&temp)
+                    || ctx.assigned_locals.contains(&temp)
+                    || [text, url, body].into_iter().any(|e| reads_name(e, &temp))
+                {
+                    temp.push('_');
+                }
+                Symbol::from(temp.as_str())
+            };
+            // A local the parameter shadows keeps its value after the
+            // block, as a Ruby block parameter leaves it, assignments to
+            // the parameter inside included: saved before the binding and
+            // restored after the body (#1874).
+            if ctx.is_local(p.as_str()) || ctx.assigned_locals.iter().any(|n| n == p.as_str()) {
+                let saved = fresh("_link_saved");
+                captured.push(assign(saved.clone(), var_ref(p.clone())));
+                restore = Some(assign(p.clone(), var_ref(saved)));
+            }
             // A url reading a template local the parameter shadows
             // (`<% x = "o" %>… Tracker.at(x) do |x|`) reads the outer
             // one, as in Rails: the name goes to a temp no one else reads,
             // then the url, and the parameter is bound last (#1874).
             if url_read.as_ref().is_some_and(|u| reads_name(u, p.as_str())) {
-                let mut temp = String::from("_link_name");
-                while ctx.is_local(&temp) || [text, url, body].into_iter().any(|e| reads_name(e, &temp)) {
-                    temp.push('_');
-                }
-                let temp = Symbol::from(temp.as_str());
+                let temp = fresh("_link_name");
                 captured.push(assign(temp.clone(), name));
                 captured.extend(url_read.take());
                 captured.push(assign(p.clone(), var_ref(temp)));
@@ -2111,6 +2138,7 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
     };
     captured.extend(url_read);
     captured.extend(walk_body(body, &inner_ctx));
+    captured.extend(restore);
     let shown = if captured.len() == 1 { captured.pop().unwrap() } else { seq(captured) };
     let link = accumulator_append_call(linked.clone(), ctx);
     let (then_branch, else_branch) = if negate { (shown, link) } else { (link, shown) };
@@ -2206,6 +2234,7 @@ mod tests {
         ViewCtx {
             locals: Vec::new(),
             ivar_params: Vec::new(),
+            assigned_locals: Vec::new(),
             arg_name: String::new(),
             resource_dir: String::new(),
             accumulator: "io".to_string(),

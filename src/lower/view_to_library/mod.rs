@@ -859,6 +859,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let mut ctx = ViewCtx {
         locals,
         ivar_params,
+        assigned_locals: Vec::new(),
         // Only layouts consult arg_name (emit_yield → the `body` local);
         // action views don't yield, so an empty name is fine for them.
         arg_name: if is_action_view { String::new() } else { arg_name.clone() },
@@ -5104,6 +5105,11 @@ pub(super) struct ViewCtx {
     /// (`@post` threaded in as `post`), not a local Rails binds: the
     /// bare name still calls the method it names (`ViewCtx::binds_local`).
     pub(super) ivar_params: Vec<String>,
+    /// Template locals an earlier statement of this body or an enclosing
+    /// one assigned (`<% x = "o" %>`), kept apart from `locals` so they
+    /// classify as before: a `link_to_if` block parameter of that name
+    /// saves and restores it (`walker::emit_link_to_if_block`).
+    pub(super) assigned_locals: Vec<String>,
     pub(super) arg_name: String,
     pub(super) resource_dir: String,
     /// Name of the local that accumulates output via `<<`. The
