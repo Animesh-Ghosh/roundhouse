@@ -20995,3 +20995,202 @@ fn link_to_unless_and_the_block_form_render_as_rails_on_spinel() {
         .run_spinel(&helper_escape_at_output::render_script(link_to_unless::RENDERS))
         .assert_passes();
 }
+
+#[path = "support/simple_format.rs"]
+mod simple_format;
+
+/// `simple_format` with `sanitize: false`: paragraphs, line breaks, html
+/// options and `wrapper_tag:`, as Rails 8.1.4 renders them.
+#[test]
+fn simple_format_renders_as_rails() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", simple_format::VIEW)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(simple_format::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn simple_format_renders_as_rails_on_spinel() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", simple_format::VIEW)
+        .run_spinel(&helper_escape_at_output::render_script(simple_format::RENDERS))
+        .assert_passes();
+}
+
+/// The default `sanitize: true` runs Rails' HTML sanitizer, which isn't
+/// modeled: refused with the reason, as is a `sanitize:` that isn't a
+/// literal `false` or `nil`.
+#[test]
+fn simple_format_that_sanitizes_is_refused() {
+    for markup in [
+        "<%= simple_format(\"a\") %>\n",
+        "<%= simple_format(\"a\", class: \"k\") %>\n",
+        "<%= simple_format(\"a\", {}, sanitize: true) %>\n",
+        "<%= simple_format(\"a\", {}, wrapper_tag: :div) %>\n",
+        "<%= simple_format(\"a\", {}, sanitize: @article.nil?) %>\n",
+    ] {
+        let errors = html_safe_method_owner::app().write("app/views/probes/show.html.erb", markup).check_errors();
+        let refused: Vec<_> = errors.iter().filter(|e| e.contains("simple_format")).collect();
+        assert!(refused.len() == 1 && refused[0].contains("simple_format not supported") && refused[0].contains("HTML sanitizer"), "{markup}: {errors:?}");
+    }
+}
+
+/// Options that aren't a literal hash of `sanitize: false` and a literal
+/// `wrapper_tag:` are left as written and refused.
+#[test]
+fn simple_format_with_options_it_does_not_model_is_refused() {
+    for markup in [
+        "<%= simple_format(\"a\", {}, sanitize: false, wrapper_tag: @article.label) %>\n",
+        "<%= simple_format(\"a\", {}, sanitize: false, sanitize_options: {}) %>\n",
+        "<% opts = { sanitize: false } %><%= simple_format(\"a\", {}, opts) %>\n",
+        "<% opts = { sanitize: false } %><%= simple_format(\"a\", {}, **opts) %>\n",
+        "<%= simple_format(\"a\", nil, sanitize: false) %>\n",
+    ] {
+        let errors = html_safe_method_owner::app().write("app/views/probes/show.html.erb", markup).check_errors();
+        let refused: Vec<_> = errors.iter().filter(|e| e.contains("simple_format")).collect();
+        assert!(refused.len() == 1 && refused[0].contains("simple_format not supported") && refused[0].contains("literal options hash"), "{markup}: {errors:?}");
+    }
+}
+
+/// A library class's `simple_format` isn't lowered (an `include
+/// ActionView::Helpers::TextHelper` there doesn't define it, #1824), so it
+/// is refused rather than reaching the emit.
+#[test]
+fn simple_format_in_a_library_class_is_refused() {
+    let errors = html_safe_method_owner::app()
+        .write(
+            "app/lib/note_formatter.rb",
+            "class NoteFormatter\n  include ActionView::Helpers::TextHelper\n\n  def initialize(text)\n    @text = text\n  end\n\n  def to_s\n    simple_format(@text, {}, sanitize: false)\n  end\nend\n",
+        )
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("simple_format not supported") && e.contains("library class")), "{errors:?}");
+}
+
+/// An app's own `simple_format` is what Rails calls, ahead of ActionView's:
+/// it is neither lowered nor refused.
+#[test]
+fn an_app_defined_simple_format_is_left_to_the_app() {
+    let overlay = || {
+        html_safe_method_owner::app()
+            .write("app/views/probes/show.html.erb", "L0:<%= simple_format(\"a\") %>|<%= simple_format(\"b\", {}, sanitize: false) %>\n")
+            .write("app/helpers/application_helper.rb", "module ApplicationHelper\n  def simple_format(text, html_options = {}, options = {})\n    \"own:\" + text\n  end\nend\n")
+    };
+    let errors = overlay().check_errors();
+    assert!(!errors.iter().any(|e| e.contains("simple_format")), "{errors:?}");
+    overlay()
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(&["L0:own:a|own:b"]))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// A controller's `helper_method` of `simple_format`, `pluralize` or
+/// `content_tag` that reads the controller's state: Rails calls it in the
+/// templates that controller renders, and ActionView's in the others. That
+/// isn't decided statically, so each call is refused: one error per call,
+/// whether the rendering controller declares it, another controller does,
+/// or an ancestor does. An app helper of the same name is no owner either:
+/// Rails calls the controller's in its templates and the helper's in the
+/// others. A template no request reaches gets a warning.
+#[test]
+fn a_controller_helper_method_shadowing_a_view_helper_is_refused() {
+    let own = "  helper_method :simple_format, :pluralize, :content_tag\n\n  def simple_format(text, html_options = {}, options = {})\n    @own ||= \"own:\"\n    @own + text\n  end\n\n  def pluralize(count, word)\n    @own ||= \"own:\"\n    @own + word\n  end\n\n  def content_tag(name, text)\n    @own ||= \"own:\"\n    @own + text\n  end\n\n";
+    let helper = "module ApplicationHelper\n  def simple_format(text, html_options = {}, options = {})\n    \"helper:\" + text\n  end\n\n  def pluralize(count, word)\n    \"helper:\" + word\n  end\n\n  def content_tag(name, text)\n    \"helper:\" + text\n  end\nend\n";
+    let view = "L0:<%= simple_format(\"a\", {}, sanitize: false) %>|<%= pluralize(2, \"b\") %>|<%= content_tag(:i, \"c\") %>\n";
+    for (file, header, with_helper) in [
+        ("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n", false),
+        ("app/controllers/comments_controller.rb", "class CommentsController < ApplicationController\n", false),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n", false),
+        ("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n", true),
+        ("app/controllers/comments_controller.rb", "class CommentsController < ApplicationController\n", true),
+    ] {
+        // The fixture's own templates call `pluralize` too: the probe's
+        // calls are what an empty probe doesn't refuse.
+        let refused = |view: &str| -> Vec<String> {
+            let overlay = html_safe_method_owner::app()
+                .write("app/views/probes/show.html.erb", view)
+                .write("app/views/articles/orphan.html.erb", view)
+                .edit(file, header, &format!("{header}{own}"));
+            let overlay = if with_helper { overlay.write("app/helpers/application_helper.rb", helper) } else { overlay };
+            overlay
+                .check_errors()
+                .into_iter()
+                .filter(|e| e.contains("isn't decided statically"))
+                .collect()
+        };
+        let baseline = refused("L0:\n");
+        let errors: Vec<String> = refused(view).into_iter().filter(|e| !baseline.contains(e)).collect();
+        assert_eq!(errors.len(), 3, "{file} (helper: {with_helper}): {errors:?}");
+        for name in ["simple_format", "pluralize", "content_tag"] {
+            assert!(errors.iter().any(|e| e.contains(&format!("`helper_method :{name}`"))), "{file}: {name}: {errors:?}");
+        }
+    }
+}
+
+/// A controller's arg-pure `helper_method :content_tag` has a class-side
+/// clone, which serves every template only when every controller is that
+/// controller or descends from it (`ApplicationController`'s:
+/// `promoted_module_helpers_and_controller_helpers_keep_their_view_dispatch`).
+/// `CommentsController`'s doesn't reach `ProbesController`'s templates,
+/// where Rails calls ActionView's, so the call is refused.
+#[test]
+fn a_pure_helper_method_of_one_controller_is_refused_in_the_others() {
+    let errors: Vec<String> = html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", "L0:<%= content_tag(:i, \"c\") %>\n")
+        .edit(
+            "app/controllers/comments_controller.rb",
+            "class CommentsController < ApplicationController\n",
+            "class CommentsController < ApplicationController\n  helper_method :content_tag\n\n  def content_tag(name, text)\n    \"pure:\" + text\n  end\n\n",
+        )
+        .check_errors()
+        .into_iter()
+        .filter(|e| e.contains("isn't decided statically"))
+        .collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("`helper_method :content_tag`"), "{errors:?}");
+}
+
+/// `ApplicationController`'s arg-pure `helper_method :content_tag` doesn't
+/// serve the templates of a subclass that overrides the method: Rails'
+/// `helper_method` calls it on the rendering controller, so the override
+/// wins there, with or without its own `helper_method`, and so does a
+/// concern's. The call is refused.
+#[test]
+fn a_base_controllers_pure_helper_method_with_an_override_is_refused() {
+    let base = "class ApplicationController < ActionController::Base\n  helper_method :content_tag\n\n  def content_tag(name, text)\n    \"pure:\" + text\n  end\n\n";
+    let own = "  def content_tag(name, text)\n    @own ||= \"own:\"\n    @own + text\n  end\n\n";
+    let probes = "class ProbesController < ApplicationController\n";
+    for (label, header, concern) in [
+        ("declared override", format!("{probes}  helper_method :content_tag\n\n{own}"), false),
+        ("bare override", format!("{probes}{own}"), false),
+        ("concern override", format!("{probes}  include Tagging\n\n"), true),
+    ] {
+        let overlay = html_safe_method_owner::app()
+            .write("app/views/probes/show.html.erb", "L0:<%= content_tag(:i, \"c\") %>\n")
+            .edit("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n", base)
+            .edit("app/controllers/probes_controller.rb", probes, &header);
+        let overlay = if concern {
+            overlay.write("app/controllers/concerns/tagging.rb", &format!("module Tagging\n  extend ActiveSupport::Concern\n\n{own}end\n"))
+        } else {
+            overlay
+        };
+        let errors: Vec<String> =
+            overlay.check_errors().into_iter().filter(|e| e.contains("isn't decided statically")).collect();
+        assert_eq!(errors.len(), 1, "{label}: {errors:?}");
+        assert!(errors[0].contains("`helper_method :content_tag`"), "{label}: {errors:?}");
+    }
+}
+
+/// A template no request reaches keeps its errors as warnings, as analysis
+/// does, so its `simple_format` doesn't fail another target's build.
+#[test]
+fn simple_format_in_an_unreachable_template_is_a_warning() {
+    let overlay = || emit_and_run::real_blog().write("app/views/articles/orphan.html.erb", "<%= simple_format(\"a\") %>\n");
+    let (_, errors) = overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(!errors.iter().any(|e| e.contains("simple_format")), "{errors:?}");
+    let (_, errors) = overlay()
+        .edit("config/routes.rb", "Rails.application.routes.draw do\n", "Rails.application.routes.draw do\n  get \"orphan\", to: \"articles#orphan\"\n")
+        .emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.iter().any(|e| e.contains("simple_format not supported")), "a routed template keeps the error: {errors:?}");
+}

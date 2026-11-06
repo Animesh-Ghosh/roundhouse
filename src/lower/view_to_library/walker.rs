@@ -1651,6 +1651,11 @@ pub(super) fn safe_buffer_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
         ("html_escape", 1) if matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"])) => {
             Some(e.clone())
         }
+        // `simple_format`'s `sanitize: false` form, the one it lowers to,
+        // returns Rails' html-safe buffer.
+        ("simple_format", 2 | 3) if matches!(&*r.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).eq(["ActionView", "ViewHelpers"])) => {
+            Some(e.clone())
+        }
         ("html_safe", 0) => Some((*r).clone()),
         ("+", 1) => {
             let left = safe_buffer_value(r, ctx)?;
