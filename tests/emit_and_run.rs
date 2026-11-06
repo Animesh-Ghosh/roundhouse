@@ -20959,3 +20959,26 @@ fn full_forwarding_keeps_the_native_argument_contract() {
 }
 #[path = "emit_and_run/form_with_nilable_record.rs"]
 mod form_with_nilable_record;
+
+#[path = "support/link_to_unless.rs"]
+mod link_to_unless;
+
+/// `link_to_unless` links when its condition doesn't hold, and with a
+/// block, it and `link_to_if` show the block's output when no link is made.
+#[test]
+fn link_to_unless_and_the_block_form_render_as_rails() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_unless::VIEW)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_unless::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_unless_and_the_block_form_render_as_rails_on_spinel() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_unless::VIEW)
+        .run_spinel(&helper_escape_at_output::render_script(link_to_unless::RENDERS))
+        .assert_passes();
+}

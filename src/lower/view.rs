@@ -107,7 +107,9 @@ pub enum ViewHelperKind<'a> {
     LinkTo { text: &'a Expr, url: &'a Expr, opts: Option<&'a Expr> },
     /// `<%= link_to_if cond, text, url [, opts] %>` — the link when the
     /// condition holds, the escaped text alone otherwise.
-    LinkToIf { cond: &'a Expr, text: &'a Expr, url: &'a Expr, opts: Option<&'a Expr> },
+    /// `link_to_unless` is the same with `negate` set: the link when the
+    /// condition doesn't hold.
+    LinkToIf { cond: &'a Expr, text: &'a Expr, url: &'a Expr, opts: Option<&'a Expr>, negate: bool },
     /// `<%= button_to text, target [, opts] %>`.
     ButtonTo { text: &'a Expr, target: &'a Expr, opts: Option<&'a Expr> },
 }
@@ -767,17 +769,19 @@ pub fn classify_view_helper<'a>(
             url: &args[1],
             opts: Some(&args[2]),
         }),
-        ("link_to_if", 3) => Some(ViewHelperKind::LinkToIf {
+        ("link_to_if" | "link_to_unless", 3) => Some(ViewHelperKind::LinkToIf {
             cond: &args[0],
             text: &args[1],
             url: &args[2],
             opts: None,
+            negate: method == "link_to_unless",
         }),
-        ("link_to_if", 4) => Some(ViewHelperKind::LinkToIf {
+        ("link_to_if" | "link_to_unless", 4) => Some(ViewHelperKind::LinkToIf {
             cond: &args[0],
             text: &args[1],
             url: &args[2],
             opts: Some(&args[3]),
+            negate: method == "link_to_unless",
         }),
         ("button_to", 2) => Some(ViewHelperKind::ButtonTo {
             text: &args[0],
