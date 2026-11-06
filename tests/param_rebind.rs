@@ -640,3 +640,27 @@ end
         "the User must not be written onto the parameter:\n{out}"
     );
 }
+
+/// addressable's `punycode_adapt`: a parameter rebound and then written by
+/// `+=` and, in a loop, by `/=`. Split onto a fresh local, the compound
+/// writes stayed on the binder while the loop's test read the fresh one,
+/// and the loop never ended.
+#[test]
+fn a_parameter_a_compound_assignment_writes_stays_whole() {
+    let out = emit_classes(
+        r#"class Punycode
+  def self.adapt(delta, numpoints, firsttime)
+    delta = firsttime ? delta / 700 : delta >> 1
+    delta += delta / numpoints
+    k = 0
+    while delta > 455
+      delta /= 35
+      k += 36
+    end
+    k + 36 * delta / (delta + 38)
+  end
+end
+"#,
+    );
+    assert!(!out.contains("__rh_delta"), "{out}");
+}

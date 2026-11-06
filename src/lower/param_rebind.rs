@@ -187,6 +187,23 @@ fn collect_unsafe_writes(
             }
             collect_unsafe_writes(value, params, out, in_unsafe_scope);
         }
+        // Not splittable at all: `+=` and a multi-assign write the parameter where this pass renames no target.
+        ExprNode::OpAssign { target: LValue::Var { name, .. }, value, .. } => {
+            if params.contains(name) {
+                out.insert(name.clone());
+            }
+            collect_unsafe_writes(value, params, out, in_unsafe_scope);
+        }
+        ExprNode::MultiAssign { targets, value } => {
+            for t in targets {
+                if let LValue::Var { name, .. } = t
+                    && params.contains(name)
+                {
+                    out.insert(name.clone());
+                }
+            }
+            collect_unsafe_writes(value, params, out, in_unsafe_scope);
+        }
         ExprNode::If {
             cond,
             then_branch,
