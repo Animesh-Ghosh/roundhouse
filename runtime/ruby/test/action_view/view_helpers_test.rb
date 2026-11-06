@@ -180,6 +180,11 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "<p>\na</p>", ViewHelpers.simple_format("\r\na", :p)
     assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\n\nb", :p)
     assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\n\r\nb", :p)
+    assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\r\nb", :p)
+    assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\r\n\r\nb", :p)
+    assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\n\rb", :p)
+    assert_equal "<p>a</p>", ViewHelpers.simple_format("a\r\r\n", :p)
+    assert_equal "<p></p>\n\n<p>a</p>", ViewHelpers.simple_format("\r\r\na", :p)
   end
 
   # Rails raises for zero but returns nil for a negative width. Keep the

@@ -21076,26 +21076,40 @@ fn an_app_defined_simple_format_is_left_to_the_app() {
         .assert_passes();
 }
 
-/// A controller's `helper_method :simple_format` that reads the controller's
-/// state is the one the template calls, through the controller, as for any
-/// other such `helper_method`: it is neither lowered nor refused.
+/// A controller's `helper_method` of `simple_format`, `pluralize` or
+/// `content_tag` that reads the controller's state: Rails calls it in the
+/// templates that controller renders, and ActionView's in the others. That
+/// isn't decided statically, so each call is refused: one error per call,
+/// whether the rendering controller declares it, another controller does,
+/// or an ancestor does. A template no request reaches gets a warning.
 #[test]
-fn a_controller_helper_method_simple_format_is_left_to_the_controller() {
-    let overlay = || {
-        html_safe_method_owner::app()
-            .write("app/views/probes/show.html.erb", "L0:<%= simple_format(\"a\") %>|<%= simple_format(\"b\", {}, sanitize: false) %>\n")
-            .edit(
-                "app/controllers/probes_controller.rb",
-                "class ProbesController < ApplicationController\n",
-                "class ProbesController < ApplicationController\n  helper_method :simple_format\n\n  def simple_format(text, html_options = {}, options = {})\n    @own ||= \"own:\"\n    @own + text\n  end\n\n",
-            )
-    };
-    let errors = overlay().check_errors();
-    assert!(!errors.iter().any(|e| e.contains("simple_format")), "{errors:?}");
-    overlay()
-        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(&["L0:own:a|own:b"]))
-        .run_test("test/controllers/probes_controller_test.rb")
-        .assert_passes();
+fn a_controller_helper_method_shadowing_a_view_helper_is_refused() {
+    let own = "  helper_method :simple_format, :pluralize, :content_tag\n\n  def simple_format(text, html_options = {}, options = {})\n    @own ||= \"own:\"\n    @own + text\n  end\n\n  def pluralize(count, word)\n    @own ||= \"own:\"\n    @own + word\n  end\n\n  def content_tag(name, text)\n    @own ||= \"own:\"\n    @own + text\n  end\n\n";
+    let view = "L0:<%= simple_format(\"a\", {}, sanitize: false) %>|<%= pluralize(2, \"b\") %>|<%= content_tag(:i, \"c\") %>\n";
+    for (file, header) in [
+        ("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n"),
+        ("app/controllers/comments_controller.rb", "class CommentsController < ApplicationController\n"),
+        ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\n"),
+    ] {
+        // The fixture's own templates call `pluralize` too: the probe's
+        // calls are what an empty probe doesn't refuse.
+        let refused = |view: &str| -> Vec<String> {
+            html_safe_method_owner::app()
+                .write("app/views/probes/show.html.erb", view)
+                .write("app/views/articles/orphan.html.erb", view)
+                .edit(file, header, &format!("{header}{own}"))
+                .check_errors()
+                .into_iter()
+                .filter(|e| e.contains("isn't decided statically"))
+                .collect()
+        };
+        let baseline = refused("L0:\n");
+        let errors: Vec<String> = refused(view).into_iter().filter(|e| !baseline.contains(e)).collect();
+        assert_eq!(errors.len(), 3, "{file}: {errors:?}");
+        for name in ["simple_format", "pluralize", "content_tag"] {
+            assert!(errors.iter().any(|e| e.contains(&format!("`helper_method :{name}`"))), "{file}: {name}: {errors:?}");
+        }
+    }
 }
 
 /// A template no request reaches keeps its errors as warnings, as analysis

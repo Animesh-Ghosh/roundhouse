@@ -734,7 +734,8 @@ module ActionView
     # One loop, ending in `i += 1` (Elixir): a run of newlines is counted
     # in `nl` and settled at the next other character, and the `\n` of a
     # `\r\n` isn't counted, so no index steps by two. Where characters are
-    # grapheme clusters (Swift), a `\r\n` is one `c`, and one newline.
+    # grapheme clusters (Swift), a `\r\n` is one `c`, and one newline, even
+    # after a `\r`.
     def self.simple_format_paragraphs(text, wrapper_tag, opts)
       out = ""
       para = ""
@@ -744,7 +745,7 @@ module ActionView
       while i < text.length
         c = text[i, 1]
         if c == "\r" || c == "\n" || c == "\r\n"
-          if c == "\r" || prev != "\r"
+          if c == "\r" || c == "\r\n" || prev != "\r"
             nl = nl + 1
           end
         elsif nl == 0

@@ -479,6 +479,57 @@ fn unlowered_simple_format(app: &App) -> Vec<Diagnostic> {
     out
 }
 
+/// A call to `pluralize`, `content_tag` or `simple_format` where a
+/// controller's `helper_method` of that name has no helper-side owner
+/// (`helper_method_index`). Rails calls the controller's method in the
+/// templates that controller renders and ActionView's in the others, and
+/// which controller renders a template isn't decided statically
+/// (`render template:` reaches any of them). So the call is refused
+/// rather than routed one way for every template.
+fn controller_shadowed_view_helpers(app: &App) -> Vec<Diagnostic> {
+    let names: Vec<&str> = ["pluralize", "content_tag", "simple_format"]
+        .into_iter()
+        .filter(|n| {
+            let name = Symbol::from(*n);
+            app.view_visible_controller_methods.contains(&name) && !app.helper_method_index.contains_key(&name)
+        })
+        .collect();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    fn visit(expr: &Expr, names: &[&str], unreachable: bool, out: &mut Vec<Diagnostic>) {
+        if !expr.span.is_synthetic()
+            && let ExprNode::Send { recv: None, method, .. } = &*expr.node
+            && names.contains(&method.as_str())
+        {
+            let mut d = Diagnostic::unsupported(
+                expr.span,
+                None,
+                method.as_str(),
+                format!(
+                    "a controller's `helper_method :{0}` is called in the templates that controller renders, and ActionView's `{0}` in the others; which controller renders a template isn't decided statically",
+                    method.as_str()
+                ),
+            );
+            if unreachable {
+                d.severity = crate::diagnostic::Severity::Warning;
+            }
+            out.push(d);
+        }
+        expr.node.for_each_child(&mut |child| visit(child, names, unreachable, out));
+    }
+    let mut out = Vec::new();
+    for view in &app.views {
+        visit(&view.body, &names, app.unreachable_views.contains(&view.name), &mut out);
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            visit(&method.body, &names, false, &mut out);
+        }
+    }
+    out
+}
+
 /// Builder methods the view lowering serves outside
 /// `classify_form_builder_method`.
 const FORM_BUILDER_HANDLED_ELSEWHERE: &[&str] = &["object"];
@@ -805,6 +856,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     out.extend(helper_stylesheet_link_tags(app));
     out.extend(unlowered_time_tags(app));
     out.extend(unlowered_simple_format(app));
+    out.extend(controller_shadowed_view_helpers(app));
     out.extend(devise_refusals(app));
     out.extend(overridden_synthesized_accessors(app));
     out.extend(runtime_defined_surfaces(app));
