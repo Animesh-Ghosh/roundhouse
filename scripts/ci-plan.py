@@ -584,6 +584,7 @@ def native_coverage(path):
         "tests/schema_constraints.rs", "src/schema.rs", "src/ingest/schema.rs",
         "src/emit/shared/schema_sql.rs", "src/lower/model_to_library/schema.rs", "src/lower/scope_chain.rs",
         "src/emit/roda.rs", "src/emit/ruby/library.rs",
+        "src/lower/model_to_library/mod.rs",
     } or path.startswith("tests/support/schema_constraints_"):
         suites.add("schema_constraints")
     if path in JSON_TYPES_SPINEL_INPUTS:

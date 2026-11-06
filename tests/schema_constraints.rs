@@ -366,3 +366,50 @@ fn rooted_expression_bulk_call_is_refused_or_uses_the_atomic_runtime() {
         expression_bulk_app(call).run_ruby("Member.import_members\nraise unless Member.count == 1").assert_passes();
     }
 }
+
+#[test]
+fn scope_body_insert_all_with_expression_index_is_refused_at_its_source() {
+    let source = "class Member < ActiveRecord::Base\n scope :imported, -> {\n Member.insert_all([{age: 18, email: 'One@example.test'}, {age: 18, email: 'one@example.test'}])\n all\n }\nend\n";
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Spinel] {
+        let (_, app, errors) = app().write("app/models/member.rb", source).emit_with_app(target);
+        let refusal = errors.iter().find(|d| d.message.contains("unique expression index"))
+            .expect("scope bodies must keep the same bulk conflict refusal as service calls");
+        let file = &app.sources[(refusal.span.file.0 - 1) as usize];
+        assert!(file.path.ends_with("app/models/member.rb"), "{}", file.path);
+        assert!(file.text[refusal.span.start as usize..refusal.span.end as usize].contains("Member.insert_all"));
+    }
+}
+
+#[test]
+fn postgres_config_does_not_bypass_portable_app_schema_ingestion() {
+    for declaration in [
+        "t.check_constraint \"email::text <> 'blocked'\", name: 'members_email_check'",
+        "t.index 'lower(email::text)', name: 'members_lower'",
+    ] {
+        let schema = format!("ActiveRecord::Schema[8.1].define do\n create_table :members do |t|\n t.string :email\n {declaration}\n end\nend");
+        let tree = roundhouse::vfs::FileTree::from([
+            (std::path::PathBuf::from("config/database.yml"), b"development:\n  adapter: postgresql\n  database: schema_test\n".to_vec()),
+            (std::path::PathBuf::from("db/schema.rb"), schema.as_bytes().to_vec()),
+        ]);
+        let (result, _) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_app_from_tree(tree));
+        let error = result.expect_err("app ingestion must refuse before calling the Roda emitter").to_string();
+        assert!(error.contains("db/schema.rb") && error.contains("::text"), "{error}");
+    }
+}
+
+#[test]
+fn association_scope_rewrite_keeps_expression_conflict_information() {
+    use roundhouse::lower::scope_chain;
+    let source = "class Member < ActiveRecord::Base\n scope :imported, -> { Member.insert_all([{age: 18, email: 'one@example.test'}]); all }\nend\n";
+    let (_, app, _) = app().write("app/models/member.rb", source).emit_with_app(roundhouse::project::BuildTarget::Ruby);
+    let member = app.models.iter().find(|m| m.name.0.as_str() == "Member").unwrap();
+    let mut body = member.scopes().next().unwrap().body.clone();
+    let keys = scope_chain::build_unique_keys(&app);
+    let scopes = scope_chain::build_scope_registry(&app.models);
+    let models = scope_chain::model_set(&app.models);
+    let assocs = scope_chain::AssocRegistry::default();
+    let (_, diagnostics) = roundhouse::emit::diagnostics::scope(|| scope_chain::rewrite_assoc_scope_body(
+        &mut body, &member.name, &roundhouse::Symbol::from("__rel"), &scopes, &models, &assocs, &keys,
+    ));
+    assert!(diagnostics.iter().any(|d| d.message.contains("unique expression index")), "{diagnostics:?}");
+}

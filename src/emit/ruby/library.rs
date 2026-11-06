@@ -2160,6 +2160,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &scopes,
                 &models,
                 &assocs,
+                &unique_keys,
             );
         }
         // User-written class methods the registry admitted as
@@ -2192,6 +2193,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         &scopes,
                         &models,
                         &assocs,
+                        &unique_keys,
                     );
                 }
             }
@@ -2239,6 +2241,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         &scopes,
                         &models,
                         &assocs,
+                        &unique_keys,
                     );
                 }
             }

@@ -5680,8 +5680,9 @@ pub fn rewrite_scope_body(
     scopes: &ScopeRegistry,
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
+    unique_keys: &UniqueKeys,
 ) {
-    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, false);
+    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, unique_keys, false);
 }
 
 /// The same rewrite for an ASSOCIATION-scoped class method's body, which
@@ -5695,8 +5696,9 @@ pub fn rewrite_assoc_scope_body(
     scopes: &ScopeRegistry,
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
+    unique_keys: &UniqueKeys,
 ) {
-    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, true);
+    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, unique_keys, true);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5707,6 +5709,7 @@ fn rewrite_relation_taking_body(
     scopes: &ScopeRegistry,
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
+    unique_keys: &UniqueKeys,
     self_const_is_implicit: bool,
 ) {
     // Scope bodies don't consult user-method return types (none
@@ -5715,15 +5718,11 @@ fn rewrite_relation_taking_body(
     // after this runs) — conservative empty registries.
     let empty_returns = UserMethodReturns::new();
     let empty_assoc_cm = AssocClassMethods::default();
-    // A scope body's `insert_all` (none in the corpus) keeps the
-    // unguarded inline: this entry point takes registries, not the app,
-    // so there is no schema here to read a conflict target from.
-    let empty_unique = UniqueKeys::default();
     let ctx = Ctx {
         scopes,
         models,
         assocs,
-        unique_keys: &empty_unique,
+        unique_keys,
         assoc_class_methods: &empty_assoc_cm,
         scope_body: Some((self_model.clone(), rel_param.clone())),
         self_const_is_implicit,
