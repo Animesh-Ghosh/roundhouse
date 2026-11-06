@@ -217,10 +217,11 @@ def balanced_groups(cases: dict[Case, bool], weights: dict[Group, float], count:
     return shards
 
 
-def group_filter(groups: list[Group]) -> str:
+def group_filter(groups: list[Group], binaries: set[str]) -> str:
     if not groups:
         raise ContractError("assigned test partition is empty")
-    clauses = []
+    # A binary_id that is false for a whole binary makes Nextest skip listing it, so every binary keeps a per-test clause.
+    clauses = [f"(binary_id(={binary}) & test(/^$/))" for binary in sorted(binaries)]
     for binary, parent in sorted(groups):
         pattern = f"^{parent}::[^:]+$" if parent else "^[^:]+$"
         clauses.append(f"(binary_id(={binary}) & test(/{pattern}/))")
@@ -349,7 +350,8 @@ def extract(archive: Path, inventory: Path, shard_count: int | None) -> tuple[di
 def run(args: argparse.Namespace, report: dict) -> int:
     validate_shard(args.shard_index, args.shard_count)
     manifest, expected, metadata = extract(args.archive, args.inventory, args.shard_count)
-    filters = [group_filter(groups)
+    binaries = {binary for binary, _name in expected}
+    filters = [group_filter(groups, binaries)
                for groups in balanced_groups(expected, load_weights(args.weights), args.shard_count)]
     partitions = []
     for expression in filters:

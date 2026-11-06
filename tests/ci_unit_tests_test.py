@@ -311,11 +311,11 @@ class UnitBalanceTests(unittest.TestCase):
 
     def test_filter_names_each_module_directly_and_never_an_empty_shard(self):
         self.assertEqual(
-            unit.group_filter([("roundhouse::all_tests", "emit_and_run::slow"), ("roundhouse", "")]),
-            "(binary_id(=roundhouse) & test(/^[^:]+$/)) | "
-            "(binary_id(=roundhouse::all_tests) & test(/^emit_and_run::slow::[^:]+$/))")
+            unit.group_filter([("roundhouse", "")], {"roundhouse", "roundhouse::all_tests"}),
+            "(binary_id(=roundhouse) & test(/^$/)) | (binary_id(=roundhouse::all_tests) & test(/^$/)) | "
+            "(binary_id(=roundhouse) & test(/^[^:]+$/))")
         with self.assertRaises(unit.ContractError):
-            unit.group_filter([])
+            unit.group_filter([], {"roundhouse"})
 
     def test_identities_that_a_filter_cannot_spell_are_rejected(self):
         for identity in (("roundhouse", "a::b c"), ("roundhouse", "a/b"), ("bad id", "a")):
