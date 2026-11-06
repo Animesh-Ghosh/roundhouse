@@ -1212,6 +1212,26 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         }
     }
 
+    // `<%= link_to_if cond, name, url do |name| %> … <% end %>`, and the
+    // same for `link_to_unless`: when no link is made, Rails calls the
+    // block with the name and shows what it renders. Ahead of the generic
+    // arm below, which would rebuild the call with its block and leave
+    // the runtime's blockless helper to answer it, dropping the block.
+    if let ExprNode::Send {
+        recv: None,
+        method,
+        args: sa,
+        block: Some(block),
+        ..
+    } = &*inner.node
+    {
+        if matches!(method.as_str(), "link_to_if" | "link_to_unless") && !ctx.is_local(method.as_str()) {
+            if let Some(stmts) = emit_link_to_if_block(method.as_str(), sa, block, ctx) {
+                return stmts;
+            }
+        }
+    }
+
     // `<%= button_to url, opts do %> …markup… <% end %>` and the same
     // for `link_to` — the block spelling of a helper whose positional
     // form already inlines. Ahead of the generic arm below, which would
@@ -1969,6 +1989,67 @@ fn bind_before_block(e: Expr, site: u32, bound: &mut usize, stmts: &mut Vec<Expr
             var_ref(at)
         }
     }
+}
+
+/// `link_to_if`'s and `link_to_unless`'s block form: the link the
+/// blockless form writes when the condition says to link, and otherwise
+/// the block's body, walked against the view's accumulator with its
+/// parameter bound to the name (a block without one still evaluates the
+/// name, as Rails does). `None` for a block this doesn't take
+/// (one that isn't template markup, or has more than one parameter).
+fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCtx) -> Option<Vec<Expr>> {
+    let ExprNode::Lambda { params, rest_param, extra_params, body, .. } = &*block.node else {
+        return None;
+    };
+    if !block_body_is_template(body) || params.len() > 1 || rest_param.is_some() || !extra_params.is_empty() {
+        return None;
+    }
+    let Some(ViewHelperKind::LinkToIf { cond, text, url, opts, negate }) = classify_view_helper(method, args) else {
+        return None;
+    };
+    // The condition and the link, as the blockless `link_to_if` lowers
+    // them.
+    let blockless = emit_view_helper_call(&ViewHelperKind::LinkToIf { cond, text, url, opts, negate: false }, ctx)?;
+    let ExprNode::If { cond, then_branch: linked, .. } = &*blockless.node else {
+        return None;
+    };
+    // Rails evaluates the name whether or not the block takes it, as the
+    // blockless form's text does. A discard (`_ = …`) evaluates it where
+    // the block may not read it: Go rejects an unused local, and an
+    // unused value that isn't a call. Go, Rust and Kotlin each write the
+    // discard their own way. Without a parameter, a literal, a local or
+    // an ivar does nothing and is left out.
+    let discard = |value: Expr| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign { target: LValue::Var { id: VarId(0), name: Symbol::from("_") }, value },
+        )
+    };
+    let mut captured = Vec::new();
+    let inner_ctx = match params.first() {
+        Some(p) => {
+            captured.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Var { id: VarId(0), name: p.clone() },
+                    value: rewrite_helpers_in_expr(text, ctx),
+                },
+            ));
+            captured.push(discard(var_ref(p.clone())));
+            ctx.with_locals([p.as_str().to_string()])
+        }
+        None => {
+            if !matches!(&*text.node, ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+                captured.push(discard(rewrite_helpers_in_expr(text, ctx)));
+            }
+            ctx.with_locals(std::iter::empty())
+        }
+    };
+    captured.extend(walk_body(body, &inner_ctx));
+    let shown = if captured.len() == 1 { captured.pop().unwrap() } else { seq(captured) };
+    let link = accumulator_append_call(linked.clone(), ctx);
+    let (then_branch, else_branch) = if negate { (shown, link) } else { (link, shown) };
+    Some(vec![Expr::new(Span::synthetic(), ExprNode::If { cond: cond.clone(), then_branch, else_branch })])
 }
 
 /// Whether a helper's block is template markup: it writes the ERB buffer

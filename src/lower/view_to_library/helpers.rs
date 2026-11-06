@@ -358,7 +358,7 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
         // runtime `link_to`, which escapes its label itself — so a
         // label the Truncate arm already wrapped is handed over
         // unwrapped, and escaped once either way.
-        LinkToIf { cond, text, url, opts } => {
+        LinkToIf { cond, text, url, opts, negate } => {
             // The label as the template's own helpers lower it: a
             // `truncate(…)` arrives as `html_escape(truncate(…))`,
             // already escape-correct, which the two branches below
@@ -420,6 +420,9 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                     None => view_helpers_call("html_escape", vec![lit_str_coerce(lowered)]),
                 }
             };
+            // `link_to_unless` links when the condition doesn't hold: the
+            // same branches, swapped.
+            let (then_branch, else_branch) = if *negate { (bare, linked) } else { (linked, bare) };
             Some(Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
@@ -433,8 +436,8 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
                         &ctx.reference_reads,
                         &ctx.nilable_scalar_reads,
                     ),
-                    then_branch: linked,
-                    else_branch: bare,
+                    then_branch,
+                    else_branch,
                 },
             ))
         }

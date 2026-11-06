@@ -535,3 +535,21 @@ fn a_conditional_scalar_left_of_or_is_kept() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success() && stdout.contains("--- PASS: TestNoteOrProbe"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
+
+/// `link_to_unless`'s block form with a name that is an expression, not a
+/// call (`"a" + "b"`), in a block without a parameter and in one whose
+/// parameter the block doesn't read: the no-link branch still evaluates
+/// the name, and the generated view builds.
+#[test]
+#[ignore]
+fn a_link_to_unless_block_over_an_expression_name_builds() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/views/articles/index.html.erb",
+            "<% content_for :title, \"Articles\" %>\n",
+            "<% content_for :title, \"Articles\" %>\n<% t = @articles.nil? %>\n<%= link_to_unless !t, \"a\" + \"b\", \"/x\" do %>none<% end %>\n<%= link_to_unless !t, \"c\" + \"d\", \"/x\" do |name| %>none<% end %>\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_go_passes("real-blog with link_to_unless blocks", &emitted);
+}
