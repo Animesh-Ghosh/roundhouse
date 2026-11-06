@@ -1832,35 +1832,28 @@ impl Analyzer {
             self.overlay_test_params(app);
             self.apply_pinned_params();
             // Not pinned while the loop still moves: a `Var` mid-loop may be an argument the next round types.
-            if self.inferred_params == before && !(app.pins_unresolved_params && self.pin_open_params()) {
-                if returns_settled {
-                    rounds.restamp.end = LoopEnd::Settled(round);
-                }
+            if self.inferred_params == before && returns_settled && !(app.pins_unresolved_params && self.pin_open_params()) {
+                rounds.restamp.end = LoopEnd::Settled(round);
                 break;
             }
             if rounds.restamp.passes == FIXPOINT_CAP {
                 break;
             }
             crate::timings::phase("typing passes (after view param restamp)", || {
-                // Not one production pass: a helper return the new params move is read by production callers typed before its harvest.
-                loop {
-                    rounds.restamp.passes += 1;
-                    let hints = self.capture_dirty_hints();
-                    self.run_typing_passes(
-                        app,
-                        &dynamic_render_ivars,
-                        &existing_view_names,
-                        &module_methods,
-                        &module_includes,
-                        &parent_link_by_name,
-                        TypingMode::Production { dirty: None },
-                    );
-                    self.harvest_returns_to_registry(app, true);
-                    returns_settled = self.inference_matches(&hints.sig);
-                    if returns_settled || rounds.restamp.passes == FIXPOINT_CAP {
-                        break;
-                    }
-                }
+                // Not retyped until the returns settle before the next re-join: every round then ended on a pass that only confirmed its returns, so a chain of view-fed helpers took two passes per helper instead of one.
+                rounds.restamp.passes += 1;
+                let hints = self.capture_dirty_hints();
+                self.run_typing_passes(
+                    app,
+                    &dynamic_render_ivars,
+                    &existing_view_names,
+                    &module_methods,
+                    &module_includes,
+                    &parent_link_by_name,
+                    TypingMode::Production { dirty: None },
+                );
+                self.harvest_returns_to_registry(app, true);
+                returns_settled = self.inference_matches(&hints.sig);
                 self.run_typing_passes(
                     app,
                     &dynamic_render_ivars,

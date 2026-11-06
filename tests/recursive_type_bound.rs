@@ -377,6 +377,44 @@ fn a_view_fed_helper_param_settles_the_restamp_in_one_pass() {
     assert_eq!(settled.rounds.restamp, Restamp { end: LoopEnd::Settled(1), rounds: 2, passes: 1 });
 }
 
+/// Each helper's argument is the previous helper's return in the view, so
+/// each re-join moves the next helper's param.
+const SCORE_CHAIN_HELPER: &str = r#"
+module ScoreHelper
+  def shown_score(size)
+    if size > 3
+      size
+    else
+      "~"
+    end
+  end
+
+  def first_score(score) = score
+  def second_score(score) = score
+  def third_score(score) = score
+end
+"#;
+
+/// The restamp re-joins after every production pass: one pass per helper
+/// on the chain and one that moves nothing, not a pass that moves a return
+/// and a pass that confirms it for each helper.
+#[test]
+fn a_chain_of_view_fed_helper_params_takes_one_restamp_pass_per_helper() {
+    let settled = analyze(
+        &[
+            ("app/controllers/trees_controller.rb", "class TreesController < ApplicationController\n  def index\n    @size = 5\n  end\nend\n"),
+            ("app/helpers/score_helper.rb", SCORE_CHAIN_HELPER),
+            ("app/views/trees/index.html.erb", "<% a = shown_score(@size) %>\n<% b = first_score(a) %>\n<% c = second_score(b) %>\n<%= third_score(c) %>\n"),
+        ],
+        &[("ScoreHelper", "shown_score", false), ("ScoreHelper", "third_score", false)],
+    );
+    assert!(settled.errors.is_empty(), "errors: {:#?}", settled.errors);
+    let shown = settled.returns.iter().find(|(name, _)| name == "ScoreHelper#shown_score").map(|(_, ty)| ty);
+    let third = settled.params.iter().find(|(name, _)| name == "ScoreHelper#third_score[0]").map(|(_, ty)| ty);
+    assert_eq!(third, shown, "third_score's param is shown_score's Integer | String");
+    assert_eq!(settled.rounds.restamp, Restamp { end: LoopEnd::Settled(4), rounds: 5, passes: 4 });
+}
+
 /// The call sites live in the class, so analysis sees the same feedback
 /// as the controllers above.
 const TREE_WALK: &str = r#"
