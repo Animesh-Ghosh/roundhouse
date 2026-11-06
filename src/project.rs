@@ -11481,15 +11481,8 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         .filter(|dep| matches!(crate::gems::fate_of(dep), crate::gems::GemFate::Unknown))
         .map(|dep| crate::gems::GemEntry { name: dep.clone(), version: lock.version_of(dep).map(str::to_string), fate: crate::gems::GemFate::Unknown })
         .collect();
-    let ported = crate::gems::ported_runtime_constants();
-    // Not only the gems the catalog knows nothing of: one it only types (addressable) has no body on this tree either, and Bundler loads the real one.
-    let modeled = census
-        .gems
-        .iter()
-        .filter(|g| g.fate == crate::gems::GemFate::Modeled && !ported.contains(&crate::gems::namespace_of(&g.name)));
     let needed: Vec<_> = census
         .unknown()
-        .chain(modeled)
         .chain(source_deps.iter())
         .filter(|gem| {
             // Fail-closed: a GIT-sourced unknown must not be rewritten as a

@@ -61,8 +61,6 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
             GemFate::Unknown if direct || needed_by_source => {}
             // Not left to its façade: rotp's `ROTP` raises there, so two-factor sign-in failed on Spinel while the installed gem is plain Ruby.
             GemFate::Modeled if direct && crate::gems::stub_facade_namespaces().contains(&crate::gems::namespace_of(gem)) => {}
-            // Not left to the catalog's types alone: addressable's are signatures with no body on the Spinel tree, so its constants were undefined there.
-            GemFate::Modeled if direct && !ported.contains(&crate::gems::namespace_of(gem)) => {}
             // Not Ruby's standard library, gem-packaged or not: the Spinel side supplies that (a package or a port), not the app's tree.
             _ => return,
         }

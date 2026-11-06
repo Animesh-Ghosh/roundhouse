@@ -67,7 +67,7 @@ end
 "#;
 
 // The answers addressable 2.9.0 gives on CRuby.
-const ASSERTIONS: &str = r#"
+const ASSERTIONS: &str = r##"
 def check(label, got, want)
   raise "#{label}: #{got.inspect}, not #{want.inspect}" unless got == want
 end
@@ -83,7 +83,7 @@ check "template", LinkCheck.interaction_url("acct:alice@example.com"),
 check "component", LinkCheck.query_component("a b&c"), "a%20b&c"
 check "normalize", LinkCheck.normalized("http://example.com/a/../b/./c"), "http://example.com/b/c"
 puts "addressable passed"
-"#;
+"##;
 
 fn app() -> emit_and_run::Overlay {
     let fixture = roundhouse::fixtures::real_blog();
