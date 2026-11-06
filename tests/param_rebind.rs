@@ -664,3 +664,36 @@ end
     );
     assert!(!out.contains("__rh_delta"), "{out}");
 }
+
+/// addressable's `normalize_path` loops until a pass of `gsub!` changes
+/// nothing: `mod ||= path.gsub!(…)` reads the bang call's nil. The
+/// frozen-literal rewrite to `path = path.gsub(…)` answers a String every
+/// time, so the loop never ended; a bang whose value is read stays a bang,
+/// and one standing as a statement still becomes the reassignment.
+#[test]
+fn a_bang_whose_value_is_read_stays_a_bang_call() {
+    let out = emit_app_file(
+        &[
+            ("db/schema.rb", SCHEMA),
+            (
+                "app/models/path_tidy.rb",
+                r#"class PathTidy
+  def self.tidy(path)
+    normalized = path.dup
+    loop do
+      mod = nil
+      mod ||= normalized.gsub!(%r{/\./}, "/")
+      break if mod.nil?
+    end
+    normalized.strip!
+    normalized
+  end
+end
+"#,
+            ),
+        ],
+        "path_tidy.rb",
+    );
+    assert!(out.contains("mod ||= normalized.gsub!("), "{out}");
+    assert!(out.contains("normalized = normalized.strip"), "{out}");
+}
