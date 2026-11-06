@@ -9125,6 +9125,18 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 format!("Zlib::{flag} is a bundled zlib constant, which the {target} runtime does not supply"),
             );
         }
+        // A Hash value, so the class/module gate does not see it either.
+        if !matches!(target, "jruby" | "spinel" | "futamura")
+            && let crate::expr::ExprNode::Const { path } = &*expr.node
+            && path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["ActiveSupport", "TimeZone", "MAPPING"])
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "ruby_family_runtime_constant",
+                format!("ActiveSupport::TimeZone::MAPPING is the ruby-family runtime's zone-name table, which the {target} runtime does not supply"),
+            );
+        }
         // Typed as IO for the Ruby family; a strict emit spelled them as names its runtime does not define.
         if !matches!(target, "jruby" | "spinel")
             && let Some(name) = match &*expr.node {
