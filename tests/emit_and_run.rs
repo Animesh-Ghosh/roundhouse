@@ -13072,14 +13072,11 @@ puts "string inflections passed"
 
 /// #293: `tableize` needs Rails' plural rules, which the runtime does not
 /// carry (its `pluralize_word` keeps a word that ends in "s", where Rails
-/// answers "statuses"), and `strip_heredoc` has no runtime body. Both are
-/// refused at check time, not emitted onto a String no runtime reopens.
+/// answers "statuses"). It is refused at check time, not emitted onto a
+/// String no runtime reopens.
 #[test]
 fn string_extensions_without_a_runtime_body_are_refused() {
-    for (call, method) in [
-        (r#""Status".tableize"#, "tableize"),
-        (r#""  gear\n  boxes\n".strip_heredoc"#, "strip_heredoc"),
-    ] {
+    for (call, method) in [(r#""Status".tableize"#, "tableize")] {
         let errors = emit_and_run::real_blog()
             .edit(
                 "app/models/article.rb",
