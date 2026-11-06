@@ -34,6 +34,8 @@ pub(super) fn push_validate_method(
         .into_iter()
         .flat_map(|(_, attrs)| attrs.into_iter().map(|a| a.name))
         .collect();
+    let defaulted_attrs: crate::det::HashSet<Symbol> =
+        super::markers::attribute_api_defaults(&model.body).into_iter().map(|(name, _)| name).collect();
 
     // Unprepended validations and belongs_to checks keep declaration order.
     for item in model.validation_order() {
@@ -144,7 +146,8 @@ pub(super) fn push_validate_method(
                         produced = vec![with_condition_guard(body, &v.if_cond, &v.unless_cond)];
                     }
                     // Not the `@attr` slot a column has: a typed_store attribute lives in its store column, behind the reader Rails validates through.
-                    if store_attrs.contains(&v.attribute) {
+                    // A defaulted `attribute` holds nil in `@attr` until its reader applies the default.
+                    if store_attrs.contains(&v.attribute) || defaulted_attrs.contains(&v.attribute) {
                         for check in &mut produced {
                             read_through_reader(check, &v.attribute);
                         }

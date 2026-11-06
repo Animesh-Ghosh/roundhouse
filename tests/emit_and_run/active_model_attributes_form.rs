@@ -244,6 +244,8 @@ const DEFAULTS_FORM: &str = r#"class Form::Prefs
   attribute :label, :string, default: "none"
   attribute :stamp, :integer, default: -> { CALLS << :call; CALLS.size }
   attribute :origin, :string, default: -> { name }
+
+  validates :label, inclusion: { in: %w[none other] }
 end
 "#;
 
@@ -251,7 +253,8 @@ end
 /// form and an ActiveRecord model): cast as an assigned value is; `new`
 /// with the key, even nil, wins; a String default is fresh per instance; a
 /// lambda is called on the first read, with the class as `self`, kept, and
-/// skipped by an earlier write or `new` key.
+/// skipped by an earlier write or `new` key. A validation reads the
+/// default through the reader.
 const DEFAULTS_SCRIPT: &str = r##"
 require_relative "app/models/form/prefs"
 def check(label, got, want)
@@ -272,6 +275,8 @@ w = Form::Prefs.new
 w.stamp = 6
 check("write before read skips the lambda", [w.stamp, Form::Prefs::CALLS.size], [6, 0])
 check("lambda self is the class", Form::Prefs.new.origin, "Form::Prefs")
+check("validation reads the default", Form::Prefs.new.valid?, true)
+check("validation reads the written value", Form::Prefs.new(label: "x").valid?, false)
 puts "model attribute defaults passed"
 "##;
 
