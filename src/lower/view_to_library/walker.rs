@@ -1122,6 +1122,11 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     if let ExprNode::Send { recv: None, method, args: sa, block: None, parenthesized } = &*inner.node {
         if let Some(kind) = classify_template_helper(method.as_str(), sa, *parenthesized, ctx) {
             if let Some(call) = emit_view_helper_call(&kind, ctx) {
+                if let ViewHelperKind::LinkToIf { url, negate, .. } = &kind
+                    && let Some(stmts) = link_to_if_statement(&call, url, *negate, ctx)
+                {
+                    return stmts;
+                }
                 return vec![accumulator_append_call(call, ctx)];
             }
         }
@@ -1991,6 +1996,53 @@ fn bind_before_block(e: Expr, site: u32, bound: &mut usize, stmts: &mut Vec<Expr
     }
 }
 
+/// `_ = value`: Ruby's discard, which evaluates `value` and keeps nothing.
+/// Go rejects an unused local, and an unused value that isn't a call; Go,
+/// Rust and Kotlin each write the discard their own way.
+fn discard(value: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign { target: LValue::Var { id: VarId(0), name: Symbol::from("_") }, value },
+    )
+}
+
+/// The discard of a `link_to_if` / `link_to_unless` url when no link is
+/// made: Rails evaluates it before it picks a branch. A literal, a local,
+/// an ivar or a constant does nothing and is left out; a route helper is
+/// kept, since Rails raises for a key it lacks.
+fn url_discard(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
+    if matches!(&*url.node, ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef) {
+        return None;
+    }
+    if let ExprNode::Send { recv: None, method, args, .. } = &*url.node
+        && args.is_empty()
+        && ctx.binds_local(method.as_str())
+    {
+        return None;
+    }
+    Some(discard(rewrite_helpers_in_expr(url, ctx)))
+}
+
+/// A blockless `<%= link_to_if/unless … %>` as statements: the link, or
+/// the name followed by the url's discard, so the url is evaluated, after
+/// the name, whether or not a link is made (#1862). Rails evaluates both
+/// before it writes either; a raise between them aborts the render, so
+/// what is written is the same. `None` when the url has nothing to
+/// evaluate, and the value form stays.
+fn link_to_if_statement(call: &Expr, url: &Expr, negate: bool, ctx: &ViewCtx) -> Option<Vec<Expr>> {
+    let ExprNode::If { cond, then_branch, else_branch } = &*call.node else {
+        return None;
+    };
+    let url = url_discard(url, ctx)?;
+    let append = |e: &Expr| accumulator_append_call(e.clone(), ctx);
+    let (then_branch, else_branch) = if negate {
+        (seq(vec![append(then_branch), url]), append(else_branch))
+    } else {
+        (append(then_branch), seq(vec![append(else_branch), url]))
+    };
+    Some(vec![Expr::new(Span::synthetic(), ExprNode::If { cond: cond.clone(), then_branch, else_branch })])
+}
+
 /// `link_to_if`'s and `link_to_unless`'s block form: the link the
 /// blockless form writes when the condition says to link, and otherwise
 /// the block's body, walked against the view's accumulator with its
@@ -2014,17 +2066,10 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
         return None;
     };
     // Rails evaluates the name whether or not the block takes it, as the
-    // blockless form's text does. A discard (`_ = …`) evaluates it where
-    // the block may not read it: Go rejects an unused local, and an
-    // unused value that isn't a call. Go, Rust and Kotlin each write the
-    // discard their own way. Without a parameter, a literal, a local or
-    // an ivar does nothing and is left out.
-    let discard = |value: Expr| {
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Assign { target: LValue::Var { id: VarId(0), name: Symbol::from("_") }, value },
-        )
-    };
+    // blockless form's text does, and then the url, before the block
+    // runs. A discard (`_ = …`) evaluates the name where the block may not
+    // read it. Without a parameter, a literal, a local or an ivar does
+    // nothing and is left out.
     let mut captured = Vec::new();
     let inner_ctx = match params.first() {
         Some(p) => {
@@ -2045,6 +2090,7 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
             ctx.with_locals(std::iter::empty())
         }
     };
+    captured.extend(url_discard(url, ctx));
     captured.extend(walk_body(body, &inner_ctx));
     let shown = if captured.len() == 1 { captured.pop().unwrap() } else { seq(captured) };
     let link = accumulator_append_call(linked.clone(), ctx);
