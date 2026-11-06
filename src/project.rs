@@ -8718,6 +8718,8 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     ("ActiveSupport", "cast_boolean"),
     ("ActiveSupport", "cast_datetime"),
     ("ActiveSupport", "change_time_usec"),
+    ("ActiveSupport", "deep_stringify_keys"),
+    ("ActiveSupport", "deep_stringify_keys_value"),
     ("ActiveSupport", "errors_to_hash"),
     ("ActiveSupport", "errors_messages"),
     ("ActiveSupport", "truncate_bytes"),

@@ -75,6 +75,7 @@ mod parallel;
 mod inferred_types;
 pub mod inquiry;
 pub mod indifferent;
+pub(crate) mod hash_keys;
 pub use inferred_types::inferred_types;
 pub use inquiry::inquirer_methods;
 pub use diagnostics::{diagnose, diagnose_helper_modules, diagnose_with_coverage, unknown_receiver_sends, UnknownReceiverSend};
