@@ -2,8 +2,8 @@
 # rack 3.2's `Rack::Request`, the reads a Rack middleware a gem ships
 # asks of a request (rack-attack's `Rack::Attack::Request < ::Rack::Request`),
 # for the Spinel tree, which has no rack gem to load. The ruby family
-# swaps this file for `require "rack/request"` (`project::ruby_runtime_files`),
-# so the gem's own class runs there.
+# leaves this file out (`project::ruby_family_runtime_files`): the gem
+# requires rack itself, so rack's own class runs there.
 #
 # The env is the Rack env `GemMiddleware` builds for the request. A read
 # rack has and this does not is a NoMethodError the build reports, not a

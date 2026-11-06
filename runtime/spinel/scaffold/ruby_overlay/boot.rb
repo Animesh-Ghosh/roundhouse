@@ -70,10 +70,6 @@ require_relative "runtime/mime"
 require_relative "runtime/params"
 # Before any gem: rack-attack asks for it while it loads (runtime/action_dispatch_journey.rb).
 require_relative "runtime/action_dispatch_journey"
-# Before any gem: a gem's middleware subclasses it (rack-attack's Rack::Attack::Request).
-require_relative "runtime/rack_request"
-# Before any gem: a gem subclasses it (rack-attack's BaseProxy).
-require_relative "runtime/delegate_spinel"
 # ActionText::Content — see the spinel scaffold's main.rb. Both entry
 # points need it: a `has_rich_text` model's `body` reader constructs
 # one on every read, so an unloaded constant is a NameError on the

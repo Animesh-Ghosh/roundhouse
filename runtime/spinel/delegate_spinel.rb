@@ -4,8 +4,8 @@
 # gem's subclass loads and its own methods run (rack-attack's store
 # proxies). Not the forwarding: Ruby's sends every other call on through
 # `method_missing` by its runtime name, which Spinel cannot compile, so such
-# a call stays the refusal Spinel reports. The ruby family swaps this file
-# for `require "delegate"` (`project::ruby_runtime_files`).
+# a call stays the refusal Spinel reports. The ruby family leaves this file
+# out (`project::ruby_family_runtime_files`): the gem requires Ruby's own.
 class Delegator
   def initialize(obj)
     __setobj__(obj)

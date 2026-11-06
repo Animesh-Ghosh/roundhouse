@@ -4907,6 +4907,8 @@ fn ruby_family_runtime_files(
     let (mut files, test_stems) = spinel_files(app, fixture, param_binds)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/faye_websocket.rb");
+    // Spinel's stand-ins for rack's Rack::Request and Ruby's SimpleDelegator: the ruby family's gems load the real ones.
+    files.retain(|(p, _)| p != "runtime/rack_request.rb" && p != "runtime/delegate_spinel.rb");
     // The spinel SQL-functions file is FFI; CRuby writes its own below
     // (the sqlite3 gem's `create_function`), JRuby has none yet.
     files.retain(|(p, _)| p != "runtime/sql_functions.rb");
@@ -5006,19 +5008,6 @@ fn ruby_family_runtime_files(
         }
         // `Rack::Utils`: the rack gem the overlay's Puma already loads,
         // under the port's require path.
-        if path == "runtime/delegate_spinel.rb" {
-            *content = "# Ruby's own SimpleDelegator — see `project::ruby_runtime_files`.\n\
-                        # The part at runtime/spinel/delegate_spinel.rb is the Spinel tree's.\n\
-                        require \"delegate\"\n"
-                .to_string();
-        }
-        if path == "runtime/rack_request.rb" {
-            *content = "# The rack gem's own Rack::Request — see `project::ruby_runtime_files`.\n\
-                        # The port at runtime/spinel/rack_request.rb exists for the Spinel\n\
-                        # tree, which has no rack to load.\n\
-                        require \"rack/request\"\n"
-                .to_string();
-        }
         if path == "runtime/rack_utils.rb" {
             *content = "# The rack gem's own Rack::Utils — see `project::ruby_runtime_files`.\n\
                         # The port at runtime/ruby/rack_utils.rb exists for the targets\n\
