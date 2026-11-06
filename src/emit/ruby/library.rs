@@ -756,6 +756,7 @@ fn emit_library_class_with_nested(
             .filter(|l| !l.starts_with("require"))
             .collect();
         let Some(block) = child_block(&body, depth, kid.name.0.as_str()) else { continue };
+        let block = within_namespaces(block, parent.name.0.as_str(), kid.name.0.as_str(), classes);
         blocks.push(NestedBlock {
             name: kid.name.0.as_str().to_string(),
             requires: nested_dependencies(kid, kids),
@@ -769,7 +770,7 @@ fn emit_library_class_with_nested(
         let sidecar = super::rbs::emit_library_class_rbs(kid, &rb_path);
         let lines: Vec<&str> = sidecar.content.lines().collect();
         if let Some(block) = child_block(&lines, depth, kid.name.0.as_str()) {
-            sidecar_blocks.push(block);
+            sidecar_blocks.push(within_namespaces(block, parent.name.0.as_str(), kid.name.0.as_str(), classes));
         }
     }
     if blocks.is_empty() {
@@ -992,6 +993,40 @@ impl NestedEmitter<'_> {
 /// segment is the runtime's — with ONE compact header naming the whole
 /// path (`module WebPush::Connections::Stages`), which is renamed to
 /// its last segment.
+/// A child two or more levels below the parent (`Rack::Attack::StoreProxy::RedisProxy`
+/// in `Rack::Attack`) inside the namespaces between them: `child_block` names it by its
+/// last segment, which alone would define `Rack::Attack::RedisProxy`.
+fn within_namespaces(block: String, parent: &str, child: &str, classes: &[LibraryClass]) -> String {
+    let Some(relative) = child.strip_prefix(&format!("{parent}::")) else { return block };
+    let segments: Vec<&str> = relative.split("::").collect();
+    let Some((_, between)) = segments.split_last() else { return block };
+    // Already inside them: `unwrapped` kept the source's own `module StoreProxy`.
+    let first = block.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
+    // Not a bare prefix test: `module StoreProxyHelpers` would pass for `StoreProxy`.
+    let opens = |kw: &str| {
+        first.strip_prefix(&format!("{kw} {}", between.first().copied().unwrap_or(""))).is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', ';']))
+    };
+    if between.is_empty() || opens("module") || opens("class") {
+        return block;
+    }
+    let mut out = String::new();
+    let mut name = parent.to_string();
+    for (i, seg) in between.iter().enumerate() {
+        name = format!("{name}::{seg}");
+        let keyword = if classes.iter().any(|c| c.name.0.as_str() == name && !c.is_module) { "class" } else { "module" };
+        out.push_str(&format!("{}{keyword} {seg}\n", "  ".repeat(i)));
+    }
+    out.push_str(&indent_lines(&block, between.len()));
+    out.push('\n');
+    for i in (0..between.len()).rev() {
+        out.push_str(&format!("{}end", "  ".repeat(i)));
+        if i > 0 {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn child_block(body: &[&str], depth: usize, full_name: &str) -> Option<String> {
     let first = body.iter().position(|l| !l.trim().is_empty())?;
     let header = body[first];

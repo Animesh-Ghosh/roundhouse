@@ -4907,6 +4907,8 @@ fn ruby_family_runtime_files(
     let (mut files, test_stems) = spinel_files(app, fixture, param_binds)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/faye_websocket.rb");
+    // Spinel's stand-ins for rack's Rack::Request and Ruby's SimpleDelegator: the ruby family's gems load the real ones.
+    files.retain(|(p, _)| p != "runtime/rack_request.rb" && p != "runtime/delegate_spinel.rb");
     // The spinel SQL-functions file is FFI; CRuby writes its own below
     // (the sqlite3 gem's `create_function`), JRuby has none yet.
     files.retain(|(p, _)| p != "runtime/sql_functions.rb");
@@ -5326,6 +5328,18 @@ fn ruby_family_runtime_files(
         "",
         &mut files,
     )?;
+    // The middleware the app's gems' Railties `use`, outermost first, as Rails stacks them.
+    if !app.gem_middlewares.is_empty() {
+        let stacked = app.gem_middlewares.iter().rev().fold("app".to_string(), |inner, class| format!("{class}.new({inner})"));
+        let body = format!(
+            "# frozen_string_literal: true\n# The Rack middleware the app's gems put on Rails' stack from their\n# Railties (`App::gem_middlewares`), outermost first.\nmodule GemMiddleware\n  def self.wrap(app)\n    {stacked}\n  end\nend\n"
+        );
+        for (path, content) in files.iter_mut() {
+            if path == "runtime/gem_middleware.rb" {
+                *content = body.clone();
+            }
+        }
+    }
     // `ruby sidekiq.rb`, the worker role's entry, only where there is a
     // worker to run.
     if !sidekiq {
@@ -9672,6 +9686,105 @@ fn drop_solid_queue_standin(app: &App, files: &mut Vec<(String, String)>) {
     }
 }
 
+/// The Spinel tree's `GemMiddleware` for an app whose gems' Railties
+/// `use` middleware (`App::gem_middlewares`): the request as a Rack env,
+/// through the stack, with the routes at the bottom.
+fn spinel_gem_middleware(classes: &[String]) -> String {
+    let stacked = classes.iter().rev().fold("app".to_string(), |inner, class| format!("{class}.new({inner})"));
+    format!(
+        r#"# frozen_string_literal: true
+# The Rack middleware the app's gems put on Rails' stack from their
+# Railties (`App::gem_middlewares`), outermost first, between Rails'
+# RequestId and the routes. Written by `project::spinel_gem_middleware`.
+require "stringio"
+
+module GemMiddleware
+  # The rest of the stack under the gems' middleware: Rails' routes, for one request.
+  class App
+    attr_reader :tuple
+
+    def initialize(req, res, request_obj)
+      @req = req
+      @res = res
+      @request_obj = request_obj
+      @tuple = nil
+    end
+
+    def call(env)
+      # Not the request's own path: a middleware above may have rewritten PATH_INFO, and Rails routes the rewritten one.
+      @req.path = env["PATH_INFO"].to_s
+      Main.dispatch_request(@req, @res, @request_obj)
+      @routes_body = @res.body
+      @body = [@routes_body]
+      @tuple = [@res.status, @res.headers, @body]
+      @tuple
+    end
+
+    # The routes' own body, as they left it: the same Array holding the same String.
+    def routes_body?(body)
+      body.equal?(@body) && @body.length == 1 && @body[0].equal?(@routes_body)
+    end
+  end
+
+  def self.dispatch(req, res, request_obj)
+    app = App.new(req, res, request_obj)
+    # Built per request, not once as Rails does: the app at its bottom holds this request's objects, and a shared one has nowhere typed to keep them.
+    response = {stacked}.call(GemMiddleware.env_of(req, request_obj))
+    res.status = response[0].to_i
+    # Not merged into the routes' headers: a response of the middleware's own carries only its own.
+    GemMiddleware.replace_headers(res, response[1]) unless response[1].equal?(res.headers)
+    # Not rebuilt from the routes' own body: it may be no String (a file a controller sends).
+    return nil if app.routes_body?(response[2])
+    begin
+      body = +""
+      response[2].each {{ |part| body << part.to_s }}
+      res.body = body
+      res.file_path = +""
+      res.streaming = false
+    ensure
+      response[2].close if response[2].respond_to?(:close)
+    end
+    nil
+  end
+
+  def self.replace_headers(res, headers)
+    res.headers = Tep.str_hash
+    res.set_cookies.pop while res.set_cookies.length > 0
+    res.header_fields.pop while res.header_fields.length > 0
+    headers.each do |name, value|
+      key = name.to_s
+      # Not one header line: Rack 3 gives a repeated header as an Array, and Set-Cookie as one per line.
+      values = value.is_a?(Array) ? value.map {{ |part| part.to_s }} : value.to_s.split("\n")
+      if key.downcase == "set-cookie"
+        values.each {{ |cookie| res.set_cookies << cookie }}
+      else
+        res.headers[key] = values.join(", ")
+      end
+    end
+  end
+
+  # The Rack env a server builds for the request, as Puma does.
+  def self.env_of(req, request_obj)
+    env = {{ "REQUEST_METHOD" => req.verb }}
+    env["SCRIPT_NAME"] = ""
+    env["PATH_INFO"] = req.path
+    env["QUERY_STRING"] = req.raw_query
+    env["REMOTE_ADDR"] = req.remote_host
+    env["SERVER_PROTOCOL"] = req.http_version
+    env["rack.url_scheme"] = req.req_headers.fetch("x-forwarded-proto", "http") == "https" ? "https" : "http"
+    req.req_headers.each do |name, value|
+      key = name.upcase.tr("-", "_")
+      env[key == "CONTENT_TYPE" || key == "CONTENT_LENGTH" ? key : "HTTP_" + key] = value
+    end
+    env["rack.input"] = StringIO.new(req.raw_body.to_s)
+    env["action_dispatch.request_id"] = request_obj.request_id.to_s
+    env
+  end
+end
+"#
+    )
+}
+
 fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     let mut files: Vec<(String, String)> = Vec::new();
 
@@ -9691,6 +9804,14 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     }
 
     crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files)?;
+    if !app.gem_middlewares.is_empty() {
+        let body = spinel_gem_middleware(&app.gem_middlewares);
+        for (path, content) in files.iter_mut() {
+            if path == "runtime/gem_middleware.rb" {
+                *content = body.clone();
+            }
+        }
+    }
 
     let needs_date = app_uses_date(app);
 
@@ -11389,6 +11510,7 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         return;
     };
     let mut eager_requires = Vec::new();
+    let mut bundler_requires: Vec<String> = Vec::new();
     for gem in needed {
         // Not only a gem that loads by its name: the app's Gemfile can say what Bundler requires for it.
         match lock.gemfile_requires.get(&gem.name) {
@@ -11396,6 +11518,8 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
             None if crate::gems::loads_by_gem_name(&gem.name) => eager_requires.push(gem.name.clone()),
             // A source gem's dependency: its own `require "et-orbi"` is the one the compiled gem no longer runs.
             None if source_deps.iter().any(|d| d.name == gem.name) => eager_requires.push(gem.name.clone()),
+            // Bundler's own fallback for a dashed name: `rack-attack` is `rack/attack`.
+            None if gem.name.contains('-') => bundler_requires.push(gem.name.clone()),
             None => {}
         }
         let version = gem.version.as_deref();
@@ -11425,12 +11549,19 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     if let Some((_, boot)) = files.iter_mut().find(|(path, _)| path == "boot.rb") {
         eager_requires.sort();
         eager_requires.dedup();
-        let requires = eager_requires
+        let mut requires = eager_requires
             .iter()
             .filter(|feature| !boot.contains(&format!("require {feature:?}")))
             .map(|feature| format!("require {feature:?}\n"))
             .collect::<String>();
+        bundler_requires.sort();
+        bundler_requires.dedup();
+        for name in &bundler_requires {
+            requires.push_str(&bundler_require(name));
+        }
         if !requires.is_empty() {
+            // Rails defines its frameworks before Bundler requires a gem, which may test for one as it loads (rack-attack's PathNormalizer).
+            let requires = format!("require_relative \"runtime/action_dispatch_journey\"\n{requires}");
             insert_require_line(boot, &requires);
         }
     }
@@ -12500,6 +12631,16 @@ fn write_bundled_requires(files: &mut [(String, String)]) {
 /// before the first token, so a require written above one switches it
 /// off and warns "'frozen_string_literal' is ignored after any tokens".
 /// A shebang stays the first line.
+/// `Bundler.require` for a gem the Gemfile gives no `require:`: its name,
+/// then, for a dashed one, the name with each dash a slash; a file that
+/// is not there is skipped, and a LoadError from inside the gem is not.
+fn bundler_require(name: &str) -> String {
+    let nested = name.replace('-', "/");
+    format!(
+        "begin\n  require {name:?}\nrescue LoadError => e\n  raise unless e.path == {name:?}\n  begin\n    require {nested:?}\n  rescue LoadError => e\n    raise unless e.path == {nested:?}\n  end\nend\n"
+    )
+}
+
 fn insert_require_line(content: &mut String, line: &str) {
     // Ruby reads magic comments anywhere in the leading run of comments
     // and blank lines, so scan that whole run (a license header may come

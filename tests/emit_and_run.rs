@@ -20703,6 +20703,8 @@ mod solid_queue_worker_contract;
 mod solid_queue_surface;
 #[path = "emit_and_run/controller_surface.rs"]
 mod controller_surface;
+#[path = "emit_and_run/rack_attack.rs"]
+mod rack_attack;
 #[path = "emit_and_run/solid_queue_worker.rs"]
 mod solid_queue_worker;
 #[path = "emit_and_run/route_helper_segment_escape.rs"]
