@@ -38,6 +38,8 @@ mod content_tag_options;
 #[path = "support/link_to_if_eval_order.rs"]
 #[allow(dead_code)]
 mod link_to_if_eval_order;
+#[path = "support/simple_format.rs"]
+mod simple_format;
 #[path = "support/nested_classes.rs"]
 mod nested_classes;
 #[path = "support/array_methods.rs"]
@@ -735,6 +737,24 @@ fn a_link_to_unless_block_over_an_expression_name_tsc_passes() {
 #[ignore]
 fn link_to_if_evaluates_its_url_and_renders() {
     let (emitted, errors) = content_tag_options::app_rendering(link_to_if_eval_order::STRICT_VIEW, link_to_if_eval_order::STRICT_RENDERS).emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let install = Command::new("npm").args(["install", "--silent", "--no-audit", "--no-fund"]).current_dir(&*emitted).output().expect("run npm install");
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    let output = Command::new("./node_modules/.bin/tsx")
+        .args(["--test", "test/probes_controller.test.ts"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run tsx --test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("pass 1"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1861: `simple_format` with `sanitize: false` renders as Rails 8.1.4
+/// does, multibyte texts included (`simple_format::VIEW`): the app's integration test, run by the emitted node test.
+#[test]
+#[ignore]
+fn simple_format_renders() {
+    let (emitted, errors) = content_tag_options::app_rendering(simple_format::VIEW, simple_format::RENDERS).emit(roundhouse::project::BuildTarget::Typescript);
     assert!(errors.is_empty(), "{errors:?}");
     let install = Command::new("npm").args(["install", "--silent", "--no-audit", "--no-fund"]).current_dir(&*emitted).output().expect("run npm install");
     assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));

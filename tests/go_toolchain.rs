@@ -26,6 +26,8 @@ mod content_tag_options;
 #[path = "support/link_to_if_eval_order.rs"]
 #[allow(dead_code)]
 mod link_to_if_eval_order;
+#[path = "support/simple_format.rs"]
+mod simple_format;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -564,4 +566,12 @@ fn a_link_to_unless_block_over_an_expression_name_builds() {
 #[ignore]
 fn link_to_if_evaluates_its_url_and_renders() {
     assert_content_tag_test_passes(content_tag_options::app_rendering(link_to_if_eval_order::STRICT_VIEW, link_to_if_eval_order::STRICT_RENDERS));
+}
+
+/// #1861: `simple_format` with `sanitize: false` renders as Rails 8.1.4
+/// does, multibyte texts included (`simple_format::VIEW`): the app's integration test, run by `go test`.
+#[test]
+#[ignore]
+fn simple_format_renders() {
+    assert_content_tag_test_passes(content_tag_options::app_rendering(simple_format::VIEW, simple_format::RENDERS));
 }

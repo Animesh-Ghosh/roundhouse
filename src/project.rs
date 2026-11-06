@@ -7673,15 +7673,15 @@ enum RequireTarget {
     Spinel,
 }
 
-/// Standard libraries in `ingest::app`'s requirable list that Spinel has
-/// no package or native module for: `spinel` warns "is not available in
-/// Spinel" for each, and an app binary's `--strict-require` (from `spin
-/// flags`) makes that fatal. The spinel tree leaves them out, as it did
-/// before app requires were carried; the ruby family loads them all.
-const SPINEL_LACKS: &[&str] = &[
-    "delegate", "English", "etc", "io/nonblock", "io/wait", "ipaddr", "observer", "pp",
-    "weakref",
-];
+/// Standard libraries in `ingest::app`'s requirable list that the spinel
+/// tree's boot.rb leaves out; the ruby family loads them all. Spinel warns
+/// "is not available in Spinel" for `delegate`, `English`, `etc` and
+/// `io/nonblock`, and `--strict-require` makes that fatal. `ipaddr` stays
+/// on the port the tree carries (`runtime/ruby/ipaddr.rb`). `pp` and
+/// `observer` have packages this tree's shape still trips: a bare
+/// `require "pp"` is refused (PP's layout), and `require "observer"` leaves
+/// inference unsettled and fails the C compile once Observable is used.
+const SPINEL_LACKS: &[&str] = &["delegate", "English", "etc", "io/nonblock", "ipaddr", "observer", "pp"];
 
 /// The app's own standard-library requires ([`App::app_requires`]) at
 /// the head of `boot.rb`, ahead of everything that file loads. Twice on
