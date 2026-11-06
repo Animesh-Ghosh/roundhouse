@@ -1013,6 +1013,18 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         classes.entry(ClassId(Symbol::from(exc))).or_default().parent =
             Some(ClassId(Symbol::from(parent)));
     }
+    // ECError aliases PKeyError; source may reopen either spelling with different returns.
+    let gradual_errors: Vec<_> = exception_surface.iter().map(|(name, _)| (*name, Ty::Untyped)).collect();
+    for (exc, parent) in [
+        ("OpenSSL::PKey::PKeyError", "OpenSSL::OpenSSLError"),
+        ("OpenSSL::PKey::ECError", "OpenSSL::PKey::PKeyError"),
+        ("OpenSSL::Digest::DigestError", "OpenSSL::OpenSSLError"),
+        ("OpenSSL::KDF::KDFError", "OpenSSL::OpenSSLError"),
+    ] {
+        let surface = if matches!(exc, "OpenSSL::PKey::PKeyError" | "OpenSSL::PKey::ECError") { gradual_errors.as_slice() } else { &[] };
+        register_stdlib_class(classes, exc, &[], surface);
+        classes.entry(ClassId(Symbol::from(exc))).or_default().parent = Some(ClassId(Symbol::from(parent)));
+    }
     // Exception owners preserve their runtime ancestry, without claiming a
     // constructor implementation. The body typer refuses that missing API.
     classes.entry(ClassId(Symbol::from("ActiveStorage::Transformers"))).or_default().is_module = true;
@@ -1395,10 +1407,20 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // require; on Spinel by its fileutils / openssl package.
     register_stdlib_class(classes, "GC", &[("start", Ty::Nil)], &[]);
     register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
+    register_stdlib_class(classes, "OpenSSL", &[("fixed_length_secure_compare", Ty::Bool), ("secure_compare", Ty::Bool)], &[]);
+    register_stdlib_class(classes, "OpenSSL::KDF", &[("hkdf", Ty::Str)], &[]);
+    register_stdlib_class(classes, "OpenSSL::PKey", &[("read", Ty::Untyped), ("new_raw_private_key", class("OpenSSL::PKey::PKey"))], &[]);
+    register_stdlib_class(classes, "OpenSSL::PKey::PKey", &[], &[("sign", Ty::Str)]);
+    register_stdlib_class(classes, "OpenSSL::PKey::EC", &[("generate", Ty::Untyped)], &[
+        ("private?", Ty::Bool), ("group", class("OpenSSL::PKey::EC::Group")),
+        ("public_to_der", Ty::Str), ("private_to_der", Ty::Str), ("private_to_pem", Ty::Str),
+        ("dsa_sign_asn1", Ty::Str), ("dsa_verify_asn1", Ty::Bool),
+    ]);
+    register_stdlib_class(classes, "OpenSSL::PKey::EC::Group", &[], &[("curve_name", Ty::Str)]);
     // `OpenSSL::HMAC.digest(OpenSSL::Digest.new("sha1"), key, data)`: rotp's one-time codes.
-    for name in ["OpenSSL::Digest", "OpenSSL::Digest::SHA1", "OpenSSL::Digest::SHA256"] {
+    for name in ["OpenSSL::Digest", "OpenSSL::Digest::SHA1", "OpenSSL::Digest::SHA256", "OpenSSL::Digest::SHA384", "OpenSSL::Digest::SHA512"] {
         let digest = Ty::Class { id: ClassId(Symbol::from(name)), args: vec![].into() };
-        register_stdlib_class(classes, name, &[("new", digest)], &[
+        register_stdlib_class(classes, name, &[("new", if matches!(name, "OpenSSL::Digest::SHA384" | "OpenSSL::Digest::SHA512") { Ty::Untyped } else { digest })], &[
             ("name", Ty::Str), ("digest", Ty::Str), ("hexdigest", Ty::Str),
         ]);
         if name != "OpenSSL::Digest" {

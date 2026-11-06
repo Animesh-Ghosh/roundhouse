@@ -380,6 +380,15 @@ class Routing(unittest.TestCase):
         self.assertNotIn("build-wasm", plan["jobs"])
         self.assertIn("generated_columns_spinel", plan["spinel_tests"])
 
+    def test_openssl_registration_inputs_select_native_contract(self):
+        for path in [
+            "src/analyze/registry/stdlib.rs", "src/analyze/registry/library.rs", "src/project.rs",
+            "tests/openssl_registrations.rs", "tests/support/openssl_registrations.rb",
+        ]:
+            with self.subTest(path=path):
+                self.assertIn("openssl_registrations", ci.select([path])["spinel_tests"])
+        self.assertIn("openssl_registrations", ci.select([], full=True)["spinel_tests"])
+
     def test_did_you_mean_inputs_select_the_native_contract(self):
         for path in [
             "src/ingest/settled_conditionals.rs",
