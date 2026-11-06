@@ -328,6 +328,12 @@ mod cable_broadcast_json_contract;
 mod cable_transmit_contract;
 #[path = "emit_and_run/cable_transmit.rs"]
 mod cable_transmit;
+#[path = "support/cable_stop_all_streams.rs"]
+mod cable_stop_all_streams_contract;
+#[path = "emit_and_run/cable_stop_all_streams.rs"]
+mod cable_stop_all_streams;
+#[path = "emit_and_run/cable_stop_all_streams_replacement.rs"]
+mod cable_stop_all_streams_replacement;
 #[path = "emit_and_run/cable_broadcast_json.rs"]
 mod cable_broadcast_json;
 #[path = "support/index_with.rs"]
