@@ -29,8 +29,9 @@ use crate::ingest::prism_api::PrismLocation;
 
 /// Expand every reproducible `validates_with` in a model body, in place,
 /// and mark the runtime as defining `ActiveModel::Validator`.
-pub(crate) fn expand(app: &mut App) {
+pub(crate) fn expand(app: &mut App) -> Vec<crate::diagnostic::Diagnostic> {
     app.ports_active_model_validator = true;
+    let mut diagnostics = Vec::new();
     let sources = app.sources.clone();
     let guards = app.validates_with_guards.clone();
     // One count for the app, not per model: a parent model's method must
@@ -60,12 +61,19 @@ pub(crate) fn expand(app: &mut App) {
                 _ => None,
             };
             match expanded {
-                Some(items) => body.extend(items),
+                Some((items, warnings)) => {
+                    diagnostics.extend(warnings.into_iter().map(|mut diagnostic| {
+                        diagnostic.span = item.span();
+                        diagnostic
+                    }));
+                    body.extend(items);
+                }
                 None => body.push(item),
             }
         }
         model.body = body;
     }
+    diagnostics
 }
 
 fn source_text(sources: &[crate::span::SourceFile], span: crate::span::Span) -> Option<&str> {
@@ -126,9 +134,10 @@ fn generated_source(call_text: &str, name: &str, guard: Option<&str>) -> Option<
 /// doesn't ingest cleanly, or `validate` doesn't take its conditions.
 pub(super) fn ingest_source(src: &str, owner: &crate::ident::ClassId) -> Option<Vec<ModelBodyItem>> {
     ingest_source_with_constants(src, owner, &Default::default())
+        .and_then(|(items, warnings)| warnings.is_empty().then_some(items))
 }
 
-pub(super) fn ingest_source_with_constants(src: &str, owner: &crate::ident::ClassId, constants: &super::model::ClassConsts) -> Option<Vec<ModelBodyItem>> {
+pub(super) fn ingest_source_with_constants(src: &str, owner: &crate::ident::ClassId, constants: &super::model::ClassConsts) -> Option<(Vec<ModelBodyItem>, Vec<crate::diagnostic::Diagnostic>)> {
     let (items, diags) = crate::ingest::prism::scope(|| -> Option<Vec<ModelBodyItem>> {
         let result = crate::ingest::prism::parse(src.as_bytes(), "<validates_with>");
         let root = result.node();
@@ -143,7 +152,11 @@ pub(super) fn ingest_source_with_constants(src: &str, owner: &crate::ident::Clas
         }
         Some(out)
     });
-    if !diags.is_empty() {
+    // An unknown scheduling value keeps the callback in ordinary order.
+    // Other ingest diagnostics still decline the generated declaration.
+    if diags.iter().any(|diagnostic| diagnostic.severity != crate::diagnostic::Severity::Warning
+        || !matches!(&diagnostic.kind, crate::diagnostic::DiagnosticKind::IgnoredValidatorOption { validator, option, .. }
+            if validator.as_str() == "validate" && option.as_str() == "prepend")) {
         return None;
     }
     let items = items?;
@@ -151,7 +164,7 @@ pub(super) fn ingest_source_with_constants(src: &str, owner: &crate::ident::Clas
     if items.iter().any(|i| matches!(i, ModelBodyItem::Unknown { .. })) {
         return None;
     }
-    Some(items)
+    Some((items, diags))
 }
 
 /// Generated callbacks read scheduling constants in the original declaration's

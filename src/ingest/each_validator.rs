@@ -128,6 +128,7 @@ pub(super) fn resolve(app: &mut App) {
 pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diagnostic> {
     let calls = std::mem::take(&mut app.each_validator_calls);
     let sources = app.sources.clone();
+    let mut diagnostics = Vec::new();
     let mut gaps: Vec<(Span, String, String)> = Vec::new();
     // One count for the app, as `validates_with` keeps.
     let mut counter = 0usize;
@@ -148,13 +149,19 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
             };
             let expanded = generated_source(call, &owner, &mut counter).and_then(|src| {
                 if src.is_empty() {
-                    Some(Vec::new())
+                    Some((Vec::new(), Vec::new()))
                 } else {
                     super::validates_with::ingest_source_with_constants(&src, &model.name, &super::validates_with::constants_at(&sources, call.span))
                 }
             });
             match expanded {
-                Some(items) => body.extend(items),
+                Some((items, warnings)) => {
+                    diagnostics.extend(warnings.into_iter().map(|mut diagnostic| {
+                        diagnostic.span = call.span;
+                        diagnostic
+                    }));
+                    body.extend(items);
+                }
                 None => {
                     let keys: Vec<String> = call.keys.iter().map(|(key, _)| key.clone()).collect();
                     gaps.extend(key_gaps(call.span, &call.text, &keys, &call.kept));
@@ -165,7 +172,8 @@ pub(crate) fn expand(app: &mut App, target: &str) -> Vec<crate::diagnostic::Diag
         model.body = body;
         drop_calls(model, &dropped);
     }
-    gap_diagnostics(app, target, gaps)
+    diagnostics.extend(gap_diagnostics(app, target, gaps));
+    diagnostics
 }
 
 /// A target without the expansion: every kept call's keys are dropped and

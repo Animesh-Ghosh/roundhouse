@@ -1056,7 +1056,16 @@ pub(super) fn ingest_model_body_item(
                         match (key.as_deref(), value) {
                             (Some("prepend"), _) => match class_consts.truthiness(&assoc.value()) {
                                 Some(flag) => prepend = flag,
-                                None => options_ok = false,
+                                None => super::prism::push(crate::diagnostic::Diagnostic {
+                                    span,
+                                    kind: crate::diagnostic::DiagnosticKind::IgnoredValidatorOption {
+                                        validator: Symbol::from("validate"),
+                                        option: Symbol::from("prepend"),
+                                        hint: None,
+                                    },
+                                    severity: crate::diagnostic::Severity::Warning,
+                                    message: "prepend value cannot be resolved; validation is kept in ordinary registration order".into(),
+                                }),
                             },
                             (Some("if"), Some(v)) => if_method = Some(v),
                             (Some("unless"), Some(v)) => unless_method = Some(v),

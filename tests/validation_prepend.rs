@@ -973,3 +973,117 @@ raise record.errors.inspect unless record.errors[:name] == ["first", "length", "
         );
     }
 }
+
+const EXTERNAL_MARK: &str = "class MarkValidator < ActiveModel::Validator\n  def validate(record)\n    record.errors.add(:base, 'x')\n  end\nend\n";
+const EXTERNAL_EACH: &str = "class MarkEachValidator < ActiveModel::EachValidator\n  def validate_each(record, attribute, value)\n    record.errors.add(:base, 'x')\n  end\nend\n";
+
+fn external_prepend_files(kind: &str, flag: &str) -> Vec<(String, String)> {
+    let value = if flag == "false" { "false" } else { "true" };
+    let (settings, constant) = if flag == "qualified" {
+        (format!("module Config\n  module Flags\n    PREPEND = {value}\n  end\nend\n"), "Config::Flags::PREPEND")
+    } else {
+        (format!("module Settings\n  FLAG = {value}\nend\n"), "Settings::FLAG")
+    };
+    let declaration = match kind {
+        "direct" => format!("validate :x, prepend: {constant}"),
+        "with" => format!("validates_with MarkValidator, prepend: {constant}"),
+        "each" => format!("validates :name, mark_each: {{ prepend: {constant} }}"),
+        "both" => format!("validates_with MarkValidator, prepend: {constant}\n  validates :name, mark_each: {{ prepend: {constant} }}"),
+        _ => unreachable!(),
+    };
+    let model = format!("class Item < ApplicationRecord\n  validate :tail\n  {declaration}\n  def tail\n    errors.add(:base, 'tail')\n  end\n  def x\n    errors.add(:base, 'x')\n  end\nend\n");
+    let mut files = vec![("app/models/settings.rb".into(), settings)];
+    if matches!(kind, "with" | "both") {
+        files.push(("app/validators/mark_validator.rb".into(), EXTERNAL_MARK.into()));
+    }
+    if matches!(kind, "each" | "both") {
+        files.push(("app/validators/mark_each_validator.rb".into(), EXTERNAL_EACH.into()));
+    }
+    files.push(("app/models/item.rb".into(), model));
+    files
+}
+
+fn initialized_validation_oracle(files: &[(String, String)], script: &str) -> Option<String> {
+    let oracle = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
+    let sources = files.iter().map(|(_, source)| source.as_str()).collect::<Vec<_>>().join("\n");
+    let output = std::process::Command::new("ruby").args(["-e", &format!(r#"
+require {oracle:?}
+unless RailsOracle.available?('railties', 'activerecord', sqlite3: '>= 2.9')
+  warn "skipping initialized validation control: #{{RailsOracle.label}} and sqlite3 are required"
+  exit 77
+end
+RailsOracle.activate('railties', 'activerecord', sqlite3: '>= 2.9')
+require 'rails'
+require 'active_record/railtie'
+require 'tmpdir'
+ENV['RAILS_ENV'] = 'test'
+ENV['DATABASE_URL'] = 'sqlite3::memory:'
+class ValidationOracle < Rails::Application
+  config.load_defaults 8.1
+  config.eager_load = false
+  config.secret_key_base = 'validation-oracle-key'
+  config.logger = Logger.new(File::NULL)
+  config.root = Dir.mktmpdir('validation-oracle')
+end
+ValidationOracle.initialize!
+ActiveRecord::Base.establish_connection(adapter: 'sqlite3', database: ':memory:')
+ActiveRecord::Schema.verbose = false
+{SCHEMA}
+{BASE}
+{sources}
+{script}
+"#)]).output().expect("Rails 8.1 control");
+    if output.status.code() == Some(77) {
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        return None;
+    }
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[test]
+fn external_prepend_constants_keep_direct_and_generated_validations() {
+    let script = "record = Item.new(name: '')\nputs record.valid?\nputs record.errors.to_a.join('|')\n";
+    for kind in ["direct", "with", "each"] {
+        for flag in ["true", "false", "qualified"] {
+            let files = external_prepend_files(kind, flag);
+            let Some(oracle) = initialized_validation_oracle(&files, script) else { return };
+            let rails_order = if flag == "false" { "tail|x" } else { "x|tail" };
+            assert_eq!(oracle, format!("false\n{rails_order}"));
+            let refs: Vec<_> = files.iter().map(|(path, source)| (path.as_str(), source.as_str())).collect();
+            let run = app(&refs).run_ruby(script);
+            run.assert_passes();
+            // Direct declarations already import these constants. Generated
+            // callbacks cannot resolve them and explicitly keep ordinary order.
+            let order = if kind == "direct" { rails_order } else { "tail|x" };
+            assert_eq!(run.stdout.trim(), format!("false\n{order}"), "{kind}/{flag}");
+
+            let mut tree: roundhouse::vfs::FileTree = files.iter().map(|(path, source)|
+                (std::path::PathBuf::from(path), source.as_bytes().to_vec())).collect();
+            tree.insert("app/models/application_record.rb".into(), BASE.as_bytes().to_vec());
+            tree.insert("db/schema.rb".into(), SCHEMA.as_bytes().to_vec());
+            let (ingested, mut diagnostics) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_app_from_tree(tree));
+            let mut model_app = ingested.unwrap();
+            diagnostics.extend(roundhouse::session::analyze_and_lower_for(&mut model_app, roundhouse::project::BuildTarget::Ruby));
+            let warnings: Vec<_> = diagnostics.iter().filter(|diagnostic| matches!(&diagnostic.kind,
+                roundhouse::diagnostic::DiagnosticKind::IgnoredValidatorOption { validator, option, .. }
+                    if validator.as_str() == "validate" && option.as_str() == "prepend")).collect();
+            assert_eq!(warnings.len(), if kind == "direct" { 0 } else { 1 }, "{kind}/{flag}: {diagnostics:?}");
+            for warning in warnings {
+                assert_eq!(warning.severity, roundhouse::diagnostic::Severity::Warning);
+                assert!(warning.message.contains("kept in ordinary registration order"));
+                let source = &model_app.sources[warning.span.file.0 as usize - 1];
+                assert!(source.path.ends_with("app/models/item.rb"));
+                assert!(source.text[warning.span.start as usize..warning.span.end as usize].contains("prepend:"));
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn external_prepend_constants_keep_generated_validations_natively() {
+    let files = external_prepend_files("both", "true");
+    let refs: Vec<_> = files.iter().map(|(path, source)| (path.as_str(), source.as_str())).collect();
+    app(&refs).run_spinel_with_db("record = Item.new(name: '')\nraise 'validation skipped' if record.valid?\nraise record.errors.to_a.inspect unless record.errors.to_a == ['tail', 'x', 'x']\n").assert_passes();
+}
