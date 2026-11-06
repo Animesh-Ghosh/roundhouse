@@ -9186,9 +9186,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         // These newly admitted class objects are retained by Ruby/JRuby only.
         if target != "jruby"
             && expr.decisions & crate::expr::RUNTIME_CLASS_OBJECT != 0
-            && let crate::expr::ExprNode::Send { method, args, block, .. } = &*expr.node
-            // Not a bare `Module.new` on Spinel, which makes an anonymous module (addressable's `NONE` sentinel); a body or a superclass is still refused.
-            && !(target == "spinel" && method.as_str() == "new" && args.is_empty() && block.is_none())
+            && let crate::expr::ExprNode::Send { method, .. } = &*expr.node
         {
             emit::diagnostics::report_unsupported(
                 expr.span,
