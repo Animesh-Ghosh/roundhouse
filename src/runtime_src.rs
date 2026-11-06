@@ -44,6 +44,8 @@ fn ingest_expr(node: &Node<'_>, file: &str) -> Result<Expr, crate::ingest::Inges
 ///   `CONST = { k: v, ... }.freeze`
 ///   `CONST = [a, b, ...]`
 ///   `CONST = [a, b, ...].freeze`
+///   `CONST = OTHER`, where `OTHER` is an earlier constant of the same
+///   source with one of these types
 /// The returned map keys are the constant's last-segment name; values
 /// are the inferred Ty (Hash[K, V] / Array[T] / etc.). Used by the
 /// body-typer's `ExprNode::Const` arm so dispatch on a constant
@@ -307,7 +309,12 @@ fn collect_constant_from_stmt(
     }
     if let Some(write) = node.as_constant_write_node() {
         let Ok(name) = std::str::from_utf8(write.name().as_slice()) else { return };
-        if let Some(ty) = type_of_const_literal(&write.value()) {
+        let value = write.value();
+        let ty = type_of_const_literal(&value).or_else(|| {
+            let read = value.as_constant_read_node()?;
+            global.get(&Symbol::from(std::str::from_utf8(read.name().as_slice()).ok()?)).cloned()
+        });
+        if let Some(ty) = ty {
             let name = Symbol::from(name);
             if with_owners && !owner.is_empty() {
                 by_owner.entry(ClassId(Symbol::from(owner))).or_default().insert(name.clone(), ty.clone());

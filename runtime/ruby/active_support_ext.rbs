@@ -155,6 +155,7 @@ module ActiveSupport
   def self.formatted_offset: (Time t) -> String
   def self.seconds_to_utc_offset: (Integer seconds) -> String
   class TimeZone
+    MAPPING: Hash[String, String]
     def name: () -> String
     def initialize: (String name, TimeZoneData data) -> void
     def self.lookup: (String? name) -> TimeZone?
