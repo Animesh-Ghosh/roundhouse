@@ -4779,51 +4779,11 @@ fn view_helpers_path() -> Vec<Symbol> {
 ///      `ActionView::ViewHelpers.name(args)`.
 /// Only receiver-less Sends are rewritten in (3)/(4): a call with a receiver
 /// already resolves, and a bare identifier with no call shape is a local read.
-fn rewrite_helper_calls(
-    expr: &mut Expr,
-    index: &HashMap<Symbol, ClassId>,
-    route_helpers: &crate::det::HashSet<Symbol>,
-    url_helper_classes: &crate::det::HashSet<Symbol>,
-    rewrite_request: bool,
-    own_methods: &crate::det::HashSet<Symbol>,
-    own_params: &crate::det::HashSet<Symbol>,
-    view_visible: &std::collections::BTreeSet<Symbol>,
-) {
-    expr.node.for_each_child_mut(&mut |c| {
-        rewrite_helper_calls(
-            c,
-            index,
-            route_helpers,
-            url_helper_classes,
-            rewrite_request,
-            own_methods,
-            own_params,
-            view_visible,
-        )
-    });
-
-    // Not left on `self` in a view or helper module: a helper reached as `self.x` is the bare `x` below, and the module function has no such method. A same-named param keeps `self`, which a bare call would read instead.
-    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
-        if rewrite_request
-            && matches!(&*r.node, ExprNode::SelfRef)
-            && (index.contains_key(method) || view_visible.contains(method))
-            && !own_methods.contains(method)
-            && !own_params.contains(method)
-        {
-            let ExprNode::Send { recv, .. } = &mut *expr.node else { unreachable!() };
-            *recv = None;
-        }
-    }
-
-    // Destructive `<lvalue>.<m>!(args)` on a frozen string raises under
-    // spinel (frozen literals) — lobsters' link_to_different_page does
-    // `path.sub!(/…/, "")` on a route-helper literal (`active_path` → a
-    // frozen "/active"). For the in-place string mutators whose bang form
-    // modifies self and returns self-or-nil, the non-destructive
-    // `<lvalue> = <lvalue>.<m>(args)` is equivalent when the bang return is
-    // unused (statement position) and is frozen-safe. Assignable receiver
-    // (Var/Ivar) only; `slice!` and friends (which return the removed part,
-    // not the modified string) are deliberately excluded.
+/// Destructive `<lvalue>.<m>!(args)` on a frozen string raises under
+/// spinel (frozen literals). For the in-place string mutators whose bang
+/// form modifies self and returns self-or-nil, `<lvalue> = <lvalue>.<m>(args)`
+/// is equivalent when the bang's value is unused, and frozen-safe.
+fn bang_to_reassign(expr: &mut Expr) {
     let bang_rewrite: Option<Symbol> =
         if let ExprNode::Send { recv: Some(r), method, block: None, .. } = &*expr.node {
             // A reserved-word local (`class:`) or a numbered parameter
@@ -4868,7 +4828,52 @@ fn rewrite_helper_calls(
             ExprNode::Send { recv: Some(r), method: base, args, block: None, parenthesized },
         );
         *expr.node = ExprNode::Assign { target, value: call };
-        return;
+    }
+}
+
+fn rewrite_helper_calls(
+    expr: &mut Expr,
+    index: &HashMap<Symbol, ClassId>,
+    route_helpers: &crate::det::HashSet<Symbol>,
+    url_helper_classes: &crate::det::HashSet<Symbol>,
+    rewrite_request: bool,
+    own_methods: &crate::det::HashSet<Symbol>,
+    own_params: &crate::det::HashSet<Symbol>,
+    view_visible: &std::collections::BTreeSet<Symbol>,
+) {
+    expr.node.for_each_child_mut(&mut |c| {
+        rewrite_helper_calls(
+            c,
+            index,
+            route_helpers,
+            url_helper_classes,
+            rewrite_request,
+            own_methods,
+            own_params,
+            view_visible,
+        )
+    });
+
+    // Not left on `self` in a view or helper module: a helper reached as `self.x` is the bare `x` below, and the module function has no such method. A same-named param keeps `self`, which a bare call would read instead.
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+        if rewrite_request
+            && matches!(&*r.node, ExprNode::SelfRef)
+            && (index.contains_key(method) || view_visible.contains(method))
+            && !own_methods.contains(method)
+            && !own_params.contains(method)
+        {
+            let ExprNode::Send { recv, .. } = &mut *expr.node else { unreachable!() };
+            *recv = None;
+        }
+    }
+
+    // Only a statement whose value nothing reads: `mod ||= path.gsub!(…)` tests the bang call's nil (addressable's normalize_path).
+    if let ExprNode::Seq { exprs } = &mut *expr.node
+        && let Some((_, statements)) = exprs.split_last_mut()
+    {
+        for statement in statements {
+            bang_to_reassign(statement);
+        }
     }
 
     // ActiveSupport `String#pluralize(count)` — count-aware inflection of

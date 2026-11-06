@@ -20705,6 +20705,8 @@ mod solid_queue_surface;
 mod controller_surface;
 #[path = "emit_and_run/rack_attack.rs"]
 mod rack_attack;
+#[path = "emit_and_run/addressable.rs"]
+mod addressable;
 #[path = "emit_and_run/solid_queue_worker.rs"]
 mod solid_queue_worker;
 #[path = "emit_and_run/route_helper_segment_escape.rs"]
