@@ -174,6 +174,7 @@ module Main
     res.headers["x-routes"] = req.path
     res.body = +"routes body"
     res.file_path = +"/tmp/sent.pdf" if req.path == "/file"
+    res.streaming = true if req.path == "/stream"
   end
 end
 class Probe
@@ -182,7 +183,7 @@ class Probe
     env["PATH_INFO"] = env["PATH_INFO"].sub("/old", "/new")
     status, headers, body = response = @app.call(env)
     case env["PATH_INFO"]
-    when "/file" then [429, {{ "x-own" => "1" }}, ["replaced"]]
+    when "/file", "/stream" then [429, {{ "x-own" => "1" }}, ["replaced"]]
     when "/element" then (body[0] = "element"; response)
     else [status, headers, body]
     end
@@ -195,6 +196,8 @@ def run(path)
 end
 res = run("/file")
 raise "file: #{{res.to_h}}" unless res.status == 429 && res.body == "replaced" && res.file_path == "" && res.headers == {{ "x-own" => "1" }}
+res = run("/stream")
+raise "stream: #{{res.to_h}}" unless res.status == 429 && res.body == "replaced" && res.streaming == false
 res = run("/element")
 raise "element: #{{res.to_h}}" unless res.body == "element" && res.headers["x-routes"] == "/element"
 res = run("/old/page")

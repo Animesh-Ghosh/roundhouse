@@ -76,6 +76,14 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, gem_libs: &[PathBuf]) -> (Vec<Strin
                 // Not `file_id` alone: a file library ingest has not registered yet answers no file.
                 let file_id = super::sources::register(&name, &String::from_utf8_lossy(&bytes));
                 if matches!(loaded, Loading::Autoload | Loading::Unknown) {
+                    // Not reported for a Railtie that inserts no middleware (acts_as_follower's): its loading changes no stack.
+                    let (mut probe_uses, mut probe_diags) = (Vec::new(), Vec::new());
+                    for stmt in flatten_statements(body) {
+                        read_initializer(&stmt, file_id, &lexical, &mut probe_uses, &mut probe_diags);
+                    }
+                    if probe_uses.is_empty() && probe_diags.is_empty() {
+                        continue;
+                    }
                     let loc = class.location();
                     let why = if loaded == Loading::Autoload {
                         "a Railtie only autoloaded: whether the app loads it, and so runs its initializers, is not known here"
@@ -205,7 +213,15 @@ fn loads(node: &Node<'_>, certain: bool, out: &mut Vec<Load>) {
         }
         return;
     }
-    let Some(call) = node.as_call_node() else { return };
+    // Not run as the file loads: a method's body runs only when something calls it.
+    if node.as_def_node().is_some() {
+        return;
+    }
+    let Some(call) = node.as_call_node() else {
+        // Not passed over: a require inside `cond && require …` or any other expression may run.
+        uncertain_loads(node, out);
+        return;
+    };
     let name = constant_id_str(&call.name());
     if call.receiver().is_none() && matches!(name, "require" | "require_relative" | "autoload") {
         let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
@@ -223,11 +239,27 @@ fn loads(node: &Node<'_>, certain: bool, out: &mut Vec<Load>) {
     }
 }
 
+// Not any path under Rails: `defined?(::Rails::OptionalFeature)` can be false in a Rails app.
+/// The requires an expression this walker does not follow names, each as one that may not run.
+fn uncertain_loads(node: &Node<'_>, out: &mut Vec<Load>) {
+    let text = String::from_utf8_lossy(node.location().as_slice()).into_owned();
+    for (kind, relative, autoload) in [("require_relative", true, false), ("require", false, false), ("autoload", false, true)] {
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find(kind) {
+            let after = &rest[at + kind.len()..];
+            rest = after;
+            if kind == "require" && after.starts_with("_relative") {
+                continue;
+            }
+            if let Some(feature) = after.split(['"', '\'']).nth(1) {
+                out.push(Load { feature: feature.to_string(), relative, autoload, certain: false });
+            }
+        }
+    }
+}
+
 fn rails_defined(predicate: &Node<'_>) -> bool {
-    predicate
-        .as_defined_node()
-        .and_then(|d| constant_path_of(&d.value()))
-        .is_some_and(|path| path.first().is_some_and(|root| root == "Rails"))
+    predicate.as_defined_node().and_then(|d| constant_path_of(&d.value())).is_some_and(|path| path == ["Rails"])
 }
 
 /// Whether Bundler's `require` of the gem reaches `file`: from the entry file (`lib/<name>.rb`, or the
@@ -489,6 +521,16 @@ mod tests {
         // Any other condition may be false: reported, not stacked.
         let (classes, diags) = read(&[("/gem/lib/gem.rb", &with("if false\n  require \"gem/railtie\"\nend\n")), ("/gem/lib/gem/railtie.rb", &rt)]);
         assert!(classes.is_empty() && diags.len() == 1, "{classes:?} {diags:?}");
+        // A guard under Rails other than Rails itself may be false.
+        let (classes, diags) = read(&[("/gem/lib/gem.rb", &with("require \"gem/railtie\" if defined?(::Rails::Optional)\n")), ("/gem/lib/gem/railtie.rb", &rt)]);
+        assert!(classes.is_empty() && diags.len() == 1, "{classes:?} {diags:?}");
+        // A require a short-circuit decides may not run.
+        let (classes, diags) = read(&[("/gem/lib/gem.rb", &with("ENV[\"ON\"] && require(\"gem/railtie\")\n")), ("/gem/lib/gem/railtie.rb", &rt)]);
+        assert!(classes.is_empty() && diags.len() == 1, "{classes:?} {diags:?}");
+        // An uncertain Railtie that inserts no middleware changes no stack.
+        let quiet = railtie("    initializer \"gem.ar\" do |app|\n      ActiveSupport.on_load(:active_record) { }\n    end");
+        let (classes, diags) = read(&[("/gem/lib/gem.rb", &with("require \"gem/railtie\" if defined?(Rails) && Rails::VERSION::MAJOR >= 3\n")), ("/gem/lib/gem/railtie.rb", &quiet)]);
+        assert!(classes.is_empty() && diags.is_empty(), "{classes:?} {diags:?}");
         // A require inside a method runs only if something calls it.
         let (classes, diags) =
             read(&[("/gem/lib/gem.rb", &with("def self.boot\n  require \"gem/railtie\"\nend\n")), ("/gem/lib/gem/railtie.rb", &rt)]);
