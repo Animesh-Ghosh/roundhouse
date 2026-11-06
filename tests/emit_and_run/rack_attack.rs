@@ -109,8 +109,7 @@ fn rack_attack_throttles_and_safelists_as_in_rails() {
     assert!(run.stdout.contains("rack-attack passed"), "{}", run.stdout);
 }
 
-// Not run on Spinel yet: `Cache#store=`'s `proxy.new(store)` on a Class read out of
-// `@@proxies` reaches every builtin class's `new`, and String's refuses the store (matz/spinel#11154).
+// Emitted only: the Spinel toolchain lane, which builds and serves a tree, installs no rack-attack.
 #[test]
 fn the_spinel_tree_stacks_the_railtie_middleware() {
     let (tree, errors) = app().emit(BuildTarget::Spinel);
