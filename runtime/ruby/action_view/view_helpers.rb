@@ -716,12 +716,14 @@ module ActionView
     # Rails' `String#blank?`: nothing but `[[:space:]]`, the ASCII
     # whitespace and the Unicode spaces (U+0085, U+00A0, U+1680,
     # U+2000..U+200A, U+2028, U+2029, U+202F, U+205F, U+3000).
+    # `text[i, 1]` is `"\r\n"` on a target whose characters are grapheme
+    # clusters (Swift), and it is blank too.
     def self.simple_format_blank?(text)
       spaces = " \t\n\v\f\r\u0085\u00A0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000"
       blank = true
       i = 0
       while i < text.length
-        if !spaces.include?(text[i, 1])
+        if !spaces.include?(text[i, 1]) && text[i, 1] != "\r\n"
           blank = false
         end
         i += 1
@@ -731,7 +733,8 @@ module ActionView
 
     # One loop, ending in `i += 1` (Elixir): a run of newlines is counted
     # in `nl` and settled at the next other character, and the `\n` of a
-    # `\r\n` isn't counted, so no index steps by two.
+    # `\r\n` isn't counted, so no index steps by two. Where characters are
+    # grapheme clusters (Swift), a `\r\n` is one `c`, and one newline.
     def self.simple_format_paragraphs(text, wrapper_tag, opts)
       out = ""
       para = ""
@@ -740,7 +743,7 @@ module ActionView
       i = 0
       while i < text.length
         c = text[i, 1]
-        if c == "\r" || c == "\n"
+        if c == "\r" || c == "\n" || c == "\r\n"
           if c == "\r" || prev != "\r"
             nl = nl + 1
           end

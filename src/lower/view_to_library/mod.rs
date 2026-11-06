@@ -488,16 +488,39 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let mut rewritten = rewritten;
     // An app override owns pluralize, content_tag or simple_format,
     // including nested ERB calls. Qualify it before the framework
-    // classifier consumes bare Sends.
+    // classifier consumes bare Sends: to its helper module or class-side
+    // clone, or, for a controller's `helper_method` that reads the
+    // controller's state (in `view_visible_controller_methods` only), to
+    // `ActionController::Current.controller`, as the Ruby emit routes
+    // any other such call.
     for helper in ["pluralize", "content_tag", "simple_format"] {
-        let Some(owner) = app.helper_method_index.get(&Symbol::from(helper)) else { continue };
-        fn qualify_helper(e: &mut Expr, helper: &str, owner: &ClassId) {
+        let name = Symbol::from(helper);
+        let owner = app.helper_method_index.get(&name);
+        if owner.is_none() && !app.view_visible_controller_methods.contains(&name) {
+            continue;
+        }
+        fn receiver(span: Span, owner: Option<&ClassId>) -> Expr {
+            let Some(owner) = owner else {
+                let current = Expr::new(span, ExprNode::Const {
+                    path: vec![Symbol::from("ActionController"), Symbol::from("Current")],
+                });
+                return Expr::new(span, ExprNode::Send {
+                    recv: Some(current),
+                    method: Symbol::from("controller"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                });
+            };
+            Expr::new(span, ExprNode::Const {
+                path: owner.0.as_str().split("::").map(Symbol::from).collect(),
+            })
+        }
+        fn qualify_helper(e: &mut Expr, helper: &str, owner: Option<&ClassId>) {
             e.node.for_each_child_mut(&mut |c| qualify_helper(c, helper, owner));
             if let ExprNode::Send { recv, method, .. } = &mut *e.node {
                 if recv.is_none() && method.as_str() == helper {
-                    *recv = Some(Expr::new(e.span, ExprNode::Const {
-                        path: owner.0.as_str().split("::").map(Symbol::from).collect(),
-                    }));
+                    *recv = Some(receiver(e.span, owner));
                 }
             }
         }

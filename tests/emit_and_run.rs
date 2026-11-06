@@ -21076,6 +21076,28 @@ fn an_app_defined_simple_format_is_left_to_the_app() {
         .assert_passes();
 }
 
+/// A controller's `helper_method :simple_format` that reads the controller's
+/// state is the one the template calls, through the controller, as for any
+/// other such `helper_method`: it is neither lowered nor refused.
+#[test]
+fn a_controller_helper_method_simple_format_is_left_to_the_controller() {
+    let overlay = || {
+        html_safe_method_owner::app()
+            .write("app/views/probes/show.html.erb", "L0:<%= simple_format(\"a\") %>|<%= simple_format(\"b\", {}, sanitize: false) %>\n")
+            .edit(
+                "app/controllers/probes_controller.rb",
+                "class ProbesController < ApplicationController\n",
+                "class ProbesController < ApplicationController\n  helper_method :simple_format\n\n  def simple_format(text, html_options = {}, options = {})\n    @own ||= \"own:\"\n    @own + text\n  end\n\n",
+            )
+    };
+    let errors = overlay().check_errors();
+    assert!(!errors.iter().any(|e| e.contains("simple_format")), "{errors:?}");
+    overlay()
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(&["L0:own:a|own:b"]))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
 /// A template no request reaches keeps its errors as warnings, as analysis
 /// does, so its `simple_format` doesn't fail another target's build.
 #[test]

@@ -174,6 +174,12 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "<div class=\"k\"><b>a</b></div>\n\n<div class=\"k\">b</div>",
                  ViewHelpers.simple_format("<b>a</b>\n\nb", :div, { class: "k" })
     assert_equal "<span class=\"k\"></span>", ViewHelpers.simple_format("", :span, { class: "k" })
+    assert_equal "<p></p>", ViewHelpers.simple_format("\r\n", :p)
+    assert_equal "<p></p>", ViewHelpers.simple_format(" \r\n　", :p)
+    assert_equal "<p>a\n</p>", ViewHelpers.simple_format("a\r\n", :p)
+    assert_equal "<p>\na</p>", ViewHelpers.simple_format("\r\na", :p)
+    assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\n\nb", :p)
+    assert_equal "<p>a</p>\n\n<p>b</p>", ViewHelpers.simple_format("a\r\n\r\nb", :p)
   end
 
   # Rails raises for zero but returns nil for a negative width. Keep the
