@@ -25,6 +25,8 @@ mod emit_and_run;
 mod content_tag_options;
 #[path = "support/simple_format.rs"]
 mod simple_format;
+#[path = "support/link_to_computed_url.rs"]
+mod link_to_computed_url;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -562,4 +564,12 @@ fn a_link_to_unless_block_over_an_expression_name_builds() {
 #[ignore]
 fn simple_format_renders() {
     assert_content_tag_test_passes(content_tag_options::app_rendering(simple_format::VIEW, simple_format::RENDERS));
+}
+
+/// #1865: `link_to` with a url the template computes renders as Rails
+/// 8.1.4 does (`link_to_computed_url::VIEW`).
+#[test]
+#[ignore]
+fn link_to_computed_url_renders() {
+    assert_content_tag_test_passes(content_tag_options::app_rendering(link_to_computed_url::VIEW, link_to_computed_url::RENDERS));
 }

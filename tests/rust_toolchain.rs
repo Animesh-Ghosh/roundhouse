@@ -30,6 +30,8 @@ mod emit_and_run;
 mod content_tag_options;
 #[path = "support/simple_format.rs"]
 mod simple_format;
+#[path = "support/link_to_computed_url.rs"]
+mod link_to_computed_url;
 #[path = "support/rust_bare_model.rs"]
 mod rust_bare_model;
 #[path = "support/i18n_locales_app.rs"]
@@ -643,6 +645,26 @@ fn a_link_to_unless_block_over_an_expression_name_compiles() {
 #[ignore]
 fn simple_format_renders() {
     let (emitted, errors) = content_tag_options::app_rendering(simple_format::VIEW, simple_format::RENDERS).emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("src/tests/probes_controller_test.rs");
+    let mut source = std::fs::read_to_string(&test).expect("probes_controller_test.rs");
+    source.push_str("\nfn assert_includes(body: String, want: &str) {\n    assert!(body.contains(want), \"missing {want} in {body}\");\n}\n");
+    std::fs::write(&test, source).expect("write probe");
+    let output = Command::new("cargo")
+        .args(["test", "content_tag_renders"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("content_tag_renders ... ok"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1865: `link_to` with a url the template computes renders as Rails
+/// 8.1.4 does (`link_to_computed_url::VIEW`).
+#[test]
+#[ignore]
+fn link_to_computed_url_renders() {
+    let (emitted, errors) = content_tag_options::app_rendering(link_to_computed_url::VIEW, link_to_computed_url::RENDERS).emit(roundhouse::project::BuildTarget::Rust);
     assert!(errors.is_empty(), "{errors:?}");
     let test = emitted.join("src/tests/probes_controller_test.rs");
     let mut source = std::fs::read_to_string(&test).expect("probes_controller_test.rs");

@@ -1095,8 +1095,22 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
             return Some(super::absolute_url_interp(stem, args.clone()));
         }
     }
+    // A url the template computes as a String (`"/x" + "y"`, a String
+    // local, `"/X".downcase`, `articles_path + "?p=1"`) is the url, as an
+    // interpolated one is: Rails' `url_for` returns a String unchanged.
+    // Without this it fell through to a `link_to` no compiled runtime
+    // defines (#1865). A record local's name convention doesn't apply to
+    // a String either.
+    let string_url = || matches!(url.ty, Some(crate::ty::Ty::Str)).then(|| rewrite_helpers_in_expr(url, ctx));
     let is_local = |n: &str| ctx.is_local(n);
-    let kind = classify_view_url_arg(url, &is_local)?;
+    let Some(kind) = classify_view_url_arg(url, &is_local) else {
+        return string_url();
+    };
+    if matches!(kind, ViewUrlArg::RecordRef { .. })
+        && let Some(url) = string_url()
+    {
+        return Some(url);
+    }
     match kind {
         ViewUrlArg::Literal { value } => Some(lit_str(value.to_string())),
         // The local already holds the url — read it.
