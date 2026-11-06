@@ -2076,15 +2076,29 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
     // read it. Without a parameter, a literal, a local or an ivar does
     // nothing and is left out.
     let mut captured = Vec::new();
+    let mut url_read = url_discard(url, ctx);
+    let assign = |name: Symbol, value: Expr| {
+        Expr::new(Span::synthetic(), ExprNode::Assign { target: LValue::Var { id: VarId(0), name }, value })
+    };
     let inner_ctx = match params.first() {
         Some(p) => {
-            captured.push(Expr::new(
-                Span::synthetic(),
-                ExprNode::Assign {
-                    target: LValue::Var { id: VarId(0), name: p.clone() },
-                    value: rewrite_helpers_in_expr(text, ctx),
-                },
-            ));
+            let name = rewrite_helpers_in_expr(text, ctx);
+            // A url reading a template local the parameter shadows
+            // (`<% x = "o" %>… Tracker.at(x) do |x|`) reads the outer
+            // one, as in Rails: the name goes to a temp no one else reads,
+            // then the url, and the parameter is bound last (#1874).
+            if url_read.as_ref().is_some_and(|u| reads_name(u, p.as_str())) {
+                let mut temp = String::from("_link_name");
+                while ctx.is_local(&temp) || [text, url, body].into_iter().any(|e| reads_name(e, &temp)) {
+                    temp.push('_');
+                }
+                let temp = Symbol::from(temp.as_str());
+                captured.push(assign(temp.clone(), name));
+                captured.extend(url_read.take());
+                captured.push(assign(p.clone(), var_ref(temp)));
+            } else {
+                captured.push(assign(p.clone(), name));
+            }
             captured.push(discard(var_ref(p.clone())));
             ctx.with_locals([p.as_str().to_string()])
         }
@@ -2095,12 +2109,27 @@ fn emit_link_to_if_block(method: &str, args: &[Expr], block: &Expr, ctx: &ViewCt
             ctx.with_locals(std::iter::empty())
         }
     };
-    captured.extend(url_discard(url, ctx));
+    captured.extend(url_read);
     captured.extend(walk_body(body, &inner_ctx));
     let shown = if captured.len() == 1 { captured.pop().unwrap() } else { seq(captured) };
     let link = accumulator_append_call(linked.clone(), ctx);
     let (then_branch, else_branch) = if negate { (shown, link) } else { (link, shown) };
     Some(vec![Expr::new(Span::synthetic(), ExprNode::If { cond: cond.clone(), then_branch, else_branch })])
+}
+
+/// Whether `e` reads or binds the local `name`: a `Var`, an assignment
+/// to it, a bare argument-less `Send` (Prism's shape for a local it hasn't
+/// seen assigned), or a block parameter.
+fn reads_name(e: &Expr, name: &str) -> bool {
+    let here = match &*e.node {
+        ExprNode::Var { name: n, .. } | ExprNode::Assign { target: LValue::Var { name: n, .. }, .. } => n.as_str() == name,
+        ExprNode::Send { recv: None, method, args, block: None, .. } => args.is_empty() && method.as_str() == name,
+        ExprNode::Lambda { params, .. } => params.iter().any(|p| p.as_str() == name),
+        _ => false,
+    };
+    let mut found = here;
+    e.node.for_each_child(&mut |c| found = found || reads_name(c, name));
+    found
 }
 
 /// Whether a helper's block is template markup: it writes the ERB buffer
