@@ -315,7 +315,12 @@ module Tep
     end
 
     def consume_chunked_body(client_fd, input, scheduled)
-      io = IO.for_fd(client_fd, autoclose: false)
+      return consume_chunks(nil, client_fd, input, true) if scheduled
+      begin
+        io = IO.for_fd(client_fd, autoclose: false)
+      rescue StandardError
+        return false
+      end
       begin
         consume_chunks(io, client_fd, input, scheduled)
       ensure
@@ -330,6 +335,7 @@ module Tep
         if scheduled
           return false if Tep::Scheduler.io_wait(client_fd, Tep::Scheduler::READ, 5) == 0
         else
+          return false if io.nil?
           return false if io.wait_readable(5).nil?
         end
         bytes = Sock.sphttp_recv_some(client_fd, 65535).b

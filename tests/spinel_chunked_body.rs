@@ -21,6 +21,11 @@ fn ruby_driver(name: &str) {
 }
 
 #[test]
+fn wrapper_setup_failure_does_not_escape() {
+    ruby_driver("spinel_chunked_body_io");
+}
+
+#[test]
 fn chunked_framing_across_all_servers() {
     ruby_driver("spinel_chunked_body");
 }
