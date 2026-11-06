@@ -341,8 +341,29 @@ fn plain_value(expr: &crate::expr::Expr) -> bool {
 }
 
 fn reads_no_local(expr: &crate::expr::Expr) -> bool {
-    let mut clean = !matches!(&*expr.node, ExprNode::Var { .. });
-    expr.node.for_each_child(&mut |child| clean &= reads_no_local(child));
+    reads_only(expr, &mut Vec::new())
+}
+
+// A lambda's own parameters are its, not the body's locals: `register(:code, ->(value) { value })` replays whole.
+fn reads_only(expr: &crate::expr::Expr, bound: &mut Vec<crate::ident::Symbol>) -> bool {
+    match &*expr.node {
+        ExprNode::Var { name, .. } => return bound.contains(name),
+        // Not left to `for_each_child`, which does not enter a `defined?` operand.
+        ExprNode::Defined { operand } => return reads_only(operand, bound),
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
+            let depth = bound.len();
+            bound.extend(params.iter().cloned());
+            bound.extend(rest_param.iter().cloned());
+            bound.extend(extra_params.iter().map(|p| p.name.clone()));
+            bound.extend(block_param.iter().cloned());
+            let clean = extra_params.iter().all(|p| p.default.as_ref().is_none_or(|d| reads_only(d, bound))) && reads_only(body, bound);
+            bound.truncate(depth);
+            return clean;
+        }
+        _ => {}
+    }
+    let mut clean = true;
+    expr.node.for_each_child(&mut |child| clean &= reads_only(child, bound));
     clean
 }
 

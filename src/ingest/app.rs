@@ -3232,8 +3232,6 @@ end
     // gone by then — a base's ancestry is the one thing the tree
     // cannot see for itself.
     super::library_class::expand_props_bases(&mut app);
-    // Not beside the hoists: forwardable, delegate, carried includes and props bases give an included module methods and ancestors later.
-    app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);
     // After both: the chain is complete, so a repeated declaration can
     // find the one it replaces.
     dedup_repeated_filters(&mut app);
@@ -3339,6 +3337,8 @@ end
     super::container_specialize::specialize(&mut app);
     super::unreachable_views::mark(&mut app);
     super::settled_conditionals::settle(&mut app);
+    // Not beside the hoists: later passes give an included module methods and ancestors (forwardable, carried includes, props bases, the queue adapter reader) or take an inactive branch's away.
+    app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);
     super::job_class_lookup::rewrite(&mut app);
     super::uncalled_definers::mark(&mut app);
     super::absence_guards::mark(&mut app, &source_gem_classes);

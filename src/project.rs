@@ -9780,9 +9780,13 @@ module GemMiddleware
     end
   end
 
+  STACK_LOCK = Mutex.new
+
   # Not at load: Rails builds the stack after the initializers, which configure the middleware.
   def self.stack
-    @stack ||= {stacked}
+    return @stack if @stack
+    # Not a bare `||=`: two first requests at once would each build a stack and run its constructors twice.
+    STACK_LOCK.synchronize {{ @stack ||= {stacked} }}
   end
 
   def self.dispatch(req, res, request_obj)

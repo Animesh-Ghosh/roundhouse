@@ -184,6 +184,8 @@ class Probe
   self.built = 0
   def initialize(app)
     Probe.built += 1
+    # Wide enough for a second first request to arrive while this one builds.
+    sleep 0.05
     @app = app
   end
   def call(env)
@@ -201,6 +203,8 @@ def run(path)
   GemMiddleware.dispatch(Req.new("GET", path, "", "127.0.0.1", "HTTP/1.1", {{}}, ""), res, ReqObj.new("id"))
   res
 end
+# Two first requests at once still build one stack.
+2.times.map {{ Thread.new {{ run("/old/first") }} }}.each(&:join)
 res = run("/file")
 raise "file: #{{res.to_h}}" unless res.status == 429 && res.body == "replaced" && res.file_path == "" && res.headers == {{ "x-own" => "1" }}
 res = run("/stream")
