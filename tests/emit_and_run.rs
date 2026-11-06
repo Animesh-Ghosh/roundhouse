@@ -19278,7 +19278,7 @@ class PagesControllerTest < ActionDispatch::IntegrationTest
     assert_response :success
     page = %({"component":"pages/show","props":{"title":"Hello \\u003c/script\\u003e","count":#{Article.count},"label":"eager-lambda"},) +
       %("url":"/pages/show","version":null,"encryptHistory":false,"clearHistory":false})
-    assert_includes response.body, %(<script data-page="app" type="application/json">#{page}</script>\n<div id="app"></div>)
+    assert_includes response.body, %(<script data-page="app" type="application/json">#{page}</script>\n<div id="app"></div>\n\n    </main>)
     assert_includes response.body, "<title>Real Blog</title>"
     assert_equal "X-Inertia", response.headers["vary"]
   end
@@ -19576,6 +19576,7 @@ class PagesControllerTest < ActionDispatch::IntegrationTest
     end
     assert_includes response.body, %(<div id="app" data-page="{&quot;component&quot;:&quot;pages/show&quot;,&quot;props&quot;:{},) +
       %(&quot;url&quot;:&quot;/pages/show&quot;,&quot;version&quot;:&quot;#{format("%016x", digest)}&quot;,)
+    assert_includes response.body, %("></div>\n\n    </main>)
     assert File.exist?("public/vite/assets/inertia-abc.js")
   end
 end
