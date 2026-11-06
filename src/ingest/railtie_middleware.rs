@@ -80,7 +80,7 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, gem_libs: &[PathBuf]) -> (Vec<Strin
                     let why = if loaded == Loading::Autoload {
                         "a Railtie only autoloaded: whether the app loads it, and so runs its initializers, is not known here"
                     } else {
-                        "a Railtie in a gem with no entry file to follow: whether Bundler's require loads it is not known here"
+                        "a Railtie the gem's entry may not load (a require under a condition, a rescue or a block, or no entry file): whether Rails runs its initializers is not known here"
                     };
                     diags.push(Diagnostic::unsupported(
                         Span { file: file_id, start: loc.start_offset() as u32, end: loc.end_offset() as u32 },
@@ -130,12 +130,108 @@ enum Loading {
     Required,
     Autoload,
     Never,
-    /// No entry file to start from, so whether Bundler's require reaches it is not known.
+    /// No entry file to start from, or reached only through a require that may not run.
     Unknown,
 }
 
+/// A `require`, `require_relative` or `autoload` the file runs as it loads.
+struct Load {
+    feature: String,
+    relative: bool,
+    autoload: bool,
+    /// Runs whenever the file loads: not under a condition Rails could leave false, a rescue or a block.
+    certain: bool,
+}
+
+fn loads(node: &Node<'_>, certain: bool, out: &mut Vec<Load>) {
+    if let Some(p) = node.as_program_node() {
+        return loads(&p.statements().as_node(), certain, out);
+    }
+    if let Some(st) = node.as_statements_node() {
+        for child in st.body().iter() {
+            loads(&child, certain, out);
+        }
+        return;
+    }
+    if let Some(m) = node.as_module_node() {
+        if let Some(body) = m.body() {
+            loads(&body, certain, out);
+        }
+        return;
+    }
+    if let Some(c) = node.as_class_node() {
+        if let Some(body) = c.body() {
+            loads(&body, certain, out);
+        }
+        return;
+    }
+    if let Some(b) = node.as_begin_node() {
+        if let Some(st) = b.statements() {
+            loads(&st.as_node(), certain, out);
+        }
+        if let Some(r) = b.rescue_clause()
+            && let Some(st) = r.statements()
+        {
+            loads(&st.as_node(), false, out);
+        }
+        return;
+    }
+    // `if defined?(::Rails)` holds in a Rails app; any other condition may not.
+    if let Some(i) = node.as_if_node() {
+        let rails = rails_defined(&i.predicate());
+        if let Some(st) = i.statements() {
+            loads(&st.as_node(), certain && rails, out);
+        }
+        if !rails && let Some(sub) = i.subsequent() {
+            loads(&sub, false, out);
+        }
+        return;
+    }
+    if let Some(u) = node.as_unless_node() {
+        let rails = rails_defined(&u.predicate());
+        if !rails && let Some(st) = u.statements() {
+            loads(&st.as_node(), false, out);
+        }
+        if let Some(e) = u.else_clause()
+            && let Some(st) = e.statements()
+        {
+            loads(&st.as_node(), certain && rails, out);
+        }
+        return;
+    }
+    if let Some(e) = node.as_else_node() {
+        if let Some(st) = e.statements() {
+            loads(&st.as_node(), certain, out);
+        }
+        return;
+    }
+    let Some(call) = node.as_call_node() else { return };
+    let name = constant_id_str(&call.name());
+    if call.receiver().is_none() && matches!(name, "require" | "require_relative" | "autoload") {
+        let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        let feature = args.iter().rev().find_map(|a| a.as_string_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned()));
+        if let Some(feature) = feature {
+            out.push(Load { feature, relative: name == "require_relative", autoload: name == "autoload", certain });
+        }
+        return;
+    }
+    // Not run as the file loads: a block hands its body to a method that decides when, or whether.
+    if let Some(block) = call.block().and_then(|b| b.as_block_node())
+        && let Some(body) = block.body()
+    {
+        loads(&body, false, out);
+    }
+}
+
+fn rails_defined(predicate: &Node<'_>) -> bool {
+    predicate
+        .as_defined_node()
+        .and_then(|d| constant_path_of(&d.value()))
+        .is_some_and(|path| path.first().is_some_and(|root| root == "Rails"))
+}
+
 /// Whether Bundler's `require` of the gem reaches `file`: from the entry file (`lib/<name>.rb`, or the
-/// dashed name's nested path), through each `require` and `require_relative` it runs, transitively.
+/// dashed name's nested path), through each `require` and `require_relative` it runs as it loads.
 fn loading<V: Vfs + ?Sized>(vfs: &V, lib: &Path, files: &[PathBuf], file: &Path) -> Loading {
     let dir = lib.parent().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     // `rack-attack-6.7.0`: the gem's name is what precedes its version.
@@ -148,35 +244,39 @@ fn loading<V: Vfs + ?Sized>(vfs: &V, lib: &Path, files: &[PathBuf], file: &Path)
     if entries.is_empty() {
         return Loading::Unknown;
     }
-    let mut reached: Vec<PathBuf> = entries.clone();
+    let mut certain: Vec<PathBuf> = entries.clone();
+    let mut maybe: Vec<PathBuf> = Vec::new();
     let mut autoloaded: Vec<PathBuf> = Vec::new();
-    let mut queue = entries;
-    while let Some(at) = queue.pop() {
+    let mut queue: Vec<(PathBuf, bool)> = entries.into_iter().map(|e| (e, true)).collect();
+    while let Some((at, sure)) = queue.pop() {
         let Ok(bytes) = vfs.read(&at) else { continue };
-        for line in String::from_utf8_lossy(&bytes).lines() {
-            let line = line.trim_start();
-            let Some(quoted) = line.split(['"', '\'']).nth(1) else { continue };
-            let target = if line.starts_with("require_relative") {
-                normalize(&at.parent().unwrap_or(lib).join(quoted))
-            } else if line.starts_with("require") || line.starts_with("autoload") {
-                lib.join(quoted)
-            } else {
-                continue;
-            };
+        let parsed = super::prism::parse_silent(&bytes);
+        let mut found = Vec::new();
+        loads(&parsed.node(), true, &mut found);
+        for load in found {
+            let target =
+                if load.relative { normalize(&at.parent().unwrap_or(lib).join(&load.feature)) } else { lib.join(&load.feature) };
             let target = if target.extension().is_some_and(|e| e == "rb") { target } else { target.with_extension("rb") };
             if !files.contains(&target) {
                 continue;
             }
-            if line.starts_with("autoload") {
+            if load.autoload {
                 autoloaded.push(target);
-            } else if !reached.contains(&target) {
-                reached.push(target.clone());
-                queue.push(target);
+            } else if sure && load.certain {
+                if !certain.contains(&target) {
+                    certain.push(target.clone());
+                    queue.push((target, true));
+                }
+            } else if !certain.contains(&target) && !maybe.contains(&target) {
+                maybe.push(target.clone());
+                queue.push((target, false));
             }
         }
     }
-    if reached.iter().any(|p| p == file) {
+    if certain.iter().any(|p| p == file) {
         Loading::Required
+    } else if maybe.iter().any(|p| p == file) {
+        Loading::Unknown
     } else if autoloaded.iter().any(|p| p == file) {
         Loading::Autoload
     } else {
@@ -377,6 +477,22 @@ mod tests {
         let rt = railtie("    initializer \"gem.middleware\" do |app|\n      app.middleware.use(Middleware) if ENV[\"ON\"]\n    end");
         let (classes, diags) = read(&[("/gem/lib/gem.rb", ENTRY), ("/gem/lib/gem/railtie.rb", &rt)]);
         assert!(classes.is_empty() && diags.len() == 1, "{classes:?} {diags:?}");
+    }
+
+    #[test]
+    fn a_require_counts_only_where_it_runs_as_the_entry_loads() {
+        let rt = railtie("    initializer \"gem.middleware\" do |app|\n      app.middleware.use(Middleware)\n    end");
+        let with = |req: &str| ENTRY.replace("require \"gem/railtie\"\n", req);
+        // `defined?(::Rails)` holds in a Rails app, as rack-attack's own guard assumes.
+        let (classes, diags) = read(&[("/gem/lib/gem.rb", &with("require \"gem/railtie\" if defined?(::Rails)\n")), ("/gem/lib/gem/railtie.rb", &rt)]);
+        assert!(classes == ["Gem::Middleware"] && diags.is_empty(), "{classes:?} {diags:?}");
+        // Any other condition may be false: reported, not stacked.
+        let (classes, diags) = read(&[("/gem/lib/gem.rb", &with("if false\n  require \"gem/railtie\"\nend\n")), ("/gem/lib/gem/railtie.rb", &rt)]);
+        assert!(classes.is_empty() && diags.len() == 1, "{classes:?} {diags:?}");
+        // A require inside a method runs only if something calls it.
+        let (classes, diags) =
+            read(&[("/gem/lib/gem.rb", &with("def self.boot\n  require \"gem/railtie\"\nend\n")), ("/gem/lib/gem/railtie.rb", &rt)]);
+        assert!(classes.is_empty() && diags.is_empty(), "{classes:?} {diags:?}");
     }
 
     #[test]

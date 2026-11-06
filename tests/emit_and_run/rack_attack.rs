@@ -151,3 +151,58 @@ fn the_spinel_rack_request_port_finds_the_client_rack_finds() {
     let rack = run("require \"rack\"\n".to_string());
     assert_eq!(ported, rack);
 }
+
+// Not served over HTTP: no CI lane serves a Spinel tree with rack-attack, so the emitted adapter runs on CRuby over a stand-in server.
+#[test]
+fn the_spinel_adapter_sends_the_response_the_middleware_returns() {
+    let (tree, errors) = app().emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let adapter = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb"))
+        .expect("gem_middleware.rb")
+        .replace("Rack::Attack.new(app)", "Probe.new(app)");
+    let script = format!(
+        r#"{adapter}
+module Tep
+  def self.str_hash = {{}}
+end
+Res = Struct.new(:status, :headers, :body, :file_path, :streaming, :set_cookies, :header_fields)
+Req = Struct.new(:verb, :path, :raw_query, :remote_host, :http_version, :req_headers, :raw_body)
+ReqObj = Struct.new(:request_id)
+module Main
+  def self.dispatch_request(req, res, _obj)
+    res.status = 200
+    res.headers["x-routes"] = req.path
+    res.body = +"routes body"
+    res.file_path = +"/tmp/sent.pdf" if req.path == "/file"
+  end
+end
+class Probe
+  def initialize(app) = @app = app
+  def call(env)
+    env["PATH_INFO"] = env["PATH_INFO"].sub("/old", "/new")
+    status, headers, body = response = @app.call(env)
+    case env["PATH_INFO"]
+    when "/file" then [429, {{ "x-own" => "1" }}, ["replaced"]]
+    when "/element" then (body[0] = "element"; response)
+    else [status, headers, body]
+    end
+  end
+end
+def run(path)
+  res = Res.new(0, {{}}, +"", +"", false, [], [])
+  GemMiddleware.dispatch(Req.new("GET", path, "", "127.0.0.1", "HTTP/1.1", {{}}, ""), res, ReqObj.new("id"))
+  res
+end
+res = run("/file")
+raise "file: #{{res.to_h}}" unless res.status == 429 && res.body == "replaced" && res.file_path == "" && res.headers == {{ "x-own" => "1" }}
+res = run("/element")
+raise "element: #{{res.to_h}}" unless res.body == "element" && res.headers["x-routes"] == "/element"
+res = run("/old/page")
+raise "path: #{{res.to_h}}" unless res.body == "routes body" && res.headers["x-routes"] == "/new/page"
+puts "adapter passed"
+"#
+    );
+    let out = std::process::Command::new("ruby").args(["-e", &script]).output().expect("spawn ruby");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("adapter passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}
