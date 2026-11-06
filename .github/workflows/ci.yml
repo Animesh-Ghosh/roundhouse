@@ -588,6 +588,8 @@ jobs:
           gem install --no-document sequel -v 5.99.0
           # solid_queue's record models, at the fixture's locked version (tests/support/solid_queue_worker.rs).
           gem install --no-document --ignore-dependencies solid_queue -v "$(sed -n 's/^    solid_queue (\(.*\))$/\1/p' fixtures/real-blog/Gemfile.lock)"
+          # rack-attack, compiled from its source (tests/emit_and_run/rack_attack.rs).
+          gem install --no-document --ignore-dependencies rack-attack -v 6.7.0
       - name: Download current-run test bundle
         uses: actions/download-artifact@v8
         with:
