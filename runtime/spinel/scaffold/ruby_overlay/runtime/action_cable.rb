@@ -442,7 +442,7 @@ module ActionCable
       end
 
       def stop_all_streams
-        @connection.stop_streams(@identifier) unless @connection.nil?
+        @connection.stop_streams(self) unless @connection.nil?
         @streams.clear
         nil
       end
@@ -712,9 +712,9 @@ module ActionCable
       # socket was told.
       attr_accessor :transport
 
-      def stop_streams(identifier)
+      def stop_streams(channel)
         live = @transport
-        live.stop_streams(identifier) unless live.nil?
+        live.stop_streams(channel) unless live.nil?
         nil
       end
 

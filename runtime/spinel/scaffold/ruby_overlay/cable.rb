@@ -699,8 +699,11 @@ module Cable
       @subscriptions[stream] || []
     end
 
-    def stop_streams(identifier_json)
+    def stop_streams(channel)
+      identifier_json = channel.identifier
       Reactor.post do
+        next unless @channels[identifier_json].equal?(channel)
+
         @subscriptions.each_value { |list| list.delete(identifier_json) }
         @subscriptions.each do |stream, list|
           Registry.unsubscribe(stream, self) if list.empty?
