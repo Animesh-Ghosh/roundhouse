@@ -320,6 +320,10 @@ mod cable_allowed_origins;
 mod public_file_server_headers_contract;
 #[path = "emit_and_run/public_file_server_headers.rs"]
 mod public_file_server_headers;
+#[path = "support/puma_boot.rs"]
+mod puma_boot_contract;
+#[path = "emit_and_run/puma_boot.rs"]
+mod puma_boot;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "emit_and_run/cable_actions.rs"]
@@ -7856,6 +7860,52 @@ end
         )
         .run_test("test/controllers/zones_controller_test.rb")
         .assert_passes();
+}
+
+fn time_zone_mapping_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\n  create_table :reminders do |t|\n    t.string :time_zone\n  end\nend\n")
+        .write("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\nend\n")
+        .write(
+            "app/models/reminder.rb",
+            r#"class Reminder < ApplicationRecord
+  def canonical_time_zone
+    zone = ActiveSupport::TimeZone[time_zone]
+    zone ? ActiveSupport::TimeZone::MAPPING.fetch(zone.name, zone.name) : time_zone
+  end
+
+  def self.rails_zone_count
+    ::ActiveSupport::TimeZone::MAPPING.size
+  end
+end
+"#,
+        )
+}
+
+/// `ActiveSupport::TimeZone::MAPPING` answers Rails' IANA identifier for a
+/// Rails zone name; an IANA identifier is not a key, so `fetch` with the
+/// name as its default passes it through. Expected values are
+/// ActiveSupport 8.1's.
+#[test]
+fn time_zone_mapping_reads_rails_zone_names() {
+    time_zone_mapping_app()
+        .run_ruby(
+            r#"got = ["Tokyo", "Eastern Time (US & Canada)", "UTC", "Asia/Tokyo", "Nowhere"].map { |name| Reminder.new(time_zone: name).canonical_time_zone }
+raise got.inspect unless got == ["Asia/Tokyo", "America/New_York", "Etc/UTC", "Asia/Tokyo", "Nowhere"]
+raise Reminder.rails_zone_count.inspect unless Reminder.rails_zone_count == 152
+"#,
+        )
+        .assert_passes();
+}
+
+/// The table is the ruby-family runtime's; a strict target reports the constant instead of emitting a name its runtime does not define.
+#[test]
+fn time_zone_mapping_is_unsupported_on_strict_targets() {
+    for (target, name) in [(roundhouse::project::BuildTarget::Rust, "rust"), (roundhouse::project::BuildTarget::Typescript, "typescript")] {
+        let (_emitted, errors) = time_zone_mapping_app().emit(target);
+        let want = format!("ruby_family_runtime_constant not supported ({name}): ActiveSupport::TimeZone::MAPPING");
+        assert_eq!(errors.iter().filter(|e| e.contains(&want)).count(), 2, "{target:?}: {errors:?}");
+    }
 }
 
 /// A class method `ApplicationRecord` defines runs on a subclass's relation,
@@ -20657,6 +20707,10 @@ mod solid_queue_worker_contract;
 mod solid_queue_surface;
 #[path = "emit_and_run/controller_surface.rs"]
 mod controller_surface;
+#[path = "emit_and_run/rack_attack.rs"]
+mod rack_attack;
+#[path = "emit_and_run/addressable.rs"]
+mod addressable;
 #[path = "emit_and_run/solid_queue_worker.rs"]
 mod solid_queue_worker;
 #[path = "emit_and_run/route_helper_segment_escape.rs"]

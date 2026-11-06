@@ -41,6 +41,8 @@ mod dry_types;
 mod oj;
 pub(crate) mod source_gems;
 mod auto_source_gems;
+mod forwardable;
+mod railtie_middleware;
 mod absence_guards;
 mod uncalled_definers;
 mod job_class_lookup;
@@ -71,6 +73,7 @@ mod active_model_super;
 mod queue_adapter_reader;
 mod library_concern_items;
 mod unreached_gem_modules;
+pub(crate) mod puma_boot;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;
@@ -153,6 +156,7 @@ mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};
 pub use concern_accessors::{defer as defer_accessor_surface, DeferredAccessorSurface};
+pub use puma_boot::preserve_config as preserve_puma_config;
 
 /// The construct an ActiveRecord class outside app/models is reported
 /// under (`app::report_unmodelled_records`): the CLI keys its per-target

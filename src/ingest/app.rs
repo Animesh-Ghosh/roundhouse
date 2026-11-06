@@ -279,7 +279,7 @@ fn keep_initializer_defined(
     let referenced = |name: &str| {
         sources.iter().any(|f| {
             let rel = f.path.strip_prefix(root).unwrap_or(&f.path).trim_start_matches('/');
-            if !(rel.starts_with("app/") || rel.starts_with("lib/")) {
+            if !(rel.starts_with("app/") || rel.starts_with("lib/") || rel == "config/puma.rb") {
                 return false;
             }
             // In Ruby, a comment or a string naming it is not a reference.
@@ -707,6 +707,9 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let mut app = App::new();
     app.extensions = extensions;
     app.spinel_int_overflow = spinel_int_overflow;
+    // Not a framework gem's models (solid_queue's): only a gem compiled for the app runs its Railtie here.
+    let gem_libs: Vec<PathBuf> = source_gems.iter().map(|gem| gem.mount.join("lib")).collect();
+    (app.gem_middlewares, app.gem_middleware_refusals) = super::railtie_middleware::read(vfs, &gem_libs);
     // `enum` columns declared inside a concern's `included do`, keyed by
     // the module. Local rather than a field on `App`: they exist only
     // until the splice folds them into each including model's own
@@ -2668,6 +2671,7 @@ end
             app.engine_importmaps.push((engine.module.clone(), importmap));
         }
     }
+    super::puma_boot::install(&mut app, vfs, dir)?;
 
     app.vite_manifest = super::vite::read_manifest(vfs, dir);
     let vite_digest = app.vite_manifest.as_ref().map(|m| m.digest.clone());
@@ -3105,6 +3109,7 @@ end
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
+    super::forwardable::lower_forwardable(&mut app);
     super::delegate::lower_delegates(&mut app);
     // `Other.include(M)` written in another body: `Other`'s include,
     // before the concern splices read the includes.
@@ -3170,6 +3175,8 @@ end
     super::extend_splice::splice_sole_extended_modules(&mut app);
     super::included_extend::splice_included_extends(&mut app);
     super::absence_guards::raise_undefined_capitalized_calls(&mut app);
+    // Not asked at `absence_guards::mark`: by then a source gem's methods no longer resolve their file.
+    let source_gem_classes = super::absence_guards::source_gem_classes(&app);
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
@@ -3330,7 +3337,7 @@ end
     super::settled_conditionals::settle(&mut app);
     super::job_class_lookup::rewrite(&mut app);
     super::uncalled_definers::mark(&mut app);
-    super::absence_guards::mark(&mut app);
+    super::absence_guards::mark(&mut app, &source_gem_classes);
     // After every pass that changes a controller's methods, the concern
     // splice and the class-body macros above all: the lowering clones
     // from the controller they leave.

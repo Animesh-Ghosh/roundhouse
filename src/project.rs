@@ -4907,6 +4907,8 @@ fn ruby_family_runtime_files(
     let (mut files, test_stems) = spinel_files(app, fixture, param_binds)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/faye_websocket.rb");
+    // Spinel's stand-ins for rack's Rack::Request and Ruby's SimpleDelegator: the ruby family's gems load the real ones.
+    files.retain(|(p, _)| p != "runtime/rack_request.rb" && p != "runtime/delegate_spinel.rb");
     // The spinel SQL-functions file is FFI; CRuby writes its own below
     // (the sqlite3 gem's `create_function`), JRuby has none yet.
     files.retain(|(p, _)| p != "runtime/sql_functions.rb");
@@ -5326,6 +5328,18 @@ fn ruby_family_runtime_files(
         "",
         &mut files,
     )?;
+    // The middleware the app's gems' Railties `use`, outermost first, as Rails stacks them.
+    if !app.gem_middlewares.is_empty() {
+        let stacked = app.gem_middlewares.iter().rev().fold("app".to_string(), |inner, class| format!("{class}.new({inner})"));
+        let body = format!(
+            "# frozen_string_literal: true\n# The Rack middleware the app's gems put on Rails' stack from their\n# Railties (`App::gem_middlewares`), outermost first.\nmodule GemMiddleware\n  def self.wrap(app)\n    {stacked}\n  end\nend\n"
+        );
+        for (path, content) in files.iter_mut() {
+            if path == "runtime/gem_middleware.rb" {
+                *content = body.clone();
+            }
+        }
+    }
     // `ruby sidekiq.rb`, the worker role's entry, only where there is a
     // worker to run.
     if !sidekiq {
@@ -5385,6 +5399,7 @@ fn ruby_family_runtime_files(
     // that file in `spinel_files` are gone. Write them again here.
     apply_environment_flags(&mut files, app);
     apply_app_requires(&mut files, app, RequireTarget::RubyFamily);
+    apply_puma_boot_hooks(&mut files, app, RequireTarget::RubyFamily)?;
     apply_rails_version(&mut files, app);
     // Overlay boot replaces the spinel boot wholesale (see comment above
     // on apply_module_mixins), wiping the Date-package inject from
@@ -7673,6 +7688,35 @@ enum RequireTarget {
     Spinel,
 }
 
+fn puma_boot_hooks(app: &App) -> bool {
+    app.library_classes.iter().any(|class| class.name.0.as_str() == crate::ingest::puma_boot::CLASS && {
+        class.methods.iter().any(|method| method.name.as_str() == crate::ingest::puma_boot::BOOTED)
+    })
+}
+
+fn apply_puma_boot_hooks(files: &mut [(String, String)], app: &App, target: RequireTarget) -> Result<(), String> {
+    if !puma_boot_hooks(app) { return Ok(()); }
+    for (path, source) in files {
+        match target {
+            RequireTarget::RubyFamily if path == "config/puma.rb" => {
+                source.push_str("\nrequire_relative \"../boot\"\nroundhouse_puma_hooks = RoundhousePumaBoot.__roundhouse_puma_register\nafter_booted { Db.with_connection { RoundhousePumaBoot.__roundhouse_puma_after_booted(roundhouse_puma_hooks) } }\n");
+            }
+            RequireTarget::Spinel if path == "main.rb" => {
+                let anchor = "begin\nMain.configure_default_adapter!\n";
+                if !source.contains(anchor) {
+                    return Err("apply_puma_boot_hooks: main.rb lost its configure_default_adapter! anchor".into());
+                }
+                *source = source.replace(anchor, "begin\nif workers != 1 || (ENV[\"TEP_SERVER\"] || \"thread\") == \"fiber\"\n  raise ArgumentError, \"Puma after_booted hooks require one threaded server process\"\nend\nTep.prepare_boot_hooks\nMain.configure_default_adapter!\n");
+            }
+            RequireTarget::Spinel if path == "runtime/tep/tep_core.rb" => {
+                source.push_str("\nmodule Tep\n  @@roundhouse_puma_hooks = [false]\n  def self.boot_hooks?\n    true\n  end\n  def self.prepare_boot_hooks\n    @@roundhouse_puma_hooks = RoundhousePumaBoot.__roundhouse_puma_register\n    nil\n  end\n  def self.on_booted\n    Db.with_connection { RoundhousePumaBoot.__roundhouse_puma_after_booted(@@roundhouse_puma_hooks) }\n    nil\n  end\nend\n");
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Standard libraries in `ingest::app`'s requirable list that the spinel
 /// tree's boot.rb leaves out; the ruby family loads them all. Spinel warns
 /// "is not available in Spinel" for `delegate`, `English`, `etc` and
@@ -8883,6 +8927,16 @@ fn report_not_nil(expr: &crate::expr::Expr, app: &App, target: &str) {
 }
 
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
+    if puma_boot_hooks(app) && !matches!(target, BuildTarget::Blog | BuildTarget::Futamura | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
+        let method = app.library_classes.iter().find(|c| c.name.0.as_str() == crate::ingest::puma_boot::CLASS).unwrap().methods.iter()
+            .find(|method| method.name.as_str() == crate::ingest::puma_boot::BOOTED).unwrap();
+        emit::diagnostics::report_unsupported(
+            method.name_span,
+            target.as_str(),
+            "Puma after_booted",
+            format!("{} has no server boot event for config/puma.rb after_booted hooks", target.as_str()),
+        );
+    }
     // Column readers are synthesized inside the emitter, after this walk,
     // so a Send match never sees them. The schema column is the fact.
     // Ruby, JRuby, and Spinel ship the interval intrinsics. Roda is Sequel:
@@ -9125,6 +9179,18 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 format!("Zlib::{flag} is a bundled zlib constant, which the {target} runtime does not supply"),
             );
         }
+        // A Hash value, so the class/module gate does not see it either.
+        if !matches!(target, "jruby" | "spinel" | "futamura")
+            && let crate::expr::ExprNode::Const { path } = &*expr.node
+            && path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["ActiveSupport", "TimeZone", "MAPPING"])
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "ruby_family_runtime_constant",
+                format!("ActiveSupport::TimeZone::MAPPING is the ruby-family runtime's zone-name table, which the {target} runtime does not supply"),
+            );
+        }
         // Typed as IO for the Ruby family; a strict emit spelled them as names its runtime does not define.
         if !matches!(target, "jruby" | "spinel")
             && let Some(name) = match &*expr.node {
@@ -9172,7 +9238,14 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         // These newly admitted class objects are retained by Ruby/JRuby only.
         if target != "jruby"
             && expr.decisions & crate::expr::RUNTIME_CLASS_OBJECT != 0
-            && let crate::expr::ExprNode::Send { method, .. } = &*expr.node
+            && let crate::expr::ExprNode::Send { recv, method, args, block, .. } = &*expr.node
+            // Not a bare `Module.new` on Spinel, which makes an anonymous module (addressable's `NONE` sentinel); `Class.new`, a body or a superclass is still refused.
+            && !(target == "spinel"
+                && recv.as_ref().is_some_and(|r| matches!(&*r.node, crate::expr::ExprNode::Const { path }
+                    if path.iter().filter(|s| !s.as_str().is_empty()).map(|s| s.as_str()).eq(["Module"])))
+                && method.as_str() == "new"
+                && args.is_empty()
+                && block.is_none())
         {
             emit::diagnostics::report_unsupported(
                 expr.span,
@@ -9660,6 +9733,105 @@ fn drop_solid_queue_standin(app: &App, files: &mut Vec<(String, String)>) {
     }
 }
 
+/// The Spinel tree's `GemMiddleware` for an app whose gems' Railties
+/// `use` middleware (`App::gem_middlewares`): the request as a Rack env,
+/// through the stack, with the routes at the bottom.
+fn spinel_gem_middleware(classes: &[String]) -> String {
+    let stacked = classes.iter().rev().fold("app".to_string(), |inner, class| format!("{class}.new({inner})"));
+    format!(
+        r#"# frozen_string_literal: true
+# The Rack middleware the app's gems put on Rails' stack from their
+# Railties (`App::gem_middlewares`), outermost first, between Rails'
+# RequestId and the routes. Written by `project::spinel_gem_middleware`.
+require "stringio"
+
+module GemMiddleware
+  # The rest of the stack under the gems' middleware: Rails' routes, for one request.
+  class App
+    attr_reader :tuple
+
+    def initialize(req, res, request_obj)
+      @req = req
+      @res = res
+      @request_obj = request_obj
+      @tuple = nil
+    end
+
+    def call(env)
+      # Not the request's own path: a middleware above may have rewritten PATH_INFO, and Rails routes the rewritten one.
+      @req.path = env["PATH_INFO"].to_s
+      Main.dispatch_request(@req, @res, @request_obj)
+      @routes_body = @res.body
+      @body = [@routes_body]
+      @tuple = [@res.status, @res.headers, @body]
+      @tuple
+    end
+
+    # The routes' own body, as they left it: the same Array holding the same String.
+    def routes_body?(body)
+      body.equal?(@body) && @body.length == 1 && @body[0].equal?(@routes_body)
+    end
+  end
+
+  def self.dispatch(req, res, request_obj)
+    app = App.new(req, res, request_obj)
+    # Built per request, not once as Rails does: the app at its bottom holds this request's objects, and a shared one has nowhere typed to keep them.
+    response = {stacked}.call(GemMiddleware.env_of(req, request_obj))
+    res.status = response[0].to_i
+    # Not merged into the routes' headers: a response of the middleware's own carries only its own.
+    GemMiddleware.replace_headers(res, response[1]) unless response[1].equal?(res.headers)
+    # Not rebuilt from the routes' own body: it may be no String (a file a controller sends).
+    return nil if app.routes_body?(response[2])
+    begin
+      body = +""
+      response[2].each {{ |part| body << part.to_s }}
+      res.body = body
+      res.file_path = +""
+      res.streaming = false
+    ensure
+      response[2].close if response[2].respond_to?(:close)
+    end
+    nil
+  end
+
+  def self.replace_headers(res, headers)
+    res.headers = Tep.str_hash
+    res.set_cookies.pop while res.set_cookies.length > 0
+    res.header_fields.pop while res.header_fields.length > 0
+    headers.each do |name, value|
+      key = name.to_s
+      # Not one header line: Rack 3 gives a repeated header as an Array, and Set-Cookie as one per line.
+      values = value.is_a?(Array) ? value.map {{ |part| part.to_s }} : value.to_s.split("\n")
+      if key.downcase == "set-cookie"
+        values.each {{ |cookie| res.set_cookies << cookie }}
+      else
+        res.headers[key] = values.join(", ")
+      end
+    end
+  end
+
+  # The Rack env a server builds for the request, as Puma does.
+  def self.env_of(req, request_obj)
+    env = {{ "REQUEST_METHOD" => req.verb }}
+    env["SCRIPT_NAME"] = ""
+    env["PATH_INFO"] = req.path
+    env["QUERY_STRING"] = req.raw_query
+    env["REMOTE_ADDR"] = req.remote_host
+    env["SERVER_PROTOCOL"] = req.http_version
+    env["rack.url_scheme"] = req.req_headers.fetch("x-forwarded-proto", "http") == "https" ? "https" : "http"
+    req.req_headers.each do |name, value|
+      key = name.upcase.tr("-", "_")
+      env[key == "CONTENT_TYPE" || key == "CONTENT_LENGTH" ? key : "HTTP_" + key] = value
+    end
+    env["rack.input"] = StringIO.new(req.raw_body.to_s)
+    env["action_dispatch.request_id"] = request_obj.request_id.to_s
+    env
+  end
+end
+"#
+    )
+}
+
 fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     let mut files: Vec<(String, String)> = Vec::new();
 
@@ -9679,6 +9851,14 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     }
 
     crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files)?;
+    if !app.gem_middlewares.is_empty() {
+        let body = spinel_gem_middleware(&app.gem_middlewares);
+        for (path, content) in files.iter_mut() {
+            if path == "runtime/gem_middleware.rb" {
+                *content = body.clone();
+            }
+        }
+    }
 
     let needs_date = app_uses_date(app);
 
@@ -10362,6 +10542,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_boot_program(&mut files, app);
     apply_environment_flags(&mut files, app);
     apply_app_requires(&mut files, app, RequireTarget::Spinel);
+    apply_puma_boot_hooks(&mut files, app, RequireTarget::Spinel)?;
     apply_rails_version(&mut files, app);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
@@ -11377,6 +11558,7 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         return;
     };
     let mut eager_requires = Vec::new();
+    let mut bundler_requires: Vec<String> = Vec::new();
     for gem in needed {
         // Not only a gem that loads by its name: the app's Gemfile can say what Bundler requires for it.
         match lock.gemfile_requires.get(&gem.name) {
@@ -11384,6 +11566,8 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
             None if crate::gems::loads_by_gem_name(&gem.name) => eager_requires.push(gem.name.clone()),
             // A source gem's dependency: its own `require "et-orbi"` is the one the compiled gem no longer runs.
             None if source_deps.iter().any(|d| d.name == gem.name) => eager_requires.push(gem.name.clone()),
+            // Bundler's own fallback for a dashed name: `rack-attack` is `rack/attack`.
+            None if gem.name.contains('-') => bundler_requires.push(gem.name.clone()),
             None => {}
         }
         let version = gem.version.as_deref();
@@ -11413,12 +11597,19 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     if let Some((_, boot)) = files.iter_mut().find(|(path, _)| path == "boot.rb") {
         eager_requires.sort();
         eager_requires.dedup();
-        let requires = eager_requires
+        let mut requires = eager_requires
             .iter()
             .filter(|feature| !boot.contains(&format!("require {feature:?}")))
             .map(|feature| format!("require {feature:?}\n"))
             .collect::<String>();
+        bundler_requires.sort();
+        bundler_requires.dedup();
+        for name in &bundler_requires {
+            requires.push_str(&bundler_require(name));
+        }
         if !requires.is_empty() {
+            // Rails defines its frameworks before Bundler requires a gem, which may test for one as it loads (rack-attack's PathNormalizer).
+            let requires = format!("require_relative \"runtime/action_dispatch_journey\"\n{requires}");
             insert_require_line(boot, &requires);
         }
     }
@@ -12488,6 +12679,16 @@ fn write_bundled_requires(files: &mut [(String, String)]) {
 /// before the first token, so a require written above one switches it
 /// off and warns "'frozen_string_literal' is ignored after any tokens".
 /// A shebang stays the first line.
+/// `Bundler.require` for a gem the Gemfile gives no `require:`: its name,
+/// then, for a dashed one, the name with each dash a slash; a file that
+/// is not there is skipped, and a LoadError from inside the gem is not.
+fn bundler_require(name: &str) -> String {
+    let nested = name.replace('-', "/");
+    format!(
+        "begin\n  require {name:?}\nrescue LoadError => e\n  raise unless e.path == {name:?}\n  begin\n    require {nested:?}\n  rescue LoadError => e\n    raise unless e.path == {nested:?}\n  end\nend\n"
+    )
+}
+
 fn insert_require_line(content: &mut String, line: &str) {
     // Ruby reads magic comments anywhere in the leading run of comments
     // and blank lines, so scan that whole run (a license header may come
@@ -13624,8 +13825,12 @@ pub fn build_archives(fixture: &Path, out: &Path, targets: &[BuildTarget]) -> Re
         fs::remove_dir_all(&browse).map_err(|e| format!("clean {}: {e}", browse.display()))?;
     }
     fs::create_dir_all(&browse).map_err(|e| format!("mkdir {}: {e}", browse.display()))?;
-    let app =
-        ingest_app(fixture).map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
+    let ingest = || ingest_app(fixture);
+    let app = if targets.iter().all(|target| matches!(target, BuildTarget::Blog | BuildTarget::Futamura)) {
+        crate::ingest::preserve_puma_config(ingest)
+    } else {
+        ingest()
+    }.map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
     // Futamura needs the types but none of the lowerings, same split as
     // the single-target driver (`bin/roundhouse`).
     let analyzed = targets.contains(&BuildTarget::Futamura).then(|| {
@@ -13825,6 +14030,29 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn puma_boot_hooks_refuse_a_missing_native_startup_anchor() {
+        let mut app = App::new();
+        app.library_classes.push(crate::dialect::LibraryClass {
+            name: crate::ident::ClassId(crate::ident::Symbol::from(crate::ingest::puma_boot::CLASS)),
+            is_module: false,
+            parent: None,
+            parent_span: Default::default(),
+            includes: Vec::new(),
+            include_spans: Vec::new(),
+            methods: crate::runtime_src::parse_methods("def __roundhouse_puma_after_booted\n  nil\nend").unwrap(),
+            nullable_columns: Vec::new(),
+            origin: None,
+            constants: Vec::new(),
+            conditional_definitions: Vec::new(),
+            unknown_calls: Vec::new(),
+            class_ivar_initializers: Vec::new(),
+        });
+        let mut files = vec![("main.rb".into(), "Main.configure_default_adapter!\n".into())];
+        let error = apply_puma_boot_hooks(&mut files, &app, RequireTarget::Spinel).unwrap_err();
+        assert!(error.contains("main.rb lost its configure_default_adapter! anchor"), "{error}");
+    }
 
     /// A symlinked data file is carried by its contents only when its
     /// target would be carried at its own path.

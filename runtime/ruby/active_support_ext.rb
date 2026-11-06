@@ -1689,6 +1689,8 @@ module ActiveSupport
   end
 
   class TimeZone
+    MAPPING = ZONE_NAMES
+
     attr_reader :name
 
     def initialize(name, data)

@@ -867,7 +867,12 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // this pass covers executable support methods and initializers.
     for class in app.library_classes.iter().chain(app.rails_application.iter()) {
         for method in &class.methods {
-            collect_constants(&method.body, &mut out);
+            if class.name.0.as_str() == crate::ingest::puma_boot::CLASS {
+                diagnose_expr_in(&method.body, &mut out, false);
+                unchecked_boot_calls(&method.body, method.name_span, &mut out);
+            } else {
+                collect_constants(&method.body, &mut out);
+            }
             for param in &method.params {
                 if let Some(default) = &param.default { collect_constants(default, &mut out); }
             }
@@ -943,6 +948,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
         None => out.extend(diagnose_helper_modules(app)),
     }
     out.extend(app.unknown_association_targets.iter().cloned());
+    out.extend(app.gem_middleware_refusals.iter().cloned());
     for class in &app.library_classes {
         for initializer in &class.class_ivar_initializers {
             diagnose_expr(initializer, &mut out);
@@ -1110,6 +1116,25 @@ fn is_unknown_ty(ty: Option<&Ty>) -> bool {
         Some(Ty::Var { .. }) => true,
         _ => false,
     }
+}
+
+fn unchecked_boot_calls(expr: &Expr, source: crate::span::Span, out: &mut Vec<Diagnostic>) {
+    if let ExprNode::Send { recv, method, .. } = &*expr.node {
+        let unchecked = match recv {
+            Some(receiver) => is_unknown_ty(receiver.ty.as_ref()) || matches!(receiver.ty, Some(Ty::Untyped)),
+            None => is_unknown_ty(expr.ty.as_ref()) || matches!(expr.ty, Some(Ty::Untyped)),
+        };
+        if unchecked && expr.diagnostic().is_none() {
+            let span = if expr.span.file.0 == 0 { source } else { expr.span };
+            out.push(Diagnostic::unsupported(
+                span,
+                None,
+                "Puma boot callback call",
+                format!("`{method}` in config/puma.rb has no resolved receiver or method"),
+            ));
+        }
+    }
+    expr.node.for_each_child(&mut |child| unchecked_boot_calls(child, source, out));
 }
 
 /// A send whose explicit receiver the analysis could not type.
