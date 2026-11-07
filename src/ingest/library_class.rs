@@ -1904,6 +1904,15 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
                 if !statements.body().iter().all(|stmt| struct_block_declaration(&stmt)) {
                     return None;
                 }
+                // Not over a member: Ruby's block `attr_accessor :a` replaces the member's reader with one of `@a`, which this class cannot tell from the member.
+                if statements.body().iter().any(|stmt| {
+                    stmt.as_call_node().is_some_and(|call| {
+                        matches!(constant_id_str(&call.name()).as_ref(), "attr_reader" | "attr_writer" | "attr_accessor" | "delegate")
+                            && call.arguments().is_some_and(|a| a.arguments().iter().any(|arg| symbol_value(&arg).is_some_and(|n| members.iter().any(|m| m.as_str() == n))))
+                    })
+                }) {
+                    return None;
+                }
                 // Not an `initialize` of its own: in Ruby the generated one is
                 // the anonymous Struct parent's, which its `super` reaches. Here
                 // both would sit in one class, and that `super` would miss.

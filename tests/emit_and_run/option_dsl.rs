@@ -120,7 +120,7 @@ fn an_association_class_name_read_off_the_configured_object_is_the_one_it_names(
         )
         .run_ruby(
             r##"article = Article.create!(title: "Configured", body: "A body long enough to pass the validation")
-article.comments.create!(commenter: "Ann", body: "First")
+Comment.create!(article_id: article.id, commenter: "Ann", body: "First")
 raise "remarks: #{article.remarks.map(&:class).inspect}" unless article.remarks.count == 1 && article.remarks.first.is_a?(Comment)
 puts "configured association passed"
 "##,

@@ -175,6 +175,8 @@ mod temporal_index_assign;
 mod file_mtime_time;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
+#[path = "emit_and_run/gem_routes.rs"]
+mod gem_routes;
 #[path = "support/option_dsl.rs"]
 mod option_dsl;
 #[path = "emit_and_run/option_dsl.rs"]
