@@ -1198,8 +1198,15 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             }
             if let Some(body) = writing_connection_block(&c) {
                 return match body {
-                    Some(body) => ingest_expr(&body, file),
-                    None => Ok(Expr::new(span, ExprNode::Lit { value: Literal::Nil })),
+                    WritingBlock::Body(Some(body)) => ingest_expr(&body, file),
+                    WritingBlock::Body(None) => Ok(Expr::new(span, ExprNode::Lit { value: Literal::Nil })),
+                    WritingBlock::Forwarded(name) => Ok(Expr::new(span, ExprNode::Send {
+                        recv: Some(Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name })),
+                        method: Symbol::from("call"),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: false,
+                    })),
                 };
             }
             let args: Vec<Expr> = if let Some(a) = c.arguments() {
@@ -4844,7 +4851,14 @@ fn binary_string(s: &ruby_prism::StringNode<'_>, span: Span, file: &str) -> Inge
 /// unsupported `connected_to`.
 /// ponytail: a local first assigned in the block outlives it once inlined;
 /// a later bare call of that name would read it.
-fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<Option<Node<'pr>>> {
+/// A block handed on from a local (`connected_to(role: :writing, &block)`, doorkeeper's
+/// `with_primary_role`) is that block, called.
+enum WritingBlock<'pr> {
+    Body(Option<Node<'pr>>),
+    Forwarded(Symbol),
+}
+
+fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<WritingBlock<'pr>> {
     if constant_id_str(&c.name()) != "connected_to"
         || c.receiver().and_then(|r| super::util::constant_path_of(&r)).as_deref() != Some(&["ActiveRecord".to_string(), "Base".to_string()])
     {
@@ -4857,6 +4871,10 @@ fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<Option
     let assoc = element.as_assoc_node()?;
     if symbol_value(&assoc.key()).as_deref() != Some("role") || symbol_value(&assoc.value()).as_deref() != Some("writing") {
         return None;
+    }
+    if let Some(forwarded) = c.block()?.as_block_argument_node() {
+        let local = forwarded.expression()?.as_local_variable_read_node()?;
+        return Some(WritingBlock::Forwarded(Symbol::from(constant_id_str(&local.name()).as_ref())));
     }
     let block = c.block()?.as_block_node()?;
     if block.parameters().is_some() {
@@ -4888,7 +4906,7 @@ fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<Option
             return None;
         }
     }
-    Some(body)
+    Some(WritingBlock::Body(body))
 }
 
 fn wide_integer(value: &ruby_prism::Integer<'_>, span: Span) -> Expr {
