@@ -2970,6 +2970,11 @@ fn synth_initialize(
             // seam, over the `|| <default>` a NOT NULL column keeps.
             let given = lookup.clone();
             // Not through the app's own `<col>=` for an absent key: Rails' constructor calls only the writers of the attributes it is given, and lobsters' `Domain#selector=` strips its argument.
+            if column.is_json() && col.default_expression.is_some() && col.computed_default().is_none() {
+                stmts.push(Expr::new(Span::synthetic(), ExprNode::Send { recv: Some(self_ref()), method: json_storage_writer(col), args: vec![default], block: None, parenthesized: false }));
+                stmts.push(given_value_assign(col, &attrs, given));
+                continue;
+            }
             if !column.is_json() && app_defines_writer(model, &col.name) {
                 let slot_ty = super::ty_of_column_slot(col);
                 let raw_default = if nullable { nil_lit() } else { default };
@@ -4364,6 +4369,12 @@ fn column_default_literal(model: &Model, col: &Column) -> Option<Expr> {
 
 fn schema_default_literal(col: &Column) -> Option<Expr> {
     use crate::schema::ColumnType;
+    // Rails extracts quoted SQL literals before classifying default functions.
+    if let Some(sql) = col.default_expression.as_deref().filter(|_| col.computed_default().is_none()) {
+        if let Some(inner) = sql.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')) {
+            return Some(lit_str(inner.replace("''", "'")));
+        }
+    }
     let raw = col.stored_default()?;
     if col.array_stored {
         // `default: []`, the only array default ingest keeps: a fresh

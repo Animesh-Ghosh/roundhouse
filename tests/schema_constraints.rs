@@ -12,6 +12,120 @@ fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app().write("db/schema.rb", SCHEMA)
 }
 
+const JSON_SCHEMA: &str = r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table :record_items do |t|
+    t.text :payload
+    t.check_constraint '"payload" IS NULL OR json_valid("payload")'
+  end
+end
+"#;
+const JSON_CONTRACT: &str = r#"
+RecordItem.create!(payload: '{"ok":true}')
+RecordItem.create!
+rejected = false
+begin
+  RecordItem.create!(payload: 'not json')
+rescue StandardError => error
+  rejected = error.message.include?('CHECK constraint failed')
+end
+raise 'malformed JSON accepted' unless rejected
+raise 'CHECK lost valid rows' unless RecordItem.count == 2
+puts 'SQLite JSON CHECK rejects malformed JSON and accepts NULL'
+"#;
+
+fn json_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app().write("db/schema.rb", JSON_SCHEMA)
+        .write("app/models/record_item.rb", "class RecordItem < ActiveRecord::Base\nend\n")
+}
+
+fn json_schema(expression: &str) -> String {
+    JSON_SCHEMA.replace("'\"payload\" IS NULL OR json_valid(\"payload\")'", &format!("{expression:?}"))
+}
+
+#[test]
+fn sqlite_json_check_keeps_exact_expression() {
+    let schema = ingest_schema(JSON_SCHEMA.as_bytes(), "db/schema.rb").unwrap();
+    let ddl = render_schema_statements_for(&schema, Dialect::Sqlite).unwrap().join(";\n");
+    assert!(ddl.contains("CHECK (\"payload\" IS NULL OR json_valid(\"payload\"))"), "{ddl}");
+    assert!(render_schema_statements_for(&schema, Dialect::Postgres).is_err());
+}
+
+#[test]
+fn sqlite_check_functions_and_equivalent_spellings_stay_narrow() {
+    for sql in ["\"payload\" IS NULL OR JSON_VALID (\"payload\")", "payload IS NULL OR (json_valid(payload) AND length(payload) > 0)", "payload IS NULL OR substr(payload, 1, 1) = '{'", "payload IS NULL OR upper(payload) <> 'NULL'"] {
+        let source = json_schema(sql);
+        let schema = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap();
+        let ddl = render_schema_statements_for(&schema, Dialect::Sqlite).unwrap().join(";\n");
+        assert!(ddl.contains(&format!("CHECK ({sql})")), "{ddl}");
+    }
+    for sql in ["json_unknown(payload)", "unknown_column IS NULL", "randomblob(16) IS NOT NULL", "payload::json IS NOT NULL", "\"payload\"(payload) IS NULL", "payload/**/(payload) IS NULL", "\"payload\"/**/(payload) IS NULL"] {
+        let source = json_schema(sql);
+        let error = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap_err().to_string();
+        assert!(error.contains("db/schema.rb") && error.contains("line 4"), "{error}");
+    }
+}
+
+#[test]
+fn postgres_refuses_sqlite_checks_indexes_and_predicates_at_the_source() {
+    use roundhouse::ingest::ingest_schema_with_generated_expression_dialect;
+    use roundhouse::schema::generated::GeneratedExpressionDialect;
+    for expression in ["json_valid(payload)", "\"json_valid\"(payload)", "json_valid/**/(payload)", "JSON_VALID (payload)"] {
+        let source = json_schema(expression);
+        let error = ingest_schema_with_generated_expression_dialect(source.as_bytes(), "db/schema.rb", GeneratedExpressionDialect::Postgres).unwrap_err().to_string();
+        assert!(error.contains("db/schema.rb") && error.contains("line 4"), "{error}");
+    }
+    for declaration in ["t.index 'json_valid(payload)', name: 'payload_json'", "t.index :payload, name: 'payload_json', where: 'json_valid(payload)'"] {
+        let source = JSON_SCHEMA.replace("t.check_constraint '\"payload\" IS NULL OR json_valid(\"payload\")'", declaration);
+        let schema = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap();
+        assert!(render_schema_statements_for(&schema, Dialect::Postgres).is_err());
+    }
+}
+
+#[test]
+fn emitted_ruby_enforces_sqlite_json_check() {
+    json_app().run_ruby(JSON_CONTRACT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn native_spinel_enforces_sqlite_json_check() {
+    json_app().run_spinel_with_db(JSON_CONTRACT).assert_passes();
+}
+
+#[test]
+fn rails_enforces_sqlite_json_check() {
+    let helper = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
+    let script = format!(r#"
+require {helper:?}
+unless RailsOracle.available?("railties", "activerecord", sqlite3: ">= 2.9")
+  puts 'skip: Rails oracle, railties or sqlite3 unavailable'
+  exit
+end
+RailsOracle.activate("railties", "activerecord", sqlite3: ">= 2.9")
+require 'rails'
+require 'active_record/railtie'
+class OracleApp < Rails::Application
+  config.load_defaults 8.1
+  config.eager_load = false
+  config.secret_key_base = 'test'
+  config.logger = Logger.new(File::NULL)
+end
+ENV['DATABASE_URL'] = 'sqlite3::memory:'
+OracleApp.initialize!
+ActiveRecord::Base.establish_connection(adapter: 'sqlite3', database: ':memory:')
+ActiveRecord::Schema.verbose = false
+{JSON_SCHEMA}
+class RecordItem < ActiveRecord::Base; end
+{JSON_CONTRACT}
+puts "oracle Ruby=#{{RUBY_VERSION}} Rails=#{{Rails.version}} defaults=8.1 SQLite=#{{SQLite3::SQLITE_VERSION}}"
+"#);
+    let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("SQLite JSON CHECK rejects") || stdout.contains("skip:"), "{stdout}");
+    println!("{stdout}");
+}
+
 #[test]
 fn check_constraint_reaches_both_ddl_dialects() {
     let schema = ingest_schema(SCHEMA.as_bytes(), "db/schema.rb").unwrap();

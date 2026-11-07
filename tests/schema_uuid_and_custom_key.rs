@@ -228,7 +228,7 @@ end
     assert_eq!(
         out[0],
         "CREATE TABLE IF NOT EXISTS story_texts (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  \
-         created_at TEXT NOT NULL\n)"
+         created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)\n)"
     );
 }
 
