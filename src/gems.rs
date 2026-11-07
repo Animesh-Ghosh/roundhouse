@@ -916,7 +916,23 @@ pub(crate) fn is_stdlib_namespace(root: &str) -> bool {
         "Socket", "StringIO", "StringScanner", "Syslog", "Tempfile", "Thread", "Time", "Timeout", "TracePoint",
         "TSort", "UNIXSocket", "URI", "Warning", "WeakRef", "YAML", "Zlib", "TCPSocket", "UDPSocket", "Addrinfo",
     ];
+    // Ruby's core classes and modules: always defined, so never absent. The
+    // modules RUBY_OWN already holds (Kernel, Comparable, Math, Marshal, GC,
+    // ObjectSpace, Process, Signal, IO, Encoding, Fiber, Mutex, Warning) are
+    // not repeated here.
+    const RUBY_CORE: &[&str] = &[
+        "ArgumentError", "Array", "BasicObject", "Binding", "Class", "ClosedQueueError", "ConditionVariable", "Complex",
+        "Data", "Dir", "EncodingError", "EOFError", "Enumerable", "Enumerator", "Exception", "FalseClass", "File",
+        "FileTest", "FiberError", "Float", "FloatDomainError", "FrozenError", "Hash", "IndexError", "Integer",
+        "Interrupt", "IOError", "KeyError", "LoadError", "LocalJumpError", "Method", "Module", "NameError", "NilClass",
+        "NoMatchingPatternError", "NoMatchingPatternKeyError", "NoMemoryError", "NoMethodError", "NotImplementedError",
+        "Numeric", "Object", "Proc", "Queue", "Random", "Range", "RangeError", "Rational", "Refinement", "Regexp",
+        "RegexpError", "RuntimeError", "ScriptError", "SecurityError", "SignalException", "SizedQueue", "StandardError",
+        "StopIteration", "String", "Struct", "Symbol", "SyntaxError", "SystemCallError", "SystemExit", "SystemStackError",
+        "ThreadError", "ThreadGroup", "TrueClass", "TypeError", "UnboundMethod", "UncaughtThrowError", "ZeroDivisionError",
+    ];
     RUBY_OWN.contains(&root)
+        || RUBY_CORE.contains(&root)
         || PRELOADED.iter().any(|(_, namespace, _)| namespace.eq_ignore_ascii_case(root))
         || FATES.iter().any(|(gem, fate)| matches!(fate, GemFate::Stdlib) && namespace_of(gem).eq_ignore_ascii_case(root))
 }
