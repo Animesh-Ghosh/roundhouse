@@ -42,17 +42,23 @@ struct Pending {
 }
 
 thread_local! {
+    /// Set while an app ingest runs, the one caller that folds what it defers.
+    static FOLDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static PENDING: RefCell<Vec<Pending>> = const { RefCell::new(Vec::new()) };
     static CLASS_NAMES: RefCell<Vec<(Span, Expr)>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(super) fn reset() {
+    FOLDING.with(|f| f.set(true));
     PENDING.with(|p| p.borrow_mut().clear());
     CLASS_NAMES.with(|p| p.borrow_mut().clear());
 }
 
 /// An association's `class_name:` written as an expression, by the declaration's span.
 pub(super) fn defer_class_name(span: Span, expr: Expr) {
+    if !FOLDING.with(|f| f.get()) {
+        return;
+    }
     CLASS_NAMES.with(|p| p.borrow_mut().push((span, expr)));
 }
 
@@ -60,6 +66,9 @@ pub(super) fn defer_class_name(span: Span, expr: Expr) {
 /// constant (`Doorkeeper.config.resolve_controller(:base)`); `false`
 /// leaves the superclass to the caller's refusal.
 pub(super) fn defer(owner: &ClassId, node: &ruby_prism::Node<'_>, span: Span, file: &str) -> bool {
+    if !FOLDING.with(|f| f.get()) {
+        return false;
+    }
     let mut root = node.as_call_node();
     let mut calls = 0;
     while let Some(call) = root {
@@ -86,6 +95,7 @@ pub(super) fn defer(owner: &ClassId, node: &ruby_prism::Node<'_>, span: Span, fi
 /// Each deferred superclass: the constant it evaluates to, set as the
 /// class's parent, or the refusal ingest would have reported.
 pub(super) fn fold<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App) {
+    FOLDING.with(|f| f.set(false));
     let pending = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
     if pending.is_empty() {
         return;
@@ -336,11 +346,27 @@ impl<'a> Eval<'a> {
 
     fn answer_value(&mut self, expr: &Expr, initializers: &[Expr]) -> Res<Val> {
         let root = root_constant(expr).ok_or("no constant at the root")?;
+        let top_name = root.split("::").next().unwrap_or_default().to_string();
+        self.replay(initializers, &top_name)?;
         let top = Frame { this: Val::Class("Object".into()), locals: HashMap::default(), block: None, scope: None };
-        for statement in initializers.iter().filter(|s| root_constant(s).as_deref() == Some(root.as_str())) {
-            self.statement(statement, &mut top.clone())?;
-        }
         self.value(expr, &mut top.clone())
+    }
+
+    /// The initializers' calls on `root`; one that names it any other way (under an `if`, in a
+    /// `to_prepare`, through `Root::Config`) and may write an instance variable may set what the
+    /// answer reads, so nothing folds.
+    fn replay(&mut self, initializers: &[Expr], root: &str) -> Res<()> {
+        let top = Frame { this: Val::Class("Object".into()), locals: HashMap::default(), block: None, scope: None };
+        for statement in initializers {
+            if root_constant(statement).as_deref() == Some(root) {
+                self.statement(statement, &mut top.clone())?;
+            } else if names_constant(statement, root)
+                && self.may_write(statement, "*", false, &mut HashSet::default()).is_none_or(|w| !w.is_empty())
+            {
+                return Err(format!("an initializer reaches `{root}` other than through a call on it, and may write what the answer reads"));
+            }
+        }
+        Ok(())
     }
 
     /// A statement whose value is not used: one it cannot run is passed over and its possible writes kept.
@@ -1344,6 +1370,12 @@ impl<'a> Eval<'a> {
                     }
                     continue;
                 }
+                // Not a program object: `Rails.application.config` answers the framework's, whose methods write none of the program's ivars.
+                if recv.as_ref().is_some_and(|r| {
+                    matches!(&*r.node, ExprNode::Send { .. }) && root_constant(r).is_some_and(|c| self.resolve(&c, class.as_deref()).is_none())
+                }) {
+                    continue;
+                }
                 // The class the call is on, when the receiver says: then its own lookup answers, and no method there is a built-in.
                 let on: Option<(String, MethodReceiver)> = match recv.as_ref().map(|r| &*r.node) {
                     None | Some(ExprNode::SelfRef) => {
@@ -1524,10 +1556,7 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
 /// recording `Router` after the initializers that call on `root` have run.
 pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr, initializers: &[Expr], root: &str) -> Res<Vec<Expr>> {
     let mut eval = Eval::new(app);
-    let top = Frame { this: Val::Class("Object".into()), locals: HashMap::default(), block: None, scope: None };
-    for statement in initializers.iter().filter(|s| root_constant(s).as_deref() == Some(root)) {
-        eval.statement(statement, &mut top.clone())?;
-    }
+    eval.replay(initializers, root)?;
     let ExprNode::Send { args, block, .. } = &*call.node else { return Err("not a call".into()) };
     let mut frame = Frame { this: Val::Router, locals: HashMap::default(), block: None, scope: None };
     let argv = args.iter().map(|a| eval.value(a, &mut frame)).collect::<Res<Vec<_>>>()?;
@@ -1563,5 +1592,18 @@ fn cvar_reader(def: &MethodDef) -> Option<String> {
         ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => Some(name.as_str().to_string()),
         _ => None,
     }
+}
+
+/// Whether `e` names the constant `root` or one under it anywhere.
+fn names_constant(e: &Expr, root: &str) -> bool {
+    let mut found = false;
+    visit(e, &mut |x| {
+        if let ExprNode::Const { path } = &*x.node
+            && path.iter().map(|s| s.as_str()).find(|s| !s.is_empty()) == Some(root)
+        {
+            found = true;
+        }
+    });
+    found
 }
 

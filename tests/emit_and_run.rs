@@ -824,6 +824,27 @@ puts "struct block passed"
     assert!(run.stdout.contains("struct block passed"), "{}", run.stdout);
 }
 
+/// A `Struct.new` block's `include` is the class's own, as in a class body. An `alias_method` there
+/// keeps the constant: the struct class is written without its class-body calls.
+#[test]
+fn a_struct_block_body_keeps_its_includes() {
+    let run = emit_and_run::real_blog()
+        .write("app/models/greeting.rb", "module Greeting\n  def hi\n    \"hi #{name}\"\n  end\nend\n")
+        .write(
+            "app/models/greeter.rb",
+            "class Greeter\n  Person = Struct.new(:name) do\n    include Greeting\n  end\nend\n",
+        )
+        .run_ruby(
+            r##"person = Greeter::Person.new("Ann")
+raise "include: #{person.hi.inspect}" unless person.hi == "hi Ann"
+raise "ancestry" unless Greeter::Person.include?(Greeting)
+puts "struct include passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("struct include passed"), "{}", run.stdout);
+}
+
 /// `String#strip_heredoc` as Rails takes it: the least indentation of a
 /// line that is not blank, by String order, off each line's start.
 #[test]

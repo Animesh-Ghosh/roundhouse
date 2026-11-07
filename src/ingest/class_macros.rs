@@ -1032,8 +1032,10 @@ fn ancestors(named: &Named, parents: &HashMap<ClassId, ClassId>, model: &ClassId
 // Resolved as Ruby's lexical lookup from the class: nested under it, then each enclosing namespace, then the top level.
 fn extended_modules(lc: &LibraryClass, module_methods: &HashMap<String, Vec<MethodDef>>) -> Vec<String> {
     let owner = lc.name.0.as_str();
+    // The last `extend` first, as Ruby searches it; one `extend A, B` keeps A first.
     lc.unknown_calls
         .iter()
+        .rev()
         .filter_map(|e| match &*e.node {
             ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "extend" => Some(args),
             _ => None,

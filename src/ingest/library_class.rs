@@ -1944,7 +1944,7 @@ fn struct_block_declaration(stmt: &ruby_prism::Node<'_>) -> bool {
                 && call.block().is_none()
                 && matches!(
                     constant_id_str(&call.name()).as_ref(),
-                    "delegate" | "attr_reader" | "attr_writer" | "attr_accessor" | "include" | "alias_method"
+                    "delegate" | "attr_reader" | "attr_writer" | "attr_accessor" | "include"
                 )
         })
 }
