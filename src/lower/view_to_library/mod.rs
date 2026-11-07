@@ -260,6 +260,7 @@ pub struct ViewLowerCtx<'a> {
     partial_form_bindings: crate::det::HashMap<ViewKey, PartialFormBinding>,
     route_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
     app_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
+    direct_route_helpers: std::rc::Rc<crate::det::HashSet<String>>,
     i18n: std::rc::Rc<crate::i18n::FormI18n>,
     /// Generated RouteHelpers function name -> how many REQUIRED
     /// positionals it takes. See the ViewCtx field of the same name.
@@ -364,6 +365,7 @@ impl<'a> ViewLowerCtx<'a> {
             app_helper_names: std::rc::Rc::new(
                 app.helper_method_index.keys().map(|n| n.as_str().to_string()).collect(),
             ),
+            direct_route_helpers: std::rc::Rc::new(crate::lower::routes::direct_helper_names(app)),
             route_helper_arity: std::rc::Rc::new(route_helpers.into_iter().collect()),
             strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
             yielding_partials: std::rc::Rc::new(yielding),
@@ -885,6 +887,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         store_readers: lx.store_readers.clone(),
         route_helper_names: lx.route_helper_names.clone(),
         app_helper_names: lx.app_helper_names.clone(),
+        direct_route_helpers: lx.direct_route_helpers.clone(),
         i18n: lx.i18n.clone(),
         route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
@@ -5212,6 +5215,11 @@ pub(super) struct ViewCtx {
     /// app helpers in above the url helpers), so its arguments are the
     /// app's to read, not a route's to project.
     pub(super) app_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
+    /// The app's `direct` route helpers (`lower::routes::direct_helper_names`).
+    /// Their bodies are the blocks the app wrote, which read what they're
+    /// handed (campfire's `fresh_user_avatar` reads `user.updated_at`), so
+    /// a record reaches them whole.
+    pub(super) direct_route_helpers: std::rc::Rc<crate::det::HashSet<String>>,
     /// The app's translations for form labels and submit text.
     pub(super) i18n: std::rc::Rc<crate::i18n::FormI18n>,
     /// Generated RouteHelpers function name -> how many REQUIRED

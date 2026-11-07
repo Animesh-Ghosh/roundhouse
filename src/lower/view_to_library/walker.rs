@@ -2067,16 +2067,25 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
 /// app's models passes its `to_param` (`.id`, or the model's own
 /// `to_param` where it overrides it), as Rails fills the segment from
 /// it. The strict targets' helpers take that scalar, not the record. A
-/// scalar argument, an untyped one, and every argument of a helper an
-/// app helper module redefines (`app_helper_names`, which a bare call
-/// reaches first) pass as written.
+/// scalar argument, an untyped one, and every argument of a helper whose
+/// body the app wrote pass as written: an app helper module's method of
+/// the name (`app_helper_names`, which a bare call reaches first) or a
+/// `direct` route's block (`direct_route_helpers`).
 fn route_args(helper: &str, args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
-    let shadowed = ctx.app_helper_names.contains(helper);
+    let shadowed = ctx.app_helper_names.contains(helper) || ctx.direct_route_helpers.contains(helper);
     args.iter()
         .map(|a| {
             let arg = rewrite_helpers_in_expr(a, ctx);
             let model = match a.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
-                Some(crate::ty::Ty::Class { id, .. }) => Some(crate::naming::model_param_key(id.0.as_str())),
+                // The app's key for the class (`model_param_keys`, which
+                // drops an isolated engine's namespace), the one
+                // `model_singulars` and `slug_models` hold.
+                Some(crate::ty::Ty::Class { id, .. }) => Some(
+                    ctx.model_param_keys
+                        .get(id.0.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| crate::naming::model_param_key(id.0.as_str())),
+                ),
                 _ => None,
             };
             match model {
@@ -2396,6 +2405,7 @@ mod tests {
             store_readers: Default::default(),
             route_helper_names: Default::default(),
             app_helper_names: Default::default(),
+            direct_route_helpers: Default::default(),
             i18n: Default::default(),
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
@@ -3239,6 +3249,62 @@ mod tests {
             let emitted = emit_output(bare(name), &ctx.with_locals([name.to_string()]));
             assert!(!calls_a_helper(&emitted), "a block param `{name}` is a local again:\n{emitted}");
         }
+    }
+
+    /// `<x>_path(rec)` nested in an output expression, `rec` typed as an
+    /// isolated engine's model.
+    fn nested_route_call(direct: bool) -> Expr {
+        let ctx = ViewCtx {
+            locals: vec!["rec".to_string()],
+            route_helper_names: std::rc::Rc::new(["article_path".to_string()].into_iter().collect()),
+            direct_route_helpers: std::rc::Rc::new(
+                if direct { vec!["article_path".to_string()] } else { Vec::new() }.into_iter().collect(),
+            ),
+            model_singulars: std::rc::Rc::new(["article".to_string()].into_iter().collect()),
+            model_param_keys: std::rc::Rc::new(
+                [("Blorgh::Article".to_string(), "article".to_string())].into_iter().collect(),
+            ),
+            ..test_ctx()
+        };
+        let mut rec = var("rec");
+        rec.ty = Some(crate::ty::Ty::Class {
+            id: crate::ident::ClassId(Symbol::from("Blorgh::Article")),
+            args: Default::default(),
+        });
+        let call = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("article_path"),
+                args: vec![rec],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        rewrite_helpers_in_expr(&call, &ctx)
+    }
+
+    fn first_arg(call: &Expr) -> &Expr {
+        let ExprNode::Send { args, .. } = &*call.node else { panic!("not a call: {call:?}") };
+        &args[0]
+    }
+
+    #[test]
+    fn an_isolated_engine_record_projects_under_the_apps_key() {
+        // `Blorgh::Article`'s key is `article` (`model_param_keys`), not
+        // `blorgh_article` (`naming::model_param_key`).
+        let out = nested_route_call(false);
+        assert!(
+            matches!(&*first_arg(&out).node, ExprNode::Send { recv: Some(r), method, .. }
+                if method.as_str() == "id" && matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == "rec")),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_direct_route_keeps_its_record() {
+        let out = nested_route_call(true);
+        assert!(matches!(&*first_arg(&out).node, ExprNode::Var { name, .. } if name.as_str() == "rec"), "{out:?}");
     }
 }
 

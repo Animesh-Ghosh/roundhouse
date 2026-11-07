@@ -7,11 +7,12 @@
 //! the strict targets that the page holds each one,
 //! `content_tag_options::app_rendering`).
 //!
-//! `SHADOW` (L5, L6) calls `draft_path` and `draft_url`, app helpers of
-//! a route's names, which a bare call reaches first: its record passes
-//! as written, to the app's method. Only
+//! `SHADOW` (L5–L7) is the helpers whose body the app wrote, which take
+//! the record as written: `draft_path` and `draft_url`, app helpers of a
+//! route's names that a bare call reaches first, and `fresh_article_path`,
+//! a `direct` route whose block reads the record. Only
 //! the ruby target and Spinel render it; the other targets don't reach
-//! an app helper from a view yet. `URL` (L7) is the `_url` form: the
+//! an app helper from a view yet. `URL` (L8) is the `_url` form: the
 //! ruby target checks it against Rails, the strict targets that it
 //! builds, and Spinel's in-process render (no request host) leaves it
 //! out.
@@ -38,11 +39,12 @@ pub const ROUTE_RENDERS: &[&str] = &[
 pub const SHADOW: &str = concat!(
     r#"L5:<%= "" + draft_path(rec) %>"#, "\n",
     r#"L6:<%= "" + draft_url(rec) %>"#, "\n",
+    r#"L7:<%= "" + fresh_article_path(rec) %>"#, "\n",
 );
-pub const SHADOW_RENDERS: &[&str] = &["L5:/d/t", "L6:/u/t"];
+pub const SHADOW_RENDERS: &[&str] = &["L5:/d/t", "L6:/u/t", "L7:/f/t"];
 
-pub const URL: &str = concat!(r#"L7:<%= "" + article_url(rec) %>"#, "\n");
-pub const URL_RENDERS: &str = "L7:http://www.example.com/articles/7";
+pub const URL: &str = concat!(r#"L8:<%= "" + article_url(rec) %>"#, "\n");
+pub const URL_RENDERS: &str = "L8:http://www.example.com/articles/7";
 
 /// The route lines, with `SHADOW` and `URL` where asked, and what
 /// Rails renders for each line.
@@ -61,8 +63,8 @@ pub fn view(shadow: bool, url: bool) -> (String, Vec<&'static str>) {
 }
 
 /// `base` (a probe app over `fixtures/real-blog`) with the record the
-/// view reads, and for `shadow` the `draft` route and the app helper of
-/// its name.
+/// view reads, and for `shadow` the `draft` route, the app helpers of
+/// its names and the `fresh_article` direct route.
 pub fn app(base: Overlay, shadow: bool) -> Overlay {
     let base = base.write(
         "app/controllers/probes_controller.rb",
@@ -71,7 +73,11 @@ pub fn app(base: Overlay, shadow: bool) -> Overlay {
     if !shadow {
         return base;
     }
-    base.edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/drafts/:id\", to: \"articles#show\", as: :draft\n")
+    base.edit(
+        "config/routes.rb",
+        "  root \"articles#index\"\n",
+        "  root \"articles#index\"\n  get \"/drafts/:id\", to: \"articles#show\", as: :draft\n  direct(:fresh_article) { |article| \"/f/#{article.title}\" }\n",
+    )
         .edit(
             "app/helpers/application_helper.rb",
             "module ApplicationHelper\n",
