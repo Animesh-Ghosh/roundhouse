@@ -190,6 +190,18 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // Epilogue `_buf` read — drop; the explicit trailing `io` is
         // appended once at method-body construction.
         ExprNode::Var { name, .. } if name.as_str() == "_buf" => Vec::new(),
+        // A local rebound to itself, which is what `<% article = @article %>`
+        // becomes once the ivar is the view's parameter `article`
+        // (`rewrite_ivars_to_locals`). Rails' two are one object, so the
+        // assignment changes nothing; written out, TypeScript refuses the
+        // second declaration and Crystal the no-op. Only for a local the
+        // view binds: Ruby's `x = x` with no local `x` before it is nil.
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+            if ctx.is_local(name.as_str())
+                && matches!(&*value.node, ExprNode::Var { name: read, .. } if read == name) =>
+        {
+            Vec::new()
+        }
         // Template-local `||=` (`<% is_unread ||= false %>`) — same
         // statement treatment as plain assignment; Ruby's `x ||= v`
         // defines the local when unset.
