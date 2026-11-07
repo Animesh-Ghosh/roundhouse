@@ -1437,20 +1437,28 @@ fn ingest_route_stmts<'pr>(
     Ok(entries)
 }
 
+fn empty_route_splat(node: &Node<'_>) -> bool {
+    node.as_assoc_splat_node().and_then(|s| s.value()).and_then(|v| v.as_hash_node())
+        .is_some_and(|h| h.elements().iter().all(|item| empty_route_splat(&item)))
+}
+
 /// Literal `defaults:` the table keeps (scope ones are checked per route), and no option the ingesters skip.
 fn route_options_kept(call: &ruby_prism::CallNode<'_>, method: &str) -> bool {
-    let default_kept = |default: Node<'_>| default.as_assoc_node().is_some_and(|pair| symbol_or_string_value(&pair.value()).is_some()
+    let default_kept = |default: Node<'_>| empty_route_splat(&default) || default.as_assoc_node().is_some_and(|pair| symbol_or_string_value(&pair.value()).is_some()
         && symbol_value(&pair.key()).is_some_and(|key| method == "scope" || (key == "format" && http_method_from(method).is_some())));
-    let (mut defaults_seen, mut path_seen) = (false, false);
+    let literal_format = |value: Node<'_>| symbol_or_string_value(&value).is_some() || bool_value(&value).is_some()
+        || value.as_nil_node().is_some() || value.as_regular_expression_node().is_some();
+    let (mut defaults_seen, mut path_seen, mut format_seen) = (false, false, false);
     let mut read = |arg: Node<'_>| {
         if arg.as_interpolated_string_node().is_some() || rname(&arg).is_some() { path_seen = true; return true; }
         arg.as_keyword_hash_node().is_some_and(|options| options.elements().iter().all(|option| {
-            if option.as_assoc_splat_node().and_then(|s| s.value()).and_then(|v| v.as_hash_node()).is_some_and(|h| h.elements().is_empty()) { return true; }
+            if empty_route_splat(&option) { return true; }
             option.as_assoc_node().is_some_and(|pair| match symbol_value(&pair.key()) {
+                Some(key) if key == "format" => !std::mem::replace(&mut format_seen, true) && literal_format(pair.value())
+                    && (http_method_from(method).is_some() || pair.value().as_true_node().is_some() || pair.value().as_regular_expression_node().is_some()),
                 Some(key) if key != "defaults" && pair.value().as_regular_expression_node().is_some() => true,
                 Some(key) if key == "defaults" => !std::mem::replace(&mut defaults_seen, true)
                     && pair.value().as_hash_node().is_some_and(|hash| hash.elements().iter().all(&default_kept)),
-                Some(key) if key == "format" => http_method_from(method).is_some() || pair.value().as_true_node().is_some(),
                 Some(key) => matches!(key.as_str(), "path" | "as" | "controller" | "action" | "constraints" | "to" | "via")
                     || (http_method_from(method).is_some() && key == "on")
                     || (matches!(method, "scope" | "namespace" | "resources" | "resource") && matches!(key.as_str(), "module" | "only" | "except" | "shallow" | "path_names"))

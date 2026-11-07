@@ -376,6 +376,39 @@ fn literal_regex_options_keep_the_existing_route_support() {
 }
 
 #[test]
+fn route_option_refusal_requires_one_literal_direct_format() {
+    for (body, line) in [
+        ("value = 'json'\nget '/catalog', to: 'catalog#show', format: value", 3),
+        (r##"get '/catalog', to: 'catalog#show', format: "#{'json'}""##, 2),
+        ("get '/catalog', to: 'catalog#show', format: 'json', format: nil", 2),
+        ("get '/catalog', to: 'catalog#show', format: /json/, format: :json", 2),
+    ] {
+        refused(&drawn(body), "route defaults", &format!("config/routes.rb:{line}:"));
+    }
+    for value in ["'json'", ":json", "false", "nil", "/json/"] {
+        kept(&drawn(&format!("get '/catalog', to: 'catalog#show', format: {value}")));
+    }
+}
+
+#[test]
+fn route_option_refusal_keeps_recursively_empty_literal_splats() {
+    for body in [
+        "get '/catalog', to: 'catalog#show', defaults: { **{} }",
+        "get '/catalog', to: 'catalog#show', **{ **{} }",
+        "scope defaults: { **{} } do\nget '/catalog', to: 'catalog#show'\nend",
+        "get '/catalog', to: 'catalog#show', defaults: { **{ **{} }, format: 'json', **{} }",
+    ] {
+        kept(&drawn(body));
+    }
+    for body in [
+        "get '/catalog', to: 'catalog#show', **{ **{ as: :catalog } }",
+        "get '/catalog', to: 'catalog#show', defaults: { **{ format: 'json' } }",
+    ] {
+        refused(&drawn(body), "route defaults", "config/routes.rb:2:");
+    }
+}
+
+#[test]
 fn emitted_format_defaults_retain_the_existing_request_behavior() {
     let root = scratch::dir("route-default-values");
     let input = root.join("input");
