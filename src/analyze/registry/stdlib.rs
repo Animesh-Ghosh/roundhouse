@@ -1006,6 +1006,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("Psych::BadAlias", "Psych::Exception"),
         ("Psych::AliasesNotEnabled", "Psych::BadAlias"),
         ("Psych::AnchorNotDefined", "Psych::BadAlias"),
+        // `rescue WeakRef::RefError` around a read of a collected referent.
+        ("WeakRef::RefError", "StandardError"),
     ] {
         register_stdlib_class(classes, exc, &[], &exception_surface);
         classes.entry(ClassId(Symbol::from(exc))).or_default().parent =
@@ -1484,13 +1486,17 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Mutex", &[], &[]);
     // `require "weakref"`: Ruby's own on the ruby family, packages/weakref
     // on spinel. `__getobj__` answers whatever the reference was made over,
-    // so it stays untyped; the referent's methods go through it as through
-    // any delegate.
+    // so it stays untyped. `weakref_alive?` is true, nil once the object is
+    // collected, and the String "instance-variable" for a reference to
+    // true, false or nil. The referent's other methods are not modeled on
+    // the reference: CRuby forwards them through method_missing, spinel's
+    // package does not, so an app that runs on both reads the object with
+    // `__getobj__` and calls that.
     let weak_ref = class("WeakRef");
     register_stdlib_class(classes, "WeakRef", &[("new", weak_ref)], &[
-        ("weakref_alive?", Ty::Bool), ("__getobj__", Ty::Untyped), ("__setobj__", Ty::Untyped),
+        ("weakref_alive?", Ty::Union { variants: vec![Ty::Bool, Ty::Str, Ty::Nil].into() }),
+        ("__getobj__", Ty::Untyped), ("__setobj__", Ty::Untyped),
     ]);
-    register_stdlib_class(classes, "WeakRef::RefError", &[], &[]);
     // `require "observer"`: the mixin an `include Observable` names. Its
     // methods answer what observer.rb's do: `changed` and `changed?` the
     // state flag, `count_observers` the count; the rest hand back the

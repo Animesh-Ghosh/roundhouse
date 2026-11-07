@@ -16,7 +16,11 @@ class CacheSlot
 
   def alive? = @ref.weakref_alive?
 
-  def value = @ref.__getobj__
+  def value
+    @ref.__getobj__
+  rescue WeakRef::RefError => e
+    e.message
+  end
 end
 "#;
 
@@ -52,6 +56,7 @@ fn ticker_app() -> emit_and_run::Overlay {
 const SLOT_ASSERTIONS: &str = r##"value = +"kept"
 slot = CacheSlot.new(value)
 raise slot.alive?.inspect unless slot.alive? == true
+raise CacheSlot.new(nil).alive?.inspect unless CacheSlot.new(nil).alive? == "instance-variable"
 raise slot.value.inspect unless slot.value == "kept"
 puts "weakref passed"
 "##;
