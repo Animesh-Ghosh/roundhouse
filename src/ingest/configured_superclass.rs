@@ -361,7 +361,8 @@ impl<'a> Eval<'a> {
     fn replay(&mut self, initializers: &[Expr], root: &str) -> Res<()> {
         let top = Frame { this: Val::Class("Object".into()), locals: HashMap::default(), block: None, scope: None };
         for statement in initializers {
-            if root_constant(statement).as_deref() == Some(root) {
+            // Not the whole path: `Admin::Settings.configure` calls on what `Admin` holds.
+            if root_constant(statement).is_some_and(|r| r.split("::").next() == Some(root)) {
                 self.statement(statement, &mut top.clone())?;
             } else if names_constant(statement, root)
                 && self.may_write(statement, "*", false, &mut HashSet::default()).is_none_or(|w| !w.is_empty())
@@ -1011,7 +1012,11 @@ impl<'a> Eval<'a> {
             ("size" | "length" | "count", Val::Array(items), []) if blk.is_none() => Ok(Val::Int(items.len() as i64)),
             ("size" | "length" | "count", Val::Hash(entries), []) if blk.is_none() => Ok(Val::Int(entries.len() as i64)),
             ("[]", Val::Hash(entries), [key]) => Ok(entries.iter().find(|(k, _)| same(k, key)).map(|(_, v)| v.clone()).unwrap_or(Val::Nil)),
-            ("[]", Val::Array(items), [Val::Int(i)]) => Ok(usize::try_from(*i).ok().and_then(|i| items.get(i)).cloned().unwrap_or(Val::Nil)),
+            ("[]", Val::Array(items), [Val::Int(i)]) => {
+                let at = if *i < 0 { i64::try_from(items.len()).ok().and_then(|n| usize::try_from(n + i).ok()) } else { usize::try_from(*i).ok() };
+                Ok(at.and_then(|i| items.get(i)).cloned().unwrap_or(Val::Nil))
+            }
+            ("==" | "!=", _, [other]) if !(compares(&this) && compares(other)) => Err(format!("`{method}` on a value it does not compare")),
             ("==", _, [other]) => Ok(Val::Bool(same(&this, other))),
             ("!=", _, [other]) => Ok(Val::Bool(!same(&this, other))),
             ("<" | ">" | "<=" | ">=", Val::Int(a), [Val::Int(b)]) => Ok(Val::Bool(match method {
@@ -1596,7 +1601,19 @@ fn same(a: &Val, b: &Val) -> bool {
         (Val::Int(x), Val::Int(y)) => x == y,
         (Val::Str(x), Val::Str(y)) | (Val::Sym(x), Val::Sym(y)) | (Val::Class(x), Val::Class(y)) => x == y,
         (Val::Obj(x), Val::Obj(y)) => x == y,
+        (Val::Array(x), Val::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(a, b)| same(a, b)),
+        (Val::Hash(x), Val::Hash(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.iter().any(|(k2, v2)| same(k, k2) && same(v, v2))),
         _ => false,
+    }
+}
+
+/// Whether `same` answers `==` as Ruby does: not for a value it carries without modeling (a Regexp's options, a Proc's identity).
+fn compares(v: &Val) -> bool {
+    match v {
+        Val::Array(items) => items.iter().all(compares),
+        Val::Hash(entries) => entries.iter().all(|(k, v)| compares(k) && compares(v)),
+        Val::Regex(_) | Val::Proc { .. } | Val::Unknown | Val::Router | Val::Merger { .. } => false,
+        _ => true,
     }
 }
 

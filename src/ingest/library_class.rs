@@ -4597,8 +4597,8 @@ pub(super) fn ingest_library_method_with_keywords(
         });
 
     let body = match def.body() {
-        Some(b) => super::expr::with_anonymous_rest(formals.forwarded_rest_name.clone(), || {
-            ingest_expr(&b, file)
+        Some(b) => super::expr::with_block_param(block_param.as_ref().map(|p| p.name.clone()), || {
+            super::expr::with_anonymous_rest(formals.forwarded_rest_name.clone(), || ingest_expr(&b, file))
         })?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };

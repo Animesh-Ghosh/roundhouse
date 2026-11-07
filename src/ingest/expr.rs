@@ -30,6 +30,18 @@ pub(super) fn with_anonymous_rest<T>(name: Option<Symbol>, f: impl FnOnce() -> T
     out
 }
 
+thread_local! {
+    static BLOCK_PARAM: std::cell::RefCell<Option<Symbol>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Ingests a `def` body whose `&name` parameter is `name`: a block handed on from it is the block the method was given.
+pub(super) fn with_block_param<T>(name: Option<Symbol>, f: impl FnOnce() -> T) -> T {
+    let saved = BLOCK_PARAM.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), name));
+    let out = f();
+    BLOCK_PARAM.with(|slot| *slot.borrow_mut() = saved);
+    out
+}
+
 use crate::ingest::prism_api::PrismLocation;
 pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Survey-mode gate: when active, intercept Err returns and
@@ -4874,7 +4886,12 @@ fn writing_connection_block<'pr>(c: &ruby_prism::CallNode<'pr>) -> Option<Writin
     }
     if let Some(forwarded) = c.block()?.as_block_argument_node() {
         let local = forwarded.expression()?.as_local_variable_read_node()?;
-        return Some(WritingBlock::Forwarded(Symbol::from(constant_id_str(&local.name()).as_ref())));
+        let name = Symbol::from(constant_id_str(&local.name()).as_ref());
+        // Not any local: `&callback` converts through `to_proc`, which only the method's own block needs no call for.
+        if BLOCK_PARAM.with(|slot| slot.borrow().as_ref() != Some(&name)) {
+            return None;
+        }
+        return Some(WritingBlock::Forwarded(name));
     }
     let block = c.block()?.as_block_node()?;
     if block.parameters().is_some() {

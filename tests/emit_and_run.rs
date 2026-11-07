@@ -10360,6 +10360,8 @@ fn connected_to_other_than_the_writing_role_stays_unsupported() {
         "ActiveRecord::Base.connected_to(role: :reading) do\n      count\n    end",
         "ActiveRecord::Base.connected_to(role: :writing, shard: :other) do\n      count\n    end",
         "ActiveRecord::Base.connected_to(role: :writing) do\n      next 0 if none?\n      count\n    end",
+        // Not the method's own block: `&callback` converts a local through `to_proc`.
+        "callback = method(:count)\n    ActiveRecord::Base.connected_to(role: :writing, &callback)",
     ] {
         let errors = emit_and_run::real_blog()
             .edit(

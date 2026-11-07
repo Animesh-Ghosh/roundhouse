@@ -1051,8 +1051,11 @@ fn extended_modules(lc: &LibraryClass, module_methods: &HashMap<String, Vec<Meth
                     candidates.push(format!("{prefix}::{written}"));
                     scope = prefix.rsplit_once("::").map(|(p, _)| p);
                 }
+                let top = candidates.len();
                 candidates.push(written);
-                candidates.into_iter().find(|c| module_methods.contains_key(c))
+                let at = candidates.iter().position(|c| module_methods.contains_key(c))?;
+                // Not an enclosing namespace's: `class Outer::Config` does not nest in `Outer`, and the walk does not know which way the class was written.
+                (at == 0 || at == top).then(|| candidates.swap_remove(at))
             }
             _ => None,
         })

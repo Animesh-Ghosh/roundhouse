@@ -515,7 +515,7 @@ pub(super) fn ingest_devise_for(
         }
     };
     // `Devise::Mapping#used_routes`: the routes of the modules the model declares, as Rails draws them.
-    let class_name = crate::naming::camelize(&singular);
+    let class_name = crate::naming::camelize_path(&singular);
     let declared = MODEL_MODULES.with(|m| m.borrow().get(&class_name).cloned());
     let used: Option<Vec<&str>> = match &declared {
         Some(modules) => {
