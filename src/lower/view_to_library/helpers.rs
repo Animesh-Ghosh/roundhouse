@@ -1314,18 +1314,24 @@ fn nested_element_parts(kind: &NestedUrlElement<'_>) -> (String, Expr) {
 /// [`rewrite_path_arg`] over a helper's arguments. A lone record handed
 /// to the member helper of a model that overrides `to_param` (lobsters'
 /// `user_path(user)`, a username) projects to that, as Rails renders it.
+/// An argument that isn't a bound local projects by its type, as a nested
+/// call's does (`walker::record_segment_method`): a local the template
+/// assigns (`<% rec = @article %>`) is typed as the record. Not for a
+/// helper whose body the app wrote, an app helper of the name or a
+/// `direct` route, which reads the record.
 pub(super) fn rewrite_path_args(helper: &str, args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
     let resource = helper.trim_end_matches("_path").trim_end_matches("_url");
     let resource = resource.strip_prefix("edit_").unwrap_or(resource);
     let param = if args.len() == 1 && ctx.slug_models.iter().any(|m| m == resource) { "to_param" } else { "id" };
-    args.iter().map(|a| project_path_arg(a, ctx, param)).collect()
+    let typed = !(ctx.app_helper_names.contains(helper) || ctx.direct_route_helpers.contains(helper));
+    args.iter().map(|a| project_path_arg(a, ctx, param, typed)).collect()
 }
 
 pub(super) fn rewrite_path_arg(arg: &Expr, ctx: &ViewCtx) -> Expr {
-    project_path_arg(arg, ctx, "id")
+    project_path_arg(arg, ctx, "id", false)
 }
 
-fn project_path_arg(arg: &Expr, ctx: &ViewCtx, param: &str) -> Expr {
+fn project_path_arg(arg: &Expr, ctx: &ViewCtx, param: &str, typed: bool) -> Expr {
     let local_name = match &*arg.node {
         ExprNode::Var { name, .. } if ctx.is_local(name.as_str()) => Some(name.clone()),
         ExprNode::Send {
@@ -1343,6 +1349,10 @@ fn project_path_arg(arg: &Expr, ctx: &ViewCtx, param: &str) -> Expr {
             let own = ctx.slug_models.iter().any(|m| *m == singularize(name.as_str()));
             send(Some(var_ref(name)), if own { "to_param" } else { param }, Vec::new(), None, false)
         }
+        None if typed => match super::walker::record_segment_method(arg, ctx) {
+            Some(method) => send(Some(arg.clone()), method, Vec::new(), None, false),
+            None => arg.clone(),
+        },
         None => arg.clone(),
     }
 }
