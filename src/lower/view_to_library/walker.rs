@@ -1861,34 +1861,6 @@ pub(super) fn classify_template_helper<'a>(
 /// %>` and similar combinations end up with the helper rewritten
 /// before the html_escape wrap, matching the convention every
 /// emitter would otherwise have to repeat.
-/// A generated route helper's arguments inside an output expression
-/// (`<%= "" + article_path(article) %>`): an argument typed as one of the
-/// app's models passes its `to_param` (`.id`, or the model's own
-/// `to_param` where it overrides it), as Rails fills the segment from
-/// it. The strict targets' helpers take that scalar, not the record. A
-/// scalar argument, an untyped one, and every argument of a helper an
-/// app helper module redefines (`app_helper_names`, which a bare call
-/// reaches first) pass as written.
-fn route_args(helper: &str, args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
-    let shadowed = ctx.app_helper_names.contains(helper);
-    args.iter()
-        .map(|a| {
-            let arg = rewrite_helpers_in_expr(a, ctx);
-            let model = match a.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
-                Some(crate::ty::Ty::Class { id, .. }) => Some(crate::naming::model_param_key(id.0.as_str())),
-                _ => None,
-            };
-            match model {
-                Some(key) if !shadowed && ctx.model_singulars.contains(&key) => {
-                    let param = if ctx.slug_models.contains(&key) { "to_param" } else { "id" };
-                    send(Some(arg), param, Vec::new(), None, false)
-                }
-                _ => arg,
-            }
-        })
-        .collect()
-}
-
 pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
     // `x.presence` in a view's output (`<%= r[:title].presence || t(...) %>`):
     // ActiveSupport's Object#presence, which only the CRuby overlay can
@@ -1948,8 +1920,11 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
             // implementation. Leave unknown route helpers untouched.
             if let Some(stem) = method.as_str().strip_suffix("_url") {
                 let path_helper = format!("{stem}_path");
-                if ctx.route_helper_names.contains(&path_helper) {
-                    let args = route_args(&path_helper, args, ctx);
+                // An app helper of the `_url` name is what the bare call
+                // reaches first (Rails mixes app helpers in above the url
+                // helpers), so it stays a call to that method.
+                if ctx.route_helper_names.contains(&path_helper) && !ctx.app_helper_names.contains(method.as_str()) {
+                    let args = route_args(method.as_str(), args, ctx);
                     let mut call = super::absolute_url_interp(stem, args);
                     call.inherit_span(e.span);
                     return call;
@@ -2085,6 +2060,34 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
     // Not a fresh, untyped node: a rebuilt `[]` the i18n lowering typed `Array[String]` would read as `Array[untyped]`
     out.ty = e.ty.clone();
     out
+}
+
+/// A generated route helper's arguments inside an output expression
+/// (`<%= "" + article_path(article) %>`): an argument typed as one of the
+/// app's models passes its `to_param` (`.id`, or the model's own
+/// `to_param` where it overrides it), as Rails fills the segment from
+/// it. The strict targets' helpers take that scalar, not the record. A
+/// scalar argument, an untyped one, and every argument of a helper an
+/// app helper module redefines (`app_helper_names`, which a bare call
+/// reaches first) pass as written.
+fn route_args(helper: &str, args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
+    let shadowed = ctx.app_helper_names.contains(helper);
+    args.iter()
+        .map(|a| {
+            let arg = rewrite_helpers_in_expr(a, ctx);
+            let model = match a.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
+                Some(crate::ty::Ty::Class { id, .. }) => Some(crate::naming::model_param_key(id.0.as_str())),
+                _ => None,
+            };
+            match model {
+                Some(key) if !shadowed && ctx.model_singulars.contains(&key) => {
+                    let param = if ctx.slug_models.contains(&key) { "to_param" } else { "id" };
+                    send(Some(arg), param, Vec::new(), None, false)
+                }
+                _ => arg,
+            }
+        })
+        .collect()
 }
 
 /// Does a block body hold compiled-template buffer ops (`_buf = _buf + …`)?

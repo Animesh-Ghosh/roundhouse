@@ -5104,9 +5104,13 @@ fn rewrite_helper_calls(
     //
     // Self wins here too: a class that defines `widgets_url` itself
     // calls that method (Rails mixes url helpers in beneath a class's
-    // own methods, and a plain class has none mixed in at all).
+    // own methods, and a plain class has none mixed in at all). So does
+    // an app helper of the `_url` name (`index`): Rails mixes the app's
+    // helpers in above the url helpers, and the bare call takes case 3's
+    // qualification to that module below.
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node
         && !own_methods.contains(method)
+        && !index.contains_key(method)
     {
         if let Some(stem) = method.as_str().strip_suffix("_url") {
             let path_name = Symbol::from(format!("{stem}_path"));

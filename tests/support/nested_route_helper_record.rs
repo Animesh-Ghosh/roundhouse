@@ -7,10 +7,11 @@
 //! the strict targets that the page holds each one,
 //! `content_tag_options::app_rendering`).
 //!
-//! `SHADOW` (L5) calls `draft_path`, an app helper of a route's name,
-//! which a bare call reaches first: its record passes as written. Only
+//! `SHADOW` (L5, L6) calls `draft_path` and `draft_url`, app helpers of
+//! a route's names, which a bare call reaches first: its record passes
+//! as written, to the app's method. Only
 //! the ruby target and Spinel render it; the other targets don't reach
-//! an app helper from a view yet. `URL` (L6) is the `_url` form: the
+//! an app helper from a view yet. `URL` (L7) is the `_url` form: the
 //! ruby target checks it against Rails, the strict targets that it
 //! builds, and Spinel's in-process render (no request host) leaves it
 //! out.
@@ -34,11 +35,14 @@ pub const ROUTE_RENDERS: &[&str] = &[
     "L4:/articles/7/edit?a=1",
 ];
 
-pub const SHADOW: &str = concat!(r#"L5:<%= "" + draft_path(rec) %>"#, "\n");
-pub const SHADOW_RENDERS: &str = "L5:/d/t";
+pub const SHADOW: &str = concat!(
+    r#"L5:<%= "" + draft_path(rec) %>"#, "\n",
+    r#"L6:<%= "" + draft_url(rec) %>"#, "\n",
+);
+pub const SHADOW_RENDERS: &[&str] = &["L5:/d/t", "L6:/u/t"];
 
-pub const URL: &str = concat!(r#"L6:<%= "" + article_url(rec) %>"#, "\n");
-pub const URL_RENDERS: &str = "L6:http://www.example.com/articles/7";
+pub const URL: &str = concat!(r#"L7:<%= "" + article_url(rec) %>"#, "\n");
+pub const URL_RENDERS: &str = "L7:http://www.example.com/articles/7";
 
 /// The route lines, with `SHADOW` and `URL` where asked, and what
 /// Rails renders for each line.
@@ -47,7 +51,7 @@ pub fn view(shadow: bool, url: bool) -> (String, Vec<&'static str>) {
     let mut renders = ROUTE_RENDERS.to_vec();
     if shadow {
         view.push_str(SHADOW);
-        renders.push(SHADOW_RENDERS);
+        renders.extend_from_slice(SHADOW_RENDERS);
     }
     if url {
         view.push_str(URL);
@@ -68,7 +72,11 @@ pub fn app(base: Overlay, shadow: bool) -> Overlay {
         return base;
     }
     base.edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/drafts/:id\", to: \"articles#show\", as: :draft\n")
-        .edit("app/helpers/application_helper.rb", "module ApplicationHelper\n", "module ApplicationHelper\n  def draft_path(article)\n    \"/d/#{article.title}\"\n  end\n")
+        .edit(
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n",
+            "module ApplicationHelper\n  def draft_path(article)\n    \"/d/#{article.title}\"\n  end\n\n  def draft_url(article)\n    \"/u/#{article.title}\"\n  end\n",
+        )
 }
 
 /// The strict targets' probe app: the route lines, checked against
