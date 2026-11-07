@@ -4,7 +4,7 @@
 
 use ruby_prism::Node;
 
-use crate::dialect::{Action, Comment, Controller, ControllerBodyItem, LayoutDecl, RenderTarget};
+use crate::dialect::{Action, Comment, Controller, ControllerBodyItem, LayoutCall, LayoutDecl, LayoutValue, RenderTarget};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::span::Span;
@@ -150,8 +150,8 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
             // (matches Rails: a later `layout` call overrides an earlier
             // one). The call still falls through to Unknown for source
             // round-trip; the side-channel `Controller.layout` is what
-            // analyze reads to seed layout-view ivar types.
-            if let Some(decl) = parse_layout_call(&stmt) {
+            // `controller_layout` resolves each action's layout from.
+            if let Some(decl) = parse_layout_call(&stmt, file) {
                 layout = decl;
             }
             // A `before_action :a, :b` line declares one filter per leading
@@ -428,20 +428,13 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
     }))
 }
 
-/// Recognize a `layout` class-body call. Returns `Some(decl)` if this
-/// is a `layout ...` call we can interpret, `None` otherwise (including
-/// for unsupported shapes like `layout :method_name` where the symbol
-/// names a controller method — those degrade to `Inherit` and the
-/// effective layout falls back to convention).
-///
-/// Note: we can't tell `layout :foo` (static name "foo") from
-/// `layout :foo` (dispatch to method `foo`) syntactically. v1 treats
-/// every `layout :sym` as a static name. The dispatch form is rare
-/// enough on real Rails controllers that this is a safe v1 assumption;
-/// the worst case is a layout-view-name miss, not a crash.
-fn parse_layout_call(stmt: &Node<'_>) -> Option<LayoutDecl> {
+/// Recognize a `layout` class-body call. A String names the template, a
+/// Symbol the method Rails calls for it, `false` no layout and `nil` the
+/// default lookup; anything else is kept as computed, for
+/// `controller_layout` to report.
+fn parse_layout_call(stmt: &Node<'_>, file: &str) -> Option<LayoutDecl> {
     let call = stmt.as_call_node()?;
-    if call.receiver().is_some() {
+    if call.receiver().is_some() || call.block().is_some() {
         return None;
     }
     if constant_id_str(&call.name()) != "layout" {
@@ -450,39 +443,34 @@ fn parse_layout_call(stmt: &Node<'_>) -> Option<LayoutDecl> {
     let args = call.arguments()?;
     let all_args = args.arguments();
     let first = all_args.iter().next()?;
-    if let Some(sym) = first.as_symbol_node() {
-        let bytes = sym.unescaped();
-        let name = std::str::from_utf8(bytes).ok()?;
-        return Some(LayoutDecl::Name { name: Symbol::from(name) });
-    }
-    if let Some(s) = first.as_string_node() {
-        let bytes = s.unescaped();
-        let name = std::str::from_utf8(bytes).ok()?;
-        return Some(LayoutDecl::Name { name: Symbol::from(name) });
-    }
-    if first.as_false_node().is_some() || first.as_nil_node().is_some() {
-        // `only:`/`except:` scope the suppression exactly as they scope
-        // a filter — campfire writes `layout false, only: :index`, and
-        // reading past the options would strip the layout from `show`
-        // and `edit` too.
-        let mut only: Vec<Symbol> = Vec::new();
-        let mut except: Vec<Symbol> = Vec::new();
-        for arg in all_args.iter().skip(1) {
-            let Some(hash) = arg.as_keyword_hash_node() else { continue };
-            for element in hash.elements().iter() {
-                let Some(pair) = element.as_assoc_node() else { continue };
-                let Some(key) = pair.key().as_symbol_node() else { continue };
-                let Ok(name) = std::str::from_utf8(key.unescaped()) else { continue };
-                match name {
-                    "only" => only = super::util::symbol_list_value(&pair.value()),
-                    "except" => except = super::util::symbol_list_value(&pair.value()),
-                    _ => {}
-                }
+    let text = |bytes: &[u8]| std::str::from_utf8(bytes).ok().map(Symbol::from);
+    let value = if let Some(sym) = first.as_symbol_node() {
+        LayoutValue::Method { name: text(sym.unescaped())? }
+    } else if let Some(s) = first.as_string_node() {
+        LayoutValue::Name { name: text(s.unescaped())? }
+    } else if first.as_false_node().is_some() {
+        LayoutValue::None
+    } else if first.as_nil_node().is_some() {
+        LayoutValue::Default
+    } else {
+        LayoutValue::Computed
+    };
+    let mut only: Vec<Symbol> = Vec::new();
+    let mut except: Vec<Symbol> = Vec::new();
+    for arg in all_args.iter().skip(1) {
+        let Some(hash) = arg.as_keyword_hash_node() else { continue };
+        for element in hash.elements().iter() {
+            let Some(pair) = element.as_assoc_node() else { continue };
+            let Some(key) = pair.key().as_symbol_node() else { continue };
+            let Ok(name) = std::str::from_utf8(key.unescaped()) else { continue };
+            match name {
+                "only" => only = super::util::symbol_list_value(&pair.value()),
+                "except" => except = super::util::symbol_list_value(&pair.value()),
+                _ => {}
             }
         }
-        return Some(LayoutDecl::None { only, except });
     }
-    None
+    Some(LayoutDecl::Declared(LayoutCall { value, only, except, span: super::util::node_span(stmt, file) }))
 }
 
 /// Classify one class-body statement into its `ControllerBodyItem` variant.

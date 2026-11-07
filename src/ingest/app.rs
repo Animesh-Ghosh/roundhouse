@@ -3317,6 +3317,9 @@ end
     super::queue_adapter_reader::synthesize(&mut app);
     super::container_specialize::specialize(&mut app);
     super::unreachable_views::mark(&mut app);
+    for d in crate::controller_layout::diagnostics(&app.controllers, &app.views) {
+        super::prism::push(d);
+    }
     super::settled_conditionals::settle(&mut app);
     // Not beside the hoists: later passes give an included module methods and ancestors (forwardable, carried includes, props bases, the queue adapter reader) or take an inactive branch's away.
     app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);

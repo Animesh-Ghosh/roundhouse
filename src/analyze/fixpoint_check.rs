@@ -482,7 +482,7 @@ impl Analyzer {
                         )
                     })
                     .collect();
-                let layout = resolution.layout.as_ref().map(|l| l.as_str());
+                let layout: Vec<&str> = resolution.layouts.iter().map(|l| l.as_str()).collect();
                 put("view_seeds", format!("resolution {}", id.0.as_str()), hash_of((filters, layout)));
             }
         }
@@ -709,7 +709,7 @@ end
                     filter, defined_in: id.clone(), included_via: id.clone(),
                     assigns: HashMap::default(), effects: Default::default(),
                 }],
-                layout: Some(Symbol::from("layouts/application")),
+                layouts: vec![Symbol::from("layouts/application")],
             };
             let app = App::default();
             let mut analyzer = Analyzer::new(&app);
