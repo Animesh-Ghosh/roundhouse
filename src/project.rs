@@ -9505,6 +9505,13 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
             }
         }
     }
+    // The jbuilder lowering, which also runs at emit time, adds the same
+    // `ActionView::MissingTemplate` raise as the fallback of a
+    // `json.partial!` whose path is built at run time. Ledgered at the
+    // call.
+    for span in crate::lower::jbuilder_to_library::dynamic_partial_raise_spans(app) {
+        report_unavailable_class_value(app, target.as_str(), "ActionView::MissingTemplate", span);
+    }
     // Like the Date gate, include roots outside the app-body survey.
     for controller in &app.controllers {
         for action in controller.actions() {
