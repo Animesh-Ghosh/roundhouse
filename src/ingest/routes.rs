@@ -264,9 +264,8 @@ pub(super) fn ingest_route_file(
         }
     }
     // A route set behind a guard or wrapper (`if flag`, `flag &&`) reaches the walk alone.
-    let wrapped = |stmt: &Node<'_>| stmt.as_call_node().is_none() && has_mount_block_call(stmt, &["draw", "prepend", "append"]);
     let statements = root.as_program_node().into_iter().flat_map(|program| program.statements().body().iter());
-    entries.extend(ingest_route_stmts(statements.filter(wrapped), file, None, &cx)?);
+    entries.extend(ingest_route_stmts(statements.filter(wrapped_route_set), file, None, &cx)?);
     // A `load`ed file carries its own `Rails.application.routes.draw`,
     // which starts a fresh mapper: its routes sit at the top of the
     // table whatever scope the `load` call was written inside.
@@ -305,6 +304,11 @@ pub(super) fn ingest_route_file(
 /// (or any `<something>.routes.draw` whose receiver is not an engine).
 fn top_level_app_draws<'pr>(root: &Node<'pr>) -> Vec<ruby_prism::CallNode<'pr>> {
     top_level_app_route_blocks(root, &["draw"])
+}
+
+fn wrapped_route_set(stmt: &Node<'_>) -> bool {
+    !stmt.as_call_node().is_some_and(|c| is_app_route_block(&c, &["draw", "prepend", "append"]))
+        && has_mount_block_call(stmt, &["draw", "prepend", "append"])
 }
 
 /// The top-level `<app>.routes.<method> do … end` calls for each of
@@ -447,8 +451,9 @@ fn refused_route_diagnostics(entries: &[RouteSpec], source: &[u8], file: &str) -
     let mut out = Vec::new();
     for route in crate::lower::routes::flatten_route_entries(entries) {
         for (key, (_, span)) in &route.param_defaults {
-            let kept = key == crate::lower::routes::FORMAT_REQUIRED_KEY || (key == "format" && route.format.is_some())
-                || route.path_params.iter().take(route.required_params).any(|p| p == key);
+            let segment = route.path_params.iter().take(route.required_params).any(|p| p == key);
+            let kept = key == crate::lower::routes::FORMAT_REQUIRED_KEY
+                || if key == "format" { route.format.is_some() && !segment } else { segment };
             if !kept {
                 let detail = format!("no required segment of {} {} carries `{key}`", format!("{:?}", route.method).to_uppercase(), route.path);
                 out.push(Diagnostic::unsupported(*span, None, "route defaults", detail));
@@ -1211,11 +1216,12 @@ fn ingest_route_stmts<'pr>(
             .or_else(|| stmt.as_unless_node().map(|c| (c.predicate(), c.else_clause().map(|e| e.as_node()), c.statements().map(|s| s.as_node()))));
         if let Some((predicate, then_arm, else_arm)) = guard {
             let known = bool_value(&predicate).or(predicate.as_nil_node().map(|_| false));
-            let hoisted = cx.hoisted.borrow().len();
+            let effectful = then_arm.is_some() || else_arm.is_some();
+            let diagnosed = cx.diagnostics.borrow().len();
             let arms = [then_arm.filter(|_| known != Some(false)), else_arm.filter(|_| known != Some(true))].into_iter().flatten();
             let walked = cx.with_mount_scope(cx.mount_scope_depth.get() + 1, || ingest_route_stmts(arms.flat_map(flatten_statements), file, parent, cx))?;
-            if known.is_none() && (!walked.is_empty() || cx.hoisted.borrow().len() > hoisted) {
-                route_refusal(&stmt, file, cx, "conditional routes", "the table would keep these routes whatever the guard decides");
+            if known.is_none() && effectful && cx.diagnostics.borrow().len() == diagnosed {
+                route_refusal(&stmt, file, cx, "conditional routes", "these declarations can change routes or mapper state depending on the guard");
             }
             entries.extend(walked);
             continue;
@@ -1288,7 +1294,7 @@ fn ingest_route_stmts<'pr>(
             continue;
         }
 
-        if call.receiver().is_some() {
+        if call.receiver().is_some_and(|recv| cx.strict || recv.as_self_node().is_none()) {
             // Any other receiver-bearing call with a block (`PAGES.each`,
             // `3.times`, `.each_with_index`) holds routes the walker
             // cannot evaluate. Skipping it, as below, dropped them with
@@ -1435,14 +1441,27 @@ fn ingest_route_stmts<'pr>(
 fn route_options_kept(call: &ruby_prism::CallNode<'_>, method: &str) -> bool {
     let default_kept = |default: Node<'_>| default.as_assoc_node().is_some_and(|pair| symbol_or_string_value(&pair.value()).is_some()
         && symbol_value(&pair.key()).is_some_and(|key| method == "scope" || (key == "format" && http_method_from(method).is_some())));
-    let option_kept = |option: Node<'_>| option.as_assoc_node().is_some_and(|pair| match symbol_value(&pair.key()) {
-        Some(key) => key != "defaults" || pair.value().as_hash_node().is_some_and(|hash| hash.elements().iter().all(&default_kept)),
-        None => pair.key().as_string_node().is_some() || pair.key().as_interpolated_string_node().is_some(),
-    });
-    let read = |arg: Node<'_>| arg.as_interpolated_string_node().is_some() || rname(&arg).is_some()
-        || arg.as_keyword_hash_node().is_some_and(|options| options.elements().iter().all(&option_kept));
+    let (mut defaults_seen, mut path_seen) = (false, false);
+    let mut read = |arg: Node<'_>| {
+        if arg.as_interpolated_string_node().is_some() || rname(&arg).is_some() { path_seen = true; return true; }
+        arg.as_keyword_hash_node().is_some_and(|options| options.elements().iter().all(|option| {
+            if option.as_assoc_splat_node().and_then(|s| s.value()).and_then(|v| v.as_hash_node()).is_some_and(|h| h.elements().is_empty()) { return true; }
+            option.as_assoc_node().is_some_and(|pair| match symbol_value(&pair.key()) {
+                Some(key) if key != "defaults" && pair.value().as_regular_expression_node().is_some() => true,
+                Some(key) if key == "defaults" => !std::mem::replace(&mut defaults_seen, true)
+                    && pair.value().as_hash_node().is_some_and(|hash| hash.elements().iter().all(&default_kept)),
+                Some(key) if key == "format" => http_method_from(method).is_some() || pair.value().as_true_node().is_some(),
+                Some(key) => matches!(key.as_str(), "path" | "as" | "controller" | "action" | "constraints" | "to" | "via")
+                    || (http_method_from(method).is_some() && key == "on")
+                    || (matches!(method, "scope" | "namespace" | "resources" | "resource") && matches!(key.as_str(), "module" | "only" | "except" | "shallow" | "path_names"))
+                    || (matches!(method, "resources" | "resource") && matches!(key.as_str(), "param" | "concerns")),
+                None => http_method_from(method).is_some() && !std::mem::replace(&mut path_seen, true)
+                    && (pair.key().as_string_node().is_some() || pair.key().as_interpolated_string_node().is_some()),
+            })
+        }))
+    };
     let routed = http_method_from(method).is_some() || matches!(method, "root" | "scope" | "namespace" | "resources" | "resource");
-    !routed || call.arguments().is_none_or(|args| args.arguments().iter().all(read))
+    !routed || call.arguments().is_none_or(|args| args.arguments().iter().all(&mut read))
 }
 
 fn route_refusal(node: &Node<'_>, file: &str, cx: &Ctx<'_>, construct: &str, detail: &str) {
@@ -2887,6 +2906,7 @@ fn ingest_route_file_include(
                         entries.extend(ingest_route_body(body, path, None, cx)?);
                     }
                 }
+                entries.extend(ingest_route_stmts(program.statements().body().iter().filter(wrapped_route_set), path, None, cx)?);
                 Ok(entries)
             })?;
             cx.hoisted.borrow_mut().extend(entries);

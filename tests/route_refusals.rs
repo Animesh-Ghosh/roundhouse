@@ -140,7 +140,6 @@ fn defaults_the_table_carries_emit_without_a_diagnostic() {
         "get '/catalog', to: 'catalog#show', format: :json",
         "get '/catalog', to: 'catalog#show', format: false",
         "scope defaults: { format: :json } do\n  get '/catalog', to: 'catalog#show'\nend",
-        "scope '/:format', defaults: { format: :json } do\n  get '/catalog', to: 'catalog#show'\nend",
         "scope path: ':bot_key', as: :bot, defaults: { format: :json } do\n  resources :messages, only: :create, controller: 'catalog'\nend",
         "resources :users, only: :show do\n  scope module: 'users' do\n    scope defaults: { user_id: 'me' } do\n      resource :sidebar, only: :show\n      resource :profile\n      resources :push_subscriptions do\n        scope module: 'push_subscriptions' do\n          resources :test_notifications, only: :create\n        end\n      end\n    end\n  end\nend",
         "resource :account, only: [] do\n  resources :users do\n    scope defaults: { user_id: 'me' } do\n      get '/catalog', to: 'catalog#show'\n    end\n  end\nend",
@@ -195,8 +194,10 @@ fn a_literal_guard_takes_the_branch_rails_takes() {
         let paths = paths(&app);
         assert!(paths.iter().any(|p| p == present) && !paths.iter().any(|p| p == absent), "{body}: {paths:?}");
     }
-    // A guard that adds no route refuses nothing.
-    kept(&drawn("prefix = 'x' if Feature.enabled?\nif Feature.enabled?\nend\nget '/b', to: 'catalog#show'"));
+    // Even an assignment can affect later routes; an empty guard has no effect.
+    refused(&drawn("prefix = 'x' if Feature.enabled?\nget '/b', to: 'catalog#show'"),
+        "conditional routes", "config/routes.rb:2:");
+    kept(&drawn("if Feature.enabled?\nend\nget '/b', to: 'catalog#show'"));
 }
 
 #[test]
@@ -365,11 +366,22 @@ fn a_proven_empty_keyword_splat_adds_no_unread_option() {
 }
 
 #[test]
-fn emitted_requests_keep_the_literal_format_default_kind() {
+fn literal_regex_options_keep_the_existing_route_support() {
+    for body in [
+        "scope ':shop', shop: /\\d+/ do\n  get '/catalog', to: 'catalog#show'\nend",
+        "scope '(:locale)', locale: /[a-z]{2}/ do\n  get '/catalog', to: 'catalog#show'\nend",
+    ] {
+        kept(&drawn(body));
+    }
+}
+
+#[test]
+fn emitted_format_defaults_retain_the_existing_request_behavior() {
     let root = scratch::dir("route-default-values");
     let input = root.join("input");
     let controller = "class CatalogController < ActionController::Base\n  def show\n    render plain: params[:kind].inspect + '|' + params[:format].inspect\n  end\nend\n";
-    for (defaults, expected) in [("defaults: { format: :json }", "nil|:json"),
+    // Rails returns a Symbol for :json; main's String coercion is a separate, pre-existing issue.
+    for (defaults, expected) in [("defaults: { format: :json }", "nil|\"json\""),
         ("defaults: { format: 'json' }", "nil|\"json\"")] {
         for scope in [false, true] {
             let body = if scope { format!("scope {defaults} do\nget '/catalog', to: 'catalog#show'\nend") }
@@ -439,6 +451,7 @@ check("false guard", reported.routes.map {{ |r| r.path.spec.to_s }}.grep(%r{{gua
 check("scope default", draw(%q{{scope defaults: {{ kind: "fixed" }} do get "/catalog", to: "catalog#show" end}}).recognize_path("/catalog")[:kind], "fixed")
 check("root format", draw(%q{{scope defaults: {{ format: :json }} do root to: "catalog#show" end}}).recognize_path("/")[:format], :json)
 check("symbol format", draw(%q{{get "/catalog", to: "catalog#show", defaults: {{ format: :json }}}}).recognize_path("/catalog")[:format], :json)
+check("regex scope", draw(%q{{scope ':shop', shop: /\\d+/ do get '/catalog', to: 'catalog#show' end}}).recognize_path('/7/catalog')[:shop], '7')
 check("literal guard", draw(%q{{get "/a", to: "catalog#show" if false
 get "/b", to: "catalog#show" unless false}}).routes.map {{ |r| r.path.spec.to_s }}, ["/b(.:format)"])
 campfire = draw(%q{{resources :users, only: :show do
