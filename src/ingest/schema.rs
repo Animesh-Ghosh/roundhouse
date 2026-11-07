@@ -577,11 +577,13 @@ fn apply_table_verb(
                 let value = to_kwarg.as_ref().or_else(|| args.get(2));
                 let expression = value.filter(|n| sql_default_candidate(n))
                     .map(sql_default_expression).transpose().map_err(|message| IngestError::Unsupported { file: file.into(), message }).and_then(|expression| {
-                        if expression.as_deref().is_some_and(|sql| sql.starts_with('\'')) && schema.tables.get(&Symbol::from(t.as_str()))
-                            .and_then(|table| table.columns.iter().find(|col| col.name.as_str() == c))
-                            .is_some_and(|col| col.array || !col.col_type.stores_sql_literal_default_as_text()) {
-                            Err(IngestError::Unsupported { file: file.into(), message: format!("default for {t}.{c}: quoted SQL literal defaults on this column type are not modeled") })
-                        } else { Ok(expression) }
+                        if let Some(sql) = expression.as_deref() {
+                            if let Some(col) = schema.tables.get(&Symbol::from(t.as_str())).and_then(|table| table.columns.iter().find(|col| col.name.as_str() == c)) {
+                                validate_sql_default_type(sql, col.col_type == ColumnType::Boolean, !col.array && col.col_type.stores_sql_literal_default_as_text())
+                                    .map_err(|message| IngestError::Unsupported { file: file.into(), message: format!("default for {t}.{c}: {message}") })?;
+                            }
+                        }
+                        Ok(expression)
                     }).or_else(|gap| super::survey::continue_or_fail(gap).map(|()| None))?;
                 let default_for = |col: &Column| {
                     value.and_then(|value| {
@@ -841,8 +843,12 @@ fn fold_column(
                 col.primary_key = existing.primary_key;
             }
         }
-        if col.default_expression.as_deref().is_some_and(|sql| sql.starts_with('\'')) && (col.array || !col.col_type.stores_sql_literal_default_as_text()) {
-            return Err(IngestError::Unsupported { file: file.into(), message: format!("default for {t}.{}: quoted SQL literal defaults on this column type are not modeled", col.name) });
+        if let Some(sql) = col.default_expression.as_deref() {
+            if let Err(message) = validate_sql_default_type(sql, col.col_type == ColumnType::Boolean, !col.array && col.col_type.stores_sql_literal_default_as_text()) {
+                super::survey::continue_or_fail(IngestError::Unsupported { file: file.into(), message: format!("default for {t}.{}: {message}", col.name) })?;
+                col.default = None;
+                col.default_expression = None;
+            }
         }
         col
     };
@@ -2368,6 +2374,14 @@ fn generated_column_from_options(
     Ok(column)
 }
 
+fn validate_sql_default_type(sql: &str, boolean: bool, stores_quoted_text: bool) -> Result<(), String> {
+    if sql.starts_with('\'') && !stores_quoted_text {
+        Err("quoted SQL literal defaults on this column type are not modeled".into())
+    } else if boolean && !sql.starts_with('\'') && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str()) {
+        Err("Boolean function defaults require an unset value distinct from false".into())
+    } else { Ok(()) }
+}
+
 /// A column-type name (`t.<type>` / `add_column …, :<type>`) to its
 /// `ColumnType`. The Postgres-only types map to their SQLite storage:
 /// `uuid`, `json`, and `jsonb` retain distinct schema variants even when
@@ -2391,11 +2405,8 @@ fn column_with_type(
     // dropped column would make every use of its reader another error.
     let default_expression = opts.default_expression.as_ref().map(|(offset, result)| {
         result.clone().and_then(|sql| {
-            if sql.starts_with('\'') && (opts.array || !matches!(type_name, "string" | "text" | "json" | "jsonb" | "uuid" | "inet" | "cidr" | "macaddr" | "enum" | "citext")) {
-                Err("quoted SQL literal defaults on this column type are not modeled".into())
-            } else if type_name == "boolean" && !sql.starts_with('\'') && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str()) {
-                Err("Boolean function defaults require an unset value distinct from false".into())
-            } else { Ok(sql) }
+            validate_sql_default_type(&sql, type_name == "boolean", !opts.array && matches!(type_name, "string" | "text" | "json" | "jsonb" | "uuid" | "inet" | "cidr" | "macaddr" | "enum" | "citext"))
+                .map(|()| sql)
         }).map_err(|why| IngestError::Unsupported { file: file.into(), message: format!("line {}: default for {table}.{col_name}: {why}", super::sources::line_at(file, *offset).unwrap_or(1)) })
     }).transpose().or_else(|gap| super::survey::continue_or_fail(gap).map(|()| None))?;
     let col_type = match type_name {
@@ -3461,6 +3472,65 @@ mod tests {
                 assert_eq!(gaps.len(), 2, "{gaps:?}");
                 assert_eq!(gaps[0], strict);
                 assert!(gaps[1].contains("quoted SQL literal"), "{gaps:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn migration_boolean_default_changes_follow_creation_rules() {
+        let base = b"ActiveRecord::Schema[8.1].define do\n create_table :flags do |t|\n t.boolean :enabled, null: false, default: true\n end\nend";
+        for sql in ["abs(1)", "ABS(1)", "json_valid('{}')", "'1'"] {
+            for value in [format!("-> {{ {sql:?} }}"), format!("from: true, to: -> {{ {sql:?} }}")] {
+                let source = format!("class ChangeFlags < ActiveRecord::Migration[8.1]\n def change\n change_column_default :flags, :enabled, {value}\n add_column :flags, :later, :string\n end\nend");
+                let initial = ingest_schema(base, "db/schema.rb").unwrap();
+                crate::ingest::survey::activate();
+                let mut schema = initial.clone();
+                let result = ingest_migration(source.as_bytes(), "1_flags.rb", &mut schema);
+                let gaps = crate::ingest::survey::drain();
+                result.expect("survey continues");
+                assert_eq!(gaps.len(), 1, "{sql}: {gaps:?}");
+                assert_eq!(col_names(&schema, "flags"), ["id", "enabled", "later"]);
+                let enabled = col(&schema, "flags", "enabled");
+                assert_eq!((&enabled.col_type, enabled.nullable), (&ColumnType::Boolean, false));
+                assert_eq!((&enabled.default, &enabled.default_expression), (&None, &None));
+                let mut strict = initial.clone();
+                let error = ingest_migration(source.as_bytes(), "1_flags.rb", &mut strict).expect_err("strict refuses");
+                assert_eq!(error.to_string(), gaps[0].to_string());
+                assert_eq!(strict, initial, "strict must not change the column");
+            }
+        }
+        for value in ["false", "nil", "-> { \"CURRENT_TIMESTAMP\" }", "-> { \"CURRENT_DATE\" }", "-> { \"CURRENT_TIME\" }"] {
+            let mut schema = ingest_schema(base, "db/schema.rb").unwrap();
+            let source = format!("class ChangeFlags < ActiveRecord::Migration[8.1]\n def change\n change_column_default :flags, :enabled, {value}\n end\nend");
+            ingest_migration(source.as_bytes(), "1_flags.rb", &mut schema).expect("creation-time controls remain allowed");
+        }
+    }
+
+    #[test]
+    fn migration_boolean_type_changes_refuse_inherited_function_defaults() {
+        for sql in ["abs(1)", "json_valid('{}')", "'1'"] {
+            let base = format!("ActiveRecord::Schema[8.1].define do\n create_table :flags do |t|\n t.string :enabled, null: false, default: -> {{ {sql:?} }}\n end\nend");
+            for options in ["".to_string(), format!(", default: -> {{ {sql:?} }}")] {
+                let source = format!("class ChangeFlags < ActiveRecord::Migration[8.1]\n def change\n change_column :flags, :enabled, :boolean{options}\n add_column :flags, :later, :string\n end\nend");
+                let initial = ingest_schema(base.as_bytes(), "db/schema.rb").unwrap();
+                crate::ingest::survey::activate();
+                let mut schema = initial.clone();
+                let result = ingest_migration(source.as_bytes(), "1_flags.rb", &mut schema);
+                let gaps = crate::ingest::survey::drain();
+                result.expect("survey continues");
+                assert_eq!(gaps.len(), 1, "{sql}: {gaps:?}");
+                assert_eq!(col_names(&schema, "flags"), ["id", "enabled", "later"]);
+                let enabled = col(&schema, "flags", "enabled");
+                assert_eq!((&enabled.col_type, enabled.nullable), (&ColumnType::Boolean, false));
+                assert_eq!((&enabled.default, &enabled.default_expression), (&None, &None));
+                let mut strict = initial.clone();
+                ingest_migration(source.as_bytes(), "1_flags.rb", &mut strict).expect_err("strict refuses");
+                assert_eq!(strict, initial, "strict must not change the column");
+            }
+            for change in ["change_column :flags, :enabled, :string", "change_column :flags, :enabled, :boolean, default: nil"] {
+                let mut schema = ingest_schema(base.as_bytes(), "db/schema.rb").unwrap();
+                let source = format!("class ChangeFlags < ActiveRecord::Migration[8.1]\n def change\n {change}\n end\nend");
+                ingest_migration(source.as_bytes(), "1_flags.rb", &mut schema).expect("unchanged type and replaced defaults remain allowed");
             }
         }
     }
