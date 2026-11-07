@@ -4371,7 +4371,9 @@ fn schema_default_literal(col: &Column) -> Option<Expr> {
     use crate::schema::ColumnType;
     // Rails extracts quoted SQL literals before classifying default functions.
     if let Some(sql) = col.default_expression.as_deref().filter(|_| col.computed_default().is_none()) {
-        return Some(lit_str(sql[1..sql.len() - 1].replace("''", "'")));
+        if let Some(inner) = sql.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')) {
+            return Some(lit_str(inner.replace("''", "'")));
+        }
     }
     let raw = col.stored_default()?;
     if col.array_stored {
