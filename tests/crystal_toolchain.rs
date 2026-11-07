@@ -42,6 +42,9 @@ mod link_to_computed_url;
 #[path = "support/nested_route_helper_record.rs"]
 #[allow(dead_code)]
 mod nested_route_helper_record;
+#[path = "support/ivar_named_local.rs"]
+#[allow(dead_code)]
+mod ivar_named_local;
 #[path = "support/link_to_if_escape.rs"]
 #[allow(dead_code)]
 mod link_to_if_escape;
@@ -505,6 +508,19 @@ fn link_to_computed_url_renders() {
 #[ignore]
 fn nested_route_helper_record_renders() {
     let (app, renders) = nested_route_helper_record::strict_app();
+    let (ok, stdout, stderr) = render_probe(app);
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in &renders {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
+    }
+}
+
+/// A template local assigned from the ivar of its own name renders as
+/// Rails 8.1.4 does (`ivar_named_local::VIEW`).
+#[test]
+#[ignore]
+fn ivar_named_local_renders() {
+    let (app, renders) = (ivar_named_local::strict_app(), ivar_named_local::RENDERS.to_vec());
     let (ok, stdout, stderr) = render_probe(app);
     assert!(ok, "{stdout}\n{stderr}");
     for want in &renders {

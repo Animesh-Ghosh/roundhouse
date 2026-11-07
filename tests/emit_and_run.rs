@@ -21229,6 +21229,9 @@ mod nested_route_helper_record;
 #[path = "support/concern_to_param.rs"]
 #[allow(dead_code)]
 mod concern_to_param;
+#[path = "support/ivar_named_local.rs"]
+#[allow(dead_code)]
+mod ivar_named_local;
 
 /// `simple_format` with `sanitize: false`: paragraphs, line breaks, html
 /// options and `wrapper_tag:`, as Rails 8.1.4 renders them.
@@ -21509,5 +21512,25 @@ fn concern_to_param_included_renders_as_rails() {
 fn concern_to_param_included_renders_as_rails_on_spinel() {
     concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::INCLUDED)
         .run_spinel(&helper_escape_at_output::render_script(concern_to_param::RENDERS))
+        .assert_passes();
+}
+
+/// A template local assigned from the ivar of its own name renders as
+/// Rails 8.1.4 does (`ivar_named_local::VIEW`).
+#[test]
+fn ivar_named_local_renders_as_rails() {
+    ivar_named_local::app(content_tag_options::app_rendering(ivar_named_local::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(ivar_named_local::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// A template local assigned from the ivar of its own name renders as
+/// Rails 8.1.4 does (`ivar_named_local::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn ivar_named_local_renders_as_rails_on_spinel() {
+    ivar_named_local::app(content_tag_options::app_rendering(ivar_named_local::VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(ivar_named_local::RENDERS))
         .assert_passes();
 }

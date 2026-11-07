@@ -33,6 +33,9 @@ mod link_to_computed_url;
 #[path = "support/nested_route_helper_record.rs"]
 #[allow(dead_code)]
 mod nested_route_helper_record;
+#[path = "support/ivar_named_local.rs"]
+#[allow(dead_code)]
+mod ivar_named_local;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -596,4 +599,12 @@ fn link_to_computed_url_renders() {
 #[ignore]
 fn nested_route_helper_record_renders() {
     assert_content_tag_test_passes(nested_route_helper_record::strict_app().0);
+}
+
+/// A template local assigned from the ivar of its own name renders as
+/// Rails 8.1.4 does (`ivar_named_local::VIEW`).
+#[test]
+#[ignore]
+fn ivar_named_local_renders() {
+    assert_content_tag_test_passes(ivar_named_local::strict_app());
 }
