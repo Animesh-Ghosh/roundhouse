@@ -7344,6 +7344,27 @@ fn block_exits(e: &Expr, yielded: &mut Vec<Ty>, drop_false: bool) -> bool {
     }
 }
 
+pub(super) fn class_object_boolop_ty(left: &Expr, op: crate::expr::BoolOpKind, right: &Expr) -> Option<Ty> {
+    use crate::expr::BoolOpKind::{And, Or};
+    let lt = super::Analyzer::class_object_return_ty(left)?;
+    let falsy = matches!(lt, Ty::Nil)
+        || matches!(&*left.node, ExprNode::Lit { value: Literal::Bool { value: false } });
+    let truthy = never_falsy(&lt)
+        || matches!(&*left.node, ExprNode::Lit { value: Literal::Bool { value: true } });
+    let right = || super::Analyzer::class_object_return_ty(right);
+    Some(match op {
+        Or if truthy => lt,
+        And if falsy => lt,
+        Or if falsy => right()?,
+        And if truthy => right()?,
+        Or => union_of(narrowing::remove_nil(&lt), right()?),
+        And => match falsy_part(&lt) {
+            Some(f) => union_of(f, right()?),
+            None => right()?,
+        },
+    })
+}
+
 /// The arms of `ty` a falsy value can come from -- `nil`, `false`, and
 /// anything not known to be truthy. `None` when there are none.
 fn falsy_part(ty: &Ty) -> Option<Ty> {

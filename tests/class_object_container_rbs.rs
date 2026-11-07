@@ -166,6 +166,83 @@ fn rooted_constants_and_block_copies_keep_the_same_elements() {
     assert!(rbs.contains("def self.registry: () -> Hash[String, singleton(Beacon)]"), "{rbs}");
 }
 
+const BOOLEAN_SOURCE: &str = r#"class Beacon
+  def self.label = "class"
+  def label = "instance"
+end
+class Other
+  def self.label = "other"
+end
+module Catalog
+  def self.fallback = [(nil || Beacon), "done"]
+  def self.short_circuit = [(Beacon || nil), "done"]
+  def self.guarded(flag) = [(flag && Beacon), "done"]
+  def self.nested(flag) = [(flag ? Beacon : nil || Other), "done"]
+  def self.coalesced(flag) = [((flag ? Beacon : nil) || Other), "done"]
+  def self.mixed(flag) = [((flag ? Beacon : Beacon.new) || Other), "done"]
+  def self.unreachable = [(nil && Beacon), "done"]
+  def self.false_fallback = [(false || Beacon), "done"]
+  def self.true_guard = [(true && Beacon), "done"]
+  def self.false_guard = [(false && Beacon), "done"]
+  def self.array = [nil || Beacon]
+  def self.hash = { (nil || Beacon) => (Beacon || nil) }
+  def self.unknown(value) = [value || Beacon]
+  def self.unknown_and(value) = [value && Beacon]
+  def self.unknown_right(value) = [Beacon && value]
+  def self.short_unknown(value) = [Beacon || value]
+  def self.run
+    [fallback.first.label, short_circuit.first.label,
+      guarded(true).first.label, guarded(false).first.to_s,
+      nested(true).first.label, nested(false).first.label,
+      mixed(true).first.label, mixed(false).first.label,
+      unreachable.first.to_s, false_fallback.first.label,
+      array.first.label, hash.keys.first.label]
+  end
+end
+"#;
+
+#[test]
+fn boolean_operands_keep_reachable_class_values() {
+    let rbs = rbs(BOOLEAN_SOURCE);
+    for expected in [
+        "def self.fallback: () -> [singleton(Beacon), String]",
+        "def self.short_circuit: () -> [singleton(Beacon), String]",
+        "def self.guarded: (bool flag) -> [(bool | singleton(Beacon)), String]",
+        "def self.nested: (bool flag) -> [(singleton(Beacon) | singleton(Other)), String]",
+        "def self.coalesced: (untyped flag) -> [(singleton(Beacon) | singleton(Other)), String]",
+        "def self.mixed: (bool flag) -> [(Beacon | singleton(Beacon)), String]",
+        "def self.unreachable: () -> [nil, String]",
+        "def self.false_fallback: () -> [singleton(Beacon), String]",
+        "def self.true_guard: () -> [singleton(Beacon), String]",
+        "def self.false_guard: () -> [bool, String]",
+        "def self.array: () -> Array[singleton(Beacon)]",
+        "def self.hash: () -> Hash[singleton(Beacon), singleton(Beacon)]",
+        "def self.unknown: (untyped value) -> Array[untyped]",
+        "def self.unknown_and: (untyped value) -> Array[untyped]",
+        "def self.unknown_right: (untyped value) -> Array[untyped]",
+        "def self.short_unknown: (untyped value) -> Array[singleton(Beacon)]",
+    ] {
+        assert!(rbs.contains(expected), "missing {expected}\n{rbs}");
+    }
+    let spelled = self::rbs(&BOOLEAN_SOURCE.replace("[nil || Beacon]", "[(nil or ::Beacon)]")
+        .replace("(flag && Beacon)", "(flag and ::Beacon)"));
+    assert!(spelled.contains("def self.array: () -> Array[singleton(Beacon)]"), "{spelled}");
+    assert!(spelled.contains("def self.guarded: (bool flag) -> [(bool | singleton(Beacon)), String]"), "{spelled}");
+}
+
+const BOOLEAN_OUTPUT: &str = "class\nclass\nclass\nfalse\nclass\nother\nclass\ninstance\n\nclass\nclass\nclass\n";
+
+#[test]
+fn boolean_containers_run_as_emitted_ruby() {
+    run(BOOLEAN_SOURCE, false, BOOLEAN_OUTPUT);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn boolean_containers_run_on_spinel_with_generated_sidecars() {
+    run(BOOLEAN_SOURCE, true, BOOLEAN_OUTPUT);
+}
+
 fn run(source: &str, native: bool, expected: &str) {
     let dir = scratch::dir("class_container");
     let mut script = String::new();
