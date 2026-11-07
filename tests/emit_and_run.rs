@@ -21541,6 +21541,16 @@ fn record_if_condition_renders_as_rails() {
         .assert_passes();
 }
 
+/// #1909: an assignment as the `if` condition, the record read in the
+/// branch, renders as Rails 8.1.4 does (`record_if_condition::ASSIGN_VIEW`).
+#[test]
+fn record_if_assignment_renders_as_rails() {
+    record_if_condition::app(content_tag_options::app_rendering(record_if_condition::ASSIGN_VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(record_if_condition::ASSIGN_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
 /// A template local assigned from the ivar of its own name renders as
 /// Rails 8.1.4 does (`ivar_named_local::VIEW`).
 #[test]
@@ -21558,6 +21568,16 @@ fn ivar_named_local_renders_as_rails_on_spinel() {
 fn record_if_condition_renders_as_rails_on_spinel() {
     record_if_condition::app(content_tag_options::app_rendering(record_if_condition::VIEW, &[]))
         .run_spinel(&helper_escape_at_output::render_script(record_if_condition::RENDERS))
+        .assert_passes();
+}
+
+/// #1909: an assignment as the `if` condition, the record read in the
+/// branch, renders as Rails 8.1.4 does (`record_if_condition::ASSIGN_VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn record_if_assignment_renders_as_rails_on_spinel() {
+    record_if_condition::app(content_tag_options::app_rendering(record_if_condition::ASSIGN_VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(record_if_condition::ASSIGN_RENDERS))
         .assert_passes();
 }
 

@@ -2842,10 +2842,18 @@ pub(super) struct IsAInit {
 /// An `if` condition. A record (a class Go holds by pointer) answers
 /// Ruby's truthiness, which for an object is "not nil"; Go wants a
 /// bool, so the condition is `!= nil`. Anything else emits as written.
+///
+/// An assignment as the condition (`if (rec = @article)`) is a statement
+/// in Go: it becomes the `if`'s init, and the test reads the local.
 fn emit_cond(ctx: &EmitCtx, cond: &Expr) -> String {
     let cond_s = emit_expr(ctx, cond);
     match cond.ty.as_ref().map(Ty::peel_nilable) {
-        Some(Ty::Class { id, .. }) if id.0.as_str() != "Time" => format!("{cond_s} != nil"),
+        Some(Ty::Class { id, .. }) if id.0.as_str() != "Time" => match &*cond.node {
+            ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, .. } => {
+                format!("{cond_s}; {} != nil", super::library::sanitize(name.as_str()))
+            }
+            _ => format!("{cond_s} != nil"),
+        },
         _ => cond_s,
     }
 }

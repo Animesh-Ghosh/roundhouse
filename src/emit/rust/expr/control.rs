@@ -33,11 +33,19 @@ fn wrap_as_block_if_multi(branch: &Expr, emitted: String) -> String {
 /// `Option<T>` is `.is_some()`, and one held as the struct itself is
 /// always present, so `true` (keeping a receiver that isn't a plain read
 /// for its effects). Anything else emits as written.
+///
+/// An assignment as the condition (`if (rec = @article)`) emits as
+/// `let rec = …`, and stays as written: the `if` is an `if let` that
+/// binds the local for the branches, and a struct always matches. (A
+/// nilable record assigned there keeps that shape too.)
 fn emit_cond(cond: &Expr) -> String {
     use crate::ty::Ty;
     let cond_s = emit_expr(cond);
     let Some(ty) = cond.ty.as_ref() else { return cond_s };
     if !matches!(ty.peel_nilable(), Ty::Class { .. }) {
+        return cond_s;
+    }
+    if matches!(&*cond.node, ExprNode::Assign { .. }) {
         return cond_s;
     }
     if !std::ptr::eq(ty.peel_nilable(), ty) {

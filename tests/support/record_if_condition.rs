@@ -20,6 +20,19 @@ pub fn app(base: Overlay) -> Overlay {
     super::nested_route_helper_record::app(base, false)
 }
 
+/// An assignment as the condition, the record read in the branch. Its
+/// own view: TypeScript, Crystal and Python don't keep the local this
+/// condition assigns (`got is not defined`), so the ruby target, Spinel,
+/// Go and Rust check it.
+pub const ASSIGN_VIEW: &str = "L0:<% if (got = @article) %><%= got.title %><% end %>|\n";
+
+pub const ASSIGN_RENDERS: &[&str] = &["L0:t|"];
+
+/// The strict targets' probe app for `ASSIGN_VIEW`.
+pub fn strict_assign_app() -> Overlay {
+    app(super::content_tag_options::app_rendering(ASSIGN_VIEW, ASSIGN_RENDERS))
+}
+
 /// The strict targets' probe app.
 pub fn strict_app() -> Overlay {
     app(super::content_tag_options::app_rendering(VIEW, RENDERS))

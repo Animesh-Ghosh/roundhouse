@@ -623,6 +623,14 @@ fn record_if_condition_renders() {
     assert_content_tag_test_passes(record_if_condition::strict_app());
 }
 
+/// #1909: an assignment as the `if` condition, the record read in the
+/// branch, renders as Rails 8.1.4 does (`record_if_condition::ASSIGN_VIEW`).
+#[test]
+#[ignore]
+fn record_if_assignment_renders() {
+    assert_content_tag_test_passes(record_if_condition::strict_assign_app());
+}
+
 /// #1898: a record in a local the template assigns, handed to
 /// `link_to`'s url helper, renders as Rails 8.1.4 does
 /// (`link_to_template_local::VIEW`).
