@@ -214,6 +214,10 @@ pub struct Analyzer {
     fixpoint_checks: fixpoint_check::Checks,
     /// Each return and parameter row's movement across the fixpoint's rounds (`oscillation`).
     settle: oscillation::Settle,
+    /// [`app_written_ivars`] of this analysis's app: what it reads is the
+    /// trees' shape, which typing does not change, and Phase B asked for
+    /// it on every typing pass.
+    written_ivars: Option<Option<BTreeSet<Symbol>>>,
     /// Parameter rows and tables kept across fixpoint rounds (see `unify_memo`).
     unify_memo: unify_memo::UnifyMemo,
 }
@@ -1375,6 +1379,7 @@ impl Analyzer {
             fixpoint_rounds: FixpointRounds::default(),
             fixpoint_checks: fixpoint_check::Checks::default(),
             settle: oscillation::Settle::default(),
+            written_ivars: None,
             unify_memo: unify_memo::UnifyMemo::default(),
         }
     }
@@ -1463,6 +1468,7 @@ impl Analyzer {
         self.upload_array_fields = Some(crate::lower::controller_to_library::params::upload_array_fields(&app.controllers));
         self.fixpoint_checks = fixpoint_check::Checks::start();
         self.settle = oscillation::Settle::default();
+        self.written_ivars = None;
         self.unify_memo.reset();
         // Before any signature is copied. Anonymous `**` / `...` cannot
         // survive flattened keywords, and `check` does not lower.
@@ -1837,6 +1843,10 @@ impl Analyzer {
         // Both loops share one budget of FIXPOINT_CAP production passes: on an app whose production loop ran to its cap, the params or returns here may never settle, and a cap per loop spent up to 12 × 12 full passes.
         // Not settled after a capped absorb: its last harvest may have moved a return that no production body has been typed against.
         let mut returns_settled = rounds.absorb != LoopEnd::RanToCap;
+        // What the last restamp pass was given. Its first pass retypes
+        // everything; each later one only the frontier of what moved since
+        // the pass before, the re-join's params included.
+        let mut fed: Option<DirtyHints> = None;
         // One round past the cap: every round that goes on spends a pass, so round FIXPOINT_CAP only re-joins what the last restamp typed, then stops.
         for round in 0..=FIXPOINT_CAP {
             rounds.restamp.rounds = round + 1;
@@ -1856,6 +1866,11 @@ impl Analyzer {
             crate::timings::phase("typing passes (after view param restamp)", || {
                 // Not retyped until the returns settle before the next re-join: every round then ended on a pass that only confirmed its returns, so a chain of view-fed helpers took two passes per helper instead of one.
                 rounds.restamp.passes += 1;
+                let dirty = fed.as_ref().and_then(|prev| self.dirty_classes_for_retype(app, prev));
+                crate::timings::note(match &dirty {
+                    Some(dirty) => format!("restamp pass {}: retype frontier {} classes", rounds.restamp.passes, dirty.len()),
+                    None => format!("restamp pass {}: retype frontier everything", rounds.restamp.passes),
+                });
                 let hints = self.capture_dirty_hints();
                 self.run_typing_passes(
                     app,
@@ -1864,11 +1879,12 @@ impl Analyzer {
                     &module_methods,
                     &module_includes,
                     &parent_link_by_name,
-                    TypingMode::Production { dirty: None },
+                    TypingMode::Production { dirty: dirty.as_ref() },
                 );
                 self.harvest_returns_to_registry(app, true);
                 self.settle.returns(&mut self.classes, &hints.sig.instance, &hints.sig.class_methods);
                 returns_settled = self.inference_matches(&hints.sig);
+                fed = Some(hints);
                 self.run_typing_passes(
                     app,
                     &dynamic_render_ivars,
@@ -3184,7 +3200,7 @@ impl Analyzer {
         // closest definition wins on name conflicts (mirrors Ruby
         // method-resolution order).
         let _typing_controllers_b = crate::timings::begin("typing: controllers B");
-        let written_ivars = app_written_ivars(app);
+        let written_ivars = self.written_ivars.get_or_insert_with(|| app_written_ivars(app)).clone();
         enum Channel { Action, Layout, Partial }
         enum Event {
             View(Channel, Symbol, Vec<(Symbol, Ty)>),
@@ -5439,10 +5455,15 @@ impl Analyzer {
         for model in &app.models {
             self.harvest_one_model(model);
         }
-        for lc in &app.library_classes {
+        // Each body's return is read on its own, so the reads run in
+        // parallel; the registry is written afterwards, in source order.
+        let this = &*self;
+        let returns = parallel::map_ref(&app.library_classes, |lc| {
+            lc.methods.iter().map(|method| this.method_return_ty(&lc.name, method)).collect::<Vec<_>>()
+        });
+        for (lc, rets) in app.library_classes.iter().zip(returns) {
             let class_id = &lc.name;
-            for method in &lc.methods {
-                let ret = self.method_return_ty(class_id, method);
+            for (method, ret) in lc.methods.iter().zip(rets) {
                 let target = match method.receiver {
                     crate::dialect::MethodReceiver::Instance => {
                         &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -5527,14 +5548,20 @@ impl Analyzer {
                 }
             }
         }
-        for lc in &app.library_classes {
-            for method in &lc.methods {
-                let bp = method.block_param.as_ref().map(|p| &p.name);
-                if self.returns_block_value(&lc.name, &method.name, &method.body, bp) {
-                    found.push((lc.name.clone(), method.name.clone()));
-                }
-            }
-        }
+        // Verdicts read last round's registry and are written below, so
+        // each class is read in parallel and collected in source order.
+        let this = &*self;
+        let verdicts = parallel::map_ref(&app.library_classes, |lc| {
+            lc.methods
+                .iter()
+                .filter(|method| {
+                    let bp = method.block_param.as_ref().map(|p| &p.name);
+                    this.returns_block_value(&lc.name, &method.name, &method.body, bp)
+                })
+                .map(|method| (lc.name.clone(), method.name.clone()))
+                .collect::<Vec<_>>()
+        });
+        found.extend(verdicts.into_iter().flatten());
         for controller in &app.controllers {
             for action in controller.actions() {
                 if self.returns_block_value(
@@ -6297,7 +6324,43 @@ impl Analyzer {
     /// Each site placed on the `def` it reaches, in site order. Where a
     /// site lands depends only on its class, method and receiver kind,
     /// so that is worked out once per distinct triple.
+    /// Sites map to observations one by one, so large site lists are
+    /// split into chunks read in parallel and joined in order: the same
+    /// observations, in the same order, and the union of the open slots.
     fn param_observations(
+        &self,
+        sites: Vec<SendSite>,
+        params_by_method: &HashMap<ParamKey, ParamShape>,
+        defined: &BTreeSet<ParamKey>,
+        open: &mut BTreeSet<(ParamKey, usize)>,
+    ) -> Vec<(ParamKey, Vec<Ty>)> {
+        const CHUNK: usize = 4096;
+        if sites.len() <= CHUNK || crate::par::workers_for(sites.len() / CHUNK + 1) == 1 {
+            return self.param_observations_of(sites, params_by_method, defined, open);
+        }
+        let mut chunks: Vec<Vec<SendSite>> = Vec::with_capacity(sites.len() / CHUNK + 1);
+        let mut rest = sites.into_iter();
+        loop {
+            let chunk: Vec<SendSite> = rest.by_ref().take(CHUNK).collect();
+            if chunk.is_empty() {
+                break;
+            }
+            chunks.push(chunk);
+        }
+        let parts = parallel::map(&mut chunks, |chunk| {
+            let mut part_open = BTreeSet::new();
+            let obs = self.param_observations_of(std::mem::take(chunk), params_by_method, defined, &mut part_open);
+            (obs, part_open)
+        });
+        let mut observations = Vec::new();
+        for (obs, part_open) in parts {
+            observations.extend(obs);
+            open.extend(part_open);
+        }
+        observations
+    }
+
+    fn param_observations_of(
         &self,
         sites: Vec<SendSite>,
         params_by_method: &HashMap<ParamKey, ParamShape>,
@@ -11521,7 +11584,7 @@ impl Analyzer {
     /// is measured on a copy. Destructured without `..`, so a new field has
     /// to be listed here; `Copy` fields own no heap.
     pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
-        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, unify_memo } = self;
+        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, unify_memo } = self;
         let mut freed: Vec<(&str, i64)> = vec![
             ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
             ("module_self_types", crate::memory_census::freed_by(|| drop(module_self_types))),
@@ -11552,6 +11615,7 @@ impl Analyzer {
             ("fixpoint_rounds", crate::memory_census::freed_by(|| drop(fixpoint_rounds))),
             ("fixpoint_checks", crate::memory_census::freed_by(|| drop(fixpoint_checks))),
             ("settle", crate::memory_census::freed_by(|| drop(settle))),
+            ("written_ivars", crate::memory_census::freed_by(|| drop(written_ivars))),
             ("unify_memo", crate::memory_census::freed_by(|| drop(unify_memo))),
         ];
         let total: i64 = freed.iter().map(|(_, bytes)| bytes).sum();
