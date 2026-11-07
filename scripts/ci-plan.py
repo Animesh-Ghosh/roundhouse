@@ -124,6 +124,7 @@ SPINEL_TESTS = [
     "render_json_encoder_spinel",
     "url_helpers_absolute_spinel",
     "jbuilder_extract_attributes_spinel",
+    "jbuilder_dynamic_partial_spinel",
     "hash_to_query_symbol_keys_spinel",
     "storage_proxy_path_spinel",
     "app_reopens_runtime_class",

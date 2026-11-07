@@ -729,6 +729,11 @@ enum JbStmt<'a> {
     /// the same output only while the partial never reads them
     /// (`record_partial_resolve`).
     PartialRecord { arg: &'a Expr, as_name: Option<Symbol>, locals: Vec<Symbol> },
+    /// `json.partial! "widgets/#{kind}", V: <expr>, …` — the same call
+    /// with a path built when the template runs: a String with one
+    /// interpolation between fixed text (`dynamic_path_parts`). Resolved
+    /// at emit time against the app's partials (`dynamic_partial_call`).
+    PartialDynamic { path: &'a Expr, locals: Vec<(Symbol, &'a Expr)> },
     /// `json.<key> obj, partial: P, as: V` — one pair whose value is a
     /// partial render of a SINGLE object. The `array!`/`partial!`
     /// siblings above render a collection and own the whole template;
@@ -984,6 +989,10 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
         let filled = match only {
             JbStmt::ArrayPartial { .. } | JbStmt::ArrayBlock { .. } | JbStmt::ArrayExtract { .. } => true,
             JbStmt::Partial { partial_path, .. } => partial_always_filled(partial_path, ctx),
+            JbStmt::PartialDynamic { path, .. } => {
+                let candidates = dynamic_partial_candidates(path, &ctx.resource_dir, &ctx.partials.paths);
+                !candidates.is_empty() && candidates.iter().all(|c| partial_always_filled(c, ctx))
+            }
             _ => false,
         };
         let whole = match only {
@@ -1006,6 +1015,13 @@ fn emit_object_filled(raw_stmts: &[&Expr], ctx: &Ctx) -> (Vec<Expr>, bool) {
                         stmts.push(io_append_call(&ctx.accumulator, call));
                         stmts
                     })
+            }
+            JbStmt::PartialDynamic { path, locals } => {
+                let locals: Vec<(Symbol, Expr)> = locals.iter().map(|(k, v)| (k.clone(), (*v).clone())).collect();
+                dynamic_partial_call(path, &locals, |v| v.clone(), ctx).map(|(mut stmts, call)| {
+                    stmts.push(io_append_call(&ctx.accumulator, call));
+                    stmts
+                })
             }
             _ => None,
         };
@@ -1051,6 +1067,9 @@ fn has_unlowered(stmts: &[&Expr], ctx: &Ctx) -> bool {
         | JbStmt::ArrayExtract { .. } => true,
         JbStmt::PartialRecord { arg, as_name, locals } => {
             record_partial_resolve(arg, as_name.as_ref(), &locals, ctx).is_err()
+        }
+        JbStmt::PartialDynamic { path, .. } => {
+            dynamic_partial_candidates(path, &ctx.resource_dir, &ctx.partials.paths).is_empty()
         }
         JbStmt::Cond { then_branch, else_branch, .. } => {
             has_unlowered(&branch_stmts(then_branch), ctx) || has_unlowered(&branch_stmts(else_branch), ctx)
@@ -1408,6 +1427,31 @@ fn emit_pairs(
                             message: format!("jbuilder: `json.partial!` of a record whose partial is not statically known: {}", why.detail()),
                         });
                         out.push(unsupported_stmt(src.span, "jbuilder partial! of a record", &why.detail()));
+                    }
+                }
+            }
+            JbStmt::PartialDynamic { path, locals } => {
+                let prepare = |v: &Expr| rewrite_h_escape(&rewrite_route_helpers(v, ctx));
+                let locals: Vec<(Symbol, Expr)> = locals.iter().map(|(k, v)| (k.clone(), prepare(v))).collect();
+                match dynamic_partial_call(path, &locals, prepare, ctx) {
+                    Some((stmts, call)) => {
+                        out.extend(stmts);
+                        sep = emit_merged_partial(call, ctx, out, sep);
+                    }
+                    // No jbuilder partial of the app matches the path's
+                    // fixed text: every render raises in Rails, and the
+                    // call is refused rather than rendered as nothing.
+                    None => {
+                        crate::ingest::survey::record(&crate::ingest::IngestError::Unsupported {
+                            file: String::new(),
+                            message: "jbuilder: `json.partial!` with a path built at run time that names none of the app's jbuilder partials"
+                                .to_string(),
+                        });
+                        out.push(unsupported_stmt(
+                            src.span,
+                            "jbuilder partial! with a path built at run time",
+                            "no jbuilder partial of the app matches the path's fixed text around its interpolation",
+                        ));
                     }
                 }
             }
@@ -2091,6 +2135,20 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             // Jbuilder renders it with every key but its own options as
             // a local.
             if let (Some(opts), 1) = (extract_hash(path_arg), args.len()) {
+                // A `partial:` built at run time, outside the collection
+                // form (which stays Unknown: each element would need
+                // its own switch).
+                if let Some(path) = hash_get_value(opts, "partial").filter(|p| dynamic_path_parts(p).is_some()) {
+                    if hash_get_value(opts, "collection").is_some() {
+                        return JbStmt::Unknown;
+                    }
+                    return match partial_locals(opts, &["partial", "as", "collection", "cached"])
+                        .and_then(|locals| bind_dynamic_object_local(locals, opts))
+                    {
+                        Some(locals) => JbStmt::PartialDynamic { path, locals },
+                        None => JbStmt::Unknown,
+                    };
+                }
                 let Some(partial_path) = hash_get_string(opts, "partial") else {
                     return JbStmt::Unknown;
                 };
@@ -2105,6 +2163,23 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             // the partial's locals, keyed by the names the partial
             // reads them under; `as:` with `collection:` is the
             // collection form again, spelled with a positional path.
+            // A path built at run time (`"widgets/#{kind}"`): the same
+            // locals, rendered by a switch over the partials it may name.
+            // With `collection:` it is the collection form, which stays
+            // Unknown.
+            if dynamic_path_parts(path_arg).is_some() {
+                let locals = match args.get(1).map(|a| (extract_hash(a), args.len())) {
+                    None => Vec::new(),
+                    Some((Some(opts), 2)) if hash_get_value(opts, "collection").is_none() => {
+                        match partial_locals(opts, &["as"]).and_then(|locals| bind_dynamic_object_local(locals, opts)) {
+                            Some(locals) => locals,
+                            None => return JbStmt::Unknown,
+                        }
+                    }
+                    Some(_) => return JbStmt::Unknown,
+                };
+                return JbStmt::PartialDynamic { path: path_arg, locals };
+            }
             let partial_path = match string_literal(path_arg) {
                 Some(s) => s,
                 None => return JbStmt::Unknown,
@@ -2646,6 +2721,40 @@ fn bind_object_local<'a>(
     Some(locals)
 }
 
+/// `bind_object_local` for a path built at run time: an `object:` is
+/// bound under `as:`, and without one under the partial's own name,
+/// which only the run time knows, so that call is None.
+fn bind_dynamic_object_local<'a>(
+    locals: Vec<(Symbol, &'a Expr)>,
+    opts: &'a [(Expr, Expr)],
+) -> Option<Vec<(Symbol, &'a Expr)>> {
+    if hash_get_value(opts, "object").is_some() && hash_get_value(opts, "as").is_none() {
+        return None;
+    }
+    bind_object_local(locals, opts, "")
+}
+
+/// A partial path built at run time with one interpolation:
+/// `"widgets/#{kind}"` is `("widgets/", kind, "")`. None for any other
+/// String, for two interpolations or more, and for an interpolation
+/// with no fixed text around it, which may name any partial of the app.
+fn dynamic_path_parts(e: &Expr) -> Option<(String, &Expr, String)> {
+    let ExprNode::StringInterp { parts } = &*e.node else {
+        return None;
+    };
+    let (mut prefix, mut suffix, mut value) = (String::new(), String::new(), None);
+    for part in parts {
+        match (part, value) {
+            (InterpPart::Text { value: t }, None) => prefix.push_str(t),
+            (InterpPart::Text { value: t }, Some(_)) => suffix.push_str(t),
+            (InterpPart::Expr { expr }, None) => value = Some(expr),
+            (InterpPart::Expr { .. }, Some(_)) => return None,
+        }
+    }
+    let value = value?;
+    (!prefix.is_empty() || !suffix.is_empty()).then_some((prefix, value, suffix))
+}
+
 fn string_literal(e: &Expr) -> Option<String> {
     if let ExprNode::Lit {
         value: Literal::Str { value },
@@ -2971,6 +3080,129 @@ fn raise_outside_set(construct: &str, models: &[&str]) -> Expr {
     send(None, "raise", vec![lit_str(message)], None, true)
 }
 
+/// The literal paths a partial path built at run time may evaluate to
+/// that name one of the app's jbuilder partials, in name order:
+/// `"widgets/widget"` for `widgets/_widget.json.jbuilder`, and also
+/// `"widget"` from a template in `widgets/`, where a path with no
+/// slash is looked up (`partial_target`). Each keeps the path's fixed
+/// text around a non-empty value.
+fn dynamic_partial_candidates(path: &Expr, resource_dir: &str, partials: &[String]) -> Vec<String> {
+    let Some((prefix, _, suffix)) = dynamic_path_parts(path) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = partials
+        .iter()
+        .flat_map(|full| {
+            let local = full
+                .rsplit_once('/')
+                .filter(|(dir, _)| *dir == resource_dir)
+                .map(|(_, stem)| stem.to_string());
+            std::iter::once(full.clone()).chain(local)
+        })
+        .filter(|c| c.len() > prefix.len() + suffix.len() && c.starts_with(&prefix) && c.ends_with(&suffix))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Every jbuilder partial of the app as the path that names it from
+/// anywhere: `widgets/widget` for `widgets/_widget.json.jbuilder`.
+fn jbuilder_partial_paths(views: &[&View]) -> Vec<String> {
+    let mut out: Vec<String> = views
+        .iter()
+        .filter_map(|v| {
+            let (dir, base) = split_view_name(v.name.as_str());
+            base.strip_prefix('_').map(|stem| format!("{dir}/{stem}"))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The statements and the value that render a partial whose path is
+/// built at run time: the interpolated value bound once, the path
+/// rebuilt from it, and a switch over the literal paths it may be
+/// (`dynamic_partial_candidates`), each branch rendering its partial as
+/// a literal path would with the same `locals`. Any other path raises
+/// the `ActionView::MissingTemplate` Action View raises for a partial
+/// it cannot find. `prepare` is applied to the interpolated value as
+/// the caller applies it to the locals. None when no partial of the app
+/// matches.
+///
+///   __kind0 = <value>
+///   __path0 = "widgets/#{__kind0}"
+///   __part0 = ""
+///   if __path0 == "widgets/gadget" then __part0 = Views::Widgets.gadget_json(…)
+///   elsif __path0 == "widgets/widget" then __part0 = Views::Widgets.widget_json(…)
+///   else raise ActionView::MissingTemplate.new("Missing partial widgets/_#{__kind0}") end
+fn dynamic_partial_call(
+    path: &Expr,
+    locals: &[(Symbol, Expr)],
+    prepare: impl Fn(&Expr) -> Expr,
+    ctx: &Ctx,
+) -> Option<(Vec<Expr>, Expr)> {
+    let (prefix, value, suffix) = dynamic_path_parts(path)?;
+    let candidates = dynamic_partial_candidates(path, &ctx.resource_dir, &ctx.partials.paths);
+    if candidates.is_empty() {
+        return None;
+    }
+    let n = ctx.temps.get();
+    ctx.temps.set(n + 1);
+    let kind = Symbol::from(format!("__kind{n}"));
+    let built = Symbol::from(format!("__path{n}"));
+    let part = Symbol::from(format!("__part{n}"));
+    let assign = |name: &Symbol, value: Expr| {
+        Expr::new(Span::synthetic(), ExprNode::Assign { target: LValue::Var { id: VarId(0), name: name.clone() }, value })
+    };
+    let interp = |before: &str, after: &str| {
+        let mut parts = Vec::new();
+        if !before.is_empty() {
+            parts.push(InterpPart::Text { value: before.to_string() });
+        }
+        parts.push(InterpPart::Expr { expr: var_ref(kind.clone()) });
+        if !after.is_empty() {
+            parts.push(InterpPart::Text { value: after.to_string() });
+        }
+        Expr::new(Span::synthetic(), ExprNode::StringInterp { parts })
+    };
+    // Action View names the missing partial by its template path, the
+    // file name with its underscore, under the directory a path with no
+    // slash is looked up in. Exact while the value holds no slash.
+    let missing = match (prefix.rsplit_once('/'), suffix.rsplit_once('/')) {
+        (_, Some((dir, file))) => interp(&format!("Missing partial {prefix}"), &format!("{dir}/_{file}")),
+        (Some((dir, file)), None) => interp(&format!("Missing partial {dir}/_{file}"), &suffix),
+        (None, None) => interp(&format!("Missing partial {}/_{prefix}", ctx.resource_dir), &suffix),
+    };
+    let error = crate::lower::controller_to_library::rewrites::typed_exception_const(
+        &["ActionView", "MissingTemplate"],
+        Span::synthetic(),
+    );
+    let mut switch = Expr::new(
+        Span::synthetic(),
+        ExprNode::Raise { value: send(Some(error), "new", vec![missing], None, true) },
+    );
+    for candidate in candidates.iter().rev() {
+        let call = partial_call(candidate, locals.to_vec(), ctx);
+        switch = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: send(Some(var_ref(built.clone())), "==", vec![lit_str(candidate.clone())], None, false),
+                then_branch: assign(&part, call),
+                else_branch: switch,
+            },
+        );
+    }
+    let stmts = vec![
+        assign(&kind, prepare(value)),
+        assign(&built, interp(&prefix, &suffix)),
+        assign(&part, lit_str(String::new())),
+        switch,
+    ];
+    Some((stmts, var_ref(part)))
+}
+
 fn emit_partial_call(partial_path: &str, locals: Vec<(Symbol, Expr)>, ctx: &Ctx) -> Vec<Expr> {
     vec![io_append_call(&ctx.accumulator, partial_call(partial_path, locals, ctx))]
 }
@@ -3056,6 +3288,9 @@ pub(crate) struct PartialParams {
     /// call (`collect_mentioned_names`): a local a call passes that is
     /// not among them is never read.
     names: crate::det::HashMap<(String, String), crate::det::HashSet<Symbol>>,
+    /// Every jbuilder partial's path (`jbuilder_partial_paths`), which a
+    /// path built at run time is matched against.
+    paths: Vec<String>,
 }
 
 impl PartialParams {
@@ -3089,7 +3324,7 @@ fn partial_params(app: &App) -> PartialParams {
             }
         }
     }
-    let mut out = PartialParams { closures, stems, ..Default::default() };
+    let mut out = PartialParams { closures, stems, paths: jbuilder_partial_paths(&views), ..Default::default() };
     for v in &views {
         let (dir, base) = split_view_name(v.name.as_str());
         let Some(stem) = base.strip_prefix('_') else { continue };
@@ -3205,13 +3440,14 @@ fn render_edges(
             partial_views.insert(partial_key(&mod_path, &method), v.name.clone());
         }
     }
+    let paths = jbuilder_partial_paths(views);
     views
         .iter()
         .map(|v| {
             let (dir, _) = split_view_name(v.name.as_str());
             let mut sites = Vec::new();
             let records = record_partial::record_sites(&v.body, models);
-            collect_partial_sites(&v.body, dir, &records, stems, &mut sites);
+            collect_partial_sites(&v.body, dir, &records, stems, &paths, &mut sites);
             let sites = sites
                 .into_iter()
                 .map(|(key, names)| {
@@ -3419,6 +3655,7 @@ fn collect_partial_sites(
     dir: &str,
     records: &record_partial::RecordSites,
     stems: &PartialStems,
+    paths: &[String],
     out: &mut Vec<((String, String), Vec<Symbol>)>,
 ) {
     if let ExprNode::Send { recv: Some(recv), block: None, .. } = &*e.node {
@@ -3438,6 +3675,16 @@ fn collect_partial_sites(
                     }
                     None
                 }
+                // Each partial the path may name is rendered with the
+                // call's locals.
+                JbStmt::PartialDynamic { path, locals } => {
+                    let names: Vec<Symbol> = locals.into_iter().map(|(k, _)| k).collect();
+                    for candidate in dynamic_partial_candidates(path, dir, paths) {
+                        let (mod_path, method) = partial_target(&candidate, dir, stems);
+                        out.push((partial_key(&mod_path, &method), names.clone()));
+                    }
+                    None
+                }
                 _ => None,
             };
             if let Some((path, names)) = site {
@@ -3446,7 +3693,7 @@ fn collect_partial_sites(
             }
         }
     }
-    e.node.for_each_child(&mut |c| collect_partial_sites(c, dir, records, stems, out));
+    e.node.for_each_child(&mut |c| collect_partial_sites(c, dir, records, stems, paths, out));
 }
 
 /// The `local_assigns[:x]` keys a template reads, in first-seen order.
