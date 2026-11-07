@@ -510,6 +510,7 @@ impl Analyzer {
         snapshot: Option<&mut HashMap<super::ParamKey, Vec<Ty>>>,
     ) {
         let before = self.state_fp(app);
+        let prev = self.capture_inference_sig();
         match which {
             Loop::Production | Loop::Absorb => {
                 self.run_typing_passes(
@@ -544,6 +545,7 @@ impl Analyzer {
                 self.overlay_test_params(app);
             }
         }
+        self.settle_oscillations(&prev);
         let moved = self.state_fp(app).moved(&before);
         self.fixpoint_checks.verified.push((which.name(), moved));
     }
