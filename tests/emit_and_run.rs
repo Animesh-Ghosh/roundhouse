@@ -175,6 +175,10 @@ mod temporal_index_assign;
 mod file_mtime_time;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
+#[path = "support/option_dsl.rs"]
+mod option_dsl;
+#[path = "emit_and_run/option_dsl.rs"]
+mod option_dsl_runs;
 #[path = "support/string_truncate.rs"]
 mod string_truncate;
 #[path = "emit_and_run/string_truncate.rs"]

@@ -2362,6 +2362,10 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
             ExprNode::Defined { operand }
                 if target == BuildTarget::Spinel && !load_time
                     && matches!(&*operand.node, ExprNode::Const { .. }) => None,
+            // `defined?(@x)` in a method: Spinel answers whether the object's ivar was ever set, nil included, as CRuby does.
+            ExprNode::Defined { operand }
+                if target == BuildTarget::Spinel && !load_time
+                    && matches!(&*operand.node, ExprNode::Ivar { .. }) => None,
             ExprNode::Defined { .. } => Some("runtime defined? query"),
             // The Ruby emitter (Spinel's and Roda's too) renders the whole
             // signature; the other emitters read only the required names

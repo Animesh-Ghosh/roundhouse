@@ -3765,7 +3765,7 @@ fn ingest_call_block(
                 {
                     if let Some(blk) = call.block() {
                         if let Some(b) = blk.as_block_node() {
-                            return Ok(Some(ingest_block_node_as_lambda(&b, file)?));
+                            return Ok(Some(ingest_block_node_as_lambda(&b, file, false)?));
                         }
                     }
                 }
@@ -3831,7 +3831,9 @@ fn ingest_call_block(
             message: "scoped find-or-create cannot be lowered safely: block locals and optional, post, keyword, block or anonymous-rest parameters are not represented in initialization-block IR".into(),
         });
     }
-    Ok(Some(ingest_block_node_as_lambda(&b, file)?))
+    // `define_method(name) { |*args, &block| … }`: the block becomes a method's own block parameter, which a `def` carries.
+    let keeps_block = matches!(enclosing_method, "define_method" | "define_singleton_method");
+    Ok(Some(ingest_block_node_as_lambda(&b, file, keeps_block)?))
 }
 
 /// Ingest a literal block's params/body into a `Lambda` `Expr`. Shared
@@ -3839,8 +3841,11 @@ fn ingest_call_block(
 /// `&proc { ... }`/`&lambda { ... }` block-argument desugar, which
 /// hands this the same `BlockNode` shape one level deeper (inside the
 /// `proc`/`lambda` call's own block).
-fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str) -> IngestResult<Expr> {
-    refuse_block_capture(b.parameters(), file)?;
+fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str, keeps_block: bool) -> IngestResult<Expr> {
+    let block_param = if keeps_block { named_block_param(b.parameters()) } else { None };
+    if block_param.is_none() {
+        refuse_block_capture(b.parameters(), file)?;
+    }
     let extra_params = block_extra_params(b.parameters(), file)?;
     let params = block_param_names(b.parameters());
     let mut rest_param = block_rest_param(b.parameters());
@@ -3848,8 +3853,13 @@ fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str) -> Ing
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { extra_params, rest_param, params, block_param: None, body, block_style },
+        ExprNode::Lambda { extra_params, rest_param, params, block_param, body, block_style },
     ))
+}
+
+fn named_block_param(params_node: Option<Node<'_>>) -> Option<Symbol> {
+    let block = params_node?.as_block_parameters_node()?.parameters()?.block()?;
+    block.as_block_parameter_node()?.name().map(|n| Symbol::from(constant_id_str(&n).as_ref()))
 }
 
 /// `method(:name)` / `recv.method(:name)` → `ExprNode::MethodRef`.
