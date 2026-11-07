@@ -4030,6 +4030,7 @@ fn ingest_resources_route(
     // and into this node's own `constraints` field below, once the
     // block body has been ingested.
     let mut constraints: IndexMap<Symbol, String> = IndexMap::new();
+    let mut path_names: IndexMap<Symbol, String> = IndexMap::new();
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -4153,6 +4154,23 @@ fn ingest_resources_route(
                         )?);
                     }
                 }
+                // `path_names: { new: "sign_up" }` renames the `new` and `edit` segments. Rails also names a block's own action by it (`get :cancel`), which is read only where the name is the action's own.
+                "path_names" => {
+                    let Some(h) = value.as_hash_node() else {
+                        return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names:` is not a literal Hash") });
+                    };
+                    for element in h.elements().iter() {
+                        let pair = element.as_assoc_node().and_then(|a| Some((symbol_or_string_value(&a.key())?, symbol_or_string_value(&a.value())?)));
+                        let Some((action, named)) = pair else {
+                            return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names:` entry is not a literal name") });
+                        };
+                        if matches!(action.as_str(), "new" | "edit") {
+                            path_names.insert(Symbol::from(action.as_str()), named.trim_matches('/').to_string());
+                        } else if named != action {
+                            return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names: {{ {action}: {named:?} }}` renames a block action") });
+                        }
+                    }
+                }
                 // `shallow:` lands when a fixture demands it.
                 _ => {}
             }
@@ -4212,6 +4230,7 @@ fn ingest_resources_route(
         param,
         path,
         constraints,
+        path_names,
     };
     Ok(match module {
         Some(module) => RouteSpec::Scope {

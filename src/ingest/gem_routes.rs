@@ -76,12 +76,12 @@ fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {
 }
 
 /// Every deferred call in the route table: the routes its method draws, or nothing and a report.
-pub(super) fn expand<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App) {
+pub(super) fn expand<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path::PathBuf], app: &mut App) {
     let mut entries = std::mem::take(&mut app.routes.entries);
     let mut failed = false;
     if contains_deferred(&entries) {
-        let initializers = super::configured_superclass::initializers_of(vfs, dir);
-        failed = replace(&mut entries, app, &initializers);
+        let initializers = super::configured_superclass::initializers_of(vfs, dir, gem_dirs);
+        failed = replace(&mut entries, app, &initializers, true);
     }
     app.routes.entries = entries;
     if !failed {
@@ -162,14 +162,17 @@ fn contains_deferred(entries: &[RouteSpec]) -> bool {
     })
 }
 
-fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr]) -> bool {
+fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr], top_level: bool) -> bool {
     let mut failed = false;
     for entry in entries.iter_mut() {
         match entry {
-            RouteSpec::Scope { entries, .. } => failed |= replace(entries, app, initializers),
-            RouteSpec::Resources { nested, .. } => failed |= replace(nested, app, initializers),
+            RouteSpec::Scope { entries, path, module, as_prefix, .. } => {
+                let plain = path.is_none() && module.is_none() && as_prefix.is_none();
+                failed |= replace(entries, app, initializers, top_level && plain)
+            }
+            RouteSpec::Resources { nested, .. } => failed |= replace(nested, app, initializers, false),
             RouteSpec::Deferred { call, span, constraints } => {
-                let drawn = draw(app, call, initializers);
+                let drawn = draw(app, call, initializers, top_level);
                 *entry = match drawn {
                     Ok(mut inner) => {
                         super::routes::apply_outer_constraints(&mut inner, constraints);
@@ -215,7 +218,7 @@ fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr]) -> bo
     failed
 }
 
-fn draw(app: &App, call: &Expr, initializers: &[Expr]) -> Result<Vec<RouteSpec>, String> {
+fn draw(app: &App, call: &Expr, initializers: &[Expr], top_level: bool) -> Result<Vec<RouteSpec>, String> {
     let ExprNode::Send { method, .. } = &*call.node else { return Err("not a call".into()) };
     let (lc, def) = extensions(app).into_iter().find(|(_, m)| &m.name == method).ok_or("no method of a mapper extension")?;
     // The gems the method reaches: its module's, and each top-level constant the program defines that its body names (`Devise` from the reopened mapper).
@@ -230,7 +233,13 @@ fn draw(app: &App, call: &Expr, initializers: &[Expr]) -> Result<Vec<RouteSpec>,
         }
     });
     let scope = def.enclosing_class.as_ref().map(|s| s.as_str().to_string()).unwrap_or_else(|| lc.name.0.as_str().to_string());
-    let drawn = super::configured_superclass::draw_routes(app, def, scope, call, initializers, &roots)?;
+    let mut mixins: Vec<String> = Vec::new();
+    for (owner, _) in extensions(app) {
+        if !mixins.iter().any(|m| m == owner.name.0.as_str()) {
+            mixins.push(owner.name.0.as_str().to_string());
+        }
+    }
+    let drawn = super::configured_superclass::draw_routes(app, def, scope, call, initializers, &roots, mixins, top_level)?;
     let body: String = drawn.iter().map(|e| crate::emit::ruby::emit_expr(e) + "\n").collect();
     let source = format!("Rails.application.routes.draw do\n{body}end\n");
     let table = super::routes::ingest_routes(source.as_bytes(), "<gem routes>").map_err(|e| format!("the drawn routes do not read: {e:?}"))?;

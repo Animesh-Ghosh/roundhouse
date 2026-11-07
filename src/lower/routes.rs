@@ -853,6 +853,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             param,
             path: path_segment,
             constraints: resource_constraints,
+            path_names,
         } => {
             let materialized;
             let ctx = if ctx.within.is_nested() {
@@ -967,6 +968,13 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     continue;
                 }
                 let member = suffix.replace(":id", &format!(":{id_param}"));
+                let member = match path_names.get(&Symbol::from(action_name)) {
+                    Some(named) if matches!(action_name, "new" | "edit") => {
+                        let base = member.strip_suffix(&format!("/{action_name}")).unwrap_or(&member).to_string();
+                        if named.is_empty() { base } else { format!("{base}/{named}") }
+                    }
+                    _ => member,
+                };
                 // Empty for an index or show mounted with `path: "/"`; it
                 // stays empty through the nesting (`/account`, not
                 // `/account/`) and is the root `/` only at the very top.
