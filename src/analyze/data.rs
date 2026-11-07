@@ -134,6 +134,13 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
                     && let ExprNode::Const { path } = &*recv.node
                     && method.as_str() == "define" && resolver.is_runtime_class(recv.span, path, "Data")
                 {
+                    // Ingest can strip a lifted block; check the original call before admitting it.
+                    let source = value.span.file.0.checked_sub(1).and_then(|i| app.sources.get(i as usize))
+                        .and_then(|s| s.text.get(value.span.start as usize..value.span.end as usize));
+                    if source.is_some_and(|source| {
+                        let parsed = ruby_prism::parse(source.as_bytes());
+                        parsed.errors().next().is_none() && parsed.node().as_program_node().is_some_and(|root| root.statements().body().iter().next().and_then(|n| n.as_call_node()).is_some_and(|call| call.block().is_none()))
+                    }) { continue; }
                     diagnostics.push(Diagnostic::unsupported(value.span, None, "Data.define", "nested Data.define factories cannot retain their bodies and lexical identity"));
                 }
             }

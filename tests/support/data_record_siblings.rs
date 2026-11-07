@@ -28,6 +28,10 @@ puts Builder.keyword.label
 
 pub const EXPECTED: &str = "abc:3\nabc:3\nabc:4\ntrue\ntrue\nfalse\nabc:3\n";
 
+pub const BODYLESS_SOURCE: &str = "Artifact = Data.define(:digest) do\n  Inner = Data.define(:value)\n  def label = digest\nend\nmodule Builder\n  def self.make = Artifact.new(\"abc\")\nend\n";
+pub const BODYLESS_ASSERTIONS: &str = "puts Builder.make.label\nputs Inner.new(\"yes\").value\n";
+pub const BODYLESS_EXPECTED: &str = "abc\nyes\n";
+
 pub fn overlay(path: &str) -> emit_and_run::Overlay {
     emit_and_run::real_blog().write(path, SOURCE)
 }

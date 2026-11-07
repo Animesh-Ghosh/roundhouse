@@ -1,6 +1,16 @@
 use super::data_record_siblings_contract as contract;
 
 #[test]
+fn a_bodyless_nested_data_factory_keeps_its_lexical_binding() {
+    for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+        let run = super::emit_and_run::real_blog().write(path, contract::BODYLESS_SOURCE)
+            .run_ruby(contract::BODYLESS_ASSERTIONS);
+        run.assert_passes();
+        assert_eq!(run.stdout, contract::BODYLESS_EXPECTED, "{path}: {}", run.stderr);
+    }
+}
+
+#[test]
 fn a_body_reader_override_survives_without_changing_stored_members() {
     let run = contract::override_overlay("lib/artifact.rb").run_ruby(contract::OVERRIDE_ASSERTIONS);
     run.assert_passes();

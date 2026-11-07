@@ -16,6 +16,20 @@ fn review_record(source: &str, path: &str, reopen: Option<(&str, &str)>) -> roun
 }
 
 #[test]
+fn review_data_nested_bodyless_factory_keeps_emitting() {
+    let source = "Artifact = Data.define(:digest) do\n  Inner = Data.define(:value)\n  def label = digest\nend\nmodule Builder; def self.make = Artifact.new(\"abc\"); end\n";
+    for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+        let mut app = review_record(source, path, None);
+        assert!(errors(&mut app).is_empty(), "{path}: bodyless nested factory must remain admitted");
+        let files = roundhouse::emit::ruby::emit_library(&app);
+        let ruby = &files.iter().find(|f| f.path.to_string_lossy().ends_with("artifact.rb")).unwrap().content;
+        assert!(ruby.contains("::Inner = ::Data.define(:value)"), "{ruby}");
+        let rbs = &files.iter().find(|f| f.path.to_string_lossy().ends_with("artifact.rbs")).unwrap().content;
+        assert!(rbs.contains("def label:"), "{rbs}");
+    }
+}
+
+#[test]
 fn review_data_nested_body_is_refused_at_its_declaration() {
     let source = "Artifact = Data.define(:digest, :size) do\n  Inner = Data.define(:value) do\n    def text = \"inner:\" + value\n  end\n  def label = digest + \":\" + size.to_s\nend\nmodule Builder; def self.make = Artifact.new(digest: \"abc\", size: 3); end\n";
     for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
