@@ -183,6 +183,12 @@ pub enum ColumnType {
     Reference { table: TableRef },
 }
 
+impl ColumnType {
+    pub(crate) fn stores_sql_literal_default_as_text(&self) -> bool {
+        matches!(self, Self::String { .. } | Self::Text | Self::Json | Self::Jsonb | Self::Uuid)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Index {
     pub name: Symbol,

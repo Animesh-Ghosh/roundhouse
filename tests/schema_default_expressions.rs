@@ -41,6 +41,140 @@ fn random_app() -> emit_and_run::Overlay {
     emit_and_run::empty_app().write("db/schema.rb", RANDOM_SCHEMA).write("app/models/record_item.rb", RANDOM_MODEL)
 }
 
+const QUOTED_SCHEMA: &str = r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table :record_items do |t|
+    t.string :token, default: -> { "'x'" }, null: true
+    t.text :escaped, default: -> { "'O''Reilly'" }
+    t.string :empty, default: -> { "''" }
+    t.string :looks_lazy, default: -> { "'CURRENT_TIMESTAMP'" }
+    t.json :payload, default: -> { "'[]'" }
+  end
+end
+"#;
+const QUOTED_CONTRACT: &str = r#"
+before = RecordItem.new
+raise 'quoted new lost default' unless before.token == 'x'
+raise 'quoted escape lost' unless before.escaped == "O'Reilly"
+raise 'quoted empty lost' unless before.empty == ''
+raise 'quoted text became lazy' unless before.looks_lazy == 'CURRENT_TIMESTAMP'
+raise 'quoted JSON default lost' unless before.payload == []
+raise 'given JSON new changed' unless RecordItem.new(payload: ['given']).payload == ['given']
+raise 'explicit JSON nil new acquired default' unless RecordItem.new(payload: nil).payload.nil?
+raise 'given new changed' unless RecordItem.new(token: 'given').token == 'given'
+raise 'explicit nil new acquired default' unless RecordItem.new(token: nil).token.nil?
+first = RecordItem.create!
+raise 'omitted insert wrote NULL' unless first.token == 'x' && RecordItem.lookup(first.id) == 'x'
+raise 'quoted JSON insert lost' unless first.payload == [] && RecordItem.find(first.id).payload == []
+given = RecordItem.create!(token: 'given', payload: ['given'])
+raise 'given insert changed' unless given.token == 'given' && RecordItem.lookup(given.id) == 'given'
+raise 'given JSON insert changed' unless given.payload == ['given'] && RecordItem.find(given.id).payload == ['given']
+explicit_nil = RecordItem.create!(token: nil, payload: nil)
+raise 'explicit NULL acquired default' unless explicit_nil.token.nil? && RecordItem.lookup(explicit_nil.id).nil?
+raise 'explicit JSON NULL acquired default' unless explicit_nil.payload.nil? && RecordItem.find(explicit_nil.id).payload.nil?
+puts 'quoted defaults match Rails for new and create'
+"#;
+
+fn quoted_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app().write("db/schema.rb", QUOTED_SCHEMA)
+        .write("app/models/record_item.rb", RANDOM_MODEL)
+}
+
+#[test]
+fn emitted_quoted_defaults_match_rails() {
+    quoted_app().run_ruby(QUOTED_CONTRACT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn native_quoted_defaults_match_rails() {
+    let script = format!("Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{QUOTED_CONTRACT}");
+    quoted_app().run_spinel_with_rbs(&script).assert_passes();
+}
+
+#[test]
+fn rails_quoted_defaults_are_literal() {
+    let helper = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
+    let script = format!(r#"
+require {helper:?}
+unless RailsOracle.available?("railties", "activerecord", sqlite3: ">= 2.9")
+  puts 'skip: Rails oracle, railties or sqlite3 unavailable'
+  exit
+end
+RailsOracle.activate("railties", "activerecord", sqlite3: ">= 2.9")
+require 'rails'
+require 'active_record/railtie'
+class QuotedDefaultsApp < Rails::Application
+  config.load_defaults 8.1
+  config.eager_load = false
+  config.secret_key_base = 'test'
+  config.logger = Logger.new(File::NULL)
+end
+ENV['DATABASE_URL'] = 'sqlite3::memory:'
+QuotedDefaultsApp.initialize!
+ActiveRecord::Base.establish_connection(adapter: 'sqlite3', database: ':memory:')
+ActiveRecord::Schema.verbose = false
+{QUOTED_SCHEMA}
+{RANDOM_MODEL}
+raise 'not Rails literal' unless RecordItem.columns_hash['token'].default == 'x' && RecordItem.columns_hash['token'].default_function.nil?
+{QUOTED_CONTRACT}
+puts "oracle Ruby=#{{RUBY_VERSION}} Rails=#{{Rails.version}} defaults=8.1 SQLite=#{{SQLite3::SQLITE_VERSION}} sqlite3=#{{SQLite3::VERSION}}"
+"#);
+    let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("quoted defaults match Rails") || stdout.contains("skip:"), "{stdout}");
+    println!("{stdout}");
+}
+
+#[test]
+fn quoted_default_spellings_keep_model_and_database_defaults() {
+    for declaration in [
+        "t.string :token, default: ->() { \"'x'\" }",
+        "t.string :token, default: lambda { \"'x'\" }",
+        "t.string :token, default: proc { \"'x'\" }",
+        "t.column :token, :string, default: (-> { \"'x'\" })",
+    ] {
+        let source = QUOTED_SCHEMA.replace("t.string :token, default: -> { \"'x'\" }, null: true", declaration);
+        let schema = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap();
+        let column = &schema.tables[&roundhouse::Symbol::from("record_items")].columns[1];
+        assert!(column.nullable && column.computed_default().is_none());
+        assert_eq!(column.default_expression.as_deref(), Some("'x'"));
+        let ddl = render_schema_statements_for(&schema, Dialect::Sqlite).unwrap().join(";\n");
+        assert!(ddl.contains("DEFAULT ('x')"), "{ddl}");
+        emit_and_run::empty_app().write("db/schema.rb", &source)
+            .write("app/models/record_item.rb", RANDOM_MODEL).run_ruby(QUOTED_CONTRACT).assert_passes();
+    }
+}
+
+#[test]
+fn quoted_defaults_with_unmodeled_storage_refuse_at_the_source() {
+    use roundhouse::ingest::ingest_migration;
+    for kind in ["integer", "bigint", "float", "decimal", "boolean", "date", "datetime", "time", "binary", "interval"] {
+        let declaration = format!("t.column :token, :{kind}, default: -> {{ \"'x'\" }}");
+        let source = format!("ActiveRecord::Schema[8.1].define do\n create_table :record_items do |t|\n {declaration}\n end\nend");
+        let error = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap_err().to_string();
+        assert!(error.contains("record_items.token") && error.contains("quoted SQL literal"), "{kind}: {error}");
+        let plain = source.replace(", default: -> { \"'x'\" }", "");
+        for value in ["-> { \"'x'\" }", "from: nil, to: -> { \"'x'\" }"] {
+            let mut schema = ingest_schema(plain.as_bytes(), "db/schema.rb").unwrap();
+            let migration = format!("class ChangeDefault < ActiveRecord::Migration[8.1]\n def change\n change_column_default :record_items, :token, {value}\n end\nend");
+            let error = ingest_migration(migration.as_bytes(), "db/migrate/1_default.rb", &mut schema).unwrap_err().to_string();
+            assert!(error.contains("record_items.token") && error.contains("quoted SQL literal"), "{kind}: {error}");
+        }
+        let mut schema = ingest_schema(QUOTED_SCHEMA.as_bytes(), "db/schema.rb").unwrap();
+        let migration = format!("class ChangeType < ActiveRecord::Migration[8.1]\n def change\n change_column :record_items, :token, :{kind}\n end\nend");
+        let error = ingest_migration(migration.as_bytes(), "db/migrate/2_type.rb", &mut schema).unwrap_err().to_string();
+        assert!(error.contains("record_items.token") && error.contains("quoted SQL literal"), "{kind}: {error}");
+    }
+    for declaration in [
+        "t.string :token, array: true, default: -> { \"'x'\" }",
+        "t.string :token, default: -> { \"'x|y'\" }",
+    ] {
+        let source = format!("ActiveRecord::Schema[8.1].define do\n create_table :record_items do |t|\n {declaration}\n end\nend");
+        assert!(ingest_schema(source.as_bytes(), "db/schema.rb").is_err(), "{declaration}");
+    }
+}
+
 #[test]
 fn sqlite_random_sql_default_keeps_exact_expression() {
     let schema = ingest_schema(RANDOM_SCHEMA.as_bytes(), "db/schema.rb").unwrap();
@@ -107,6 +241,10 @@ fn rails_scalar_default_forms_are_lazy_not_literal_text() {
     let helper = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
     let script = format!(r#"
 require {helper:?}
+unless RailsOracle.available?("railties", "activerecord", sqlite3: ">= 2.9")
+  puts 'skip: Rails oracle, railties or sqlite3 unavailable'
+  exit
+end
 RailsOracle.activate("railties", "activerecord", sqlite3: ">= 2.9")
 require 'rails'
 require 'active_record/railtie'
@@ -129,7 +267,9 @@ puts "oracle Ruby=#{{RUBY_VERSION}} Rails=#{{Rails.version}} defaults=8.1 SQLite
 "#);
     let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("classified scalar defaults match Rails"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("classified scalar defaults match Rails") || stdout.contains("skip:"), "{stdout}");
+    println!("{stdout}");
 }
 
 #[test]
@@ -452,25 +592,28 @@ end
 /// is known and the default is the one gap. Strict commands still refuse.
 #[test]
 fn survey_check_keeps_the_reader_of_a_column_whose_default_is_refused() {
-    let dir = scratch::dir("rh_refused_default_reader");
-    for (path, source) in [
-        ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :record_items do |t|\n    t.string :token, default: -> { \"random()\" }, null: false\n  end\nend\n"),
-        ("app/models/record_item.rb", "class RecordItem < ActiveRecord::Base\n  def self.lookup(id) = find(id).token\nend\n"),
-        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
-    ] {
-        std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
-        std::fs::write(dir.join(path), source).unwrap();
-    }
-    let out = dir.join("out").display().to_string();
-    let run = |args: &[&str]| std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse")).args(args).arg(&dir).output().unwrap();
-    let survey = run(&["check", "--continue"]);
-    let strict = [run(&["check"]), run(&["--target", "spinel", "-o", &out])];
-    let _ = std::fs::remove_dir_all(&dir);
-    let report = String::from_utf8_lossy(&survey.stderr);
-    assert!(!report.contains("no known method `token`") && report.contains(", 0 error(s)"), "{report}");
-    assert!(report.contains("1 survey gap(s)") && report.contains("default for record_items.token"), "{report}");
-    for run in strict {
-        let stderr = String::from_utf8_lossy(&run.stderr);
-        assert!(!run.status.success() && stderr.contains("default for record_items.token"), "{stderr}");
+    for (kind, sql) in [("string", "random()"), ("integer", "'7'")] {
+        let dir = scratch::dir("rh_refused_default_reader");
+        let source = format!("ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :record_items do |t|\n    t.{kind} :token, default: -> {{ {sql:?} }}, null: false\n  end\nend\n");
+        for (path, source) in [
+            ("db/schema.rb", source.as_str()),
+            ("app/models/record_item.rb", "class RecordItem < ActiveRecord::Base\n  def self.lookup(id) = find(id).token\nend\n"),
+            ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        ] {
+            std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(path), source).unwrap();
+        }
+        let out = dir.join("out").display().to_string();
+        let run = |args: &[&str]| std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse")).args(args).arg(&dir).output().unwrap();
+        let survey = run(&["check", "--continue"]);
+        let strict = [run(&["check"]), run(&["--target", "spinel", "-o", &out])];
+        let _ = std::fs::remove_dir_all(&dir);
+        let report = String::from_utf8_lossy(&survey.stderr);
+        assert!(!report.contains("no known method `token`") && report.contains(", 0 error(s)"), "{report}");
+        assert!(report.contains("1 survey gap(s)") && report.contains("default for record_items.token"), "{report}");
+        for run in strict {
+            let stderr = String::from_utf8_lossy(&run.stderr);
+            assert!(!run.status.success() && stderr.contains("default for record_items.token"), "{stderr}");
+        }
     }
 }

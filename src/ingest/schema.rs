@@ -577,6 +577,11 @@ fn apply_table_verb(
                 let value = to_kwarg.as_ref().or_else(|| args.get(2));
                 let expression = value.filter(|n| sql_default_candidate(n))
                     .map(sql_default_expression).transpose().map_err(|message| IngestError::Unsupported { file: file.into(), message })?;
+                if expression.as_deref().is_some_and(|sql| sql.starts_with('\'')) && schema.tables.get(&Symbol::from(t.as_str()))
+                    .and_then(|table| table.columns.iter().find(|col| col.name.as_str() == c))
+                    .is_some_and(|col| col.array || !col.col_type.stores_sql_literal_default_as_text()) {
+                    return Err(IngestError::Unsupported { file: file.into(), message: format!("default for {t}.{c}: quoted SQL literal defaults on this column type are not modeled") });
+                }
                 let default_for = |col: &Column| {
                     value.and_then(|value| {
                         if !col.array && matches!(col.col_type, ColumnType::Json | ColumnType::Jsonb) {
@@ -834,6 +839,9 @@ fn fold_column(
                 }
                 col.primary_key = existing.primary_key;
             }
+        }
+        if col.default_expression.as_deref().is_some_and(|sql| sql.starts_with('\'')) && (col.array || !col.col_type.stores_sql_literal_default_as_text()) {
+            return Err(IngestError::Unsupported { file: file.into(), message: format!("default for {t}.{}: quoted SQL literal defaults on this column type are not modeled", col.name) });
         }
         col
     };
@@ -2082,6 +2090,7 @@ fn sql_default_expression(node: &Node<'_>) -> Result<String, String> {
     let sql = if sql.eq_ignore_ascii_case("DATETIME('now')") { "CURRENT_TIMESTAMP".into() } else { sql };
     let quoted = sql.len() >= 2 && sql.starts_with('\'') && sql.ends_with('\'')
         && !sql[1..sql.len() - 1].replace("''", "").contains('\'');
+    if quoted && sql.contains('|') { return Err(gap()); }
     // Only direct calls have the lazy classification Rails' SQLite quoting
     // and default extraction establish here; parentheses can expose a literal.
     if !quoted && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str())
@@ -2381,7 +2390,9 @@ fn column_with_type(
     // dropped column would make every use of its reader another error.
     let default_expression = opts.default_expression.as_ref().map(|(offset, result)| {
         result.clone().and_then(|sql| {
-            if type_name == "boolean" && !sql.starts_with('\'') && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str()) {
+            if sql.starts_with('\'') && (opts.array || !matches!(type_name, "string" | "text" | "json" | "jsonb" | "uuid" | "inet" | "cidr" | "macaddr" | "enum" | "citext")) {
+                Err("quoted SQL literal defaults on this column type are not modeled".into())
+            } else if type_name == "boolean" && !sql.starts_with('\'') && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str()) {
                 Err("Boolean function defaults require an unset value distinct from false".into())
             } else { Ok(sql) }
         }).map_err(|why| IngestError::Unsupported { file: file.into(), message: format!("line {}: default for {table}.{col_name}: {why}", super::sources::line_at(file, *offset).unwrap_or(1)) })

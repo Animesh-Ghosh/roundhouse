@@ -969,7 +969,8 @@ class Routing(unittest.TestCase):
 
     def test_sqlite_model_defaults_own_insert_lowering(self):
         for path in ["src/lower/arel/ir.rs", "src/lower/arel/visitor.rs",
-                     "src/lower/model_to_library/mod.rs", "src/lower/model_to_library/adapter_emit/mod.rs"]:
+                     "src/lower/model_to_library/mod.rs", "src/lower/model_to_library/adapter_emit/mod.rs",
+                     "src/lower/model_to_library/schema.rs"]:
             with self.subTest(path=path):
                 plan = ci.select([path])
                 self.assertIn("schema_default_expressions", plan["spinel_tests"])
