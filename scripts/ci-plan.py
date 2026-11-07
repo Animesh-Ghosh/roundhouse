@@ -1054,17 +1054,21 @@ def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS, timings=
     return sorted(mine)
 
 
-def record_timing(kind, name, seconds, ok):
+def record_timing(kind, name, seconds, ok, timed_out=False):
     if out := os.environ.get("CI_SPINEL_TIMINGS_OUT"):
         Path(out).parent.mkdir(parents=True, exist_ok=True)
+        record = {"kind": kind, "name": name, "seconds": max(round(seconds), 1), "ok": ok}
+        if timed_out:
+            record["timed_out"] = True
         with open(out, "a") as f:
-            f.write(json.dumps({"kind": kind, "name": name, "seconds": max(round(seconds), 1), "ok": ok}) + "\n")
+            f.write(json.dumps(record) + "\n")
 
 
 def run_timed(kind, name, command, charged=0):
     start = time.monotonic()
     status = subprocess.run(command).returncode
-    record_timing(kind, name, time.monotonic() - start + charged, status == 0)
+    # 124 is timeout(1) stopping the command: its seconds are still worth recording.
+    record_timing(kind, name, time.monotonic() - start + charged, status == 0, status == 124)
     return status
 
 
@@ -1097,15 +1101,21 @@ def run_tests(kind, tests, parallel, command):
 
 
 def merge_timings(previous, records, weight=0.5):
-    """Each passing test's seconds averaged into its last value; failures keep the last value."""
+    """Each passing test's seconds averaged into its last value; failures keep the last value.
+
+    A stopped test's seconds are a floor: they can raise its value, never lower it, so the slowest runs still count.
+    """
     merged = {kind: dict(previous.get(kind, {})) for kind in SPINEL_TIMING_KINDS}
     for record in records:
         kind, name, seconds = record.get("kind"), record.get("name"), record.get("seconds")
         if not isinstance(kind, str) or kind not in merged or not isinstance(name, str):
             continue
-        if record.get("ok") is not True or not positive_seconds(seconds):
+        timed_out = record.get("timed_out") is True
+        if (record.get("ok") is not True and not timed_out) or not positive_seconds(seconds):
             continue
         last = merged[kind].get(name)
+        if timed_out and last and seconds <= last:
+            continue
         merged[kind][name] = round(last + (seconds - last) * weight) if last else round(seconds)
     return merged
 
@@ -1398,7 +1408,8 @@ def main():
             print(test)
         return False
     if args.command == "timed":
-        return run_timed(args.kind, args.name, command) != 0
+        # The command's own status: the framework loop tells timeout(1)'s 124 from a failure.
+        return run_timed(args.kind, args.name, command)
     if args.command == "run-tests":
         tests = [line.strip() for line in sys.stdin if line.strip()]
         return run_tests(args.kind, tests, args.parallel, command)
