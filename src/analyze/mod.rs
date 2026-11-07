@@ -2543,6 +2543,14 @@ impl Analyzer {
         (map, resolved)
     }
 
+    /// Records a class whose bodies a pass rewrote outside its frontier, for
+    /// both caches that reuse what its bodies gave.
+    fn note_retyped(&mut self, class: &ClassId) {
+        for retyped in [&mut self.retyped_since_unify, &mut self.retyped_since_survey].into_iter().flatten() {
+            retyped.insert(class.clone());
+        }
+    }
+
     /// One full typing pass over the whole app. Extracted from
     /// `analyze` so the fixpoint loop above can re-invoke it after
     /// each registry refinement. The Rails-aware orchestration
@@ -4301,6 +4309,11 @@ impl Analyzer {
             .collect();
         // What this pass retypes after the surveys, for the next one.
         self.retyped_since_survey = dirty.map(|d| d.iter().chain(&mailers_needing_retype).cloned().collect());
+        // The frontier omits these mailers, and the next unification must
+        // not reuse the sites they had before this retype.
+        if let Some(retyped) = self.retyped_since_unify.as_mut() {
+            retyped.extend(mailers_needing_retype.iter().cloned());
+        }
         let mut mailer_params_by_view: HashMap<Symbol, Ty> = HashMap::default();
 
         let _typing_library = crate::timings::begin("typing: library");
@@ -6270,11 +6283,19 @@ impl Analyzer {
         } else {
             crate::par::map(&stale, |&i| collect(&work[i]))
         };
+        #[cfg(debug_assertions)]
+        let walked: Vec<Vec<SendSite>> = work[..owned].iter().map(|item| collect(item).sites).collect();
         let mut cache = std::mem::take(&mut self.site_cache);
         cache.resize_with(owned, OwnedSites::default);
         let mut unowned: Vec<OwnedSites> = Vec::new();
         for (i, collected) in stale.into_iter().zip(fresh) {
             if i < owned { cache[i] = collected } else { unowned.push(collected) }
+        }
+        // A kept entry has to say what walking its body says now. One that
+        // does not means something rewrote the body without recording it.
+        #[cfg(debug_assertions)]
+        for ((item, entry), walked) in work.iter().zip(&cache).zip(&walked) {
+            assert_eq!(walked, &entry.sites, "kept send sites of {:?} are stale", item.owner);
         }
         for (item, entry) in work.iter().zip(&cache) {
             let owner = item.owner.expect("class-owned items come first");
@@ -9557,7 +9578,7 @@ fn called_targets(caller: &ClassId, sites: &[SendSite]) -> Vec<(ClassId, Symbol)
 }
 
 /// A call's trailing keyword arguments as `collect_send_sites` saw them.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct SiteKeywords {
     /// The last argument is the keyword group (`k: v` or `**splat`).
     group: bool,
@@ -10072,6 +10093,16 @@ impl BodySurveys {
             cache[i].clear();
             collect_const_attr_writes(body, targets, &mut cache[i]);
         });
+        #[cfg(debug_assertions)]
+        {
+            let mut at = 0usize;
+            crate::lower::for_each_owned_hook_body_ref(app, &mut |owner, body| {
+                let mut walked = Vec::new();
+                collect_const_attr_writes(body, targets, &mut walked);
+                assert_eq!(walked, self.attr_writes[at], "kept attribute writes of {owner:?} are stale");
+                at += 1;
+            });
+        }
     }
 
     fn mailer_withs(&mut self, app: &App, mailers: &crate::det::HashSet<ClassId>, stale: Option<&crate::det::HashSet<ClassId>>) {
@@ -10094,12 +10125,18 @@ impl BodySurveys {
             self.mailer_withs = vec![Vec::new(); bodies.len()];
             self.mailers = keys;
         }
-        for (i, (owner, body)) in bodies.into_iter().enumerate() {
-            if reuse && !stale.is_some_and(|s| s.contains(owner)) {
+        for (i, (owner, body)) in bodies.iter().enumerate() {
+            if reuse && !stale.is_some_and(|s| s.contains(*owner)) {
                 continue;
             }
             self.mailer_withs[i].clear();
             collect_mailer_withs(body, mailers, &mut self.mailer_withs[i]);
+        }
+        #[cfg(debug_assertions)]
+        for (i, (owner, body)) in bodies.iter().enumerate() {
+            let mut walked = Vec::new();
+            collect_mailer_withs(body, mailers, &mut walked);
+            assert_eq!(walked, self.mailer_withs[i], "kept mailer calls of {owner:?} are stale");
         }
     }
 
@@ -11826,6 +11863,65 @@ mod site_cache_tests {
             other => vec![other.clone()],
         };
         assert!(arms.contains(&Ty::Int) && arms.contains(&Ty::Str), "{row:?}");
+    }
+
+    // Past the first round's full retype, and with enough classes left alone
+    // that the frontier stays narrow, `Link0.get` reaches `Link5.get` a round
+    // per link.
+    fn analyzed_with_chain(files: &[(&str, &str)]) -> Analyzer {
+        let mut tree: std::collections::BTreeMap<PathBuf, Vec<u8>> = std::collections::BTreeMap::new();
+        for i in 0..6 {
+            let body = if i == 0 { "41 + 1".to_string() } else { format!("Link{}.get", i - 1) };
+            tree.insert(PathBuf::from(format!("lib/link{i}.rb")), format!("class Link{i}\n  def self.get\n    {body}\n  end\nend\n").into_bytes());
+        }
+        for i in 0..40 {
+            tree.insert(PathBuf::from(format!("lib/idle{i}.rb")), format!("class Idle{i}\n  def a\n    1\n  end\nend\n").into_bytes());
+        }
+        tree.insert(PathBuf::from("lib/sink.rb"), b"class Sink\n  def take(x)\n    x\n  end\nend\n".to_vec());
+        for (path, src) in files {
+            tree.insert(PathBuf::from(path), src.as_bytes().to_vec());
+        }
+        let mut app = crate::ingest::ingest_app_from_tree(tree.into_iter().collect()).expect("ingest");
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        analyzer
+    }
+
+    // Only the `.with` caller is on the frontier when `Link5.get` moves: the
+    // mailer is retyped because its `params` row moved. The debug build's
+    // walk of every kept entry is the check.
+    #[test]
+    fn a_mailer_retyped_for_its_params_gives_new_sites() {
+        let analyzer = analyzed_with_chain(&[
+            ("app/models/trigger.rb", "class Trigger < ActiveRecord::Base\n  def run\n    ProbeMailer.with(value: Link5.get).ping\n  end\nend\n"),
+            ("app/mailers/probe_mailer.rb", "class ProbeMailer < ActionMailer::Base\n  def ping\n    Sink.new.take(params[:value])\n    mail(to: 'x@y')\n  end\nend\n"),
+        ]);
+        let row = param(&analyzer, "Sink", "take").expect("Sink#take has a row");
+        assert!(format!("{row:?}").contains("Int"), "{row:?}");
+    }
+
+    // The configuration pass types these bodies whatever the frontier, so it
+    // has to say so itself; a controller with no such body stays reusable.
+    #[test]
+    fn the_configuration_pass_records_the_controllers_it_retypes() {
+        let tree = [
+            ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+            ("app/controllers/concerns/prefs.rb", "module Prefs\n  extend ActiveSupport::Concern\n\n  included do\n    class_attribute :_defs, default: []\n  end\n\n  class_methods do\n    def add_def(x)\n      self._defs = x\n    end\n  end\nend\n"),
+            ("app/controllers/macro_controller.rb", "class MacroController < ApplicationController\n  include Prefs\n  add_def 1\nend\n"),
+            ("app/controllers/plain_controller.rb", "class PlainController < ApplicationController\n  def show\n    head :ok\n  end\nend\n"),
+        ]
+        .into_iter()
+        .map(|(path, src)| (PathBuf::from(path), src.as_bytes().to_vec()))
+        .collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        analyzer.retyped_since_unify = Some(Default::default());
+        analyzer.retyped_since_survey = Some(Default::default());
+        analyzer.analyze_class_configuration(&mut app.controllers);
+        let expected: crate::det::HashSet<ClassId> = [ClassId(Symbol::from("MacroController"))].into_iter().collect();
+        assert_eq!(analyzer.retyped_since_unify.as_ref(), Some(&expected));
+        assert_eq!(analyzer.retyped_since_survey.as_ref(), Some(&expected));
     }
 
     #[test]
