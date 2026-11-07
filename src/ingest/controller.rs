@@ -150,9 +150,14 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
             // (matches Rails: a later `layout` call overrides an earlier
             // one). The call still falls through to Unknown for source
             // round-trip; the side-channel `Controller.layout` is what
-            // `controller_layout` resolves each action's layout from.
-            if let Some(decl) = parse_layout_call(&stmt, file) {
-                layout = decl;
+            // `controller_layout` resolves each action's layout from. A
+            // non-literal `only:`/`except:` is a located gap (survey) or a
+            // strict error, as a filter's is, and leaves `layout` as it was.
+            match parse_layout_call(&stmt, file) {
+                Ok(Some(decl)) => layout = decl,
+                Ok(None) => {}
+                Err(err) if super::survey::is_active() => super::survey::record(&err),
+                Err(err) => return Err(err),
             }
             // A `before_action :a, :b` line declares one filter per leading
             // symbol; expand to one `Filter` body item each so every target's
@@ -432,22 +437,28 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
 /// Symbol the method Rails calls for it, `false` no layout and `nil` the
 /// default lookup; anything else is kept as computed, for
 /// `controller_layout` to report.
-fn parse_layout_call(stmt: &Node<'_>, file: &str) -> Option<LayoutDecl> {
-    let call = stmt.as_call_node()?;
+///
+/// Returns `Err` for an `only:`/`except:` value `is_recognized_scope_value`
+/// declines, as `parse_filter_call` does: an unreadable scope would
+/// otherwise read as every action.
+fn parse_layout_call(stmt: &Node<'_>, file: &str) -> IngestResult<Option<LayoutDecl>> {
+    let Some(call) = stmt.as_call_node() else { return Ok(None) };
     if call.receiver().is_some() || call.block().is_some() {
-        return None;
+        return Ok(None);
     }
     if constant_id_str(&call.name()) != "layout" {
-        return None;
+        return Ok(None);
     }
-    let args = call.arguments()?;
+    let Some(args) = call.arguments() else { return Ok(None) };
     let all_args = args.arguments();
-    let first = all_args.iter().next()?;
+    let Some(first) = all_args.iter().next() else { return Ok(None) };
     let text = |bytes: &[u8]| std::str::from_utf8(bytes).ok().map(Symbol::from);
     let value = if let Some(sym) = first.as_symbol_node() {
-        LayoutValue::Method { name: text(sym.unescaped())? }
+        let Some(name) = text(sym.unescaped()) else { return Ok(None) };
+        LayoutValue::Method { name }
     } else if let Some(s) = first.as_string_node() {
-        LayoutValue::Name { name: text(s.unescaped())? }
+        let Some(name) = text(s.unescaped()) else { return Ok(None) };
+        LayoutValue::Name { name }
     } else if first.as_false_node().is_some() {
         LayoutValue::None
     } else if first.as_nil_node().is_some() {
@@ -464,13 +475,21 @@ fn parse_layout_call(stmt: &Node<'_>, file: &str) -> Option<LayoutDecl> {
             let Some(key) = pair.key().as_symbol_node() else { continue };
             let Ok(name) = std::str::from_utf8(key.unescaped()) else { continue };
             match name {
+                "only" | "except" if !is_recognized_scope_value(&pair.value()) => {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!(
+                            "`layout` `{name}:` is not a literal Symbol/String or an array of them; the layout is refused rather than silently applied to every action"
+                        ),
+                    });
+                }
                 "only" => only = super::util::symbol_list_value(&pair.value()),
                 "except" => except = super::util::symbol_list_value(&pair.value()),
                 _ => {}
             }
         }
     }
-    Some(LayoutDecl::Declared(LayoutCall { value, only, except, span: super::util::node_span(stmt, file) }))
+    Ok(Some(LayoutDecl::Declared(LayoutCall { value, only, except, span: super::util::node_span(stmt, file) })))
 }
 
 /// Classify one class-body statement into its `ControllerBodyItem` variant.

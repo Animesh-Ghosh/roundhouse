@@ -107,6 +107,45 @@ fn a_symbol_render_layout_is_refused_as_rails_raises() {
     );
 }
 
+/// An `only:`/`except:` ingest can't read would read as every action, so
+/// the `layout` call is refused, as a filter's is; a literal one resolves.
+#[test]
+fn a_layout_scope_that_cant_be_read_is_refused() {
+    use roundhouse::dialect::LayoutDecl;
+    use roundhouse::ingest::ingest_app_from_tree;
+
+    let ingest = |declaration: &str| {
+        let tree = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n".to_string()),
+            ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/gadgets\" => \"gadgets#index\"\nend\n".to_string()),
+            ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n".to_string()),
+            (
+                "app/controllers/gadgets_controller.rb",
+                format!("class GadgetsController < ApplicationController\n  {declaration}\n\n  def index\n  end\n\n  def show\n  end\nend\n"),
+            ),
+        ];
+        ingest_app_from_tree(tree.into_iter().map(|(path, source)| (path.into(), source.into_bytes())).collect())
+    };
+    for (declaration, key) in [
+        ("layout \"special\", only: SOME_CONST", "only"),
+        ("layout false, except: excluded_actions", "except"),
+    ] {
+        let message = format!("`layout` `{key}:` is not a literal Symbol/String or an array of them");
+        let err = ingest(declaration).expect_err(declaration).to_string();
+        assert!(err.contains(&message), "{declaration}\n=> {err}");
+        roundhouse::ingest::survey::activate();
+        ingest(declaration).expect("survey ingest tolerates gaps");
+        let gaps: Vec<String> = roundhouse::ingest::survey::drain().iter().map(|g| format!("{g:?}")).collect();
+        assert!(gaps.iter().any(|g| g.contains(&message)), "{declaration}\n=> {gaps:#?}");
+    }
+    for declaration in ["layout \"special\", only: %i[index]", "layout \"special\", only: \"index\""] {
+        let app = ingest(declaration).expect(declaration);
+        let controller = app.controllers.iter().find(|c| c.name.0.as_str() == "GadgetsController").expect("GadgetsController");
+        let LayoutDecl::Declared(call) = &controller.layout else { panic!("{declaration}: {:?}", controller.layout) };
+        assert_eq!(call.only.iter().map(|s| s.as_str()).collect::<Vec<_>>(), ["index"], "{declaration}");
+    }
+}
+
 #[test]
 fn a_target_with_one_layout_refuses_the_others() {
     for target in [BuildTarget::Go, BuildTarget::Typescript] {
