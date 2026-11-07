@@ -20531,6 +20531,10 @@ mod dynamic_where_forms;
 mod enum_cross_class_mapping;
 #[path = "emit_and_run/jbuilder_record_values.rs"]
 mod jbuilder_record_values;
+#[path = "support/jbuilder_dynamic_partial.rs"]
+mod jbuilder_dynamic_partial;
+#[path = "emit_and_run/jbuilder_dynamic_partial.rs"]
+mod jbuilder_dynamic_partial_test;
 #[path = "emit_and_run/nil_operand.rs"]
 mod nil_operand;
 #[path = "emit_and_run/descendant_ivar.rs"]

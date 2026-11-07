@@ -35,7 +35,7 @@ mod class_new;
 pub(crate) use body::{indexed_pluck, string_answers};
 #[cfg(test)]
 pub(crate) use body::counted_first_last;
-pub(crate) use body::{ConstResolver, ConstResolverTask, definition_index, has_ambiguous_namespace};
+pub(crate) use body::{ConstResolver, ConstResolverTask, definition_index, has_ambiguous_namespace, is_core_value_constant};
 pub use body::DefinitionIndex;
 pub use body::PreparedConstResolver;
 pub mod async_color;
@@ -792,28 +792,29 @@ impl Analyzer {
                     continue;
                 }
                 let Some(kind) = entry.return_kind else { continue };
-                // The shared runtime types these as `() -> Base`, but in Rails
-                // `reload` and `lock!` answer `self`: keep the receiver's own
+                // Dispatch checks the model's own table before its includes and
+                // parent, so a seed here would hide an override that lives in
+                // an included module or a parent class (Ruby's ancestor order
+                // puts those ahead of the framework). Seed only when no app
+                // source above the model defines the method; the catalog is
+                // the fallback for the framework's own definition.
+                let inherited = |name: &str| {
+                    model
+                        .parent
+                        .as_ref()
+                        .is_some_and(|parent| source_methods.instance_method(parent, name))
+                        || model_includes_in(model, &source_methods.classes)
+                            .iter()
+                            .any(|include| source_methods.instance_method(include, name))
+                };
+                // Rails' `lock!` calls `reload`, so an override of either hides the seed.
+                if inherited(entry.name) || (entry.name == "lock!" && inherited("reload")) {
+                    continue;
+                }
+                // The shared runtime types `reload` and `lock!` as `() -> Base`,
+                // but in Rails they answer `self`: keep the receiver's own
                 // class so its model methods still resolve on the result.
-                // Skip that seed when a parent or include defines the method
-                // (or, for `lock!`, `reload` — Rails' `lock!` calls `reload`):
-                // BodyTyper prefers the model's own table, so a self seed
-                // would hide the source override's harvested return.
-                    let ret = if matches!(entry.name, "reload" | "lock!") {
-                    let inherited = |name: &str| {
-                        model
-                            .parent
-                            .as_ref()
-                            .is_some_and(|parent| source_methods.instance_method(parent, name))
-                            || model_includes_in(model, &source_methods.classes)
-                                .iter()
-                                .any(|include| source_methods.instance_method(include, name))
-                    };
-                    if inherited(entry.name)
-                        || (entry.name == "lock!" && inherited("reload"))
-                    {
-                        continue;
-                    }
+                let ret = if matches!(entry.name, "reload" | "lock!") {
                     self_ty.clone()
                 } else {
                     instantiate(kind)
@@ -5915,7 +5916,9 @@ impl Analyzer {
         for leaf in return_leaves(body) {
             let ty = leaf.ty.clone().unwrap_or_else(crate::analyze::body::unknown);
             // A runtime-created class has kind Class/Module but no named identity.
-            let value = if matches!(&ty, Ty::Class { id, .. } if matches!(id.0.as_str(), "Class" | "Module"))
+            let value = if let ExprNode::BoolOp { left, op, right, .. } = &*leaf.node {
+                body::class_object_boolop_ty(left, *op, right)?
+            } else if matches!(&ty, Ty::Class { id, .. } if matches!(id.0.as_str(), "Class" | "Module"))
                 && !matches!(&*leaf.node, ExprNode::Const { .. })
             { ty.clone() } else { class_object_arg_ty(leaf, ty.clone()) };
             promoted |= value != ty;
@@ -11242,7 +11245,7 @@ pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
         if elements.len() < 2 || elements.iter().any(|e| matches!(&*e.node, ExprNode::Splat { .. })) {
             return None;
         }
-        let tys: Vec<Ty> = elements.iter().map(|e| e.ty.clone()).collect::<Option<_>>()?;
+        let tys: Vec<Ty> = elements.iter().map(Analyzer::class_object_return_ty).collect::<Option<_>>()?;
         if tys.iter().any(|t| matches!(t, Ty::Var { .. })) {
             return None;
         }

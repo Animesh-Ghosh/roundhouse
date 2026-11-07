@@ -127,6 +127,13 @@ class PublicationBoundary(unittest.TestCase):
 
 
 class Routing(unittest.TestCase):
+    def test_container_class_values_run_generated_sidecars_natively(self):
+        for path in ["src/analyze/mod.rs", "src/analyze/body/mod.rs", "tests/class_object_container_rbs.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("class_object_container_rbs", plan["spinel_tests"])
+
     def test_class_object_return_analysis_runs_generated_sidecars_natively(self):
         for path in ["src/analyze/mod.rs", "tests/class_object_return_rbs.rs"]:
             with self.subTest(path=path):
