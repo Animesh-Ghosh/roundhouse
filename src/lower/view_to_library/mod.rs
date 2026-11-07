@@ -259,6 +259,7 @@ pub struct ViewLowerCtx<'a> {
         std::rc::Rc<crate::det::HashMap<String, crate::det::HashSet<String>>>,
     partial_form_bindings: crate::det::HashMap<ViewKey, PartialFormBinding>,
     route_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
+    app_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
     i18n: std::rc::Rc<crate::i18n::FormI18n>,
     /// Generated RouteHelpers function name -> how many REQUIRED
     /// positionals it takes. See the ViewCtx field of the same name.
@@ -359,6 +360,9 @@ impl<'a> ViewLowerCtx<'a> {
             i18n: std::rc::Rc::new(crate::i18n::FormI18n::of(app)),
             route_helper_names: std::rc::Rc::new(
                 route_helpers.iter().map(|(n, _)| n.clone()).collect(),
+            ),
+            app_helper_names: std::rc::Rc::new(
+                app.helper_method_index.keys().map(|n| n.as_str().to_string()).collect(),
             ),
             route_helper_arity: std::rc::Rc::new(route_helpers.into_iter().collect()),
             strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
@@ -880,6 +884,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         time_columns: lx.time_columns.clone(),
         store_readers: lx.store_readers.clone(),
         route_helper_names: lx.route_helper_names.clone(),
+        app_helper_names: lx.app_helper_names.clone(),
         i18n: lx.i18n.clone(),
         route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
@@ -5202,6 +5207,11 @@ pub(super) struct ViewCtx {
     /// Empty in single-view test harnesses → both arms (the
     /// pre-gating shape).
     pub(super) route_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
+    /// Methods the app's helper modules define. One named like a route
+    /// helper is the method a view's bare call reaches (Rails mixes the
+    /// app helpers in above the url helpers), so its arguments are the
+    /// app's to read, not a route's to project.
+    pub(super) app_helper_names: std::rc::Rc<crate::det::HashSet<String>>,
     /// The app's translations for form labels and submit text.
     pub(super) i18n: std::rc::Rc<crate::i18n::FormI18n>,
     /// Generated RouteHelpers function name -> how many REQUIRED
