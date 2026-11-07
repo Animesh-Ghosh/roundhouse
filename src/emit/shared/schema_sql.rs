@@ -395,6 +395,9 @@ pub fn validate_schema_for_dialect(schema: &Schema, dialect: Dialect) -> Result<
                     return Err(format!("unsupported default expression on {}: {expression}", table.name));
                 }
             }
+            if let Some(column) = table.columns.iter().find(|c| c.col_type == ColumnType::Boolean && c.computed_default().is_some_and(|sql| !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str()))) {
+                return Err(format!("unsupported Boolean function default on {}.{}", table.name, column.name));
+            }
         }
         if let Some(vm) = &table.virtual_module {
             if dialect != Dialect::Sqlite {
@@ -539,14 +542,15 @@ fn sqlite_expression(predicate: &str, table: Option<&Table>) -> bool {
             while chars.get(next).is_some_and(|ch| ch.is_ascii_whitespace()) {
                 next += 1;
             }
-            let ok = if WORDS.iter().any(|w| word.eq_ignore_ascii_case(w))
-                || table.is_none() && ["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].iter().any(|w| word.eq_ignore_ascii_case(w)) {
-                true
-            } else if chars.get(next) == Some(&'(') {
+            let operator = ["AND", "OR", "NOT", "IS", "IN", "BETWEEN"].iter().any(|w| word.eq_ignore_ascii_case(w));
+            let ok = if chars.get(next) == Some(&'(') && !operator {
                 // Rails recognizes a lazy default only when a call has no space before `(`.
                 has_function |= next == i;
                 FUNCTIONS.iter().any(|f| word.eq_ignore_ascii_case(f))
                     || table.is_none() && word.eq_ignore_ascii_case("randomblob")
+            } else if WORDS.iter().any(|w| word.eq_ignore_ascii_case(w))
+                || table.is_none() && ["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].iter().any(|w| word.eq_ignore_ascii_case(w)) {
+                true
             } else {
                 is_column(&word, false)
             };
@@ -651,6 +655,7 @@ mod tests {
             nullable,
             default: None,
             default_expression: None,
+            legacy_default_persistence: false,
             primary_key,
             generated: None,
             generated_text_compatible: None,

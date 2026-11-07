@@ -3395,6 +3395,15 @@ fn target_files_inner(
         }
         None => app,
     };
+    if !target.supports_generated_column_insert_returning() && target != BuildTarget::Blog {
+        for table in app.schema.tables.values() {
+            for column in &table.columns {
+                if column.computed_default().is_some_and(|sql| !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str())) {
+                    return Err(format!("{} target does not support SQL-function default persistence for `{}.{}`", target.as_str(), table.name, column.name));
+                }
+            }
+        }
+    }
     if target == BuildTarget::Roda {
         if let Some((table, column)) = app.schema.tables.values().find_map(|table| {
             table

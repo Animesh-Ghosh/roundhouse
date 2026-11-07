@@ -69,6 +69,9 @@ pub struct Column {
     /// A database expression is distinct from the model's literal default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_expression: Option<String>,
+    /// Target lowering may leave computed defaults on the legacy persistence path.
+    #[serde(skip)]
+    pub legacy_default_persistence: bool,
     pub primary_key: bool,
     /// The SQL expression and storage mode of a generated column. The
     /// declared `col_type` remains the column's result type; generated
@@ -111,6 +114,10 @@ pub struct Column {
 }
 
 impl Column {
+    pub fn persisted_computed_default(&self) -> Option<&str> {
+        if self.legacy_default_persistence { None } else { self.computed_default() }
+    }
+
     /// A database-evaluated default, distinct from a quoted SQL literal.
     pub fn computed_default(&self) -> Option<&str> {
         self.default_expression.as_deref().filter(|sql| {

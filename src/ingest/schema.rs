@@ -1649,6 +1649,7 @@ fn table_from_create_table(
                 nullable: false,
                 default: None,
                 default_expression: None,
+                legacy_default_persistence: false,
                 primary_key: true,
                 generated: None,
                 generated_text_compatible: None,
@@ -1806,6 +1807,7 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             nullable: true,
             default: None,
             default_expression: None,
+            legacy_default_persistence: false,
             primary_key: false,
             generated: None,
             generated_text_compatible: None,
@@ -1919,6 +1921,7 @@ fn view_columns_from_sql(sql: &str, tables: &IndexMap<Symbol, Table>) -> Vec<Col
             nullable: true,
             default: None,
             default_expression: None,
+            legacy_default_persistence: false,
             primary_key: false,
             generated: None,
             generated_text_compatible: None,
@@ -1995,6 +1998,7 @@ fn timestamp_columns_with(nullable: bool) -> [Column; 2] {
         nullable,
         default: None,
         default_expression: None,
+        legacy_default_persistence: false,
         primary_key: false,
         generated: None,
         generated_text_compatible: None,
@@ -2015,6 +2019,7 @@ fn reference_column(name: &str) -> Column {
         nullable: true,
         default: None,
         default_expression: None,
+        legacy_default_persistence: false,
         primary_key: false,
         generated: None,
         generated_text_compatible: None,
@@ -2077,6 +2082,11 @@ fn sql_default_expression(node: &Node<'_>) -> Result<String, String> {
     let sql = if sql.eq_ignore_ascii_case("DATETIME('now')") { "CURRENT_TIMESTAMP".into() } else { sql };
     let quoted = sql.len() >= 2 && sql.starts_with('\'') && sql.ends_with('\'')
         && !sql[1..sql.len() - 1].replace("''", "").contains('\'');
+    // Rails' default-function regexp does not span lines; its binary-literal
+    // extraction also takes precedence over function recognition (`x'…'`).
+    if !quoted && (sql.contains(['\n', '\r']) || regex::Regex::new("x'[^\\n]*'").unwrap().is_match(&sql)) {
+        return Err(gap());
+    }
     if !quoted && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str())
         && !crate::emit::shared::schema_sql::schema_expression_supported(&sql, None, GeneratedExpressionDialect::Portable) { return Err(gap()); }
     Ok(sql)
@@ -2363,7 +2373,11 @@ fn column_with_type(
     file: &str,
 ) -> Result<Column, IngestError> {
     let default_expression = opts.default_expression.as_ref().map(|(offset, result)| {
-        result.clone().map_err(|why| IngestError::Unsupported { file: file.into(), message: format!("line {}: default for {table}.{col_name}: {why}", super::sources::line_at(file, *offset).unwrap_or(1)) })
+        result.clone().and_then(|sql| {
+            if type_name == "boolean" && !sql.starts_with('\'') && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str()) {
+                Err("Boolean function defaults require an unset value distinct from false".into())
+            } else { Ok(sql) }
+        }).map_err(|why| IngestError::Unsupported { file: file.into(), message: format!("line {}: default for {table}.{col_name}: {why}", super::sources::line_at(file, *offset).unwrap_or(1)) })
     }).transpose()?;
     let col_type = match type_name {
         // An integer's `limit:` is its size in bytes, and Rails' PostgreSQL
@@ -2444,6 +2458,7 @@ fn column_with_type(
             opts.default.clone()
         },
         default_expression,
+        legacy_default_persistence: false,
         primary_key: false,
         generated: None,
         generated_text_compatible,

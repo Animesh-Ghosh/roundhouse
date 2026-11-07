@@ -48,8 +48,70 @@ fn sqlite_random_sql_default_keeps_exact_expression() {
 }
 
 #[test]
+fn defaults_with_different_rails_classification_refuse_at_the_source() {
+    for sql in ["(printf('%s',\n'x'))", "coalesce('x', 'y')", "'x' || lower('Y')"] {
+        let source = RANDOM_SCHEMA.replace("printf('item_%s', lower(hex(randomblob(16))))", &sql.replace('\n', "\\n"));
+        let error = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap_err().to_string();
+        assert!(error.contains("line 3") && error.contains("record_items.token"), "{error}");
+    }
+}
+
+#[test]
+fn boolean_function_defaults_refuse_until_unset_values_are_representable() {
+    let source = RANDOM_SCHEMA.replace("t.string :token", "t.boolean :token")
+        .replace("printf('item_%s', lower(hex(randomblob(16))))", "json_valid('{}')");
+    let error = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap_err().to_string();
+    assert!(error.contains("line 3") && error.contains("record_items.token"), "{error}");
+    // Migration folds and callers constructing schema IR must not bypass refusal.
+    let mut schema = ingest_schema(RANDOM_SCHEMA.as_bytes(), "db/schema.rb").unwrap();
+    schema.tables.get_mut(&roundhouse::Symbol::from("record_items")).unwrap().columns[1].col_type = roundhouse::schema::ColumnType::Boolean;
+    assert!(render_schema_statements_for(&schema, Dialect::Sqlite).unwrap_err().contains("Boolean function default"));
+}
+
+#[test]
+fn sql_keywords_do_not_admit_unlisted_function_calls() {
+    for sql in ["true(lower('X'))", "FALSE(lower('X'))", "NULL(lower('X'))", "CURRENT_TIMESTAMP(lower('X'))"] {
+        let source = RANDOM_SCHEMA.replace("printf('item_%s', lower(hex(randomblob(16))))", sql);
+        let error = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap_err().to_string();
+        assert!(error.contains("line 3") && error.contains("record_items.token"), "{error}");
+    }
+}
+
+#[test]
+fn clock_defaults_do_not_add_returning_to_other_target_models() {
+    use roundhouse::project::BuildTarget;
+    for target in [BuildTarget::Go, BuildTarget::CSharp, BuildTarget::Typescript, BuildTarget::Rust, BuildTarget::Crystal] {
+        let source = RANDOM_SCHEMA.replace("printf('item_%s', lower(hex(randomblob(16))))", "CURRENT_TIMESTAMP");
+        let (tree, errors) = emit_and_run::empty_app().write("db/schema.rb", &source)
+            .write("app/models/record_item.rb", RANDOM_MODEL).emit(target);
+        assert!(errors.is_empty(), "{target:?}: {errors:?}");
+        fn check(dir: &std::path::Path) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() { check(&path); }
+                else if let Ok(text) = std::fs::read_to_string(&path) {
+                    assert!(!text.contains("exec_returning") && !text.contains("__rh_returning_key"), "{}", path.display());
+                }
+            }
+        }
+        check(&tree);
+    }
+}
+
+#[test]
+fn targets_without_default_returning_refuse_new_scalar_defaults() {
+    use roundhouse::project::BuildTarget;
+    let mut app = roundhouse::App::default();
+    app.schema = ingest_schema(RANDOM_SCHEMA.as_bytes(), "db/schema.rb").unwrap();
+    for target in [BuildTarget::Go, BuildTarget::CSharp, BuildTarget::Typescript, BuildTarget::Rust, BuildTarget::Crystal, BuildTarget::Roda] {
+        let error = roundhouse::project::target_files(&app, std::path::Path::new("."), target).unwrap_err();
+        assert!(error.contains("SQL-function default persistence") && error.contains("record_items.token"), "{error}");
+    }
+}
+
+#[test]
 fn sqlite_default_scalar_functions_are_closed_and_column_free() {
-    for sql in ["upper('x')", "lower('X')", "hex('x')", "randomblob(16)", "json_valid('{}')", "length('abc')", "substr('abc', 2, 1)", "coalesce(NULL, 'x')", "abs(-2)", "printf('%s', 'it''s')", "'x' || lower('Y')"] {
+    for sql in ["upper('x')", "lower('X')", "hex('x')", "randomblob(16)", "json_valid('{}')", "length('abc')", "substr('abc', 2, 1)", "coalesce(NULL, 'x')", "abs(-2)", "printf('%s', 'it''s')"] {
         let source = RANDOM_SCHEMA.replace("printf('item_%s', lower(hex(randomblob(16))))", sql);
         let schema = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap();
         let ddl = render_schema_statements_for(&schema, Dialect::Sqlite).unwrap().join(";\n");

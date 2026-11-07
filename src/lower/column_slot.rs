@@ -386,6 +386,7 @@ mod tests {
             nullable: true,
             default: None,
             default_expression: None,
+            legacy_default_persistence: false,
             primary_key: false,
             generated: None,
             generated_text_compatible: None,
