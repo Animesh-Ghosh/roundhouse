@@ -214,6 +214,11 @@ fn a_route_set_behind_a_guard_is_refused() {
         assert!(diagnostics(&app).iter().any(|d| d.contains("route set") && d.contains("error[unsupported]")), "{source}: {:#?}", diagnostics(&app));
         assert!(!paths(&app).iter().any(|p| p == "/catalog"), "{source}");
     }
+    for method in ["prepend", "append"] {
+        let block = format!("Rails.application.routes.{method} do\n  get '/catalog', to: 'catalog#show'\nend\n");
+        let app = routes(&format!("if Feature.enabled?\n{block}end\n"));
+        assert!(diagnostics(&app).iter().any(|d| d.contains("route set") && d.contains("error[unsupported]")), "{method}: {:#?}", diagnostics(&app));
+    }
     for source in [format!("Feature.enabled? && {draw}"), format!("module Wrapper\n{draw}end\n")] {
         let err = ingest(&[("config/routes.rb", &source)]).expect_err("a wrapped route set is not read");
         assert!(err.to_string().contains("line 1"), "{source}: {err}");

@@ -1322,6 +1322,7 @@ fn ingest_route_stmts<'pr>(
             // nested `routes.draw` the skip exists for is left to it.
             if call.block().is_some_and(|b| b.as_block_node().is_some())
                 && constant_id_str(&call.name()) != "draw"
+                && !is_app_route_block(&call, &["prepend", "append"])
             {
                 let err = receiver_block_route_stmt(&call, file);
                 if super::survey::is_active() {
@@ -1341,7 +1342,7 @@ fn ingest_route_stmts<'pr>(
             if cx.strict {
                 return Err(receiver_block_route_stmt(&call, file));
             }
-            if is_app_route_block(&call, &["draw"]) { route_refusal(&call.as_node(), file, cx, "nested route set", "only top-level draws are read"); }
+            if is_app_route_block(&call, &["draw", "prepend", "append"]) { route_refusal(&call.as_node(), file, cx, "nested route set", "only top-level draws, prepends and appends are read"); }
             // `Rails.application.routes.draw` gets re-found as a nested
             // call when we walk a weird input; skip anything with an
             // explicit receiver here.
