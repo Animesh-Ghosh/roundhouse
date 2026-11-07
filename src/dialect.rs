@@ -1366,8 +1366,8 @@ pub enum LibraryClassOrigin {
     DryValidation,
     /// dry-monads' Result and do-notation stand-ins (`ingest::dry_monads`).
     DryMonads,
-    /// The class a file-level `X = Data.define(:a, :b)` creates, in a
-    /// file that declares nothing else. `members` are the literal
+    /// The class a file-level `X = Data.define(:a, :b)` creates.
+    /// `members` are the literal
     /// Symbol members in declaration order; `span` is the
     /// `Data.define` call. The statements of a `do … end` block are the
     /// class body, and its constants are the class's `constants`. Ruby

@@ -808,6 +808,16 @@ def select(
             spinel_tests.add("render_json_encoder_spinel")
             reasons.append(f"{path}: shared controller runtime on every extra language")
 
+        if path in {
+            "src/analyze/data.rs",
+            "src/ingest/library_class.rs",
+            "tests/data_factory_constants.rs",
+            "tests/emit_and_run/data_record_siblings.rs",
+            "tests/support/data_record_siblings.rs",
+        }:
+            reasons.append(f"{path}: unit and spinel-toolchain (file-level Data records)")
+            spinel = True
+            jobs_selected.update(CORE)
         if path in {"tests/emit_and_run/class_body_calls.rs", "tests/support/class_body_calls.rs"}:
             reasons.append(f"{path}: unit (emit_and_run), spinel-toolchain (ordinary class-body calls)")
             spinel = True

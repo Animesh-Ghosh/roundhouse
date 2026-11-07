@@ -346,9 +346,6 @@ fn ingest_library_classes_impl(
         }));
     }
     if out.is_empty() && file_level {
-        if let Some(lc) = file_data_class(&root, file)? {
-            return Ok(vec![lc]);
-        }
         // Not an initializer's: the boot program replays that statement, and a class beside it would define the constant twice.
         if !file.contains("config/initializers/")
             && let Some(lc) = file_struct_class(&root, file)?
@@ -379,12 +376,42 @@ fn ingest_library_classes_impl(
     // while defining the subclass. A file of nothing else defines just
     // those classes. The nested and beside walks take no top-level
     // declaration.
-    let made = match (file_level, root.as_program_node()) {
+    let mut made = match (file_level, root.as_program_node()) {
         (true, Some(program)) => {
             super::class_new_factory::constant_classes(None, Some(program.statements().as_node()), file)
         }
         _ => Vec::new(),
     };
+    if file_level && let Some(program) = root.as_program_node() {
+        for statement in program.statements().body().iter() {
+            if let Some(class) = file_data_class(&statement, file)
+                .map_err(|err| super::error_site::at(err, &statement))?
+            {
+                if out.iter().chain(made.iter().map(|(_, class)| class)).any(|other| other.name == class.name) {
+                    return Err(super::error_site::at(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "Data.define beside another declaration of the same class".into(),
+                    }, &statement));
+                }
+                made.push((class.name.0.clone(), class));
+            }
+        }
+        if made.iter().any(|(_, class)| class.data_define().is_some()) {
+            for statement in program.statements().body().iter() {
+                let qualified_factory = statement.as_constant_path_write_node()
+                    .and_then(|write| static_constant_path(&write.target().as_node()))
+                    .is_some_and(|path| made.iter().any(|(_, class)| class.name.0.as_str() == path.join("::")));
+                if statement.as_constant_write_node().is_none() && statement.as_class_node().is_none()
+                    && statement.as_module_node().is_none() && !qualified_factory
+                {
+                    return Err(super::error_site::at(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "file-level statements beside Data.define must be declarations".into(),
+                    }, &statement));
+                }
+            }
+        }
+    }
     // Hoist remaining file-level constants into the first class of the
     // file — including when that first class is a Class.new factory and
     // the file has no ordinary `class`/`module`. Otherwise a
@@ -517,8 +544,8 @@ fn data_block_classes(
     Ok(out)
 }
 
-/// The class that a file with the one statement `X = Data.define(:a,
-/// :b)` creates. This is the Zeitwerk shape of a value class: Ruby
+/// The class a file-level statement `X = Data.define(:a, :b)` creates.
+/// This is the Zeitwerk shape of a value class: Ruby
 /// creates the class when it assigns the constant, so it is a library
 /// class, not a file-level constant that is hoisted into another class.
 /// Only distinct literal Symbol members are admitted. Other factories
@@ -528,8 +555,8 @@ fn data_block_classes(
 /// the new class. A `class` or `module` in the block belongs to the
 /// enclosing scope, which the emitted reopen of `X` cannot express, so
 /// the file is rejected.
-fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Option<LibraryClass>> {
-    let Some((name, call)) = file_data_factory(root) else { return Ok(None) };
+fn file_data_class(statement: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Option<LibraryClass>> {
+    let Some((name, call)) = file_data_declaration(statement) else { return Ok(None) };
     let Some(members) = data_members(&call) else { return Ok(None) };
     let owner = ClassId(Symbol::from(name));
     let body = || call.block().and_then(|block| block.as_block_node()).and_then(|block| block.body());
@@ -602,17 +629,9 @@ fn file_struct_write<'pr>(root: &ruby_prism::Node<'pr>) -> Option<(String, Struc
     Some((name, struct_constant_spec(&value)?))
 }
 
-/// The constant name and the `Data.define` call of a file whose only
-/// statement is `X = Data.define(…)` or `A::X = Data.define(…)`, with no
-/// block or with a `do … end` block that takes no parameters.
-fn file_data_factory<'pr>(
-    root: &ruby_prism::Node<'pr>,
-) -> Option<(String, ruby_prism::CallNode<'pr>)> {
-    let statements = root.as_program_node()?.statements().body();
-    let mut iter = statements.iter();
-    let (Some(statement), None) = (iter.next(), iter.next()) else {
-        return None;
-    };
+/// A file-level `X = Data.define(…)` or `A::X = Data.define(…)`, with
+/// no block or with a block that takes no parameters.
+fn file_data_declaration<'pr>(statement: &ruby_prism::Node<'pr>) -> Option<(String, ruby_prism::CallNode<'pr>)> {
     let (name, value) = match statement.as_constant_write_node() {
         Some(write) => (constant_id_str(&write.name()).to_string(), write.value()),
         None => {
@@ -4982,7 +5001,10 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         }
         // `Breadcrumb = Data.define(:name, :path)`: the file declares a
         // value class, not a model (see `file_data_class`).
-        if file_data_factory(&root).is_some_and(|(_, call)| data_members(&call).is_some()) || file_struct_write(&root).is_some() {
+        if root.as_program_node().is_some_and(|program| program.statements().body().iter()
+            .any(|stmt| file_data_declaration(&stmt).is_some_and(|(_, call)| data_members(&call).is_some())))
+            || file_struct_write(&root).is_some()
+        {
             return Some(ClassKind::LibraryClass);
         }
         // `ExampleError = Class.new(StandardError)`: the file declares a

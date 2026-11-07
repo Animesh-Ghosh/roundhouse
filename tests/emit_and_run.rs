@@ -5,6 +5,11 @@
 //! disagree: `check` is clean and the emitted program fails. Each is a
 //! complete statement of the fix: make it pass and drop the `#[ignore]`.
 
+#[path = "support/data_record_siblings.rs"]
+mod data_record_siblings_contract;
+#[path = "emit_and_run/data_record_siblings.rs"]
+mod data_record_siblings;
+
 #[path = "support/scratch.rs"]
 mod scratch;
 #[path = "support/emit_and_run.rs"]

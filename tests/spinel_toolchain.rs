@@ -82,6 +82,10 @@ fn ordinary_class_body_calls_run_natively() {
 mod dry_initializer;
 #[path = "support/data_factory.rs"]
 mod data_factory;
+#[path = "support/data_record_siblings.rs"]
+mod data_record_siblings_contract;
+#[path = "spinel_toolchain/data_record_siblings.rs"]
+mod data_record_siblings;
 #[path = "support/relation_fork.rs"]
 mod relation_fork_contract;
 #[path = "spinel_toolchain/relation_fork.rs"]

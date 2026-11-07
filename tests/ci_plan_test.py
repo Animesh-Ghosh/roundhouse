@@ -748,6 +748,22 @@ class Routing(unittest.TestCase):
                 self.assertIn("spinel-framework", plan["jobs"])
                 self.assertIn("conditional_expression_parens", plan["spinel_tests"])
 
+    def test_file_level_data_records_select_the_native_toolchain_lane(self):
+        for path in [
+            "src/analyze/data.rs",
+            "src/ingest/library_class.rs",
+            "tests/data_factory_constants.rs",
+            "tests/support/data_record_siblings.rs",
+            "tests/emit_and_run/data_record_siblings.rs",
+            "tests/spinel_toolchain/data_record_siblings.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("unit", plan["jobs"])
+                self.assertIn("spinel-toolchain", plan["jobs"])
+        # This is a toolchain test, not a framework-suite binary.
+        self.assertNotIn("data_record_siblings", ci.SPINEL_TESTS)
+
     def test_param_binds_owns_lowering_drivers_and_database_runtime(self):
         for path in [
             "src/lower/arel/visitor.rs",
