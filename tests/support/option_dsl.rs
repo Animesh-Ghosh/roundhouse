@@ -4,7 +4,7 @@
 //! builder's writer, which sets the config's ivar by a computed name.
 //! The expansion writes both as ordinary `def`s.
 
-pub const OPTION: &str = r#"module Settings
+pub const OPTION: &str = r##"module Settings
   class Config
     module Option
       def option(name, options = {})
@@ -35,12 +35,12 @@ pub const OPTION: &str = r#"module Settings
     end
   end
 end
-"#;
+"##;
 
 /// `config.rb` with the option declarations given.
 pub fn config(options: &str, extra: &str) -> String {
     format!(
-        r#"module Settings
+        r##"module Settings
   class Config
     class Builder
       attr_reader :config
@@ -67,15 +67,15 @@ pub fn config(options: &str, extra: &str) -> String {
     @config = Config::Builder.new(&block).build
   end
 end
-"#
+"##
     )
 }
 
-pub const LITERAL_OPTIONS: &str = r#"    option :base_controller, default: "ActionController::Base"
+pub const LITERAL_OPTIONS: &str = r##"    option :base_controller, default: "ActionController::Base"
     option :api_only, default: false
-    option :realm, as: :realm_name, default: "Roundhouse""#;
+    option :realm, as: :realm_name, default: "Roundhouse""##;
 
-pub const LITERAL_ASSERTIONS: &str = r#"plain = Settings::Config::Builder.new.build
+pub const LITERAL_ASSERTIONS: &str = r##"plain = Settings::Config::Builder.new.build
 raise "default: #{plain.base_controller.inspect}" unless plain.base_controller == "ActionController::Base"
 raise "as: #{plain.realm_name.inspect}" unless plain.realm_name == "Roundhouse"
 raise "false default: #{plain.api_only.inspect}" unless plain.api_only == false
@@ -87,4 +87,4 @@ raise "own: #{own.base_controller.inspect}" unless own.base_controller == "Appli
 none = Settings.configure { realm nil }
 raise "nil written: #{none.realm_name.inspect}" unless none.realm_name.nil?
 puts "option DSL passed"
-"#;
+"##;
