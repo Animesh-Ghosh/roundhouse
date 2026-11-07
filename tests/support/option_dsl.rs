@@ -66,6 +66,10 @@ pub fn config(options: &str, extra: &str) -> String {
   def self.configure(&block)
     @config = Config::Builder.new(&block).build
   end
+
+  def self.config
+    @config || configure
+  end
 end
 "##
     )
@@ -88,3 +92,26 @@ none = Settings.configure { realm nil }
 raise "nil written: #{none.realm_name.inspect}" unless none.realm_name.nil?
 puts "option DSL passed"
 "##;
+
+/// doorkeeper's `resolve_controller`: a lambda default run with `instance_exec`, so it reads the config's own options.
+pub const RESOLVING_OPTIONS: &str = r##"    option :base_controller, default: (lambda do
+      api_only ? "ActionController::API" : "ActionController::Base"
+    end)
+    option :api_only, default: false"##;
+
+pub const RESOLVE: &str = r##"    def resolve_controller(name)
+      value = public_send(:"#{name}_controller")
+      value.respond_to?(:call) ? instance_exec(&value) : value
+    end"##;
+
+/// doorkeeper 5.9's own: the controller the option names, as a class.
+pub const RESOLVE_CLASS: &str = r##"    def resolve_controller(name)
+      config_option = public_send(:"#{name}_controller")
+      controller_name = if config_option.respond_to?(:call)
+                          instance_exec(&config_option)
+                        else
+                          config_option
+                        end
+
+      controller_name.constantize
+    end"##;

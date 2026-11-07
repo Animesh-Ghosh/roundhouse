@@ -624,6 +624,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
 fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[String]) -> IngestResult<App> {
     // Not left from an earlier ingest in this process: the hoists are checked against this app's modules.
     super::library_class::included_hoist_conflicts(&[]);
+    super::configured_superclass::reset();
     super::sources::reset();
     super::each_validator::reset();
     let _source_root = super::sources::set_root(dir);
@@ -3171,6 +3172,8 @@ end
     // The sources do not change between the two: one word index serves both.
     let mentions = super::class_macros::Mentions::new(&sources);
     super::class_macros::expand_class_macros(&mut app, &sources, &mentions);
+    // After the macros: a configured object's readers and its builder's writers are methods by now.
+    super::configured_superclass::fold(vfs, dir, &mut app);
     super::class_macros::drop_expanded_hook_macros(&mut app, &hook_macros_called, &mentions);
     super::model_callbacks::expand_model_callbacks(&mut app);
     // After the macros: an expanded `has_ancestry` is what writes the `extend`.

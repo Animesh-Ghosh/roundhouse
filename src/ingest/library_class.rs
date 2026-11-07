@@ -816,7 +816,9 @@ pub(super) fn library_class_and_struct_base(
         Some(_) => Some(struct_base_id(&owner)),
         None => parent,
     };
-    if parent.is_none() && class.superclass().is_some() {
+    let deferred = parent.is_none()
+        && class.superclass().is_some_and(|n| super::configured_superclass::defer(&owner, &n, source_parent_span, file));
+    if parent.is_none() && class.superclass().is_some() && !deferred {
         super::prism::push(crate::diagnostic::Diagnostic::unsupported(
             source_parent_span,
             None,
