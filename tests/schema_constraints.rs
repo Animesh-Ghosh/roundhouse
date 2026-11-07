@@ -97,6 +97,17 @@ fn computed_constraint_table_names_are_refused_at_the_source() {
 }
 
 #[test]
+fn an_index_on_a_dropped_column_is_not_a_schema_expression() {
+    use roundhouse::ingest::survey;
+    survey::activate();
+    let source = "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"members\" do |t|\n    t.widget_blob \"email\"\n    t.index \"email\"\n  end\nend\n";
+    let _ = ingest_schema(source.as_bytes(), "db/schema.rb");
+    let recorded = survey::recorded();
+    assert!(!recorded.is_empty(), "the column should be ledgered");
+    assert!(!recorded.iter().any(|gap| gap.contains("schema expression")), "{recorded:#?}");
+}
+
+#[test]
 fn expression_index_reaches_both_ddl_dialects() {
     let schema = ingest_schema(SCHEMA.as_bytes(), "db/schema.rb").unwrap();
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {

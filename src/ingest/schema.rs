@@ -1675,7 +1675,9 @@ fn table_from_create_table(
                     if let Some(call) = stmt.as_call_node() {
                         let call_name = constant_id_str(&call.name()).to_string();
                         if matches!(call_name.as_str(), "index" | "check_constraint") {
-                            if let Some(value) = call_arguments(&call).first().and_then(|n| string_value(n).map(|s| (s, n.location().start_offset()))) {
+                            if let Some(value) = call_arguments(&call).first().and_then(|n| string_value(n).map(|s| (s, n.location().start_offset())))
+                                .filter(|(s, _)| call_name == "check_constraint" || s.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_'))
+                            {
                                 sql_locations.push(value);
                             }
                         }
