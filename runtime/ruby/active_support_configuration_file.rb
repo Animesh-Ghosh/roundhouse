@@ -2,8 +2,6 @@
 require "erb"
 require "yaml"
 require_relative "hash_deep_merge"
-# Rails' `OrderedOptions`, which only the ruby family's overlay ships.
-require_relative "active_support_ordered_options"
 
 # `ActiveSupport::ConfigurationFile.parse(path)` — read a YAML file
 # and run it through ERB when it contains a tag. Rails loads with
@@ -34,7 +32,8 @@ end
 # writes on the app's reopen (`ingest::config_for`). The YAML parse and
 # the merge run here, when the call runs: the `shared` section is
 # deep-merged under the section of `Rails.env`, and a Hash result
-# becomes an `OrderedOptions`. A name without a file raises, as in Rails.
+# becomes an `OrderedOptions`, which only the ruby family's overlay ships
+# (its `boot.rb` requires it). A name without a file raises, as in Rails.
 module Rails
   class Application
     def config_for(name)

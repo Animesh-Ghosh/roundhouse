@@ -108,6 +108,9 @@ require_relative "runtime/active_support_time_parsing"
 require_relative "runtime/active_support_core_ext"
 # type_toolkit's `not_nil!` (Kernel / NilClass reopen, CRuby overlay only).
 require_relative "runtime/type_toolkit"
+# `config_for`'s answer: a Hash subclass with `method_missing`, so it cannot
+# live in the shared runtime that reads it (CRuby overlay only).
+require_relative "runtime/active_support_ordered_options"
 # Blank-predicate helper for receivers `src/lower/blank.rs` had no static
 # type to ground on. CRuby could serve those sites through the core_ext
 # reopen above; it now takes the same lowered call every other
