@@ -3868,12 +3868,27 @@ fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str, keeps_
     let extra_params = block_extra_params(b.parameters(), file)?;
     let params = block_param_names(b.parameters());
     let mut rest_param = block_rest_param(b.parameters());
-    let body = ingest_block_body(|| b.parameters(), b.body(), &mut rest_param, file)?;
+    // Not the method's block inside a block that binds its name: `&block` there hands on the inner value.
+    let shadows = BLOCK_PARAM.with(|slot| {
+        slot.borrow().as_ref().is_some_and(|name| params.contains(name) || rest_param.as_ref() == Some(name) || block_param.as_ref() == Some(name) || block_shadows(b.parameters(), name))
+    });
+    let body = if shadows {
+        with_block_param(None, || ingest_block_body(|| b.parameters(), b.body(), &mut rest_param, file))?
+    } else {
+        ingest_block_body(|| b.parameters(), b.body(), &mut rest_param, file)?
+    };
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Expr::new(
         Span::synthetic(),
         ExprNode::Lambda { extra_params, rest_param, params, block_param, body, block_style },
     ))
+}
+
+/// A block's own parameters and block-locals (`|a, (b, c); d|`) by any name, as written.
+fn block_shadows(params_node: Option<Node<'_>>, name: &Symbol) -> bool {
+    let Some(node) = params_node else { return false };
+    let text = String::from_utf8_lossy(node.location().as_slice()).into_owned();
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|word| word == name.as_str())
 }
 
 fn named_block_param(params_node: Option<Node<'_>>) -> Option<Symbol> {

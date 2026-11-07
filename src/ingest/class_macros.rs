@@ -526,6 +526,7 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
     let module_spent: Vec<(String, Symbol)> = module_macros
         .into_iter()
         .filter(|(_, name)| expanded_total.contains_key(name) && !failed_total.contains(name))
+        .filter(|(module, _)| !app.library_classes.iter().any(|lc| unresolved_extends(lc, &module_methods).contains(module)))
         .filter(|(module, name)| {
             let extenders: Vec<ClassId> =
                 app.library_classes.iter().filter(|lc| extended_modules(lc, &module_methods).contains(module)).map(|lc| lc.name.clone()).collect();
@@ -1029,10 +1030,30 @@ fn ancestors(named: &Named, parents: &HashMap<ClassId, ClassId>, model: &ClassId
 }
 
 /// The class methods the ancestors define, the nearest one's winning.
-// Resolved as Ruby's lexical lookup from the class: nested under it, then each enclosing namespace, then the top level.
 fn extended_modules(lc: &LibraryClass, module_methods: &HashMap<String, Vec<MethodDef>>) -> Vec<String> {
+    extend_candidates(lc)
+        .into_iter()
+        .filter_map(|(mut candidates, top)| {
+            let at = candidates.iter().position(|c| module_methods.contains_key(c))?;
+            // Not an enclosing namespace's: `class Outer::Config` does not nest in `Outer`, and the walk does not know which way the class was written.
+            (at == 0 || at == top).then(|| candidates.swap_remove(at))
+        })
+        .collect()
+}
+
+/// The modules an `extend` the walk leaves unexpanded may name: their macros stay for it.
+fn unresolved_extends(lc: &LibraryClass, module_methods: &HashMap<String, Vec<MethodDef>>) -> Vec<String> {
+    extend_candidates(lc)
+        .into_iter()
+        .filter(|(candidates, top)| candidates.iter().position(|c| module_methods.contains_key(c)).is_some_and(|at| at != 0 && at != *top))
+        .flat_map(|(candidates, _)| candidates.into_iter().filter(|c| module_methods.contains_key(c)))
+        .collect()
+}
+
+/// Each `extend` argument's lexical candidates, nearest first, the last `extend` first as Ruby searches it (one `extend A, B` keeps A first), with the index of the top-level one.
+// Resolved as Ruby's lexical lookup from the class: nested under it, then each enclosing namespace, then the top level.
+fn extend_candidates(lc: &LibraryClass) -> Vec<(Vec<String>, usize)> {
     let owner = lc.name.0.as_str();
-    // The last `extend` first, as Ruby searches it; one `extend A, B` keeps A first.
     lc.unknown_calls
         .iter()
         .rev()
@@ -1053,9 +1074,7 @@ fn extended_modules(lc: &LibraryClass, module_methods: &HashMap<String, Vec<Meth
                 }
                 let top = candidates.len();
                 candidates.push(written);
-                let at = candidates.iter().position(|c| module_methods.contains_key(c))?;
-                // Not an enclosing namespace's: `class Outer::Config` does not nest in `Outer`, and the walk does not know which way the class was written.
-                (at == 0 || at == top).then(|| candidates.swap_remove(at))
+                Some((candidates, top))
             }
             _ => None,
         })

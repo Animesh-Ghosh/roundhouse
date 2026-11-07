@@ -10374,6 +10374,19 @@ fn connected_to_other_than_the_writing_role_stays_unsupported() {
     }
 }
 
+/// An inner block that binds the method's block name hands on its own value, which `&` converts through `to_proc`.
+#[test]
+fn connected_to_with_a_shadowed_block_name_stays_unsupported() {
+    let errors = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def self.tally(&block)\n    [method(:count)].map { |block| ActiveRecord::Base.connected_to(role: :writing, &block) }\n  end\n",
+        )
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("connected_to")), "{errors:?}");
+}
+
 /// `def`s in a concern's `included do` are includer methods, instance and
 /// class side: they keep their visibility, and one over a column reader
 /// wins and reads the column through `super`.
