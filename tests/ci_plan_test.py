@@ -767,7 +767,7 @@ class Routing(unittest.TestCase):
                 if path == "tests/support/emit_and_run.rs":
                     expected = [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_constraints"]
                 elif path == "src/lower/arel/visitor.rs":
-                    expected = [*ci.PARAM_BIND_TESTS, "generated_columns_spinel"]
+                    expected = [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_default_expressions"]
                 elif path.startswith("src/"):
                     expected = ci.PARAM_BIND_TESTS
                 else:
@@ -962,6 +962,14 @@ class Routing(unittest.TestCase):
             "tests/support/schema_defaults_contract.rb", "src/schema.rs", "src/schema/generated.rs",
             "src/ingest/schema.rs", "src/emit/shared/schema_sql.rs", "src/emit/roda.rs",
         ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("schema_default_expressions", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
+    def test_sqlite_model_defaults_own_insert_lowering(self):
+        for path in ["src/lower/arel/ir.rs", "src/lower/arel/visitor.rs",
+                     "src/lower/model_to_library/mod.rs", "src/lower/model_to_library/adapter_emit/mod.rs"]:
             with self.subTest(path=path):
                 plan = ci.select([path])
                 self.assertIn("schema_default_expressions", plan["spinel_tests"])

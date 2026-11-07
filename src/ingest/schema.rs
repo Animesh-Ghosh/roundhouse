@@ -669,12 +669,12 @@ fn apply_table_verb(
                 if expression.is_some() || !columns.is_empty() {
                     if let Some(table) = schema.tables.get_mut(&Symbol::from(t.clone())) {
                         if expression.is_some() || columns.iter().all(|c| table.columns.iter().any(|col| col.name == *c)) {
-                            if dialect == GeneratedExpressionDialect::Portable && expression.as_ref().is_some_and(|e| !crate::emit::shared::schema_sql::sqlite_reads_alike(e, table)) {
+                            if expression.as_ref().is_some_and(|e| !crate::emit::shared::schema_sql::schema_expression_supported(e, Some(table), dialect)) {
                                 return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported index expression on {t}") });
                             }
                             let index = build_index(&t, columns, expression, args.iter().skip(2), file)?;
-                            if dialect == GeneratedExpressionDialect::Portable && index.expression.is_some()
-                                && index.predicate.as_ref().is_some_and(|p| !crate::emit::shared::schema_sql::sqlite_reads_alike(p, table)) {
+                            if index.expression.is_some()
+                                && index.predicate.as_ref().is_some_and(|p| !crate::emit::shared::schema_sql::schema_expression_supported(p, Some(table), dialect)) {
                                 let line = super::sources::line_at(file, keys.location().start_offset()).unwrap_or(1);
                                 return Err(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported index predicate on {t}") });
                             }
@@ -735,7 +735,7 @@ fn apply_table_verb(
             if let Some(table) = arg_name(0).and_then(|n| schema.tables.get_mut(&Symbol::from(n))) {
                 if verb == "add_check_constraint" {
                     let check = check_constraint(&args[1..], file, table.name.as_str())?;
-                    if dialect == GeneratedExpressionDialect::Portable && !crate::emit::shared::schema_sql::sqlite_reads_alike(&check.expression, table) {
+                    if !crate::emit::shared::schema_sql::schema_expression_supported(&check.expression, Some(table), dialect) {
                         return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) });
                     }
                     table.check_constraints.push(check);
@@ -1764,8 +1764,7 @@ fn table_from_create_table(
         });
     }
     for (expression, offset) in sql_locations {
-        if dialect == GeneratedExpressionDialect::Portable
-            && !crate::emit::shared::schema_sql::sqlite_reads_alike(&expression, &table)
+        if !crate::emit::shared::schema_sql::schema_expression_supported(&expression, Some(&table), dialect)
         {
             let line = super::sources::line_at(file, offset).unwrap_or(1);
             gaps.push(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported schema expression on {table_name}: {expression}") });
@@ -2055,7 +2054,7 @@ fn default_value(node: &Node<'_>) -> Option<String> {
 }
 
 fn sql_default_expression(node: &Node<'_>) -> Result<String, String> {
-    let gap = || "SQL defaults require a zero-argument literal proc returning a SQL string literal or CURRENT_TIMESTAMP, CURRENT_DATE or CURRENT_TIME".to_string();
+    let gap = || "SQL defaults require a zero-argument literal proc returning a SQL string literal, clock keyword, or supported scalar function expression".to_string();
     if let Some(parens) = node.as_parentheses_node() {
         let statements = parens.body().map(flatten_statements).ok_or_else(gap)?;
         return if statements.len() == 1 { sql_default_expression(&statements[0]) } else { Err(gap()) };
@@ -2078,7 +2077,8 @@ fn sql_default_expression(node: &Node<'_>) -> Result<String, String> {
     let sql = if sql.eq_ignore_ascii_case("DATETIME('now')") { "CURRENT_TIMESTAMP".into() } else { sql };
     let quoted = sql.len() >= 2 && sql.starts_with('\'') && sql.ends_with('\'')
         && !sql[1..sql.len() - 1].replace("''", "").contains('\'');
-    if !quoted && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str()) { return Err(gap()); }
+    if !quoted && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str())
+        && !crate::emit::shared::schema_sql::schema_expression_supported(&sql, None, GeneratedExpressionDialect::Portable) { return Err(gap()); }
     Ok(sql)
 }
 
@@ -2504,6 +2504,11 @@ fn column_from_call(
     let Some(args_node) = call.arguments() else { return Ok(None) };
     let args: Vec<Node<'_>> = args_node.arguments().iter().collect();
     let Some(col_name) = args.first().and_then(name_value) else { return Ok(None) };
+    if kwarg_value(args.iter().skip(1), "primary_key").is_some()
+        && kwarg_value(args.iter().skip(1), "default").is_some_and(|n| sql_default_candidate(&n)) {
+        let line = super::sources::line_at(file, call.location().start_offset()).unwrap_or(1);
+        return Err(IngestError::Unsupported { file: file.into(), message: format!("line {line}: SQL defaults with primary_key options are unsupported: {table}.{col_name}") });
+    }
     if has_column_option_splats(&args[1..]) {
         return Err(IngestError::Unsupported {
             file: file.into(),

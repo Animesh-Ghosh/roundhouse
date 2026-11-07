@@ -3379,7 +3379,7 @@ pub fn ty_of_column_slot(col: &Column) -> Ty {
     if col.array_stored {
         base = Ty::Array { elem: base.into() };
     }
-    if (col.nullable || col.generated.is_some()) && !col.primary_key {
+    if (col.nullable || col.generated.is_some() || col.computed_default().is_some()) && !col.primary_key {
         Ty::Union { variants: vec![base, Ty::Nil].into() }
     } else {
         base

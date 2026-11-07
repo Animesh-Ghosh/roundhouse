@@ -111,6 +111,14 @@ pub struct Column {
 }
 
 impl Column {
+    /// A database-evaluated default, distinct from a quoted SQL literal.
+    pub fn computed_default(&self) -> Option<&str> {
+        self.default_expression.as_deref().filter(|sql| {
+            !(sql.len() >= 2 && sql.starts_with('\'') && sql.ends_with('\'')
+                && !sql[1..sql.len() - 1].replace("''", "").contains('\''))
+        })
+    }
+
     /// The schema default a target reads. An array column's `[]` counts
     /// only where the target stores the Array.
     pub fn stored_default(&self) -> Option<&str> {

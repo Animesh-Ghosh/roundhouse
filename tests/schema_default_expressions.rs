@@ -13,6 +13,127 @@ fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app().write("db/schema.rb", SCHEMA)
 }
 
+const RANDOM_SCHEMA: &str = r#"ActiveRecord::Schema[8.1].define(version: 1) do
+  create_table :record_items do |t|
+    t.string :token, default: -> { "printf('item_%s', lower(hex(randomblob(16))))" }, null: false
+  end
+end
+"#;
+const RANDOM_MODEL: &str = "class RecordItem < ActiveRecord::Base\n  def self.lookup(id)\n    find(id).token\n  end\nend\n";
+const RANDOM_CONTRACT: &str = r#"
+first = RecordItem.create!
+second = RecordItem.create!
+raise 'default missing from model' unless first.token.start_with?('item_') && first.token.length == 37
+raise 'random default shared between rows' if first.token == second.token
+raise 'reader lost' unless RecordItem.lookup(first.id) == first.token
+explicit = RecordItem.create!(token: 'explicit')
+raise 'explicit value changed' unless explicit.token == 'explicit'
+raise 'SQL function default is eager' unless RecordItem.new.token.nil?
+nil_input = RecordItem.create!(token: nil)
+raise 'nil did not receive SQL function default' unless nil_input.token.start_with?('item_')
+raise 'nil input shared another row default' if nil_input.token == first.token
+puts 'per-row SQLite default and reader passed'
+"#;
+
+fn random_app() -> emit_and_run::Overlay {
+    emit_and_run::empty_app().write("db/schema.rb", RANDOM_SCHEMA).write("app/models/record_item.rb", RANDOM_MODEL)
+}
+
+#[test]
+fn sqlite_random_sql_default_keeps_exact_expression() {
+    let schema = ingest_schema(RANDOM_SCHEMA.as_bytes(), "db/schema.rb").unwrap();
+    let ddl = render_schema_statements_for(&schema, Dialect::Sqlite).unwrap().join(";\n");
+    assert!(ddl.contains("DEFAULT (printf('item_%s', lower(hex(randomblob(16)))))"), "{ddl}");
+    assert!(render_schema_statements_for(&schema, Dialect::Postgres).is_err());
+}
+
+#[test]
+fn sqlite_default_scalar_functions_are_closed_and_column_free() {
+    for sql in ["upper('x')", "lower('X')", "hex('x')", "randomblob(16)", "json_valid('{}')", "length('abc')", "substr('abc', 2, 1)", "coalesce(NULL, 'x')", "abs(-2)", "printf('%s', 'it''s')", "'x' || lower('Y')"] {
+        let source = RANDOM_SCHEMA.replace("printf('item_%s', lower(hex(randomblob(16))))", sql);
+        let schema = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap();
+        let ddl = render_schema_statements_for(&schema, Dialect::Sqlite).unwrap().join(";\n");
+        assert!(ddl.contains(&format!("DEFAULT ({sql})")), "{ddl}");
+    }
+    for sql in ["unknown_function('x')", "load_extension('file')", "token", "randomblob_size(16)", "'x'; SELECT 1", "'unterminated", "1", "(1)", "(1 + 2)", "TRUE", "FALSE", "NULL", "(lower ('X'))"] {
+        let source = RANDOM_SCHEMA.replace("printf('item_%s', lower(hex(randomblob(16))))", sql);
+        let error = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap_err().to_string();
+        assert!(error.contains("db/schema.rb") && error.contains("line 3") && error.contains("record_items.token"), "{error}");
+    }
+}
+
+#[test]
+fn postgres_refuses_sqlite_calls_but_ignores_quoted_data_and_comments() {
+    for sql in ["printf('%s', 'x')", "HEX('x')", "randomblob(16)", "json_valid('{}')", "substr('abc', -1)"] {
+        let source = RANDOM_SCHEMA.replace("printf('item_%s', lower(hex(randomblob(16))))", sql);
+        let schema = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap();
+        assert!(render_schema_statements_for(&schema, Dialect::Postgres).is_err(), "{sql}");
+    }
+    let source = RANDOM_SCHEMA.replace("printf('item_%s', lower(hex(randomblob(16))))", "coalesce('printf( json_valid(', 'x')");
+    let schema = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap();
+    render_schema_statements_for(&schema, Dialect::Postgres).unwrap();
+}
+
+#[test]
+fn sql_defaults_with_unmodeled_key_options_refuse_at_the_source() {
+    for declaration in ["t.string :token, primary_key: true,", "t.column :token, :string, primary_key: true,"] {
+        let source = RANDOM_SCHEMA.replace("t.string :token,", declaration);
+        let error = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap_err().to_string();
+        assert!(error.contains("db/schema.rb") && error.contains("line 3") && error.contains("primary_key"), "{error}");
+    }
+    let mut schema = ingest_schema(RANDOM_SCHEMA.as_bytes(), "db/schema.rb").unwrap();
+    schema.tables.get_mut(&roundhouse::Symbol::from("record_items")).unwrap().columns[1].primary_key = true;
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        assert!(render_schema_statements_for(&schema, dialect).unwrap_err().contains("primary-key default"));
+    }
+}
+
+#[test]
+fn emitted_ruby_applies_per_row_sqlite_default_and_keeps_reader() {
+    random_app().run_ruby(RANDOM_CONTRACT).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn native_spinel_applies_per_row_sqlite_default_and_keeps_reader() {
+    let script = format!("Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{RANDOM_CONTRACT}");
+    random_app().run_spinel_with_rbs(&script).assert_passes();
+}
+
+#[test]
+fn rails_applies_per_row_sqlite_default_and_keeps_reader() {
+    let helper = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
+    let script = format!(r#"
+require {helper:?}
+unless RailsOracle.available?("railties", "activerecord", sqlite3: ">= 2.9")
+  puts 'skip: Rails oracle, railties or sqlite3 unavailable'
+  exit
+end
+RailsOracle.activate("railties", "activerecord", sqlite3: ">= 2.9")
+require 'rails'
+require 'active_record/railtie'
+class OracleApp < Rails::Application
+  config.load_defaults 8.1
+  config.eager_load = false
+  config.secret_key_base = 'test'
+  config.logger = Logger.new(File::NULL)
+end
+ENV['DATABASE_URL'] = 'sqlite3::memory:'
+OracleApp.initialize!
+ActiveRecord::Base.establish_connection(adapter: 'sqlite3', database: ':memory:')
+ActiveRecord::Schema.verbose = false
+{RANDOM_SCHEMA}
+{RANDOM_MODEL}
+{RANDOM_CONTRACT}
+puts "oracle Ruby=#{{RUBY_VERSION}} Rails=#{{Rails.version}} defaults=8.1 SQLite=#{{SQLite3::SQLITE_VERSION}}"
+"#);
+    let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("per-row SQLite default and reader passed") || stdout.contains("skip:"), "{stdout}");
+    println!("{stdout}");
+}
+
 #[test]
 fn sql_default_reaches_both_ddl_dialects_without_quoting() {
     let schema = ingest_schema(SCHEMA.as_bytes(), "db/schema.rb").unwrap();

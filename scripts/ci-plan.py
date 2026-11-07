@@ -595,6 +595,8 @@ def native_coverage(path):
     if path in {
         "tests/schema_default_expressions.rs", "src/schema.rs", "src/schema/generated.rs",
         "src/ingest/schema.rs", "src/emit/shared/schema_sql.rs", "src/emit/roda.rs",
+        "src/lower/arel/ir.rs", "src/lower/arel/visitor.rs", "src/lower/model_to_library/mod.rs",
+        "src/lower/model_to_library/adapter_emit/mod.rs",
     } or path.startswith("tests/support/schema_defaults_"):
         suites.add("schema_default_expressions")
     if path in JSON_TYPES_SPINEL_INPUTS:
