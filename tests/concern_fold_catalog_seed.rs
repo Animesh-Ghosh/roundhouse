@@ -100,7 +100,7 @@ puts "override passed"
 
 #[test]
 fn typescript_receives_the_boolean_too() {
-    let (emitted, errors) = example(&["Retirable", "Labelled"]).emit(BuildTarget::TypeScript);
+    let (emitted, errors) = example(&["Retirable", "Labelled"]).emit(BuildTarget::Typescript);
     assert!(errors.is_empty(), "{errors:?}");
     let mut found = None;
     let mut stack = vec![emitted.to_path_buf()];
