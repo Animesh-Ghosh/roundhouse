@@ -36,6 +36,9 @@ mod nested_route_helper_record;
 #[path = "support/ivar_named_local.rs"]
 #[allow(dead_code)]
 mod ivar_named_local;
+#[path = "support/record_if_condition.rs"]
+#[allow(dead_code)]
+mod record_if_condition;
 #[path = "support/link_to_template_local.rs"]
 #[allow(dead_code)]
 mod link_to_template_local;
@@ -610,6 +613,22 @@ fn nested_route_helper_record_renders() {
 #[ignore]
 fn ivar_named_local_renders() {
     assert_content_tag_test_passes(ivar_named_local::strict_app());
+}
+
+/// #1909: a record as an `if` condition renders as Rails 8.1.4 does
+/// (`record_if_condition::VIEW`).
+#[test]
+#[ignore]
+fn record_if_condition_renders() {
+    assert_content_tag_test_passes(record_if_condition::strict_app());
+}
+
+/// #1909: an assignment as the `if` condition, the record read in the
+/// branch, renders as Rails 8.1.4 does (`record_if_condition::ASSIGN_VIEW`).
+#[test]
+#[ignore]
+fn record_if_assignment_renders() {
+    assert_content_tag_test_passes(record_if_condition::strict_assign_app());
 }
 
 /// #1898: a record in a local the template assigns, handed to
