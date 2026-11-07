@@ -1561,6 +1561,10 @@ pub struct LayoutCall {
     pub only: Vec<Symbol>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub except: Vec<Symbol>,
+    /// Whether `only:` was given: Rails' `only: []` matches no action,
+    /// where no `only:` leaves every action to `except:`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_present: bool,
     #[serde(default, skip_serializing_if = "Span::is_synthetic")]
     pub span: Span,
 }
@@ -1585,7 +1589,7 @@ pub enum LayoutValue {
 impl LayoutCall {
     /// Whether the call applies to `action` (Rails' `_conditional_layout?`).
     pub fn applies_to(&self, action: &str) -> bool {
-        if !self.only.is_empty() {
+        if self.only_present || !self.only.is_empty() {
             return self.only.iter().any(|a| a.as_str() == action);
         }
         !self.except.iter().any(|a| a.as_str() == action)

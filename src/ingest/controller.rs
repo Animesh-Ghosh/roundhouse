@@ -468,6 +468,7 @@ fn parse_layout_call(stmt: &Node<'_>, file: &str) -> IngestResult<Option<LayoutD
     };
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
+    let mut only_present = false;
     for arg in all_args.iter().skip(1) {
         let Some(hash) = arg.as_keyword_hash_node() else { continue };
         for element in hash.elements().iter() {
@@ -483,13 +484,22 @@ fn parse_layout_call(stmt: &Node<'_>, file: &str) -> IngestResult<Option<LayoutD
                         ),
                     });
                 }
-                "only" => only = super::util::symbol_list_value(&pair.value()),
+                "only" => {
+                    only = super::util::symbol_list_value(&pair.value());
+                    only_present = true;
+                }
                 "except" => except = super::util::symbol_list_value(&pair.value()),
                 _ => {}
             }
         }
     }
-    Ok(Some(LayoutDecl::Declared(LayoutCall { value, only, except, span: super::util::node_span(stmt, file) })))
+    Ok(Some(LayoutDecl::Declared(LayoutCall {
+        value,
+        only,
+        except,
+        only_present,
+        span: super::util::node_span(stmt, file),
+    })))
 }
 
 /// Classify one class-body statement into its `ControllerBodyItem` variant.

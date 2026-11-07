@@ -13,8 +13,8 @@ mod contract;
 
 use roundhouse::project::BuildTarget;
 
-/// `PAGES` as a script against the emitted Ruby app.
-fn pages_script() -> String {
+/// `pages` as a script against the emitted Ruby app.
+fn pages_script(pages: &[(&str, &str, u16, &str)]) -> String {
     let mut script = String::from(
         r#"def page(path, query)
   status, _headers, body = Main.run_rack(
@@ -30,7 +30,7 @@ fn pages_script() -> String {
 end
 "#,
     );
-    for (path, query, status, body) in contract::PAGES {
+    for (path, query, status, body) in pages {
         script.push_str(&format!(
             "got = page({path:?}, {query:?})\nraise \"{path}?{query}: #{{got.inspect}}\" unless got == [{status}, {body:?}]\n"
         ));
@@ -41,7 +41,30 @@ end
 
 #[test]
 fn each_action_renders_in_the_layout_rails_picks() {
-    let run = contract::blog().run_ruby(&pages_script());
+    let run = contract::blog().run_ruby(&pages_script(contract::PAGES));
+    run.assert_passes();
+    assert!(run.stdout.contains("controller layouts passed"), "{}", run.stdout);
+}
+
+/// An explicit `only: []` matches no action, so every action takes the
+/// default lookup, and it wins over `except:`; `except: []` excludes none.
+#[test]
+fn an_empty_only_matches_no_action() {
+    let run = contract::blog()
+        .write("app/controllers/drafts_controller.rb", "class DraftsController < ApplicationController\n  layout false, only: []\n\n  def index\n  end\nend\n")
+        .write("app/controllers/authors_controller.rb", "class AuthorsController < ApplicationController\n  layout false, only: []\n\n  def index\n  end\nend\n")
+        .write(
+            "app/controllers/comments_controller.rb",
+            "class CommentsController < ApplicationController\n  layout \"reading\", only: [], except: :show\n\n  def index\n  end\n\n  def show\n  end\nend\n",
+        )
+        .write("app/controllers/tags_controller.rb", "class TagsController < ApplicationController\n  layout false, except: []\n\n  def index\n  end\nend\n")
+        .run_ruby(&pages_script(&[
+            ("/drafts", "", 200, "<div>APPLICATION</div><p>drafts/index</p>"),
+            ("/authors", "", 200, "<div>AUTHORS</div><p>authors/index</p>"),
+            ("/comments", "", 200, "<div>APPLICATION</div><p>comments/index</p>"),
+            ("/comments/show", "", 200, "<div>APPLICATION</div><p>comments/show</p>"),
+            ("/tags", "", 200, "<p>tags/index</p>"),
+        ]));
     run.assert_passes();
     assert!(run.stdout.contains("controller layouts passed"), "{}", run.stdout);
 }
