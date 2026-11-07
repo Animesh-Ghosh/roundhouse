@@ -792,28 +792,29 @@ impl Analyzer {
                     continue;
                 }
                 let Some(kind) = entry.return_kind else { continue };
-                // The shared runtime types these as `() -> Base`, but in Rails
-                // `reload` and `lock!` answer `self`: keep the receiver's own
+                // Dispatch checks the model's own table before its includes and
+                // parent, so a seed here would hide an override that lives in
+                // an included module or a parent class (Ruby's ancestor order
+                // puts those ahead of the framework). Seed only when no app
+                // source above the model defines the method; the catalog is
+                // the fallback for the framework's own definition.
+                let inherited = |name: &str| {
+                    model
+                        .parent
+                        .as_ref()
+                        .is_some_and(|parent| source_methods.instance_method(parent, name))
+                        || model_includes_in(model, &source_methods.classes)
+                            .iter()
+                            .any(|include| source_methods.instance_method(include, name))
+                };
+                // Rails' `lock!` calls `reload`, so an override of either hides the seed.
+                if inherited(entry.name) || (entry.name == "lock!" && inherited("reload")) {
+                    continue;
+                }
+                // The shared runtime types `reload` and `lock!` as `() -> Base`,
+                // but in Rails they answer `self`: keep the receiver's own
                 // class so its model methods still resolve on the result.
-                // Skip that seed when a parent or include defines the method
-                // (or, for `lock!`, `reload` — Rails' `lock!` calls `reload`):
-                // BodyTyper prefers the model's own table, so a self seed
-                // would hide the source override's harvested return.
-                    let ret = if matches!(entry.name, "reload" | "lock!") {
-                    let inherited = |name: &str| {
-                        model
-                            .parent
-                            .as_ref()
-                            .is_some_and(|parent| source_methods.instance_method(parent, name))
-                            || model_includes_in(model, &source_methods.classes)
-                                .iter()
-                                .any(|include| source_methods.instance_method(include, name))
-                    };
-                    if inherited(entry.name)
-                        || (entry.name == "lock!" && inherited("reload"))
-                    {
-                        continue;
-                    }
+                let ret = if matches!(entry.name, "reload" | "lock!") {
                     self_ty.clone()
                 } else {
                     instantiate(kind)
