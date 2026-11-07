@@ -44,6 +44,9 @@ mod ivar_named_local;
 #[path = "support/record_if_condition.rs"]
 #[allow(dead_code)]
 mod record_if_condition;
+#[path = "support/link_to_template_local.rs"]
+#[allow(dead_code)]
+mod link_to_template_local;
 #[path = "support/rust_bare_model.rs"]
 mod rust_bare_model;
 #[path = "support/i18n_locales_app.rs"]
@@ -759,6 +762,27 @@ fn ivar_named_local_renders() {
 #[ignore]
 fn record_if_condition_renders() {
     let (emitted, errors) = record_if_condition::strict_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("src/tests/probes_controller_test.rs");
+    let mut source = std::fs::read_to_string(&test).expect("probes_controller_test.rs");
+    source.push_str("\nfn assert_includes(body: String, want: &str) {\n    assert!(body.contains(want), \"missing {want} in {body}\");\n}\n");
+    std::fs::write(&test, source).expect("write probe");
+    let output = Command::new("cargo")
+        .args(["test", "content_tag_renders"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("content_tag_renders ... ok"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1898: a record in a local the template assigns, handed to
+/// `link_to`'s url helper, renders as Rails 8.1.4 does
+/// (`link_to_template_local::VIEW`).
+#[test]
+#[ignore]
+fn link_to_template_local_renders() {
+    let (emitted, errors) = link_to_template_local::strict_app().emit(roundhouse::project::BuildTarget::Rust);
     assert!(errors.is_empty(), "{errors:?}");
     let test = emitted.join("src/tests/probes_controller_test.rs");
     let mut source = std::fs::read_to_string(&test).expect("probes_controller_test.rs");

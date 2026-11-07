@@ -2088,27 +2088,32 @@ fn route_args(helper: &str, args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
     args.iter()
         .map(|a| {
             let arg = rewrite_helpers_in_expr(a, ctx);
-            let model = match a.ty.as_ref().map(crate::ty::Ty::peel_nilable) {
-                // The app's key for the class (`model_param_keys`, which
-                // drops an isolated engine's namespace), the one
-                // `model_singulars` and `slug_models` hold.
-                Some(crate::ty::Ty::Class { id, .. }) => Some(
-                    ctx.model_param_keys
-                        .get(id.0.as_str())
-                        .cloned()
-                        .unwrap_or_else(|| crate::naming::model_param_key(id.0.as_str())),
-                ),
-                _ => None,
-            };
-            match model {
-                Some(key) if !shadowed && ctx.model_singulars.contains(&key) => {
-                    let param = if ctx.slug_models.contains(&key) { "to_param" } else { "id" };
-                    send(Some(arg), param, Vec::new(), None, false)
-                }
+            match record_segment_method(a, ctx) {
+                Some(param) if !shadowed => send(Some(arg), param, Vec::new(), None, false),
                 _ => arg,
             }
         })
         .collect()
+}
+
+/// The method that fills a route segment from `a` when `a` is typed as a
+/// record of one of the app's models: `id`, or `to_param` for a model
+/// that overrides it. `None` for any other value.
+pub(super) fn record_segment_method(a: &Expr, ctx: &ViewCtx) -> Option<&'static str> {
+    let Some(crate::ty::Ty::Class { id, .. }) = a.ty.as_ref().map(crate::ty::Ty::peel_nilable) else {
+        return None;
+    };
+    // The app's key for the class (`model_param_keys`, which drops an
+    // isolated engine's namespace), the one `model_singulars` and
+    // `slug_models` hold.
+    let key = ctx
+        .model_param_keys
+        .get(id.0.as_str())
+        .cloned()
+        .unwrap_or_else(|| crate::naming::model_param_key(id.0.as_str()));
+    ctx.model_singulars
+        .contains(&key)
+        .then(|| if ctx.slug_models.contains(&key) { "to_param" } else { "id" })
 }
 
 /// Does a block body hold compiled-template buffer ops (`_buf = _buf + …`)?

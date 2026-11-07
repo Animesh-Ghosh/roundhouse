@@ -51,6 +51,9 @@ mod ivar_named_local;
 #[path = "support/record_if_condition.rs"]
 #[allow(dead_code)]
 mod record_if_condition;
+#[path = "support/link_to_template_local.rs"]
+#[allow(dead_code)]
+mod link_to_template_local;
 #[path = "support/nested_classes.rs"]
 mod nested_classes;
 #[path = "support/array_methods.rs"]
@@ -839,6 +842,25 @@ fn ivar_named_local_renders() {
 #[ignore]
 fn record_if_condition_renders() {
     let (emitted, errors) = record_if_condition::strict_app().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let install = Command::new("npm").args(["install", "--silent", "--no-audit", "--no-fund"]).current_dir(&*emitted).output().expect("run npm install");
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    let output = Command::new("./node_modules/.bin/tsx")
+        .args(["--test", "test/probes_controller.test.ts"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run tsx --test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("pass 1"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1898: a record in a local the template assigns, handed to
+/// `link_to`'s url helper, renders as Rails 8.1.4 does
+/// (`link_to_template_local::VIEW`).
+#[test]
+#[ignore]
+fn link_to_template_local_renders() {
+    let (emitted, errors) = link_to_template_local::strict_app().emit(roundhouse::project::BuildTarget::Typescript);
     assert!(errors.is_empty(), "{errors:?}");
     let install = Command::new("npm").args(["install", "--silent", "--no-audit", "--no-fund"]).current_dir(&*emitted).output().expect("run npm install");
     assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));

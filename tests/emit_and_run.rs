@@ -21235,6 +21235,9 @@ mod ivar_named_local;
 #[path = "support/record_if_condition.rs"]
 #[allow(dead_code)]
 mod record_if_condition;
+#[path = "support/link_to_template_local.rs"]
+#[allow(dead_code)]
+mod link_to_template_local;
 
 /// `simple_format` with `sanitize: false`: paragraphs, line breaks, html
 /// options and `wrapper_tag:`, as Rails 8.1.4 renders them.
@@ -21555,5 +21558,27 @@ fn ivar_named_local_renders_as_rails_on_spinel() {
 fn record_if_condition_renders_as_rails_on_spinel() {
     record_if_condition::app(content_tag_options::app_rendering(record_if_condition::VIEW, &[]))
         .run_spinel(&helper_escape_at_output::render_script(record_if_condition::RENDERS))
+        .assert_passes();
+}
+
+/// #1898: a record in a local the template assigns, handed to
+/// `link_to`'s url helper, renders as Rails 8.1.4 does
+/// (`link_to_template_local::VIEW`).
+#[test]
+fn link_to_template_local_renders_as_rails() {
+    link_to_template_local::app(content_tag_options::app_rendering(link_to_template_local::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_template_local::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1898: a record in a local the template assigns, handed to
+/// `link_to`'s url helper, renders as Rails 8.1.4 does
+/// (`link_to_template_local::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_template_local_renders_as_rails_on_spinel() {
+    link_to_template_local::app(content_tag_options::app_rendering(link_to_template_local::VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(link_to_template_local::RENDERS))
         .assert_passes();
 }

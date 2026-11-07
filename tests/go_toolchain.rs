@@ -39,6 +39,9 @@ mod ivar_named_local;
 #[path = "support/record_if_condition.rs"]
 #[allow(dead_code)]
 mod record_if_condition;
+#[path = "support/link_to_template_local.rs"]
+#[allow(dead_code)]
+mod link_to_template_local;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -618,4 +621,13 @@ fn ivar_named_local_renders() {
 #[ignore]
 fn record_if_condition_renders() {
     assert_content_tag_test_passes(record_if_condition::strict_app());
+}
+
+/// #1898: a record in a local the template assigns, handed to
+/// `link_to`'s url helper, renders as Rails 8.1.4 does
+/// (`link_to_template_local::VIEW`).
+#[test]
+#[ignore]
+fn link_to_template_local_renders() {
+    assert_content_tag_test_passes(link_to_template_local::strict_app());
 }
