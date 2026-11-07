@@ -21232,6 +21232,9 @@ mod concern_to_param;
 #[path = "support/ivar_named_local.rs"]
 #[allow(dead_code)]
 mod ivar_named_local;
+#[path = "support/record_if_condition.rs"]
+#[allow(dead_code)]
+mod record_if_condition;
 
 /// `simple_format` with `sanitize: false`: paragraphs, line breaks, html
 /// options and `wrapper_tag:`, as Rails 8.1.4 renders them.
@@ -21525,6 +21528,16 @@ fn ivar_named_local_renders_as_rails() {
         .assert_passes();
 }
 
+/// #1909: a record as an `if` condition renders as Rails 8.1.4 does
+/// (`record_if_condition::VIEW`).
+#[test]
+fn record_if_condition_renders_as_rails() {
+    record_if_condition::app(content_tag_options::app_rendering(record_if_condition::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(record_if_condition::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
 /// A template local assigned from the ivar of its own name renders as
 /// Rails 8.1.4 does (`ivar_named_local::VIEW`).
 #[test]
@@ -21532,5 +21545,15 @@ fn ivar_named_local_renders_as_rails() {
 fn ivar_named_local_renders_as_rails_on_spinel() {
     ivar_named_local::app(content_tag_options::app_rendering(ivar_named_local::VIEW, &[]))
         .run_spinel(&helper_escape_at_output::render_script(ivar_named_local::RENDERS))
+        .assert_passes();
+}
+
+/// #1909: a record as an `if` condition renders as Rails 8.1.4 does
+/// (`record_if_condition::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn record_if_condition_renders_as_rails_on_spinel() {
+    record_if_condition::app(content_tag_options::app_rendering(record_if_condition::VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(record_if_condition::RENDERS))
         .assert_passes();
 }

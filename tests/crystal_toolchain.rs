@@ -45,6 +45,9 @@ mod nested_route_helper_record;
 #[path = "support/ivar_named_local.rs"]
 #[allow(dead_code)]
 mod ivar_named_local;
+#[path = "support/record_if_condition.rs"]
+#[allow(dead_code)]
+mod record_if_condition;
 #[path = "support/link_to_if_escape.rs"]
 #[allow(dead_code)]
 mod link_to_if_escape;
@@ -521,6 +524,19 @@ fn nested_route_helper_record_renders() {
 #[ignore]
 fn ivar_named_local_renders() {
     let (app, renders) = (ivar_named_local::strict_app(), ivar_named_local::RENDERS.to_vec());
+    let (ok, stdout, stderr) = render_probe(app);
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in &renders {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
+    }
+}
+
+/// #1909: a record as an `if` condition renders as Rails 8.1.4 does
+/// (`record_if_condition::VIEW`).
+#[test]
+#[ignore]
+fn record_if_condition_renders() {
+    let (app, renders) = (record_if_condition::strict_app(), record_if_condition::RENDERS.to_vec());
     let (ok, stdout, stderr) = render_probe(app);
     assert!(ok, "{stdout}\n{stderr}");
     for want in &renders {

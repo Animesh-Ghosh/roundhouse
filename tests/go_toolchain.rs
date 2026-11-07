@@ -36,6 +36,9 @@ mod nested_route_helper_record;
 #[path = "support/ivar_named_local.rs"]
 #[allow(dead_code)]
 mod ivar_named_local;
+#[path = "support/record_if_condition.rs"]
+#[allow(dead_code)]
+mod record_if_condition;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -607,4 +610,12 @@ fn nested_route_helper_record_renders() {
 #[ignore]
 fn ivar_named_local_renders() {
     assert_content_tag_test_passes(ivar_named_local::strict_app());
+}
+
+/// #1909: a record as an `if` condition renders as Rails 8.1.4 does
+/// (`record_if_condition::VIEW`).
+#[test]
+#[ignore]
+fn record_if_condition_renders() {
+    assert_content_tag_test_passes(record_if_condition::strict_app());
 }

@@ -34,6 +34,9 @@ mod nested_route_helper_record;
 #[path = "support/ivar_named_local.rs"]
 #[allow(dead_code)]
 mod ivar_named_local;
+#[path = "support/record_if_condition.rs"]
+#[allow(dead_code)]
+mod record_if_condition;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -295,6 +298,25 @@ fn nested_route_helper_record_renders() {
 #[ignore]
 fn ivar_named_local_renders() {
     let (emitted, errors) = ivar_named_local::strict_app().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("tests/test_probes_controller.py");
+    let source = std::fs::read_to_string(&test).expect("test_probes_controller.py");
+    std::fs::write(&test, source.replace(".include_p(", ".__contains__(")).expect("write probe");
+    let output = Command::new("python3")
+        .args(["-m", "unittest", "tests.test_probes_controller"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run python unittest");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success() && stderr.contains("Ran 1 test"), "{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
+}
+
+/// #1909: a record as an `if` condition renders as Rails 8.1.4 does
+/// (`record_if_condition::VIEW`).
+#[test]
+#[ignore]
+fn record_if_condition_renders() {
+    let (emitted, errors) = record_if_condition::strict_app().emit(roundhouse::project::BuildTarget::Python);
     assert!(errors.is_empty(), "{errors:?}");
     let test = emitted.join("tests/test_probes_controller.py");
     let source = std::fs::read_to_string(&test).expect("test_probes_controller.py");
