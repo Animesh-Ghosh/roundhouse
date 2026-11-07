@@ -1461,6 +1461,7 @@ impl Analyzer {
         app.unknown_association_targets = unknown_association_targets(app, &self.classes);
         self.upload_array_fields = Some(crate::lower::controller_to_library::params::upload_array_fields(&app.controllers));
         self.fixpoint_checks = fixpoint_check::Checks::start();
+        self.settle = oscillation::Settle::default();
         self.unify_memo.reset();
         // Before any signature is copied. Anonymous `**` / `...` cannot
         // survive flattened keywords, and `check` does not lower.
@@ -1785,7 +1786,10 @@ impl Analyzer {
                     TypingMode::Production { dirty: None },
                 )
             });
+            let before_harvest = self.capture_inference_sig();
             self.harvest_returns_to_registry(app, true);
+            // Not left as harvested: the raw return of a pinned entry would replace its join, and the restamp can exit without another harvest to restore it.
+            self.settle.returns(&mut self.classes, &before_harvest.instance, &before_harvest.class_methods);
             // …and that harvest can still move a helper's return, which
             // production bodies read. The absorb branch above ends on a
             // signature check, so it leaves production converged; this

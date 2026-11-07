@@ -135,3 +135,17 @@ fn a_reader_that_settles_on_its_own_keeps_its_type() {
     assert_no_cap(rounds);
     assert_eq!(x, Ty::Int);
 }
+
+/// Views move no production signature here, so the absorb loop never runs
+/// and its one unchecked harvest is the last. The body re-derives a narrower
+/// return than the join each round, so nothing later restores the pin.
+#[test]
+fn the_harvest_that_replaces_the_absorb_loop_keeps_a_pinned_return() {
+    let (rounds, copy) = analyze(COPIER, ("Copier", "deep_copy", true));
+    assert_eq!(rounds.absorb, LoopEnd::NotRun, "{rounds:?}");
+    assert_eq!(rounds.restamp.passes, 0, "{rounds:?}");
+    let kept = arms(&copy)
+        .iter()
+        .any(|arm| matches!(arm, Ty::Array { elem } if !matches!(**elem, Ty::Untyped)));
+    assert!(kept, "{copy:?}");
+}
