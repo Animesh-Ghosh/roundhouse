@@ -507,25 +507,20 @@ fn a_result_name_in_another_owner_does_not_answer_an_unresolved_constant() {
 }
 
 #[test]
-fn rehomed_file_level_factories_remain_unsupported() {
+fn file_level_factories_keep_their_identity_beside_other_classes() {
     let source = format!(
         "GlobalResult = Data.define(:name)\n{}",
         data_factory::DECLARATIONS
     );
     let mut app = ingest(&source, "GlobalResult.new(name: \"global\")");
     assert!(
-        !Analyzer::new(&app)
+        Analyzer::new(&app)
             .class_registry()
             .contains_key(&ClassId(Symbol::from("GlobalResult")))
     );
     roundhouse::session::analyze_and_lower(&mut app);
     let diagnostics = roundhouse::analyze::diagnose(&app);
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.severity == roundhouse::diagnostic::Severity::Error),
-        "{diagnostics:?}"
-    );
+    assert!(diagnostics.iter().all(|diagnostic| diagnostic.severity != roundhouse::diagnostic::Severity::Error), "{diagnostics:?}");
 }
 
 #[test]
@@ -891,6 +886,98 @@ fn errors(app: &mut roundhouse::App) -> Vec<roundhouse::diagnostic::Diagnostic> 
         .into_iter()
         .filter(|diagnostic| diagnostic.severity == roundhouse::diagnostic::Severity::Error)
         .collect()
+}
+
+#[test]
+fn file_level_data_body_methods_survive_sibling_declarations() {
+    for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+        let tree: HashMap<PathBuf, Vec<u8>> = [(PathBuf::from(path), br#"
+Artifact = Data.define(:digest, :size) do
+  def label = digest + ":" + size.to_s
+end
+module Builder
+  def self.make = Artifact.new(digest: "abc", size: 3)
+  def self.label = make.label
+end
+"#.to_vec())].into_iter().collect();
+        let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+        let record = app.library_classes.iter().find(|class| class.name.0.as_str() == "Artifact")
+            .unwrap_or_else(|| panic!("{path}: missing Artifact"));
+        assert!(record.data_define().is_some(), "{path}: {:?}", record.origin);
+        assert_eq!(record.methods.len(), 1, "{path}: {:?}", record.methods);
+        assert!(errors(&mut app).is_empty(), "{path}: {:?}", roundhouse::analyze::diagnose(&app));
+    }
+}
+
+#[test]
+fn multiple_file_level_data_records_keep_their_members_and_methods() {
+    let source = "Reports::First = ::Data.define(:value) do; def label = self.value; end\n\
+                  Reports::Second = Data.define(:value) do; def label = value.to_s; end\n";
+    let tree = [(PathBuf::from("app/models/reports/records.rb"), source.as_bytes().to_vec())]
+        .into_iter().collect();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest");
+    for name in ["Reports::First", "Reports::Second"] {
+        let class = app.library_classes.iter().find(|class| class.name.0.as_str() == name).expect(name);
+        assert!(class.data_define().is_some(), "{class:?}");
+        assert_eq!(class.methods.len(), 1, "{class:?}");
+    }
+}
+
+#[test]
+fn unsupported_file_level_data_blocks_keep_source_located_refusals() {
+    use roundhouse::diagnostic::Severity;
+    for record in [
+        "Artifact = Data.define(:digest) do |klass|; klass; def label = digest; end",
+        "Artifact = Data.define(member) do; def label = digest; end",
+        "Artifact = Data.define(:digest, :digest) do; def label = digest; end",
+        "Artifact = Data.define(:digest) do; class Nested; end; def label = digest; end",
+        "Artifact = Data.define(:digest) do; def other.label = digest; end",
+    ] {
+        let source = format!("\n{record}\nmodule Builder; def self.label = Artifact.new(\"abc\").label; end\n");
+        let tree = [(PathBuf::from("lib/artifact.rb"), source.into_bytes())].into_iter().collect();
+        let (app, mut diagnostics) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_app_from_tree(tree));
+        let mut app = app.expect("support-file errors are diagnostics");
+        roundhouse::session::analyze_and_lower(&mut app);
+        diagnostics.extend(roundhouse::analyze::diagnose(&app));
+        assert!(diagnostics.iter().any(|d| d.severity == Severity::Error && !d.span.is_synthetic()),
+            "{record}: {diagnostics:?}");
+    }
+}
+
+#[test]
+fn file_level_data_redefinitions_are_refused_in_either_order() {
+    let record = "Artifact = Data.define(:digest) do; def label = digest; end";
+    for source in [
+        format!("{record}\nclass Artifact; def extra = 1; end"),
+        format!("class Artifact; def extra = 1; end\n{record}"),
+        format!("{record}\nArtifact = Data.define(:size)"),
+    ] {
+        let error = roundhouse::ingest::ingest_library_classes(source.as_bytes(), "lib/artifact.rb")
+            .expect_err("a replacement must not merge unrelated bodies");
+        assert!(format!("{error:?}").contains("same class"), "{error:?}");
+    }
+}
+
+#[test]
+fn file_level_data_records_require_the_builtin_factory() {
+    let mut app = ingest(r#"class Data
+  def self.define(name) = String
+end
+Artifact = Data.define(:digest) do
+  def label = "custom"
+end
+"#, "Artifact.new.label");
+    assert!(errors(&mut app).iter().any(|d| !d.span.is_synthetic()
+        && d.message.contains("built-in Data")));
+}
+
+#[test]
+fn file_level_data_records_do_not_drop_sibling_statements() {
+    for statement in ["puts 'loaded'", "Reports::Alias = String", "record::Other = Data.define(:value)"] {
+        let source = format!("Artifact = Data.define(:digest)\n{statement}\n");
+        assert!(roundhouse::ingest::ingest_library_classes(source.as_bytes(), "lib/artifact.rb").is_err(),
+            "silently discarded {statement}");
+    }
 }
 
 #[test]

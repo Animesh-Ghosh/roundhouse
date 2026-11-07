@@ -121,12 +121,20 @@ pub(super) fn register(
 /// or whose generated class is subclassed. Lifting methods alone does not establish
 /// that the original factory belongs to the supported subset.
 pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
-    if !app.library_classes.iter().any(|class| matches!(class.origin, Some(LibraryClassOrigin::DataFactory { .. }))) {
+    if !app.library_classes.iter().any(|class| matches!(class.origin,
+        Some(LibraryClassOrigin::DataFactory { .. } | LibraryClassOrigin::DataDefine { .. }))) {
         return Vec::new();
     }
     let resolver = app.const_resolver.for_sources(&app.sources);
     let mut diagnostics = Vec::new();
     for factory in &app.library_classes {
+        if let Some((_, span)) = factory.data_define()
+            && resolver.has_source_namespace("Data")
+        {
+            diagnostics.push(Diagnostic::unsupported(span, None, "Data.define",
+                "file-level Data factories require the built-in Data"));
+            continue;
+        }
         let Some(LibraryClassOrigin::DataFactory { declaration_span }) = factory.origin else {
             continue;
         };
