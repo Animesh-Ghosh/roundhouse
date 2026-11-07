@@ -7168,8 +7168,8 @@ impl Analyzer {
 /// arm matches.
 ///
 /// Shared by the analyzer's relation return ([`body_tail_yields_relation`])
-/// and the lowering's (`lower::scope_chain::relation_return_model`), so a
-/// body the analyzer types as a relation is never folded into an Array.
+/// and the lowering's (`lower::scope_chain::relation_return_model`), so
+/// both read the same branches.
 pub(crate) fn value_tails(body: &Expr) -> Option<Vec<&Expr>> {
     match &*body.node {
         ExprNode::Seq { exprs } => value_tails(exprs.last()?),
