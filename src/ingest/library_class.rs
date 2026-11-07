@@ -2164,6 +2164,19 @@ impl DeclBody {
             .class_initializers
             .iter()
             .any(|expr| !expr.span.is_synthetic());
+        // Not where no `@@` initializer is written: there a writer call runs in place as a body statement already.
+        if has_source_ordered_init {
+            let methods = &self.methods;
+            let writes: Vec<Expr> = self.unknown_calls.extract_if(.., |call| runs_own_writer(call, methods)).collect();
+            for write in writes {
+                let at = self
+                    .class_initializers
+                    .iter()
+                    .position(|init| !init.span.is_synthetic() && init.span.file == write.span.file && init.span.start > write.span.start)
+                    .unwrap_or(self.class_initializers.len());
+                self.class_initializers.insert(at, write);
+            }
+        }
         // Constants and `@@` initializers whose values are all literals
         // cannot observe one another, so emitting them in a different order
         // than the source wrote them changes nothing (lobsters' `Twitter`:
@@ -3817,12 +3830,7 @@ fn walk_decl_body_with_visibility<'pr>(
                             && !is_sorbet_annotation_mixin(&call)
                         {
                             if let Ok(e) = ingest_expr(&stmt, file) {
-                                if !mode.is_class_side() && call.receiver().is_some() && runs_own_writer(&e, &out.methods) {
-                                    // `self.mailer = "Devise::Mailer"` after `def self.mailer=`: the initializers run after the methods, as it does.
-                                    out.class_initializers.push(e);
-                                } else {
-                                    out.unknown_calls.push(e);
-                                }
+                                out.unknown_calls.push(e);
                             }
                         }
                     }
