@@ -468,13 +468,15 @@ fn runtime_cable_mount(call: &ruby_prism::CallNode<'_>) -> bool {
 /// is not served. Located at the regex literal when it can be found.
 fn refused_route_diagnostics(entries: &[RouteSpec], source: &[u8], file: &str) -> Vec<Diagnostic> {
     let mut seen = HashSet::default();
+    let mut defaults_seen = HashSet::default();
     let mut out = Vec::new();
     for route in crate::lower::routes::flatten_route_entries(entries) {
         for (key, (_, span)) in &route.param_defaults {
             let segment = route.path_params.iter().take(route.required_params).any(|p| p == key);
             let kept = key == crate::lower::routes::FORMAT_REQUIRED_KEY
                 || if key == "format" { route.format.is_some() && !segment } else { segment };
-            if !kept {
+            // A scope's default reaches every route under it; refuse it once at its source.
+            if !kept && defaults_seen.insert((*span, key.clone())) {
                 let detail = format!("no required segment of {} {} carries `{key}`", format!("{:?}", route.method).to_uppercase(), route.path);
                 out.push(Diagnostic::unsupported(*span, None, "route defaults", detail));
             }

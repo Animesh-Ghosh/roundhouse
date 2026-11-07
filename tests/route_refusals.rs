@@ -231,6 +231,14 @@ fn a_route_set_behind_a_guard_is_refused() {
 }
 
 #[test]
+fn a_scope_default_is_refused_once_for_all_its_routes() {
+    let app = drawn("scope defaults: { kind: 'x' } do\n  resources :posts\nend");
+    let found: Vec<String> = diagnostics(&app).into_iter().filter(|d| d.contains("route defaults")).collect();
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].starts_with("config/routes.rb:2:"), "{found:#?}");
+}
+
+#[test]
 fn top_level_prepend_or_append_on_other_values_is_not_a_route_set() {
     let draw = "Rails.application.routes.draw do\n  get '/catalog', to: 'catalog#show'\nend\n";
     for prelude in [
