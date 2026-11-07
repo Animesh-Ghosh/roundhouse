@@ -2367,6 +2367,10 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
                 if target == BuildTarget::Spinel && !load_time
                     && matches!(&*operand.node, ExprNode::Ivar { .. }) => None,
             ExprNode::Defined { .. } => Some("runtime defined? query"),
+            // A `define_method` block's `&block`, kept by ingest: only the Ruby emitter (Spinel's and Roda's too) binds it.
+            ExprNode::Lambda { block_param: Some(_), .. } if !matches!(target, BuildTarget::Spinel | BuildTarget::Roda) => {
+                Some("block parameter of a block")
+            }
             // The Ruby emitter (Spinel's and Roda's too) renders the whole
             // signature; the other emitters read only the required names
             // and would drop the rest, which the body still reads.
