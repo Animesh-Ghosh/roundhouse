@@ -328,6 +328,8 @@ enum Holder {
     Constant(String),
 }
 
+const MAPPER: &str = "ActionDispatch::Routing::Mapper";
+
 /// The owner a write to a constant's value is tagged with.
 const CONSTANT_OWNER: &str = "::constant";
 
@@ -356,6 +358,8 @@ struct Eval<'a> {
     facts: super::gem_hooks::Facts,
     /// Constants' values once read, by full name, so a change in place (`ALL.insert`) is what the next read sees.
     consts: HashMap<String, Val>,
+    /// Methods a `class_eval` string defined, by class, the latest last.
+    evaled: HashMap<String, Vec<MethodDef>>,
 }
 
 /// The mapper a routing method runs on: the program's classes that answer on it, and its instance variables.
@@ -379,7 +383,7 @@ const SCOPE_KEYS: &[&str] = &["path", "as", "module", "constraints", "defaults",
 impl<'a> Eval<'a> {
     fn new(app: &'a App) -> Self {
         let known = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
-        Eval { classes: &app.library_classes, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default() }
+        Eval { classes: &app.library_classes, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default(), evaled: HashMap::default() }
     }
 
     /// The constant `expr` names once the initializers that call on its root have run.
@@ -449,6 +453,7 @@ impl<'a> Eval<'a> {
         match this {
             Val::Obj(i) => (self.heap[*i].class.clone(), false),
             Val::Class(c) => (c.clone(), true),
+            Val::Router => (MAPPER.into(), false),
             _ => ("*".into(), false),
         }
     }
@@ -456,14 +461,15 @@ impl<'a> Eval<'a> {
     fn make_unsure(&mut self, (owner, side, name): &Tag) {
         self.tick += 1;
         if owner == CONSTANT_OWNER {
-            // By its last segment: the write names the constant as written, not as resolved.
-            let held: Vec<String> = self.consts.keys().filter(|k| k.rsplit("::").next() == Some(name.as_str())).cloned().collect();
+            // A resolved name is that constant; a written one that did not resolve may be any constant it ends with.
+            let held: Vec<String> = self.consts.keys().filter(|k| *k == name || k.ends_with(&format!("::{name}"))).cloned().collect();
             for key in held {
                 self.unsure.entry(Holder::Constant(key)).or_default().push(("*".into(), self.tick));
             }
             return;
         }
-        if !*side && (owner == "*" || owner == "ActionDispatch::Routing::Mapper" || self.router.mixins.contains(owner)) {
+        // Not for a write on an unknown receiver: the mapper is the evaluation's own, which only its methods are handed.
+        if !*side && (owner == MAPPER || self.router.mixins.contains(owner)) {
             self.unsure.entry(Holder::Router).or_default().push((name.clone(), self.tick));
         }
         let mut holders: Vec<Holder> = (0..self.heap.len())
@@ -835,7 +841,8 @@ impl<'a> Eval<'a> {
             return self.draw(method, argv, blk, frame);
         }
         // `@mapping.controllers.merge!(names)`: the Hash the reader answers is the ivar's, changed in place.
-        if matches!(method, "merge!" | "update" | "[]=")
+        if matches!(method, "merge!" | "update" | "[]=" | "delete")
+            && !(method == "delete" && !matches!(this, Val::Hash(_) | Val::Defaulted { .. }))
             && let Some(r) = recv
             && let Some(slot) = self.held_by(r, frame)
             && !argv.iter().any(|a| matches!(a, Val::Unknown))
@@ -845,6 +852,18 @@ impl<'a> Eval<'a> {
                 Some(Val::Defaulted { entries, default }) => (entries, Some(default)),
                 _ => return Err(format!("`{method}` on other than a Hash")),
             };
+            if let ("delete", [key]) = (method, argv.as_slice()) {
+                if blk.is_some() {
+                    return Err("a `delete` with a block".into());
+                }
+                let removed = entries.iter().position(|(k, _)| same(k, key)).map(|i| entries.remove(i).1);
+                let kept = match default {
+                    Some(default) => Val::Defaulted { entries, default },
+                    None => Val::Hash(entries),
+                };
+                self.slot_set(&slot, kept, frame)?;
+                return Ok(removed.unwrap_or(Val::Nil));
+            }
             let pairs: Vec<(Val, Val)> = match (method, argv.as_slice()) {
                 ("[]=", [k, v]) => vec![(k.clone(), v.clone())],
                 (_, [Val::Hash(more)]) => more.clone(),
@@ -1037,6 +1056,8 @@ impl<'a> Eval<'a> {
                 Ok(Val::Defaulted { entries: Vec::new(), default: Box::new(value.clone()) })
             }
             ("singularize", Val::Str(t), []) => Ok(Val::Str(crate::naming::singularize(t))),
+            // Registers a file to load when the constant is first read; nothing the evaluation holds changes.
+            ("autoload", Val::Class(_), [Val::Sym(_) | Val::Str(_), Val::Str(_)]) => Ok(Val::Nil),
             ("camelize" | "underscore" | "pluralize" | "singularize" | "classify", Val::Class(c), [Val::Str(t)]) if c.trim_start_matches("::") == "ActiveSupport::Inflector" => Ok(Val::Str(match method {
                 "camelize" => crate::naming::camelize_path(t),
                 "underscore" => crate::naming::underscore(t),
@@ -1067,12 +1088,19 @@ impl<'a> Eval<'a> {
                 flat(items, &mut out);
                 Ok(Val::Array(out))
             }
-            // Devise's `Mapping.add_module`: a string of `def`s defines methods and writes nothing. Not one that redefines a method the evaluation would still call.
+            // Devise's `Mapping.add_module`: a string of `def`s defines those methods on the class (`omniauthable?`), and runs nothing else.
             ("class_eval" | "module_eval", Val::Class(c), [Val::Str(code), ..]) if blk.is_none() && self.known.contains(c) && only_defs(code) => {
-                let defined = defined_names(code);
-                if self.classes.iter().filter(|d| d.name.0.as_str() == c).flat_map(|d| d.methods.iter()).any(|m| defined.iter().any(|n| n == m.name.as_str())) {
-                    return Err("a `class_eval` that redefines a method".into());
+                let parsed = super::prism::parse_silent(code.as_bytes());
+                let node = parsed.node();
+                let program = node.as_program_node().ok_or("a `class_eval` string that does not parse")?;
+                let owner = ClassId(Symbol::from(c.as_str()));
+                let mut defined = Vec::new();
+                for statement in program.statements().body().iter() {
+                    let def = statement.as_def_node().ok_or("a `class_eval` string of other than defs")?;
+                    let (read, _) = super::prism::scope(|| super::library_class::ingest_library_method(&def, &owner, "<class_eval>"));
+                    defined.push(read.map_err(|_| "a `class_eval` def that does not ingest".to_string())?);
                 }
+                self.evaled.entry(c.clone()).or_default().extend(defined);
                 Ok(Val::Nil)
             }
             ("tr", Val::Str(t), [Val::Str(from), Val::Str(to)]) if from.chars().count() == to.chars().count() && !from.contains(['-', '^', '\\']) => {
@@ -1154,6 +1182,11 @@ impl<'a> Eval<'a> {
                 let rest = argv[1..].to_vec();
                 match self.lookup(&this, name) {
                     Some((def, scope)) => self.invoke(&def, scope, this, rest, blk),
+                    // A built-in by its name (`send(:autoload, …)`), not a `send` again.
+                    None if !matches!(name.as_str(), "send" | "public_send" | "__send__") => {
+                        let name = name.clone();
+                        self.dispatch(None, this, &name, rest, blk, frame)
+                    }
                     None => Err(format!("no `{name}` to send")),
                 }
             }
@@ -1681,6 +1714,17 @@ impl<'a> Eval<'a> {
         if !seen.insert(class.to_string()) {
             return None;
         }
+        // The mapper answers with what the gems mixed into it, as well as what reopens it.
+        if class == MAPPER && receiver == MethodReceiver::Instance {
+            for mixin in self.router.mixins.iter().filter(|m| m.as_str() != MAPPER) {
+                if let Some(found) = self.lookup_in(mixin, name, receiver, seen) {
+                    return Some(found);
+                }
+            }
+        }
+        if let Some(m) = self.evaled.get(class).and_then(|ms| ms.iter().rev().find(|m| m.name.as_str() == name && m.receiver == receiver)) {
+            return Some((m.clone(), class.to_string()));
+        }
         let decls: Vec<&LibraryClass> = self.classes.iter().filter(|c| c.name.0.as_str() == class).collect();
         for c in decls.iter().rev() {
             if let Some(m) = c.methods.iter().rev().find(|m| m.name.as_str() == name && m.receiver == receiver) {
@@ -1755,6 +1799,18 @@ impl<'a> Eval<'a> {
         Ok(Val::Class(written.trim_start_matches("::").to_string()))
     }
 
+    /// A constant's tag by the name it resolves to from where it is written; one that does not resolve keeps its written path.
+    fn full_constant_tag(&self, tag: Tag, owner: &str) -> Tag {
+        if tag.0 != CONSTANT_OWNER {
+            return tag;
+        }
+        let path: Vec<Symbol> = tag.2.split("::").map(Symbol::from).collect();
+        match self.constant_slot(&path, (owner != "*").then_some(owner)) {
+            Some(key) => (CONSTANT_OWNER.to_string(), false, key),
+            None => tag,
+        }
+    }
+
     fn note_constant_read(&self, key: &str) -> Res<()> {
         let h = Holder::Constant(key.to_string());
         let last_unsure = self.unsure.get(&h).into_iter().flatten().map(|(_, t)| *t).max();
@@ -1763,7 +1819,7 @@ impl<'a> Eval<'a> {
     }
 
     /// Where a constant's value lives, by full name, and its value now.
-    fn constant_slot(&mut self, path: &[Symbol], scope: Option<&str>) -> Option<String> {
+    fn constant_slot(&self, path: &[Symbol], scope: Option<&str>) -> Option<String> {
         let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
         let (owner, last) = match written.rsplit_once("::") {
             Some((o, l)) => (self.resolve(o, scope), l.to_string()),
@@ -1857,12 +1913,12 @@ impl<'a> Eval<'a> {
                         || matches!(method.as_str(), "<<" | "push" | "[]=" | "concat" | "update" | "delete" | "clear" | "replace" | "insert" | "unshift" | "store" | "append" | "prepend")) =>
             {
                 if let Some(tag) = changed_root(r, owner, side) {
-                    out.insert(tag);
+                    out.insert(self.full_constant_tag(tag, owner));
                 }
             }
             ExprNode::Assign { target: LValue::Index { recv, .. }, .. } | ExprNode::OpAssign { target: LValue::Index { recv, .. }, .. } => {
                 if let Some(tag) = changed_root(recv, owner, side) {
-                    out.insert(tag);
+                    out.insert(self.full_constant_tag(tag, owner));
                 }
             }
             ExprNode::Send { recv, method, args, .. } if method.as_str() == "instance_variable_set" => match args.first().map(|a| &*a.node) {
@@ -1901,7 +1957,12 @@ impl<'a> Eval<'a> {
                 if let ExprNode::Send { recv, method, args, .. } = &*x.node {
                     let dynamic = matches!(method.as_str(), "send" | "public_send" | "__send__" | "class_eval" | "define_method")
                         && !matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { .. } }));
-                    calls.push((method.as_str().to_string(), recv.clone(), dynamic));
+                    // `send(:autoload, …)` calls `autoload`, not every method named `send`.
+                    let named = match (method.as_str(), args.first().map(|a| &*a.node)) {
+                        ("send" | "public_send" | "__send__", Some(ExprNode::Lit { value: Literal::Sym { value } })) => value.as_str().to_string(),
+                        _ => method.as_str().to_string(),
+                    };
+                    calls.push((named, recv.clone(), dynamic));
                 }
             });
             for (name, recv, dynamic) in calls {
@@ -2022,18 +2083,11 @@ fn only_defs(code: &str) -> bool {
     depth == 0
 }
 
-fn defined_names(code: &str) -> Vec<String> {
-    code.lines()
-        .filter_map(|l| l.trim().strip_prefix("def "))
-        .map(|rest| rest.trim_start_matches("self.").split(|c: char| c == '(' || c.is_whitespace()).next().unwrap_or("").to_string())
-        .collect()
-}
-
 /// What holds the object a receiver reads, through any `[key]` (`@routes[:a]`, `URL_HELPERS[key]`): its ivar, or its constant by last segment.
 fn changed_root(r: &Expr, owner: &str, side: bool) -> Option<Tag> {
     match &*r.node {
         ExprNode::Ivar { name } => Some((owner.to_string(), side, name.as_str().to_string())),
-        ExprNode::Const { path } => path.last().map(|last| (CONSTANT_OWNER.to_string(), false, last.as_str().to_string())),
+        ExprNode::Const { path } => Some((CONSTANT_OWNER.to_string(), false, path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"))),
         ExprNode::Send { recv: Some(inner), method, .. } if method.as_str() == "[]" => changed_root(inner, owner, side),
         _ => None,
     }

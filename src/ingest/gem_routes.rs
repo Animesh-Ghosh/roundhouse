@@ -222,12 +222,17 @@ fn draw(app: &App, call: &Expr, initializers: &[Expr], top_level: bool) -> Resul
     let ExprNode::Send { method, .. } = &*call.node else { return Err("not a call".into()) };
     let (lc, def) = extensions(app).into_iter().find(|(_, m)| &m.name == method).ok_or("no method of a mapper extension")?;
     // The gems the method reaches: its module's, and each top-level constant the program defines that its body names (`Devise` from the reopened mapper).
-    let mut roots: Vec<String> = vec![lc.name.0.as_str().split("::").next().unwrap_or_default().to_string()];
+    // Not the framework's: a reopened `ActionDispatch::Routing::Mapper` is no gem's namespace.
+    let mut roots: Vec<String> = Vec::new();
+    if lc.name.0.as_str() != "ActionDispatch::Routing::Mapper" {
+        roots.push(lc.name.0.as_str().split("::").next().unwrap_or_default().to_string());
+    }
     visit(&def.body, &mut |e| {
         if let ExprNode::Const { path } = &*e.node
             && let Some(top) = path.iter().map(|s| s.as_str()).find(|s| !s.is_empty())
             && app.library_classes.iter().any(|c| c.name.0.as_str() == top)
             && !roots.iter().any(|r| r == top)
+            && top != "ActionDispatch"
         {
             roots.push(top.to_string());
         }
