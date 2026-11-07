@@ -9667,17 +9667,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         if let Some(parent) = &class.parent {
             report_unavailable_class_value(app, target, parent.0.as_str(), class.parent_span);
         }
-        // An `include` names a module value too, kept beside the class with
-        // its span rather than in a body. Only the mixins no emitter writes
-        // itself go through here: `Comparable` and `Enumerable` the strict
-        // emitters model, so their includes are not the module's absence.
-        for (i, included) in class.includes.iter().enumerate() {
-            if !UNMODELED_MIXINS.contains(&included.0.as_str()) {
-                continue;
-            }
-            let span = class.include_spans.get(i).copied().unwrap_or_default();
-            report_unavailable_class_value(app, target, included.0.as_str(), span);
-        }
+        report_unmodeled_includes(app, target, class);
     }
     for module in &app.test_modules {
         for class in &module.inner_classes {
@@ -9689,7 +9679,22 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                     class.parent_span,
                 );
             }
+            report_unmodeled_includes(app, target, class);
         }
+    }
+}
+
+/// An `include` names a module value too, kept beside the class with its
+/// span rather than in a body. Only the mixins no emitter writes itself go
+/// through here: `Comparable` and `Enumerable` the strict emitters model,
+/// so their includes are not the module's absence.
+fn report_unmodeled_includes(app: &App, target: &str, class: &crate::dialect::LibraryClass) {
+    for (i, included) in class.includes.iter().enumerate() {
+        if !UNMODELED_MIXINS.contains(&included.0.as_str()) {
+            continue;
+        }
+        let span = class.include_spans.get(i).copied().unwrap_or_default();
+        report_unavailable_class_value(app, target, included.0.as_str(), span);
     }
 }
 
