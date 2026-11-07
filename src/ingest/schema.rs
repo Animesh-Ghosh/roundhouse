@@ -470,17 +470,19 @@ fn apply_table_verb(
     // `remove_column(:idx, :"col_#{n}")` in an `each` loop
     // kept the dropped columns.
     let named = match verb {
-        "drop_table" | "add_timestamps" | "remove_timestamps" => 1,
+        "drop_table" | "add_timestamps" | "remove_timestamps"
+        | "add_index" | "add_check_constraint" | "remove_check_constraint" => 1,
         "rename_table" | "remove_column" | "change_column_null" | "change_column_default"
         | "add_reference" | "add_belongs_to" | "remove_reference" | "remove_belongs_to" => 2,
         "add_column" | "change_column" | "rename_column" | "rename_index" => 3,
         _ => 0,
     };
     if let Some(i) = (0..named).find(|&i| arg_name(i).is_none()) {
+        let line = args.get(i).and_then(|n| super::sources::line_at(file, n.location().start_offset())).unwrap_or(1);
         return Err(IngestError::Unsupported {
             file: file.into(),
             message: format!(
-                "migration `{verb}` argument {} is not a literal name; the schema fold cannot apply it",
+                "line {line}: migration `{verb}` argument {} is not a literal name; the schema fold cannot apply it",
                 i + 1
             ),
         });
@@ -666,7 +668,13 @@ fn apply_table_verb(
                             if dialect == GeneratedExpressionDialect::Portable && expression.as_ref().is_some_and(|e| !crate::emit::shared::schema_sql::sqlite_reads_alike(e, table)) {
                                 return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported index expression on {t}") });
                             }
-                            table.indexes.push(build_index(&t, columns, expression, args.iter().skip(2), file)?);
+                            let index = build_index(&t, columns, expression, args.iter().skip(2), file)?;
+                            if dialect == GeneratedExpressionDialect::Portable && index.expression.is_some()
+                                && index.predicate.as_ref().is_some_and(|p| !crate::emit::shared::schema_sql::sqlite_reads_alike(p, table)) {
+                                let line = super::sources::line_at(file, keys.location().start_offset()).unwrap_or(1);
+                                return Err(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported index predicate on {t}") });
+                            }
+                            table.indexes.push(index);
                         }
                     }
                 }
@@ -682,6 +690,11 @@ fn apply_table_verb(
                         (columns, expression) = index_keys(&value, file)?;
                     }
                 }
+                if expression.is_some() && (has_column_option_splats(&args[1..])
+                    || kwarg_value(args.iter().skip(1), "name").is_some_and(|v| name_value(&v).is_none())) {
+                    let line = super::sources::line_at(file, args[1].location().start_offset()).unwrap_or(1);
+                    return Err(IngestError::Unsupported { file: file.into(), message: format!("line {line}: expression index removal options must be literal") });
+                }
                 let by_name =
                     kwarg_value(args.iter().skip(1), "name").and_then(|v| string_value(&v).or_else(|| symbol_value(&v)));
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
@@ -690,7 +703,7 @@ fn apply_table_verb(
                             || expression.is_none() && !columns.is_empty() && idx.expression.is_none() && idx.columns == columns;
                         let name_match =
                             by_name.as_deref().is_some_and(|n| idx.name.as_str() == n);
-                        !(col_match || name_match)
+                        !(if expression.is_some() && by_name.is_some() { name_match } else { col_match || name_match })
                     });
                 }
             }
@@ -729,7 +742,10 @@ fn apply_table_verb(
                         || args.get(1).is_some_and(|n| n.as_keyword_hash_node().is_none() && n.as_nil_node().is_none() && string_value(n).is_none()) {
                         return Err(IngestError::Unsupported { file: file.into(), message: "remove_check_constraint requires a literal name or expression".into() });
                     }
-                    table.check_constraints.retain(|c| !(name.as_ref().is_none_or(|n| c.name.as_ref() == Some(n)) && expression.as_ref().is_none_or(|e| &c.expression == e)));
+                    table.check_constraints.retain(|c| !match &name {
+                        Some(name) => c.name.as_ref() == Some(name),
+                        None => expression.as_ref().is_some_and(|e| &c.expression == e),
+                    });
                 }
             }
         }

@@ -35,6 +35,68 @@ fn top_level_schema_statements_reach_both_ddl_dialects() {
 }
 
 #[test]
+fn top_level_expression_index_predicates_are_validated_at_the_source() {
+    use roundhouse::ingest::ingest_migration;
+    for predicate in ["email::text <> 'blocked'", "email LIKE 'A%'"] {
+        let declaration = format!("add_index :members, 'lower(email)', unique: true, where: {predicate:?}");
+        let source = format!("{SCHEMA}\n{declaration}\n");
+        let error = ingest_schema(source.as_bytes(), "db/schema.rb").expect_err("must not widen a partial expression index").to_string();
+        assert!(error.contains("db/schema.rb") && error.contains("line "), "{error}");
+        let mut schema = ingest_schema(SCHEMA.as_bytes(), "db/schema.rb").unwrap();
+        let migration = format!("class AddIndex < ActiveRecord::Migration[8.1]\n def change\n {declaration}\n end\nend");
+        let error = ingest_migration(migration.as_bytes(), "db/migrate/1_add.rb", &mut schema).unwrap_err().to_string();
+        assert!(error.contains("db/migrate/1_add.rb") && error.contains("line 3"), "{error}");
+    }
+}
+
+#[test]
+fn named_expression_index_removal_keeps_the_other_predicate() {
+    use roundhouse::ingest::ingest_migration;
+    let source = SCHEMA.replace("t.index \"lower(email)\", unique: true, name: \"members_email_lower\"", "t.index 'lower(email)', unique: true, name: 'active_idx', where: 'age >= 18'\n    t.index 'lower(email)', unique: true, name: 'inactive_idx', where: 'age < 18'");
+    let mut schema = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap();
+    let migration = "class RemoveIndex < ActiveRecord::Migration[8.1]\n def change\n remove_index :members, 'lower(email)', name: 'active_idx'\n end\nend";
+    ingest_migration(migration.as_bytes(), "db/migrate/1_remove.rb", &mut schema).unwrap();
+    let names: Vec<_> = schema.tables[&roundhouse::Symbol::from("members")].indexes.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, ["inactive_idx"]);
+}
+
+#[test]
+fn expression_index_removal_refuses_unread_name_options() {
+    use roundhouse::ingest::ingest_migration;
+    for options in ["name: index_name", "**index_options"] {
+        let mut schema = ingest_schema(SCHEMA.as_bytes(), "db/schema.rb").unwrap();
+        let migration = format!("class RemoveIndex < ActiveRecord::Migration[8.1]\n def change\n remove_index :members, 'lower(email)', {options}\n end\nend");
+        let error = ingest_migration(migration.as_bytes(), "db/migrate/1_remove.rb", &mut schema)
+            .expect_err("an unread name must not become an unnamed removal").to_string();
+        assert!(error.contains("db/migrate/1_remove.rb"), "{error}");
+        assert_eq!(schema.tables[&roundhouse::Symbol::from("members")].indexes.len(), 1);
+    }
+}
+
+#[test]
+fn named_check_removal_ignores_the_reversal_expression() {
+    use roundhouse::ingest::ingest_migration;
+    let mut schema = ingest_schema(SCHEMA.as_bytes(), "db/schema.rb").unwrap();
+    let migration = "class RemoveCheck < ActiveRecord::Migration[8.1]\n def change\n remove_check_constraint :members, 'age > 21', name: 'members_adult'\n end\nend";
+    ingest_migration(migration.as_bytes(), "db/migrate/1_remove.rb", &mut schema).unwrap();
+    assert!(schema.tables[&roundhouse::Symbol::from("members")].check_constraints.is_empty());
+}
+
+#[test]
+fn computed_constraint_table_names_are_refused_at_the_source() {
+    use roundhouse::ingest::ingest_migration;
+    for declaration in ["add_check_constraint table, 'age >= 18'", "add_index table, 'lower(email)', unique: true"] {
+        let source = format!("{SCHEMA}\ntable = :members\n{declaration}\n");
+        let error = ingest_schema(source.as_bytes(), "db/schema.rb").expect_err("unresolved tables must not lose constraints").to_string();
+        assert!(error.contains("db/schema.rb") && error.contains("line "), "{error}");
+        let mut schema = ingest_schema(SCHEMA.as_bytes(), "db/schema.rb").unwrap();
+        let migration = format!("class AddConstraint < ActiveRecord::Migration[8.1]\n def change\n table = :members\n {declaration}\n end\nend");
+        let error = ingest_migration(migration.as_bytes(), "db/migrate/1_add.rb", &mut schema).unwrap_err().to_string();
+        assert!(error.contains("db/migrate/1_add.rb") && error.contains("line 4"), "{error}");
+    }
+}
+
+#[test]
 fn expression_index_reaches_both_ddl_dialects() {
     let schema = ingest_schema(SCHEMA.as_bytes(), "db/schema.rb").unwrap();
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {
@@ -50,6 +112,13 @@ fn emitted_ruby_enforces_check_and_expression_index() {
     let run = app().run_ruby(&script);
     run.assert_passes();
     assert!(run.stdout.contains(EXPECTED));
+}
+
+#[test]
+fn emitted_expression_index_keeps_sqlite_non_ascii_case_behavior() {
+    app().write("app/models/member.rb", "class Member < ActiveRecord::Base\nend\n")
+        .run_ruby("Member.create!(email: 'É@example.test', age: 18)\nMember.create!(email: 'é@example.test', age: 18)\nraise 'SQLite case behavior changed' unless Member.count == 2")
+        .assert_passes();
 }
 
 #[test]
@@ -354,14 +423,18 @@ puts 'Rails skips expression conflicts'
 fn expression_bulk_refusal_is_narrow_to_builtin_bulk_writes() {
     use roundhouse::project::BuildTarget;
     let call = "Member.insert_all([{age: 18, email: 'One@example.test'}, {age: 18, email: 'one@example.test'}])";
+    let parent = "class BulkBase < ActiveRecord::Base\n self.abstract_class = true\n def self.insert_all(rows); 42; end\nend\n";
     for owner in [
         "class Member < ActiveRecord::Base\n scope :adult, -> { where(age: 18) }\n def self.insert_all(rows); 42; end\n def self.import_members; MemberImporter.run; end\nend",
-        "class BulkBase < ActiveRecord::Base\n self.abstract_class = true\n def self.insert_all(rows); 42; end\nend\nclass Member < BulkBase\n scope :adult, -> { where(age: 18) }\n def self.import_members; MemberImporter.run; end\nend",
+        "class Member < BulkBase\n scope :adult, -> { where(age: 18) }\n def self.import_members; MemberImporter.run; end\nend",
     ] {
         for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
-            let (_, errors) = expression_bulk_app(call).write("app/models/member.rb", owner).emit(target);
-            assert!(!errors.iter().any(|d| d.contains("unique expression index")), "{errors:?}");
+            let (_, errors) = expression_bulk_app(call).write("app/models/bulk_base.rb", parent).write("app/models/member.rb", owner).emit(target);
+            assert!(errors.is_empty(), "{errors:?}");
         }
+        expression_bulk_app(call).write("app/models/bulk_base.rb", parent).write("app/models/member.rb", owner)
+            .run_ruby("raise 'source return lost' unless Member.import_members == 42\nraise 'source call inserted rows' unless Member.count == 0")
+            .assert_passes();
     }
     let bang = call.replace("insert_all(", "insert_all!(");
     let (_, errors) = expression_bulk_app(&bang).emit(BuildTarget::Spinel);
@@ -370,6 +443,42 @@ fn expression_bulk_refusal_is_narrow_to_builtin_bulk_writes() {
         .replace("t.check_constraint \"age >= 18\", name: \"members_adult\"", "");
     expression_bulk_app(call).write("db/schema.rb", &nonunique)
         .run_ruby("Member.import_members\nraise unless Member.count == 2").assert_passes();
+}
+
+fn source_bulk_override_app(owner: &str, call: &str) -> emit_and_run::Overlay {
+    expression_bulk_app(call)
+        .write("app/models/concerns/bulk_methods.rb", "module BulkMethods\n extend ActiveSupport::Concern\n class_methods do\n def insert_all(rows); 42; end\n def insert_all!(rows); 42; end\n end\nend\n")
+        .write("app/models/member.rb", owner)
+}
+
+const BULK_CONCERN_OWNER: &str = "class Member < ActiveRecord::Base\n include BulkMethods\n scope :adult, -> { all }\n def self.import_members; MemberImporter.run; end\nend\n";
+const BULK_OVERRIDE_CONTRACT: &str = "raise 'source return lost' unless Member.import_members == 42\nraise 'source call inserted rows' unless Member.count == 0";
+
+#[test]
+fn included_bulk_overrides_keep_source_dispatch_for_both_methods() {
+    for method in ["insert_all", "insert_all!"] {
+        let call = format!("Member.{method}([{{email: 'One', age: 18}}])");
+        source_bulk_override_app(BULK_CONCERN_OWNER, &call).run_ruby(BULK_OVERRIDE_CONTRACT).assert_passes();
+    }
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn native_bulk_overrides_keep_source_dispatch_for_both_methods() {
+    for method in ["insert_all", "insert_all!"] {
+        let call = format!("Member.{method}([{{email: 'One', age: 18}}])");
+        source_bulk_override_app(BULK_CONCERN_OWNER, &call).run_spinel_with_db(BULK_OVERRIDE_CONTRACT).assert_passes();
+    }
+}
+
+#[test]
+fn instance_bulk_methods_do_not_exempt_class_bulk_writes() {
+    let source = "class Member < ActiveRecord::Base\n scope :adult, -> { all }\n def insert_all(rows); 42; end\n def self.import_members; MemberImporter.run; end\nend\n";
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Spinel] {
+        let (_, errors) = expression_bulk_app("Member.insert_all([{email: 'One', age: 18}])")
+            .write("app/models/member.rb", source).emit(target);
+        assert!(errors.iter().any(|d| d.contains("unique expression index")), "{errors:?}");
+    }
 }
 
 #[test]
@@ -585,6 +694,10 @@ fn rails_bulk_writes_keep_partial_incoming_rows_and_atomic_batches() {
     let schema = bulk_schema("t.index :email, unique: true, where: 'active = 1'\n t.check_constraint 'age >= 18'");
     let script = format!(r#"
 require {helper:?}
+unless RailsOracle.available?("activerecord", sqlite3: ">= 2.9")
+  puts "skip: Rails oracle and sqlite3 are unavailable"
+  exit
+end
 RailsOracle.activate("activerecord", sqlite3: ">= 2.9")
 require 'active_record'
 ActiveRecord::Base.establish_connection(adapter: 'sqlite3', database: ':memory:')
@@ -603,5 +716,6 @@ raise 'expression conflict retained a prefix' unless failed && Member.count == 0
 "#);
     let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("rejected batches leave no prefix"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("rejected batches leave no prefix") || stdout.contains("skip:"), "{stdout}");
 }

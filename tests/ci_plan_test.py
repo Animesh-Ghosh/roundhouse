@@ -757,10 +757,9 @@ class Routing(unittest.TestCase):
         ]:
             with self.subTest(path=path):
                 plan = ci.select([path])
-                if path in {
-                    "src/lower/arel/visitor.rs",
-                    "tests/support/emit_and_run.rs",
-                }:
+                if path == "tests/support/emit_and_run.rs":
+                    expected = [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_constraints"]
+                elif path == "src/lower/arel/visitor.rs":
                     expected = [*ci.PARAM_BIND_TESTS, "generated_columns_spinel"]
                 elif path.startswith("src/"):
                     expected = ci.PARAM_BIND_TESTS
@@ -940,6 +939,7 @@ class Routing(unittest.TestCase):
         for path in [
             "tests/schema_constraints.rs", "tests/support/schema_constraints_schema.rb",
             "tests/support/schema_constraints_contract.rb", "src/schema.rs", "src/ingest/schema.rs",
+            "src/schema/generated.rs", "tests/support/emit_and_run.rs",
             "src/emit/shared/schema_sql.rs", "src/lower/model_to_library/schema.rs", "src/lower/scope_chain.rs",
             "src/emit/roda.rs", "src/emit/ruby/library.rs",
             "src/lower/model_to_library/mod.rs",

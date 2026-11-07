@@ -4792,7 +4792,9 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 // the same read-then-write shape `increment!` already
                 // carries, and under single-threaded dispatch the window
                 // it opens is not observable. Ledgered with the rest.
-                let rowwise_bulk = block.is_none() && match method.as_str() {
+                let source_bulk = matches!(method.as_str(), "insert_all" | "insert_all!")
+                    && crate::analyze::ClassInfo::source_class_method(&ctx.assocs.finder_classes, &m, &method);
+                let rowwise_bulk = !source_bulk && block.is_none() && match method.as_str() {
                     "insert_all" => args.len() == 1,
                     "insert_all!" => !args.is_empty() && args.len() <= 2 && insert_all_bang_returning(args.get(1)).is_some(),
                     _ => false,
@@ -4810,7 +4812,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         return None;
                     }
                 }
-                if method.as_str() == "insert_all" && args.len() == 1 && block.is_none() {
+                if !source_bulk && method.as_str() == "insert_all" && args.len() == 1 && block.is_none() {
                     let attrs = Symbol::from("__attrs");
                     let build = syn(
                         span,
@@ -4873,7 +4875,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 //
                 // Only a literal column list (Strings or Symbols) lowers;
                 // anything else declines.
-                if method.as_str() == "insert_all!" && !args.is_empty() && args.len() <= 2 && block.is_none() {
+                if !source_bulk && method.as_str() == "insert_all!" && !args.is_empty() && args.len() <= 2 && block.is_none() {
                     let returning = insert_all_bang_returning(args.get(1));
                     if let Some(columns) = returning {
                         let attrs = Symbol::from("__attrs");
