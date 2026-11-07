@@ -52,7 +52,8 @@ fn extensions(app: &App) -> Vec<(&LibraryClass, &MethodDef)> {
     }
     app.library_classes
         .iter()
-        .filter(|lc| lc.is_module && modules.iter().any(|m| m == lc.name.0.as_str()))
+        // The mapper reopened (`class ActionDispatch::Routing::Mapper; def devise_for`), as Devise writes it.
+        .filter(|lc| (lc.is_module && modules.iter().any(|m| m == lc.name.0.as_str())) || lc.name.0.as_str() == "ActionDispatch::Routing::Mapper")
         .flat_map(|lc| lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance).map(move |m| (lc, m)))
         .collect()
 }
@@ -209,9 +210,19 @@ fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr]) -> bo
 fn draw(app: &App, call: &Expr, initializers: &[Expr]) -> Result<Vec<RouteSpec>, String> {
     let ExprNode::Send { method, .. } = &*call.node else { return Err("not a call".into()) };
     let (lc, def) = extensions(app).into_iter().find(|(_, m)| &m.name == method).ok_or("no method of a mapper extension")?;
-    let root = lc.name.0.as_str().split("::").next().unwrap_or_default().to_string();
+    // The gems the method reaches: its module's, and each top-level constant the program defines that its body names (`Devise` from the reopened mapper).
+    let mut roots: Vec<String> = vec![lc.name.0.as_str().split("::").next().unwrap_or_default().to_string()];
+    visit(&def.body, &mut |e| {
+        if let ExprNode::Const { path } = &*e.node
+            && let Some(top) = path.iter().map(|s| s.as_str()).find(|s| !s.is_empty())
+            && app.library_classes.iter().any(|c| c.name.0.as_str() == top)
+            && !roots.iter().any(|r| r == top)
+        {
+            roots.push(top.to_string());
+        }
+    });
     let scope = def.enclosing_class.as_ref().map(|s| s.as_str().to_string()).unwrap_or_else(|| lc.name.0.as_str().to_string());
-    let drawn = super::configured_superclass::draw_routes(app, def, scope, call, initializers, &root)?;
+    let drawn = super::configured_superclass::draw_routes(app, def, scope, call, initializers, &roots)?;
     let body: String = drawn.iter().map(|e| crate::emit::ruby::emit_expr(e) + "\n").collect();
     let source = format!("Rails.application.routes.draw do\n{body}end\n");
     let table = super::routes::ingest_routes(source.as_bytes(), "<gem routes>").map_err(|e| format!("the drawn routes do not read: {e:?}"))?;

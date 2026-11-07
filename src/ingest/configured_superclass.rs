@@ -1554,9 +1554,11 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
 
 /// The routes a gem's routing method draws (`use_doorkeeper do … end`), run with the mapper as the
 /// recording `Router` after the initializers that call on `root` have run.
-pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr, initializers: &[Expr], root: &str) -> Res<Vec<Expr>> {
+pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr, initializers: &[Expr], roots: &[String]) -> Res<Vec<Expr>> {
     let mut eval = Eval::new(app);
-    eval.replay(initializers, root)?;
+    for root in roots {
+        eval.replay(initializers, root)?;
+    }
     let ExprNode::Send { args, block, .. } = &*call.node else { return Err("not a call".into()) };
     let mut frame = Frame { this: Val::Router, locals: HashMap::default(), block: None, scope: None };
     let argv = args.iter().map(|a| eval.value(a, &mut frame)).collect::<Res<Vec<_>>>()?;
