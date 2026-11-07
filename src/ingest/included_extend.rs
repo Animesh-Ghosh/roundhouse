@@ -142,8 +142,9 @@ fn drop_unreferenced(app: &mut App, extended: &HashSet<ClassId>) {
         if named.len() == wanted.len() {
             return;
         }
+        // Not the segment whole: a generated receiver (a `module_function` retarget's) holds `Outer::Helpers` in one segment.
         if let ExprNode::Const { path } = &*e.node
-            && path.last().is_some_and(|s| last.contains(s.as_str()))
+            && path.last().is_some_and(|s| last.contains(s.as_str().rsplit("::").next().unwrap_or(s.as_str())))
             && let Some(id) = resolve(path, wanted)
         {
             named.insert(id);
@@ -571,10 +572,14 @@ mod tests {
 
     const HOOKED: &str = "module Outer\n  module Helpers\n    def shout(s)\n      s.upcase\n    end\n  end\nend\n\nmodule Hook\n  def self.included(base)\n    base.instance_eval { extend Outer::Helpers }\n  end\nend\n\nmodule Parser\n  include Hook\n\n  def self.parse(s)\n    shout(s)\n  end\nend\n";
 
-    fn library_class_names(extra: &str) -> Vec<String> {
-        let tree = [(PathBuf::from("app/lib/parser.rb"), format!("{HOOKED}{extra}").into_bytes())].into_iter().collect();
+    fn class_names_of(source: &str) -> Vec<String> {
+        let tree = [(PathBuf::from("app/lib/parser.rb"), source.as_bytes().to_vec())].into_iter().collect();
         let app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
         app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()).collect()
+    }
+
+    fn library_class_names(extra: &str) -> Vec<String> {
+        class_names_of(&format!("{HOOKED}{extra}"))
     }
 
     #[test]
@@ -587,6 +592,18 @@ mod tests {
     #[test]
     fn an_extended_module_named_elsewhere_is_kept() {
         let names = library_class_names("\nclass Tool\n  def run\n    Outer::Helpers\n  end\nend\n");
+        assert!(names.iter().any(|n| n == "Outer::Helpers"), "{names:?}");
+    }
+
+    /// `module_function :up` retargets `shout`'s bare `up(s)` to a receiver holding `Outer::Helpers` in one path segment, and `shout` is copied into `Parser`, which then calls the module.
+    #[test]
+    fn an_extended_module_a_retargeted_copy_calls_is_kept() {
+        let source = HOOKED.replace(
+            "      s.upcase\n    end\n",
+            "      up(s)\n    end\n\n    def up(s)\n      s.upcase\n    end\n    module_function :up\n",
+        );
+        assert_ne!(source, HOOKED);
+        let names = class_names_of(&source);
         assert!(names.iter().any(|n| n == "Outer::Helpers"), "{names:?}");
     }
 }
