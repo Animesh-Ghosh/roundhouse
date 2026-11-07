@@ -285,6 +285,120 @@ fn strict_emission_stops_with_both_locations() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[test]
+fn a_guarded_concern_replacement_is_refused_before_its_later_use() {
+    let app = drawn("concern :choice do\n  get '/old', to: 'catalog#show'\nend\nif Feature.enabled?\n  concern :choice do\n    get '/new', to: 'catalog#show'\n  end\nend\nconcerns :choice");
+    refused(&app, "conditional routes", "config/routes.rb:5:");
+}
+
+#[test]
+fn a_loaded_file_checks_guarded_draws_beside_its_top_level_draw() {
+    let app = ingest(&[
+        ("config/routes.rb", "Rails.application.routes.draw do\n  load Rails.root.join('config/routes/extra.rb')\nend\n"),
+        ("config/routes/extra.rb", "Rails.application.routes.draw do\n  get '/plain', to: 'catalog#show'\nend\nif Feature.enabled?\n  Rails.application.routes.draw do\n    get '/guarded', to: 'catalog#show'\n  end\nend\n"),
+    ]).unwrap();
+    refused(&app, "route set", "config/routes/extra.rb:5:");
+}
+
+#[test]
+fn self_qualified_routes_keep_the_same_refusal_boundary() {
+    refused(&drawn("self.get '/catalog', to: 'catalog#show', defaults: { kind: 'fixed' }"),
+        "route defaults", "config/routes.rb:2:");
+    refused(&drawn("self.get '/catalog', to: 'catalog#show' if Feature.enabled?"),
+        "conditional routes", "config/routes.rb:2:");
+    let app = drawn("self.get '/catalog', to: 'catalog#show'");
+    kept(&app);
+    assert_eq!(paths(&app), ["/catalog"]);
+}
+
+#[test]
+fn a_call_wrapper_does_not_hide_a_guarded_route_set() {
+    let source = "Feature.enabled?.then do |enabled|\n  if enabled\n    Rails.application.routes.draw do\n      get '/guarded', to: 'catalog#show'\n    end\n  end\nend\n";
+    let result = ingest(&[("config/routes.rb", source)]);
+    assert!(result.is_err() || !diagnostics(&result.unwrap()).is_empty(), "wrapped draw must refuse");
+}
+
+#[test]
+fn replacing_a_defaults_hash_is_not_mistaken_for_merging_it() {
+    for body in [
+        "get '/catalog', to: 'catalog#show', defaults: { format: 'json' }, defaults: {}",
+        "scope defaults: { format: 'json' }, defaults: {} do\n  get '/catalog', to: 'catalog#show'\nend",
+    ] {
+        refused(&drawn(body), "route defaults", "config/routes.rb:2:");
+    }
+}
+
+#[test]
+fn plain_option_defaults_and_scope_formats_cannot_disappear() {
+    for body in [
+        "get '/catalog' => 'catalog#show', :kind => 'fixed'",
+        "get '/catalog', to: 'catalog#show', kind: 'fixed'",
+        "get '/catalog', to: 'catalog#show', 'kind' => 'fixed'",
+        "scope format: 'json' do\n  get '/catalog', to: 'catalog#show'\nend",
+        "root to: 'catalog#show', kind: 'fixed'",
+        "namespace :admin, kind: 'fixed' do\nend",
+        "resources :catalog, only: :show, kind: 'fixed'",
+        "resource :catalog, only: :show, kind: 'fixed'",
+    ] {
+        refused(&drawn(body), "route defaults", "config/routes.rb:2:");
+    }
+}
+
+#[test]
+fn reserved_format_segments_do_not_get_the_ordinary_segment_exemption() {
+    for value in ["'json'", ":json"] {
+        refused(&drawn(&format!("scope '/:format', defaults: {{ format: {value} }} do\n  get '/catalog', to: 'catalog#show'\nend")),
+            "route defaults", "config/routes.rb:2:");
+    }
+}
+
+#[test]
+fn a_proven_empty_keyword_splat_adds_no_unread_option() {
+    for body in [
+        "get '/catalog', to: 'catalog#show', **{}",
+        "scope **{} do\n  get '/catalog', to: 'catalog#show'\nend",
+    ] {
+        let app = drawn(body);
+        kept(&app);
+        assert_eq!(paths(&app), ["/catalog"]);
+    }
+}
+
+#[test]
+fn emitted_requests_keep_the_literal_format_default_kind() {
+    let root = scratch::dir("route-default-values");
+    let input = root.join("input");
+    let controller = "class CatalogController < ActionController::Base\n  def show\n    render plain: params[:kind].inspect + '|' + params[:format].inspect\n  end\nend\n";
+    for (defaults, expected) in [("defaults: { format: :json }", "nil|:json"),
+        ("defaults: { format: 'json' }", "nil|\"json\"")] {
+        for scope in [false, true] {
+            let body = if scope { format!("scope {defaults} do\nget '/catalog', to: 'catalog#show'\nend") }
+                else { format!("get '/catalog', to: 'catalog#show', {defaults}") };
+            for (path, source) in [
+                ("config/routes.rb", format!("Rails.application.routes.draw do\n{body}\nend\n")),
+                ("app/controllers/catalog_controller.rb", controller.to_string()),
+                ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\nend\n".to_string()),
+            ] {
+                std::fs::create_dir_all(input.join(path).parent().unwrap()).unwrap();
+                std::fs::write(input.join(path), source).unwrap();
+            }
+            let output = root.join("emitted");
+            let emit = Command::new(env!("CARGO_BIN_EXE_roundhouse"))
+                .args(["--target", "ruby", "--output"]).arg(&output).arg(&input).output().unwrap();
+            assert!(emit.status.success(), "{}", String::from_utf8_lossy(&emit.stderr));
+            for (path, expected) in [("/catalog", expected), ("/catalog.xml", "nil|\"xml\"")] {
+                let script = "require 'stringio'; require ARGV.shift + '/main'; Main.configure_default_adapter!; out = StringIO.new; Main.run({'REQUEST_METHOD'=>'GET', 'PATH_INFO'=>ARGV.shift}, StringIO.new(''), out); print out.string.split(\"\\r\\n\\r\\n\", 2).last";
+                let result = Command::new("ruby").args(["-e", script]).arg(&output).arg(path)
+                    .env("SECRET_KEY_BASE", "synthetic-route-default").env("RAILS_ENV", "test")
+                    .current_dir(&output).output().unwrap();
+                assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+                assert_eq!(String::from_utf8_lossy(&result.stdout), expected, "{defaults}, scope={scope}, {path}");
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// The behavior each refusal protects, as initialized Rails 8.1.4 has it.
 #[test]
 fn rails_controls_agree() {
