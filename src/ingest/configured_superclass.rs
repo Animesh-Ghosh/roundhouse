@@ -2300,6 +2300,8 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
     for root in roots {
         eval.replay(initializers, root)?;
     }
+    // Not what an initializer passed over may have written: the mapper the call runs on is the evaluation's own, made after them.
+    eval.unsure.remove(&Holder::Router);
     let ExprNode::Send { args, block, .. } = &*call.node else { return Err("not a call".into()) };
     let mut frame = Frame { this: Val::Router, locals: HashMap::default(), block: None, scope: None };
     let argv = args.iter().map(|a| eval.value(a, &mut frame)).collect::<Res<Vec<_>>>()?;

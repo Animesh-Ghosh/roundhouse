@@ -669,8 +669,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // route keeps the legacy action-name fallback in `as_name`
             // for consumers that key on it, but the helper generator
             // skips it.
-            // A symbol verb is named by its action even where `path:` moved its segment (`post :create, path: "sign_in"`).
-            let action_part = if *action_symbol { written_action(action.as_str()) } else { written_action(path) };
+            // A canonical action's symbol is named by the action where `path:` moved its segment (`post :create, path: "sign_in"`); ingest roots only that path, a bare symbol's stays the symbol.
+            let action_part = if *action_symbol && path.starts_with('/') && canonical_action(action.as_str(), route_scope) { Some(action.as_str()) } else { written_action(path) };
             let derived = match as_name.as_ref() {
                 // `as: nil`: no helper at all.
                 Some(s) if s.as_str().is_empty() => None,

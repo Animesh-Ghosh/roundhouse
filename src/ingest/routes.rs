@@ -3701,10 +3701,14 @@ fn ingest_explicit_route(
     // A symbol verb with `path:` keeps the symbol as its action and name
     // (`post :render_x, path: "x"` is `render_x`) and takes the option as
     // its URL segment; a string verb ignores the option, as Rails does.
-    // Not `as:` the symbol: Rails names the route by it as it names a bare symbol verb, so a canonical action on a member or collection (devise's `post :create, path: "sign_in"`) adds nothing, as `user_session`.
+    // Not `as:` a canonical action's symbol: Rails names the route by it as it names a bare symbol verb, so on a member or collection it adds nothing (devise's `post :create, path: "sign_in"` is `user_session`).
     if let (true, Some(segment), Some(symbol)) = (action_symbol, path_kwarg, path.clone()) {
         action_kwarg = action_kwarg.or_else(|| Some(symbol.replace('-', "_")));
         path = Some(format!("/{}", segment.trim_start_matches('/')));
+        if to.is_some() || action_kwarg.as_deref() != Some(symbol.replace('-', "_").as_str()) || !matches!(symbol.as_str(), "index" | "create" | "new" | "show" | "update" | "destroy") {
+            as_name = as_name.or_else(|| Some(Symbol::from(symbol.replace('-', "_").as_str())));
+            action_symbol = false;
+        }
     }
 
     // `scope controller: :x do get :y end` — the scope's controller is the
