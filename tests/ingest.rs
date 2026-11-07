@@ -3884,3 +3884,32 @@ end
         "an untouched piece still folds: {rules:?}"
     );
 }
+
+/// A symbol verb with `path:` is named by its action, as Rails names it: a
+/// canonical action on a singular resource's member adds nothing (devise's
+/// `post :create, path: "sign_in"` is `user_session`), and another keeps
+/// its own (`get :cancel, path: "abort"` is `cancel_session`).
+#[test]
+fn a_symbol_verb_with_a_path_is_named_by_its_action() {
+    let source = br#"Rails.application.routes.draw do
+  resource :session, only: [], controller: "sessions", path: "" do
+    get :new, path: "sign_in", as: "new"
+    post :create, path: "sign_in"
+    get :cancel, path: "abort"
+  end
+end
+"#;
+    let (result, _) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_routes(source, "config/routes.rb"));
+    let mut app = roundhouse::App::default();
+    app.routes = result.expect("ingest");
+    let flat = roundhouse::lower::flatten_routes(&app);
+    let named = |path: &str, method: &str| {
+        flat.iter()
+            .find(|r| r.path == path && format!("{:?}", r.method).eq_ignore_ascii_case(method))
+            .map(|r| r.as_name.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(named("/sign_in", "post"), "session", "{flat:#?}");
+    assert_eq!(named("/sign_in", "get"), "new_session", "{flat:#?}");
+    assert_eq!(named("/abort", "get"), "cancel_session", "{flat:#?}");
+}

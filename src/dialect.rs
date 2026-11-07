@@ -2273,6 +2273,9 @@ pub enum RouteSpec {
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
         constraints: IndexMap<Symbol, String>,
     },
+    /// Routes a gem's routing method draws under a scope it sets for itself (devise's
+    /// `with_devise_exclusive_scope`): they take none of the enclosing scopes' path, module or name.
+    Exclusive { entries: Vec<RouteSpec> },
 }
 
 /// One `get "/path", to: "c#a"` entry. Kept as a standalone struct so

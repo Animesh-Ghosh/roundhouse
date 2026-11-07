@@ -81,7 +81,7 @@ pub(super) fn expand<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path
     let mut failed = false;
     if contains_deferred(&entries) {
         let initializers = super::configured_superclass::initializers_of(vfs, dir, gem_dirs);
-        failed = replace(&mut entries, app, &initializers, true);
+        failed = replace(&mut entries, app, &initializers, &Some((None, None, None)));
     }
     app.routes.entries = entries;
     if !failed {
@@ -156,23 +156,36 @@ fn rewrite(e: &mut Expr, is_install: &mut dyn FnMut(&Expr) -> bool) {
 fn contains_deferred(entries: &[RouteSpec]) -> bool {
     entries.iter().any(|e| match e {
         RouteSpec::Deferred { .. } => true,
-        RouteSpec::Scope { entries, .. } => contains_deferred(entries),
+        RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => contains_deferred(entries),
         RouteSpec::Resources { nested, .. } => contains_deferred(nested),
         _ => false,
     })
 }
 
-fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr], top_level: bool) -> bool {
+/// Where a call stands, as Rails' `@scope` accumulates it: path, module and name; `None` inside a resource.
+type Enclosing = Option<(Option<String>, Option<String>, Option<String>)>;
+
+fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr], enclosing: &Enclosing) -> bool {
     let mut failed = false;
     for entry in entries.iter_mut() {
         match entry {
             RouteSpec::Scope { entries, path, module, as_prefix, .. } => {
-                let plain = path.is_none() && module.is_none() && as_prefix.is_none();
-                failed |= replace(entries, app, initializers, top_level && plain)
+                let inner = enclosing.as_ref().map(|(p, m, a)| {
+                    // Rails' `@scope[:path]` is rooted (`/admin/x`); its `:module` (`admin/x`) and `:as` (`admin_x`) are not.
+                    let join = |outer: &Option<String>, own: &Option<String>, sep: &str, rooted: bool| match (outer, own) {
+                        (Some(o), Some(n)) => Some(format!("{o}{sep}{}", n.trim_matches('/'))),
+                        (None, Some(n)) if rooted => Some(format!("/{}", n.trim_matches('/'))),
+                        (None, Some(n)) => Some(n.trim_matches('/').to_string()),
+                        (o, None) => o.clone(),
+                    };
+                    (join(p, path, "/", true), join(m, module, "/", false), join(a, &as_prefix.as_ref().map(|s| s.as_str().to_string()), "_", false))
+                });
+                failed |= replace(entries, app, initializers, &inner)
             }
-            RouteSpec::Resources { nested, .. } => failed |= replace(nested, app, initializers, false),
+            RouteSpec::Exclusive { entries } => failed |= replace(entries, app, initializers, &Some((None, None, None))),
+            RouteSpec::Resources { nested, .. } => failed |= replace(nested, app, initializers, &None),
             RouteSpec::Deferred { call, span, constraints } => {
-                let drawn = draw(app, call, initializers, top_level);
+                let drawn = draw(app, call, initializers, enclosing.clone());
                 *entry = match drawn {
                     Ok(mut inner) => {
                         super::routes::apply_outer_constraints(&mut inner, constraints);
@@ -218,7 +231,7 @@ fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr], top_l
     failed
 }
 
-fn draw(app: &App, call: &Expr, initializers: &[Expr], top_level: bool) -> Result<Vec<RouteSpec>, String> {
+fn draw(app: &App, call: &Expr, initializers: &[Expr], enclosing: Enclosing) -> Result<Vec<RouteSpec>, String> {
     let ExprNode::Send { method, .. } = &*call.node else { return Err("not a call".into()) };
     let (lc, def) = extensions(app).into_iter().find(|(_, m)| &m.name == method).ok_or("no method of a mapper extension")?;
     // The gems the method reaches: its module's, and each top-level constant the program defines that its body names (`Devise` from the reopened mapper).
@@ -244,7 +257,7 @@ fn draw(app: &App, call: &Expr, initializers: &[Expr], top_level: bool) -> Resul
             mixins.push(owner.name.0.as_str().to_string());
         }
     }
-    let drawn = super::configured_superclass::draw_routes(app, def, scope, call, initializers, &roots, mixins, top_level)?;
+    let drawn = super::configured_superclass::draw_routes(app, def, scope, call, initializers, &roots, mixins, enclosing)?;
     let body: String = drawn.iter().map(|e| crate::emit::ruby::emit_expr(e) + "\n").collect();
     let source = format!("Rails.application.routes.draw do\n{body}end\n");
     let table = super::routes::ingest_routes(source.as_bytes(), "<gem routes>").map_err(|e| format!("the drawn routes do not read: {e:?}"))?;

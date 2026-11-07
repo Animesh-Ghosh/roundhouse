@@ -89,6 +89,8 @@ pub(super) fn class_answer(facts: &Facts, class: &str, method: &str, argv: &[Val
     let modules = facts.devise_models.get(class)?;
     match (method, argv) {
         // `Devise::Models::Lockable::ClassMethods`: the model's `unlock_strategy` is Devise's unless its own `devise` call sets one.
+        // `Devise::Models::Omniauthable::ClassMethods`: the model's providers are Devise's (`config.omniauth :github`) unless its own `devise` call names them.
+        ("omniauth_providers", []) if modules.iter().any(|m| m == "omniauthable") && !facts.devise_configured.contains(class) => config("omniauth_providers"),
         ("unlock_strategy_enabled?", [Val::Sym(strategy)]) if modules.iter().any(|m| m == "lockable") && !facts.devise_configured.contains(class) => {
             let Val::Sym(set) = config("unlock_strategy")? else { return None };
             Some(Val::Bool(set == *strategy || set == "both"))
@@ -121,10 +123,15 @@ pub(super) fn skips(known: &HashSet<String>, caller: Option<(&str, &str)>, state
 /// A top-level statement that only registers its block for later, so replaying the files runs none of it.
 pub(super) fn registers_for_later(statement: &Expr) -> bool {
     // Warden's `Manager.after_set_user { … }` and the other `Warden::Hooks`: each appends its block to a list Warden runs per request.
-    let ExprNode::Send { recv: Some(recv), method, block: Some(_), .. } = &*statement.node else { return false };
+    let ExprNode::Send { recv: Some(recv), method, block, args, .. } = &*statement.node else { return false };
     let ExprNode::Const { path } = &*recv.node else { return false };
     let written: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
-    written == ["Warden", "Manager"]
+    // `Warden::Strategies.add(:label, StrategyClass)`: Warden subclasses the class it is given and keeps it by label; nothing of it runs as it loads.
+    if written == ["Warden", "Strategies"] && method.as_str() == "add" && block.is_none() {
+        return matches!(args.as_slice(), [label, class] if matches!(&*label.node, ExprNode::Lit { value: Literal::Sym { .. } }) && matches!(&*class.node, ExprNode::Const { .. }));
+    }
+    block.is_some()
+        && written == ["Warden", "Manager"]
         && matches!(
             method.as_str(),
             "after_set_user" | "after_authentication" | "after_fetch" | "after_failed_fetch" | "before_failure" | "before_logout" | "on_request"

@@ -582,6 +582,13 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
         RouteSpec::RackMount { .. } => {}
         // Not drawn: ingest replaces every one with the routes its call draws.
         RouteSpec::Deferred { .. } => {}
+        // Not under the enclosing scopes: the method set its own path, module and name, as Rails' `@scope` swap does.
+        RouteSpec::Exclusive { entries } => {
+            let root = Ctx { helpers_enabled: ctx.helpers_enabled, mount_path: ctx.mount_path.clone(), ..Ctx::default() };
+            for entry in entries {
+                collect_flat_routes(entry, out, &root);
+            }
+        }
         RouteSpec::Explicit {
             method,
             path,
@@ -662,7 +669,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // route keeps the legacy action-name fallback in `as_name`
             // for consumers that key on it, but the helper generator
             // skips it.
-            let action_part = written_action(path);
+            // A symbol verb is named by its action even where `path:` moved its segment (`post :create, path: "sign_in"`).
+            let action_part = if *action_symbol { written_action(action.as_str()) } else { written_action(path) };
             let derived = match as_name.as_ref() {
                 // `as: nil`: no helper at all.
                 Some(s) if s.as_str().is_empty() => None,

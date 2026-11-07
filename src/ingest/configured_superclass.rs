@@ -367,8 +367,17 @@ struct Eval<'a> {
 struct RouterState {
     mixins: Vec<String>,
     ivars: HashMap<String, Val>,
-    /// The call stands at the top of the route set, where a scope a method sets for itself is the same as one nested in it.
-    top_level: bool,
+    /// The scope the call stands in, as Rails' `@scope` holds it there: `{ path: "/admin", module: "auth", as: "admin" }`; `None` inside a resource, which the evaluation does not hold.
+    enclosing: Option<Vec<(Val, Val)>>,
+}
+
+impl RouterState {
+    /// `@scope` where the call stands.
+    fn base(&self) -> Val {
+        let Val::Hash(mut entries) = root_scope() else { unreachable!() };
+        entries.extend(self.enclosing.clone().unwrap_or_default());
+        Val::Hash(entries)
+    }
 }
 
 /// Rails' `Mapper::Scope` at the top of a route set, as `@scope[:key]` reads it.
@@ -1065,6 +1074,10 @@ impl<'a> Eval<'a> {
                 "singularize" => crate::naming::singularize(t),
                 _ => crate::naming::classify_path(t),
             })),
+            ("join", Val::Array(items), sep) if matches!(sep, [] | [Val::Str(_)]) && items.iter().all(|v| matches!(v, Val::Str(_) | Val::Sym(_) | Val::Int(_))) => {
+                let sep = match sep { [Val::Str(s)] => s.as_str(), _ => "" };
+                Ok(Val::Str(items.iter().map(|v| self.text(v)).collect::<Res<Vec<_>>>()?.join(sep)))
+            }
             ("squeeze", Val::Str(t), [Val::Str(set)]) if set.chars().count() == 1 => {
                 let c = set.chars().next().unwrap_or_default();
                 let mut out = String::new();
@@ -1393,23 +1406,30 @@ impl<'a> Eval<'a> {
         if self.drawn.len() == 1
             && let Some(Val::Hash(current)) = self.router.ivars.get("scope").cloned()
         {
-            let Val::Hash(base) = root_scope() else { unreachable!() };
+            let Val::Hash(base) = self.router.base() else { unreachable!() };
             let read = |entries: &[(Val, Val)], key: &str| entries.iter().find(|(k, _)| matches!(k, Val::Sym(n) if n == key)).map(|(_, v)| v.clone());
+            let changed = SCOPE_KEYS.iter().any(|key| {
+                let now = read(&current, key).unwrap_or(Val::Nil);
+                let was = read(&base, key).unwrap_or(Val::Nil);
+                let empty = |v: &Val| matches!(v, Val::Nil) || matches!(v, Val::Hash(e) if e.is_empty());
+                !(empty(&now) && empty(&was)) && !same(&now, &was)
+            });
+            // The whole scope, not what changed: the routes take none of the enclosing one.
             let mut set: Vec<(Val, Val)> = Vec::new();
             for key in SCOPE_KEYS {
                 let now = read(&current, key).unwrap_or(Val::Nil);
-                let empty = matches!(&now, Val::Nil) || matches!(&now, Val::Hash(e) if e.is_empty());
-                if empty || read(&base, key).is_some_and(|was| same(&was, &now)) {
+                if matches!(&now, Val::Nil) || matches!(&now, Val::Hash(e) if e.is_empty()) {
                     continue;
                 }
                 match (*key, now) {
                     ("options", Val::Hash(entries)) => set.extend(entries),
+                    ("path", Val::Str(p)) => set.push((Val::Sym("path".into()), Val::Str(p.trim_start_matches('/').to_string()))),
                     (k, v) => set.push((Val::Sym(k.to_string()), v)),
                 }
             }
-            if !set.is_empty() {
-                if !self.router.top_level {
-                    return Err("a scope the method sets for itself, inside an enclosing scope".into());
+            if changed {
+                if self.router.enclosing.is_none() {
+                    return Err("a scope the method sets for itself, inside a resource".into());
                 }
                 let mut options = to_expr(&Val::Hash(set), span)?;
                 if let ExprNode::Hash { kwargs, .. } = &mut *options.node {
@@ -1419,6 +1439,20 @@ impl<'a> Eval<'a> {
                     recv: None,
                     method: Symbol::from("scope"),
                     args: vec![options],
+                    block: Some(Expr::new(span, ExprNode::Lambda {
+                        params: Vec::new(),
+                        rest_param: None,
+                        extra_params: Vec::new(),
+                        block_param: None,
+                        body: Expr::new(span, ExprNode::Seq { exprs: vec![call] }),
+                        block_style: crate::expr::BlockStyle::Do,
+                    })),
+                    parenthesized: true,
+                });
+                call = Expr::new(span, ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from(super::routes::EXCLUSIVE_SCOPE),
+                    args: Vec::new(),
                     block: Some(Expr::new(span, ExprNode::Lambda {
                         params: Vec::new(),
                         rest_param: None,
@@ -1837,7 +1871,7 @@ impl<'a> Eval<'a> {
 
     fn ivar(&self, this: &Val, name: &str) -> Option<Val> {
         match this {
-            Val::Router => self.router.ivars.get(name).cloned().or_else(|| (name == "scope").then(root_scope)),
+            Val::Router => self.router.ivars.get(name).cloned().or_else(|| (name == "scope").then(|| self.router.base())),
             Val::Obj(i) => self.heap[*i].ivars.get(name).cloned(),
             Val::Class(c) => self.class_ivars.get(&(c.clone(), name.to_string())).cloned(),
             _ => None,
@@ -2253,9 +2287,16 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
 
 /// The routes a gem's routing method draws (`use_doorkeeper do … end`), run with the mapper as the
 /// recording `Router` after the initializers that call on `root` have run.
-pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr, initializers: &[Expr], roots: &[String], mixins: Vec<String>, top_level: bool) -> Res<Vec<Expr>> {
+/// `enclosing` is the scope the call stands in (`path`, `module`, `as`, as Rails accumulates them), `None` inside a resource.
+pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr, initializers: &[Expr], roots: &[String], mixins: Vec<String>, enclosing: Option<(Option<String>, Option<String>, Option<String>)>) -> Res<Vec<Expr>> {
     let mut eval = Eval::new(app);
-    eval.router = RouterState { mixins, ivars: HashMap::default(), top_level };
+    let enclosing = enclosing.map(|(path, module, as_)| {
+        [("path", path), ("module", module), ("as", as_)]
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (Val::Sym(k.into()), Val::Str(v))))
+            .collect()
+    });
+    eval.router = RouterState { mixins, ivars: HashMap::default(), enclosing };
     for root in roots {
         eval.replay(initializers, root)?;
     }

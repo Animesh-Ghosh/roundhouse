@@ -1740,7 +1740,7 @@ fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, S
                 }
                 merge_outer_constraints(nested, outer);
             }
-            RouteSpec::Scope { entries, .. } => {
+            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => {
                 merge_outer_constraints(entries, outer);
             }
             RouteSpec::Root { .. } | RouteSpec::RackMount { .. } => {}
@@ -1752,6 +1752,9 @@ fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, S
         }
     }
 }
+
+/// The call `ingest::gem_routes` writes around routes drawn under a scope the method set for itself.
+pub(super) const EXCLUSIVE_SCOPE: &str = "__roundhouse_exclusive_scope";
 
 std::thread_local! {
     /// The constants the app's route files read, folded from their owners
@@ -2467,6 +2470,10 @@ fn ingest_route_call(
         // `ingest::devise_routes`. Controllers override via
         // `controllers:`. Does not model Warden or OmniAuth callbacks.
         "devise_for" => super::devise_routes::ingest_devise_for(call, file),
+        // Written only by `ingest::gem_routes`: the routes a gem's method drew under a scope it set for itself.
+        EXCLUSIVE_SCOPE if call.receiver().is_none() && GEM_DSL.with(|g| !g.borrow().is_empty()) => {
+            Ok(Some(RouteSpec::Exclusive { entries: block_entries(call, file, None, cx)? }))
+        }
         // A block-taking method the app added to the mapper
         // (`routing_method :x do … end`): a scope over the enclosing
         // mapper that changes no path.
@@ -3694,11 +3701,10 @@ fn ingest_explicit_route(
     // A symbol verb with `path:` keeps the symbol as its action and name
     // (`post :render_x, path: "x"` is `render_x`) and takes the option as
     // its URL segment; a string verb ignores the option, as Rails does.
+    // Not `as:` the symbol: Rails names the route by it as it names a bare symbol verb, so a canonical action on a member or collection (devise's `post :create, path: "sign_in"`) adds nothing, as `user_session`.
     if let (true, Some(segment), Some(symbol)) = (action_symbol, path_kwarg, path.clone()) {
         action_kwarg = action_kwarg.or_else(|| Some(symbol.replace('-', "_")));
-        as_name = as_name.or_else(|| Some(Symbol::from(symbol.replace('-', "_").as_str())));
         path = Some(format!("/{}", segment.trim_start_matches('/')));
-        action_symbol = false;
     }
 
     // `scope controller: :x do get :y end` — the scope's controller is the
