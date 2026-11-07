@@ -7,6 +7,71 @@ use roundhouse::analyze::Analyzer;
 use roundhouse::ident::{ClassId, Symbol};
 use roundhouse::ty::Ty;
 
+fn review_record(source: &str, path: &str, reopen: Option<(&str, &str)>) -> roundhouse::App {
+    let mut tree = HashMap::from([(PathBuf::from(path), source.as_bytes().to_vec())]);
+    if let Some((path, source)) = reopen {
+        tree.insert(PathBuf::from(path), source.as_bytes().to_vec());
+    }
+    roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest review record")
+}
+
+#[test]
+fn review_data_nested_body_is_refused_at_its_declaration() {
+    let source = "Artifact = Data.define(:digest, :size) do\n  Inner = Data.define(:value) do\n    def text = \"inner:\" + value\n  end\n  def label = digest + \":\" + size.to_s\nend\nmodule Builder; def self.make = Artifact.new(digest: \"abc\", size: 3); end\n";
+    for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+        for source in [source.to_string(), source.replace("Data.define(:value) do", "Data.define(:value) do |klass|"),
+            source.replace("Data.define(:value) do", "Data.define(:value) do |klass|; klass;")]
+        {
+            let mut app = review_record(&source, path, None);
+            let diagnostics = errors(&mut app);
+            assert!(diagnostics.iter().any(|d| !d.span.is_synthetic() && d.message.contains("nested Data.define")),
+                "an unreferenced nested factory must not lose its body: {diagnostics:?}");
+        }
+    }
+}
+
+#[test]
+fn review_data_cross_file_reopenings_are_source_located_refusals() {
+    let source = "Artifact = Data.define(:digest, :size) do; def label = digest + \":\" + size.to_s; end\nmodule Builder; def self.make = Artifact.new(digest: \"abc\", size: 3); end\n";
+    for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+        for reopen in ["lib/a_reopen.rb", "lib/z_reopen.rb"] {
+            let mut app = review_record(source, path, Some((reopen,
+                "require_relative \"artifact\"\nclass Artifact; def extra = \"extra:\" + digest; end\n")));
+            let diagnostics = errors(&mut app);
+            assert!(diagnostics.iter().any(|d| !d.span.is_synthetic() && d.message.contains("cross-file reopening")),
+                "{path}, {reopen}: {diagnostics:?}");
+        }
+    }
+}
+
+fn review_record_signature(source: &str, path: &str) -> String {
+    let mut app = review_record(source, path, None);
+    assert!(errors(&mut app).is_empty());
+    roundhouse::emit::ruby::emit_library(&app).into_iter()
+        .find(|file| file.path.to_string_lossy().ends_with("artifact.rbs"))
+        .expect("Artifact signature").content
+}
+
+#[test]
+fn review_data_constructor_override_has_one_signature() {
+    let source = "Artifact = Data.define(:digest) do\n  def self.new(digest:) = \"custom:\" + digest\nend\nmodule Builder; def self.make = Artifact.new(digest: \"abc\"); end\n";
+    for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+        let rbs = review_record_signature(source, path);
+        assert_eq!(rbs.matches("def self.new:").count(), 1, "{rbs}");
+        assert!(rbs.contains("-> String"), "{rbs}");
+    }
+}
+
+#[test]
+fn review_data_private_visibility_survives_in_signatures() {
+    let source = "Artifact = Data.define(:digest, :size) do\n  def label = hidden + \":\" + size.to_s\n  private\n  def hidden = digest\nend\nmodule Builder; def self.make = Artifact.new(digest: \"abc\", size: 3); end\n";
+    for path in ["lib/artifact.rb", "app/models/artifact.rb"] {
+        let rbs = review_record_signature(source, path);
+        assert!(rbs.contains("private def hidden:"), "{rbs}");
+        assert!(!rbs.contains("private def label:"), "{rbs}");
+    }
+}
+
 #[path = "support/data_factory.rs"]
 mod data_factory;
 

@@ -128,6 +128,25 @@ pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
     let resolver = app.const_resolver.for_sources(&app.sources);
     let mut diagnostics = Vec::new();
     for factory in &app.library_classes {
+        if factory.data_define().is_some() {
+            for (_, value) in &factory.constants {
+                if let ExprNode::Send { recv: Some(recv), method, .. } = &*value.node
+                    && let ExprNode::Const { path } = &*recv.node
+                    && method.as_str() == "define" && resolver.is_runtime_class(recv.span, path, "Data")
+                {
+                    diagnostics.push(Diagnostic::unsupported(value.span, None, "Data.define", "nested Data.define factories cannot retain their bodies and lexical identity"));
+                }
+            }
+        }
+        if let Some((_, span)) = factory.data_define()
+            && app.library_classes.iter().any(|other| other.name == factory.name && !std::ptr::eq(other, factory)
+                && (other.data_define().is_some() || !other.methods.is_empty() || !other.constants.is_empty()
+                    || !other.includes.is_empty() || !other.unknown_calls.is_empty()
+                    || !other.class_ivar_initializers.is_empty() || !other.conditional_definitions.is_empty()))
+        {
+            diagnostics.push(Diagnostic::unsupported(span, None, "Data.define", "cross-file reopening of a Data record cannot preserve definition order"));
+            continue;
+        }
         if let Some((_, span)) = factory.data_define()
             && resolver.has_source_namespace("Data")
         {
