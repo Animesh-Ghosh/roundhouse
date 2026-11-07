@@ -2064,9 +2064,6 @@ jobs:
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    env: &compare-env
-      # The archive embeds the producer's checkout and target paths.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
     permissions:
       contents: read
@@ -2081,6 +2078,8 @@ jobs:
     steps: &compare-steps
       - uses: actions/checkout@v7
       # tools/compare (scripts/compare's HTTP differ) and the Rust target's emitted project still build here.
+      # No job-wide CARGO_TARGET_DIR: the default is already the archive's workspace/target, and set,
+      # it would also send the emitted Rust project's build there instead of its own target/.
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: ./.github/actions/setup-nextest
@@ -2603,7 +2602,6 @@ jobs:
       max-parallel: 7
       matrix:
         target: ${{ fromJSON(needs.plan.outputs.extra-compare) }}
-    env: *compare-env
     steps: *compare-steps
 
   # compare-ruby: same shape as every other compare-* — Puma+Rack
