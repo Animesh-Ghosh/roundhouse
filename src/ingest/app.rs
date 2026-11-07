@@ -2219,7 +2219,7 @@ end
     if !route_roots.is_empty() {
         let block_wrappers = mapper_extension_block_methods(&app, vfs, dir, &engine_dirs);
         super::routes::set_gem_dsl(super::gem_routes::mapper_methods(&app));
-        super::devise_routes::set_model_modules(devise_modules(&app));
+        super::devise_routes::set_model_modules(super::gem_hooks::devise_modules(&app));
         // The constants the route files read, folded from their owners
         // as a model body's are, for `constraints:` values. A route
         // names a controller's constant as often as a model's, so its
@@ -3158,7 +3158,7 @@ end
     // After the macros: a configured object's readers and its builder's writers are methods by now.
     super::configured_superclass::fold(vfs, dir, &mut app);
     super::configured_superclass::fold_class_names(vfs, dir, &mut app);
-    super::gem_routes::expand(vfs, dir, &mut app);
+    super::gem_routes::expand(vfs, dir, &path_gems, &mut app);
     super::class_macros::drop_expanded_hook_macros(&mut app, &hook_macros_called, &mentions);
     super::model_callbacks::expand_model_callbacks(&mut app);
     // After the macros: an expanded `has_ancestry` is what writes the `extend`.
@@ -14237,24 +14237,4 @@ mod path_gem_vfs_tests {
     }
 }
 
-/// Each model's `devise :a, :b` declaration, by class name: the modules whose routes `devise_for` draws.
-fn devise_modules(app: &App) -> crate::det::HashMap<String, Vec<String>> {
-    let mut out: crate::det::HashMap<String, Vec<String>> = crate::det::HashMap::default();
-    for model in &app.models {
-        for item in &model.body {
-            let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
-            let crate::expr::ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
-            if method.as_str() != "devise" {
-                continue;
-            }
-            let modules = out.entry(model.name.0.as_str().to_string()).or_default();
-            for arg in args {
-                if let crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*arg.node {
-                    modules.push(value.as_str().to_string());
-                }
-            }
-        }
-    }
-    out
-}
 

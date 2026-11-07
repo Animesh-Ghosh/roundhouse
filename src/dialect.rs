@@ -2206,6 +2206,10 @@ pub enum RouteSpec {
         /// only the block form this field carries.
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
         constraints: IndexMap<Symbol, String>,
+        /// `resource :registration, path_names: { new: "sign_up" }` (devise's): the URL segment of
+        /// the `new` and `edit` actions, in place of the action name (`/users/sign_up`).
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        path_names: IndexMap<Symbol, String>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with
@@ -2269,6 +2273,9 @@ pub enum RouteSpec {
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
         constraints: IndexMap<Symbol, String>,
     },
+    /// Routes a gem's routing method draws under a scope it sets for itself (devise's
+    /// `with_devise_exclusive_scope`): they take none of the enclosing scopes' path, module or name.
+    Exclusive { entries: Vec<RouteSpec> },
 }
 
 /// One `get "/path", to: "c#a"` entry. Kept as a standalone struct so

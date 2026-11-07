@@ -103,3 +103,98 @@ fn a_gems_routing_method_reads_its_options_and_its_setup_block() {
         .run_test("test/controllers/bells_controller_test.rb")
         .assert_passes();
 }
+
+const CHIMES: &str = r##"module Chimes
+  ROUTES = {}
+
+  def self.add_route(name, options = {})
+    key = case options[:route]
+          when Symbol then options[:route]
+          when true then name
+          end
+    ROUTES[name] = key
+  end
+end
+
+Chimes.add_route :ring, route: :ringer
+Chimes.add_route :quiet
+
+module ActionDispatch::Routing
+  class Mapper
+    def chimes_for(resource, options = {})
+      names = Hash.new { |h, k| h[k] = k.to_s }
+      names.merge!(options[:path_names]) if options[:path_names]
+      routes = Chimes::ROUTES.values.compact
+      prefix = @scope[:path]
+      as = [@scope[:as], resource].compact.join("_")
+      with_chimes_scope("#{prefix}/#{resource}", as) do
+        routes.each { |route| send("chimes_#{route}", names) }
+      end
+    end
+
+    protected
+
+    def chimes_ringer(names)
+      resource :ringer, only: [:show, :new], path: names[:ringer], controller: "chimes", path_names: { new: names[:start] }
+    end
+
+    def with_chimes_scope(path, as)
+      current = @scope.dup
+      exclusive = { as: as, path: path, module: nil }
+      if @scope.respond_to?(:new)
+        @scope = @scope.new(exclusive)
+      else
+        exclusive.each_pair { |key, value| @scope[key] = value }
+      end
+      yield
+    ensure
+      @scope = current
+    end
+  end
+end
+"##;
+
+/// devise's shape, in a gem of its own: the gem's files register what the
+/// routing method reads (`Chimes.add_route`, a `case` over the option),
+/// the method reopens the mapper, keeps a Hash with a default block, calls
+/// the mapper's other methods by a built name, and sets `@scope` for its
+/// routes as `with_devise_exclusive_scope` does.
+#[test]
+fn a_gems_routing_method_that_sets_its_own_scope_draws_routes_that_answer() {
+    emit_and_run::real_blog()
+        .edit("Gemfile.lock", "GEM\n", "PATH\n  remote: vendor/gems/chimes\n  specs:\n    chimes (1.0.0)\n\nGEM\n")
+        .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  chimes!\n")
+        .write("vendor/gems/chimes/lib/chimes.rb", CHIMES)
+        .write(
+            "app/controllers/chimes_controller.rb",
+            "class ChimesController < ApplicationController\n  def show\n    render plain: \"show #{bells_ringer_path}\"\n  end\n\n  def new\n    render plain: \"new #{new_bells_ringer_path}\"\n  end\nend\n",
+        )
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  chimes_for :bells, path_names: { ringer: \"ring\", start: \"begin\" }\n")
+        .write(
+            "test/controllers/chimes_controller_test.rb",
+            "require \"test_helper\"\n\nclass ChimesControllerTest < ActionDispatch::IntegrationTest\n  test \"the routes the gem draws answer\" do\n    get \"/bells/ring\"\n    assert_equal \"show /bells/ring\", response.body\n    get \"/bells/ring/begin\"\n    assert_equal \"new /bells/ring/begin\", response.body\n  end\nend\n",
+        )
+        .run_test("test/controllers/chimes_controller_test.rb")
+        .assert_passes();
+}
+
+/// The same method inside a `scope`: as devise's, it reads the enclosing scope's path and name off
+/// `@scope` and draws its routes under a scope of its own, which takes neither again.
+#[test]
+fn a_gems_routing_method_inside_a_scope_draws_under_its_own() {
+    emit_and_run::real_blog()
+        .edit("Gemfile.lock", "GEM\n", "PATH\n  remote: vendor/gems/chimes\n  specs:\n    chimes (1.0.0)\n\nGEM\n")
+        .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  chimes!\n")
+        .write("vendor/gems/chimes/lib/chimes.rb", CHIMES)
+        .write(
+            "app/controllers/chimes_controller.rb",
+            "class ChimesController < ApplicationController\n  def show\n    render plain: \"show #{kiosk_bells_ringer_path}\"\n  end\n\n  def new\n    render plain: \"new #{new_kiosk_bells_ringer_path}\"\n  end\nend\n",
+        )
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  scope \"kiosk\", as: \"kiosk\" do\n    chimes_for :bells, path_names: { ringer: \"ring\" }\n  end\n")
+        .write(
+            "test/controllers/chimes_controller_test.rb",
+            "require \"test_helper\"\n\nclass ChimesControllerTest < ActionDispatch::IntegrationTest\n  test \"the routes stand under the gem's own scope\" do\n    get \"/kiosk/bells/ring\"\n    assert_equal \"show /kiosk/bells/ring\", response.body\n    get \"/kiosk/bells/ring/start\"\n    assert_equal \"new /kiosk/bells/ring/start\", response.body\n  end\nend\n",
+        )
+        .run_test("test/controllers/chimes_controller_test.rb")
+        .assert_passes();
+}
