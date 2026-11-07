@@ -49,11 +49,85 @@ fn sqlite_random_sql_default_keeps_exact_expression() {
 
 #[test]
 fn defaults_with_different_rails_classification_refuse_at_the_source() {
-    for sql in ["(printf('%s',\n'x'))", "coalesce('x', 'y')", "'x' || lower('Y')"] {
+    for sql in ["(printf('%s',\n'x'))", "coalesce('x', 'y')", "'x' || lower('Y')",
+        "('2' + abs(-3) + '4')", "('aa' + length('bbb') + 'cc')",
+        "(('2' + abs(-3) + '4'))", "('2' || lower('Q') || '4')", "(upper (lower('q')))"] {
         let source = RANDOM_SCHEMA.replace("printf('item_%s', lower(hex(randomblob(16))))", &sql.replace('\n', "\\n"));
         let error = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap_err().to_string();
         assert!(error.contains("line 3") && error.contains("record_items.token"), "{error}");
     }
+}
+
+fn classified_default_control() -> (emit_and_run::Overlay, String, String) {
+    let cases = [
+        ("upper('q')", "'Q'"), ("lower('Q')", "'q'"), ("length('abc')", "'3'"),
+        ("coalesce(NULL, 'q')", "'q'"), ("nullif('q', 'Q')", "'q'"), ("nullif('q', 'q')", "nil"),
+        ("abs(-7)", "'7'"), ("hex('q')", "'71'"), ("json_valid('{}')", "'1'"),
+        ("substr('abcd', 2, 2)", "'bc'"), ("printf('%s:%s', 'a', 'b')", "'a:b'"),
+        ("abs(-3) + abs(2)", "'5'"), ("printf('%s', '2') || lower('Q')", "'2q'"),
+    ];
+    let mut schema = "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :record_items do |t|\n".to_string();
+    let mut contract = "before = RecordItem.new\nfirst = RecordItem.create!\n".to_string();
+    let nils = (0..cases.len()).map(|i| format!("value_{i}: nil")).collect::<Vec<_>>().join(", ");
+    contract.push_str(&format!("given_nil = RecordItem.create!({nils})\nexplicit = RecordItem.create!(value_0: 'manual')\nraise 'explicit changed' unless explicit.value_0 == 'manual'\n"));
+    for (i, (sql, expected)) in cases.iter().enumerate() {
+        schema.push_str(&format!("    t.string :value_{i}, default: -> {{ {sql:?} }}\n"));
+        contract.push_str(&format!("raise 'eager {i}' unless before.value_{i}.nil?\nraise 'value {i}' unless first.value_{i} == {expected}\nraise 'reader {i}' unless RecordItem.lookup(first.id).value_{i} == {expected}\nraise 'nil {i}' unless given_nil.value_{i} == {expected}\n"));
+    }
+    schema.push_str("  end\nend\n");
+    contract.push_str("puts 'classified scalar defaults match Rails'\n");
+    let mut model = "class RecordItem < ActiveRecord::Base\n  def self.lookup(id)\n    record = find(id)\n".to_string();
+    for i in 0..cases.len() { model.push_str(&format!("    record.value_{i}\n")); }
+    model.push_str("    record\n  end\nend\n");
+    let overlay = emit_and_run::empty_app().write("db/schema.rb", &schema).write("app/models/record_item.rb", &model);
+    // Rails runs the same explicit saved-row reader used by both emitted targets.
+    let schema = format!("{schema}\n{model}");
+    (overlay, schema, contract)
+}
+
+#[test]
+fn emitted_scalar_default_forms_match_rails_classification() {
+    let (app, _, contract) = classified_default_control();
+    app.run_ruby(&contract).assert_passes();
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn native_scalar_default_forms_match_rails_classification() {
+    let (app, _, contract) = classified_default_control();
+    let script = format!("Db.configure(\":memory:\")\nSchema.statements.each {{ |sql| Db.exec(sql) }}\nActiveRecord.adapter = SqliteAdapter\n{contract}");
+    app.run_spinel_with_rbs(&script).assert_passes();
+}
+
+#[test]
+fn rails_scalar_default_forms_are_lazy_not_literal_text() {
+    let (_, schema, contract) = classified_default_control();
+    let helper = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/rails_oracle.rb");
+    let script = format!(r#"
+require {helper:?}
+RailsOracle.activate("railties", "activerecord", sqlite3: ">= 2.9")
+require 'rails'
+require 'active_record/railtie'
+class ClassificationApp < Rails::Application
+  config.load_defaults 8.1
+  config.eager_load = false
+  config.secret_key_base = 'test'
+  config.logger = Logger.new(File::NULL)
+end
+ENV['DATABASE_URL'] = 'sqlite3::memory:'
+ClassificationApp.initialize!
+ActiveRecord::Base.establish_connection(adapter: 'sqlite3', database: ':memory:')
+ActiveRecord::Schema.verbose = false
+{schema}
+RecordItem.columns.reject {{ |column| column.name == 'id' }}.each do |column|
+  raise 'literal classification' unless column.default.nil? && column.default_function
+end
+{contract}
+puts "oracle Ruby=#{{RUBY_VERSION}} Rails=#{{Rails.version}} defaults=8.1 SQLite=#{{SQLite3::SQLITE_VERSION}}"
+"#);
+    let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("classified scalar defaults match Rails"));
 }
 
 #[test]

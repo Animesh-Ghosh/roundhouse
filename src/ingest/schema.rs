@@ -2082,6 +2082,10 @@ fn sql_default_expression(node: &Node<'_>) -> Result<String, String> {
     let sql = if sql.eq_ignore_ascii_case("DATETIME('now')") { "CURRENT_TIMESTAMP".into() } else { sql };
     let quoted = sql.len() >= 2 && sql.starts_with('\'') && sql.ends_with('\'')
         && !sql[1..sql.len() - 1].replace("''", "").contains('\'');
+    // Only direct calls have the lazy classification Rails' SQLite quoting
+    // and default extraction establish here; parentheses can expose a literal.
+    if !quoted && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str())
+        && !regex::Regex::new(r"\A[a-zA-Z_]\w*\(.*\)\z").unwrap().is_match(&sql) { return Err(gap()); }
     // Rails' default-function regexp does not span lines; its binary-literal
     // extraction also takes precedence over function recognition (`x'…'`).
     if !quoted && (sql.contains(['\n', '\r']) || regex::Regex::new("x'[^\\n]*'").unwrap().is_match(&sql)) {
