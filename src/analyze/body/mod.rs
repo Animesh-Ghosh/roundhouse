@@ -1739,6 +1739,8 @@ impl<'a> BodyTyper<'a> {
                 for (k, v) in entries.iter_mut() {
                     let kt = self.analyze_expr(k, ctx);
                     let vt = self.analyze_expr(v, ctx);
+                    let kt = super::Analyzer::class_object_return_ty(k).unwrap_or(kt);
+                    let vt = super::Analyzer::class_object_return_ty(v).unwrap_or(vt);
                     key_ty = Some(match key_ty.take() {
                         Some(prev) => union_of(prev, kt),
                         None => kt,
@@ -1767,6 +1769,9 @@ impl<'a> BodyTyper<'a> {
                 let mut elem_ty: Option<Ty> = None;
                 for e in elements.iter_mut() {
                     let et = self.analyze_expr(e, ctx);
+                    // A stored value keeps its class-object alternatives;
+                    // the flat nominal type is only for receiver lookup.
+                    let et = super::Analyzer::class_object_return_ty(e).unwrap_or(et);
                     // `[*a, b]` holds `a`'s elements, not `a`.
                     let et = if matches!(&*e.node, ExprNode::Splat { .. }) {
                         match splat_elements(et) {
@@ -2382,7 +2387,15 @@ impl<'a> BodyTyper<'a> {
                     // read from — its own computed type already IS
                     // the referenced method's return type.
                     match &*b.node {
-                        ExprNode::Lambda { body, .. } => body.ty.clone(),
+                        ExprNode::Lambda { body, .. } => {
+                            let mut yielded = Vec::new();
+                            if block_exits(body, &mut yielded, false) {
+                                yielded.extend(super::Analyzer::class_object_return_ty(body));
+                                Some(union_many(yielded))
+                            } else {
+                                body.ty.clone()
+                            }
+                        }
                         ExprNode::MethodRef { .. } => Some(method_ref_ty),
                         // Forwarded proc (`&callback`): Var in the block
                         // slot, no body to type. Presence must still reach
@@ -4559,7 +4572,7 @@ fn collect_array_pushes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
             if let Some((is_ivar, name)) = slot {
                 let mut pushed: Option<Ty> = None;
                 for a in args {
-                    let Some(t) = a.ty.clone() else { continue };
+                    let Some(t) = super::Analyzer::class_object_return_ty(a) else { continue };
                     if t.is_open() {
                         continue;
                     }
@@ -4666,7 +4679,7 @@ fn memo_keys(expr: &Expr, memo: &Symbol, out: &mut Vec<Ty>) {
         && matches!(method.as_str(), "[]=" | "store")
         && args.len() == 2
         && matches!(&*r.node, ExprNode::Var { name, .. } if name == memo)
-        && let Some(ty) = args[0].ty.clone().filter(|t| !t.is_open())
+        && let Some(ty) = super::Analyzer::class_object_return_ty(&args[0]).filter(|t| !t.is_open())
     {
         out.push(ty);
     }
@@ -4677,7 +4690,7 @@ fn collect_hash_index_writes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
     let write = match &*expr.node {
         ExprNode::Assign { target: LValue::Index { recv, .. }, value }
         | ExprNode::OpAssign { target: LValue::Index { recv, .. }, value, .. } => {
-            value.ty.clone().map(|t| (recv, t))
+            super::Analyzer::class_object_return_ty(value).map(|t| (recv, t))
         }
         // `h[k] = v` reaches the analyzer as a two-arg `[]=` send, NOT
         // as an `LValue::Index` assign — the LValue shape only survives
@@ -4687,7 +4700,7 @@ fn collect_hash_index_writes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
         ExprNode::Send { recv: Some(r), method, args, .. }
             if matches!(method.as_str(), "[]=" | "store") && args.len() == 2 =>
         {
-            args[1].ty.clone().map(|t| (r, t))
+            super::Analyzer::class_object_return_ty(&args[1]).map(|t| (r, t))
         }
         _ => None,
     };
@@ -7294,19 +7307,17 @@ fn filter_map_and_value(body: &Expr) -> Option<Ty> {
     let ExprNode::BoolOp { op: crate::expr::BoolOpKind::And, right, .. } = &*tail.node else {
         return None;
     };
-    let mut yielded = vec![right.ty.clone()?];
-    if !block_exits(body, &mut yielded) {
+    let mut yielded = vec![super::Analyzer::class_object_return_ty(right)?];
+    if !block_exits(body, &mut yielded, true) {
         return None;
     }
     yielded.into_iter().reduce(union_of)
 }
 
-/// Collect the types of this block's `next` values (a bare `next` is
-/// nil; a literal `next false` adds nothing, since `filter_map` drops
-/// it) into `yielded`, leaving out the blocks and loops inside it,
-/// which own their `next`. `false` on a `break`, or a `next` value with
-/// no type yet.
-fn block_exits(e: &Expr, yielded: &mut Vec<Ty>) -> bool {
+/// Collect this block's `next` values, leaving out inner blocks and loops,
+/// which own their `next`. A bare `next` is nil; only `filter_map` drops
+/// a literal `next false`. `false` on a `break` or an untyped value.
+fn block_exits(e: &Expr, yielded: &mut Vec<Ty>, drop_false: bool) -> bool {
     match &*e.node {
         ExprNode::Break { .. } => false,
         ExprNode::Next { value } => match value {
@@ -7315,11 +7326,11 @@ fn block_exits(e: &Expr, yielded: &mut Vec<Ty>) -> bool {
                 true
             }
             // `filter_map` drops a `next false` as it drops the `&&`'s false: no element
-            Some(v) if matches!(&*v.node, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } }) => true,
-            Some(v) => match &v.ty {
+            Some(v) if drop_false && matches!(&*v.node, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } }) => true,
+            Some(v) => match super::Analyzer::class_object_return_ty(v) {
                 Some(ty) => {
-                    yielded.push(ty.clone());
-                    block_exits(v, yielded)
+                    yielded.push(ty);
+                    block_exits(v, yielded, drop_false)
                 }
                 None => false,
             },
@@ -7327,10 +7338,31 @@ fn block_exits(e: &Expr, yielded: &mut Vec<Ty>) -> bool {
         ExprNode::Lambda { .. } | ExprNode::While { .. } => true,
         _ => {
             let mut ok = true;
-            e.node.for_each_child(&mut |child| ok &= block_exits(child, yielded));
+            e.node.for_each_child(&mut |child| ok &= block_exits(child, yielded, drop_false));
             ok
         }
     }
+}
+
+pub(super) fn class_object_boolop_ty(left: &Expr, op: crate::expr::BoolOpKind, right: &Expr) -> Option<Ty> {
+    use crate::expr::BoolOpKind::{And, Or};
+    let lt = super::Analyzer::class_object_return_ty(left)?;
+    let falsy = matches!(lt, Ty::Nil)
+        || matches!(&*left.node, ExprNode::Lit { value: Literal::Bool { value: false } });
+    let truthy = never_falsy(&lt)
+        || matches!(&*left.node, ExprNode::Lit { value: Literal::Bool { value: true } });
+    let right = || super::Analyzer::class_object_return_ty(right);
+    Some(match op {
+        Or if truthy => lt,
+        And if falsy => lt,
+        Or if falsy => right()?,
+        And if truthy => right()?,
+        Or => union_of(narrowing::remove_nil(&lt), right()?),
+        And => match falsy_part(&lt) {
+            Some(f) => union_of(f, right()?),
+            None => right()?,
+        },
+    })
 }
 
 /// The arms of `ty` a falsy value can come from -- `nil`, `false`, and

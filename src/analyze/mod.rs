@@ -5915,7 +5915,9 @@ impl Analyzer {
         for leaf in return_leaves(body) {
             let ty = leaf.ty.clone().unwrap_or_else(crate::analyze::body::unknown);
             // A runtime-created class has kind Class/Module but no named identity.
-            let value = if matches!(&ty, Ty::Class { id, .. } if matches!(id.0.as_str(), "Class" | "Module"))
+            let value = if let ExprNode::BoolOp { left, op, right, .. } = &*leaf.node {
+                body::class_object_boolop_ty(left, *op, right)?
+            } else if matches!(&ty, Ty::Class { id, .. } if matches!(id.0.as_str(), "Class" | "Module"))
                 && !matches!(&*leaf.node, ExprNode::Const { .. })
             { ty.clone() } else { class_object_arg_ty(leaf, ty.clone()) };
             promoted |= value != ty;
@@ -11242,7 +11244,7 @@ pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
         if elements.len() < 2 || elements.iter().any(|e| matches!(&*e.node, ExprNode::Splat { .. })) {
             return None;
         }
-        let tys: Vec<Ty> = elements.iter().map(|e| e.ty.clone()).collect::<Option<_>>()?;
+        let tys: Vec<Ty> = elements.iter().map(Analyzer::class_object_return_ty).collect::<Option<_>>()?;
         if tys.iter().any(|t| matches!(t, Ty::Var { .. })) {
             return None;
         }
