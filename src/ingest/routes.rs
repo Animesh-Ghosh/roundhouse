@@ -308,7 +308,27 @@ fn top_level_app_draws<'pr>(root: &Node<'pr>) -> Vec<ruby_prism::CallNode<'pr>> 
 
 fn wrapped_route_set(stmt: &Node<'_>) -> bool {
     !stmt.as_call_node().is_some_and(|c| is_app_route_block(&c, &["draw", "prepend", "append"]))
-        && has_mount_block_call(stmt, &["draw", "prepend", "append"])
+        && has_app_route_block(stmt, &["draw", "prepend", "append"])
+}
+
+/// A `<app>.routes.<method> do … end` call anywhere in `node`; a `prepend` or `append` on any other value doesn't count.
+fn has_app_route_block(node: &Node<'_>, methods: &[&str]) -> bool {
+    struct Finder<'a> {
+        methods: &'a [&'a str],
+        found: bool,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Finder<'_> {
+        fn visit_call_node(&mut self, call: &ruby_prism::CallNode<'pr>) {
+            if is_app_route_block(call, self.methods) {
+                self.found = true;
+                return;
+            }
+            ruby_prism::visit_call_node(self, call);
+        }
+    }
+    let mut finder = Finder { methods, found: false };
+    ruby_prism::Visit::visit(&mut finder, node);
+    finder.found
 }
 
 /// The top-level `<app>.routes.<method> do … end` calls for each of

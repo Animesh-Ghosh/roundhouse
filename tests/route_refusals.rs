@@ -225,6 +225,20 @@ fn a_route_set_behind_a_guard_is_refused() {
     }
 }
 
+#[test]
+fn top_level_prepend_or_append_on_other_values_is_not_a_route_set() {
+    let draw = "Rails.application.routes.draw do\n  get '/catalog', to: 'catalog#show'\nend\n";
+    for prelude in [
+        "API_PREFIX = ENV.fetch('API_PREFIX', 'api').prepend('/')\n",
+        "if ENV['API_PREFIX']\n  ENV['API_PREFIX'].prepend('/')\nend\n",
+        "SEGMENTS = []\nSEGMENTS.append('v1')\n",
+    ] {
+        let app = routes(&format!("{prelude}{draw}"));
+        kept(&app);
+        assert!(paths(&app).iter().any(|p| p == "/catalog"), "{prelude}");
+    }
+}
+
 fn emit(routes: &str, target: BuildTarget) -> Vec<(String, String)> {
     let tree: HashMap<PathBuf, Vec<u8>> = [
         ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
