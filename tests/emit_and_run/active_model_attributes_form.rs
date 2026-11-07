@@ -252,6 +252,8 @@ const DEFAULTS_FORM: &str = r#"class Form::Prefs
   attribute :label, :string, default: "none"
   attribute :stamp, :integer, default: -> { CALLS << :call; CALLS.size }
   attribute :origin, :string, default: -> { name }
+
+  validates :label, inclusion: { in: %w[none other] }
 end
 "#;
 
@@ -259,7 +261,8 @@ end
 /// form and an ActiveRecord model): cast as an assigned value is; `new`
 /// with the key, even nil, wins; a String default is fresh per instance; a
 /// lambda is called on the first read, with the class as `self`, kept, and
-/// skipped by an earlier write or `new` key.
+/// skipped by an earlier write or `new` key. A validation reads the
+/// default through the reader.
 const DEFAULTS_SCRIPT: &str = r##"
 require_relative "app/models/form/prefs"
 def check(label, got, want)
@@ -280,6 +283,8 @@ w = Form::Prefs.new
 w.stamp = 6
 check("write before read skips the lambda", [w.stamp, Form::Prefs::CALLS.size], [6, 0])
 check("lambda self is the class", Form::Prefs.new.origin, "Form::Prefs")
+check("validation reads the default", Form::Prefs.new.valid?, true)
+check("validation reads the written value", Form::Prefs.new(label: "x").valid?, false)
 puts "model attribute defaults passed"
 "##;
 
@@ -348,6 +353,36 @@ fn a_source_reader_beside_a_default_on_ruby() {
         .run_ruby(SOURCE_READER_SCRIPT);
     run.assert_passes();
     assert!(run.stdout.contains("source reader passed"), "{}", run.stdout);
+}
+
+const GUARDED_DEFAULT_FORM: &str = r#"class Form::Note
+  include ActiveModel::Model
+  include ActiveModel::Attributes
+
+  attribute :note, :string, default: ""
+
+  validates :note, presence: true, if: -> { @note.nil? }
+end
+"#;
+
+// A condition keeps the app's own `@note` read, which is nil in Rails
+// 8.1.4; only the check reads through the reader.
+const GUARDED_DEFAULT_SCRIPT: &str = r##"
+require_relative "app/models/form/note"
+def check(label, got, want)
+  raise "#{label}: #{got.inspect} (want #{want.inspect})" unless got == want
+end
+blank = Form::Note.new
+check("the condition reads @note, the check the default", [blank.valid?, blank.errors.to_a], [false, ["Note can't be blank"]])
+check("a written value", Form::Note.new(note: "x").valid?, true)
+puts "guarded default passed"
+"##;
+
+#[test]
+fn a_validation_condition_keeps_its_instance_variable_read_on_ruby() {
+    let run = emit_and_run::real_blog().write("app/models/form/note.rb", GUARDED_DEFAULT_FORM).run_ruby(GUARDED_DEFAULT_SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("guarded default passed"), "{}", run.stdout);
 }
 
 // Two `default:` declarations this lowering doesn't model, so they stay
