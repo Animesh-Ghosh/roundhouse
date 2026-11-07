@@ -58,3 +58,18 @@ fn a_core_class_read_in_a_rescuing_method_is_not_taken_for_absent() {
     run.assert_passes();
     assert!(run.stdout.contains("core class read passed"), "{}", run.stdout);
 }
+
+const NESTED_CORE_PROBE: &str = "module NestedCore\n  def self.object_missing\n    Object::Missing\n  rescue NameError => e\n    e.class.name\n  end\n\n  def self.string_missing\n    String::Nope\n  rescue NameError => e\n    e.class.name\n  end\n\n  def self.infinity\n    Float::INFINITY\n  rescue NameError\n    nil\n  end\nend\n";
+
+const NESTED_CORE_ASSERTIONS: &str = "got = [NestedCore.object_missing, NestedCore.string_missing, NestedCore.infinity]\nraise got.inspect unless got == [\"NameError\", \"NameError\", Float::INFINITY]\nputs \"nested core read passed\"\n";
+
+/// Only the core class itself is always defined: a constant nested under
+/// it that Ruby does not define (`Object::Missing`, `String::Nope`) is
+/// still a NameError the rescue answers, while one it does define
+/// (`Float::INFINITY`) is read as written.
+#[test]
+fn a_missing_constant_nested_in_a_core_class_still_raises_name_error() {
+    let run = emit_and_run::real_blog().write("app/models/nested_core.rb", NESTED_CORE_PROBE).run_ruby(NESTED_CORE_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("nested core read passed"), "{}", run.stdout);
+}

@@ -67,9 +67,11 @@ pub(super) fn mark(app: &mut App, source_gem_classes: &crate::det::HashSet<Strin
     // Not a constant some gem of the app, Ruby's standard library or the app itself may define: only one nothing could.
     let absent = |written: &[&Symbol]| {
         let Some(root) = written.first().map(|r| r.as_str()) else { return false };
-        let full = written.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::");
+        let segments: Vec<&str> = written.iter().map(|p| p.as_str()).collect();
+        let full = segments.join("::");
         index.owners(&full).is_empty()
             && !crate::gems::is_stdlib_namespace(root)
+            && !crate::gems::is_core_constant(&segments)
             && !own_roots.contains(root)
             && !declared.contains(root)
     };
