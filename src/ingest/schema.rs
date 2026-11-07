@@ -576,12 +576,13 @@ fn apply_table_verb(
                 let to_kwarg = kwarg_value(args.iter().skip(2), "to");
                 let value = to_kwarg.as_ref().or_else(|| args.get(2));
                 let expression = value.filter(|n| sql_default_candidate(n))
-                    .map(sql_default_expression).transpose().map_err(|message| IngestError::Unsupported { file: file.into(), message })?;
-                if expression.as_deref().is_some_and(|sql| sql.starts_with('\'')) && schema.tables.get(&Symbol::from(t.as_str()))
-                    .and_then(|table| table.columns.iter().find(|col| col.name.as_str() == c))
-                    .is_some_and(|col| col.array || !col.col_type.stores_sql_literal_default_as_text()) {
-                    return Err(IngestError::Unsupported { file: file.into(), message: format!("default for {t}.{c}: quoted SQL literal defaults on this column type are not modeled") });
-                }
+                    .map(sql_default_expression).transpose().map_err(|message| IngestError::Unsupported { file: file.into(), message }).and_then(|expression| {
+                        if expression.as_deref().is_some_and(|sql| sql.starts_with('\'')) && schema.tables.get(&Symbol::from(t.as_str()))
+                            .and_then(|table| table.columns.iter().find(|col| col.name.as_str() == c))
+                            .is_some_and(|col| col.array || !col.col_type.stores_sql_literal_default_as_text()) {
+                            Err(IngestError::Unsupported { file: file.into(), message: format!("default for {t}.{c}: quoted SQL literal defaults on this column type are not modeled") })
+                        } else { Ok(expression) }
+                    }).or_else(|gap| super::survey::continue_or_fail(gap).map(|()| None))?;
                 let default_for = |col: &Column| {
                     value.and_then(|value| {
                         if !col.array && matches!(col.col_type, ColumnType::Json | ColumnType::Jsonb) {
@@ -3434,5 +3435,33 @@ mod tests {
         }
         assert_eq!(gaps.len(), 2, "{gaps:?}");
         assert!(gaps[1].contains("line 6: default for record_items.code"), "{gaps:?}");
+    }
+
+    #[test]
+    fn survey_continues_after_a_refused_changed_column_default() {
+        for old in ["'old'", "-> { \"'old'\" }"] {
+            let base = format!("ActiveRecord::Schema[8.1].define do\n create_table :record_items do |t|\n t.string :token, null: false, default: {old}\n t.integer :number, default: 3\n end\nend");
+            for value in ["-> { \"random()\" }", "from: 'old', to: -> { \"random()\" }", "-> { computed_sql }", "SQL_DEFAULT"] {
+                let source = format!("class ChangeDefaults < ActiveRecord::Migration[8.1]\n def change\n change_column_default :record_items, :token, {value}\n add_column :record_items, :middle, :string\n change_column_default :record_items, :number, to: -> {{ \"'7'\" }}\n add_column :record_items, :later, :string\n end\nend");
+                let initial = ingest_schema(base.as_bytes(), "db/schema.rb").unwrap();
+                let mut strict_schema = initial.clone();
+                let strict = ingest_migration(source.as_bytes(), "1_change.rb", &mut strict_schema).expect_err("strict refuses").to_string();
+                assert_eq!(col_names(&strict_schema, "record_items"), ["id", "token", "number"]);
+                assert_eq!(col(&strict_schema, "record_items", "token"), col(&initial, "record_items", "token"));
+                crate::ingest::survey::activate();
+                let mut schema = initial;
+                let folded = ingest_migration(source.as_bytes(), "1_change.rb", &mut schema);
+                let gaps: Vec<String> = crate::ingest::survey::drain().iter().map(|gap| gap.to_string()).collect();
+                folded.expect("survey continues after a refused changed default");
+                assert_eq!(col_names(&schema, "record_items"), ["id", "token", "number", "middle", "later"]);
+                assert!(!col(&schema, "record_items", "token").nullable);
+                for name in ["token", "number"] {
+                    assert_eq!((col(&schema, "record_items", name).default.as_deref(), col(&schema, "record_items", name).default_expression.as_deref()), (None, None));
+                }
+                assert_eq!(gaps.len(), 2, "{gaps:?}");
+                assert_eq!(gaps[0], strict);
+                assert!(gaps[1].contains("quoted SQL literal"), "{gaps:?}");
+            }
+        }
     }
 }
