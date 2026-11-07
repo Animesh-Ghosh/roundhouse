@@ -43,10 +43,17 @@ struct Pending {
 
 thread_local! {
     static PENDING: RefCell<Vec<Pending>> = const { RefCell::new(Vec::new()) };
+    static CLASS_NAMES: RefCell<Vec<(Span, Expr)>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(super) fn reset() {
     PENDING.with(|p| p.borrow_mut().clear());
+    CLASS_NAMES.with(|p| p.borrow_mut().clear());
+}
+
+/// An association's `class_name:` written as an expression, by the declaration's span.
+pub(super) fn defer_class_name(span: Span, expr: Expr) {
+    CLASS_NAMES.with(|p| p.borrow_mut().push((span, expr)));
 }
 
 /// Records `node` for [`fold`] when it is a call chain rooted at a
@@ -105,6 +112,34 @@ pub(super) fn fold<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App) {
                     item.owner.0.as_str()
                 ),
             )),
+        }
+    }
+}
+
+/// Each association whose `class_name:` is an expression: the class it names once the initializers have run
+/// (doorkeeper's `has_many :authorized_tokens, class_name: Doorkeeper.config.access_token_class.to_s`). One it
+/// cannot settle keeps the class its name gives, as before.
+pub(super) fn fold_class_names<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App) {
+    let pending = CLASS_NAMES.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    if pending.is_empty() {
+        return;
+    }
+    let initializers = initializer_statements(vfs, dir);
+    let mut answers: Vec<(Span, String)> = Vec::new();
+    for (span, expr) in &pending {
+        let name = match Eval::new(app).answer_value(expr, &initializers) {
+            Ok(Val::Str(s)) | Ok(Val::Class(s)) => s.trim_start_matches("::").to_string(),
+            _ => continue,
+        };
+        if name.split("::").all(|seg| seg.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && seg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')) {
+            answers.push((*span, name));
+        }
+    }
+    for model in &mut app.models {
+        for item in &mut model.body {
+            let crate::dialect::ModelBodyItem::Association { assoc, span, .. } = item else { continue };
+            let Some((_, name)) = answers.iter().find(|(s, _)| s.file == span.file && s.start == span.start && s.end == span.end) else { continue };
+            assoc.set_target(ClassId(Symbol::from(name.as_str())));
         }
     }
 }
@@ -285,16 +320,19 @@ impl<'a> Eval<'a> {
 
     /// The constant `expr` names once the initializers that call on its root have run.
     fn answer(&mut self, expr: &Expr, initializers: &[Expr]) -> Res<String> {
+        match self.answer_value(expr, initializers)? {
+            Val::Class(name) => Ok(name),
+            other => Err(format!("it evaluates to {other:?}, not a class")),
+        }
+    }
+
+    fn answer_value(&mut self, expr: &Expr, initializers: &[Expr]) -> Res<Val> {
         let root = root_constant(expr).ok_or("no constant at the root")?;
         let top = Frame { this: Val::Class("Object".into()), locals: HashMap::default(), block: None, scope: None };
         for statement in initializers.iter().filter(|s| root_constant(s).as_deref() == Some(root.as_str())) {
             self.statement(statement, &mut top.clone())?;
         }
-        let value = self.value(expr, &mut top.clone())?;
-        match value {
-            Val::Class(name) => Ok(name),
-            other => Err(format!("it evaluates to {other:?}, not a class")),
-        }
+        self.value(expr, &mut top.clone())
     }
 
     /// A statement whose value is not used: one it cannot run is passed over and its possible writes kept.

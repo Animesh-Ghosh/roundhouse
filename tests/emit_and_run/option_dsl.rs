@@ -105,3 +105,26 @@ puts "computed table passed"
     assert!(run.stdout.contains("computed table passed"), "{}", run.stdout);
 }
 
+
+/// doorkeeper's `has_many :authorized_tokens, class_name: Doorkeeper.config.access_token_class.to_s`: the
+/// association reads the class the configured option names, not the `Remark` its own name would give.
+#[test]
+fn an_association_class_name_read_off_the_configured_object_is_the_one_it_names() {
+    let run = emit_and_run::real_blog()
+        .write("app/models/settings/option.rb", option_dsl::OPTION)
+        .write("app/models/settings/config.rb", &option_dsl::config("    option :remark_class, default: \"Comment\"", ""))
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  has_many :remarks, class_name: Settings.config.remark_class.to_s, foreign_key: :article_id\n",
+        )
+        .run_ruby(
+            r##"article = Article.create!(title: "Configured", body: "A body long enough to pass the validation")
+article.comments.create!(commenter: "Ann", body: "First")
+raise "remarks: #{article.remarks.map(&:class).inspect}" unless article.remarks.count == 1 && article.remarks.first.is_a?(Comment)
+puts "configured association passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("configured association passed"), "{}", run.stdout);
+}

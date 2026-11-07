@@ -580,6 +580,15 @@ pub enum Association {
 }
 
 impl Association {
+    pub fn set_target(&mut self, to: ClassId) {
+        match self {
+            Association::BelongsTo { target, .. }
+            | Association::HasMany { target, .. }
+            | Association::HasOne { target, .. }
+            | Association::HasAndBelongsToMany { target, .. } => *target = to,
+        }
+    }
+
     pub fn name(&self) -> &Symbol {
         match self {
             Association::BelongsTo { name, .. }

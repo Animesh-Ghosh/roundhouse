@@ -3176,6 +3176,7 @@ end
     super::class_macros::expand_class_macros(&mut app, &sources, &mentions);
     // After the macros: a configured object's readers and its builder's writers are methods by now.
     super::configured_superclass::fold(vfs, dir, &mut app);
+    super::configured_superclass::fold_class_names(vfs, dir, &mut app);
     super::class_macros::drop_expanded_hook_macros(&mut app, &hook_macros_called, &mentions);
     super::model_callbacks::expand_model_callbacks(&mut app);
     // After the macros: an expanded `has_ancestry` is what writes the `extend`.
