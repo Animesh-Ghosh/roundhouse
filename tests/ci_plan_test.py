@@ -1651,6 +1651,17 @@ class Results(unittest.TestCase):
         )
         self.assertEqual(merged, {"toolchain": {"a": 150, "b": 50}, "framework": {"d": 30}})
 
+    def test_a_stopped_tests_seconds_only_raise_its_last_value(self):
+        merged = ci.merge_timings(
+            {"framework": {"slow": 100, "quick": 500}},
+            [
+                {"kind": "framework", "name": "slow", "seconds": 300, "ok": False, "timed_out": True},
+                {"kind": "framework", "name": "quick", "seconds": 200, "ok": False, "timed_out": True},
+                {"kind": "framework", "name": "new", "seconds": 90, "ok": False, "timed_out": True},
+            ],
+        )
+        self.assertEqual(merged, {"toolchain": {}, "framework": {"slow": 200, "quick": 500, "new": 90}})
+
     def test_timing_commands_record_runs_and_keep_failures(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = {**os.environ, "CI_SPINEL_TIMINGS_OUT": f"{tmp}/runs/toolchain-0.jsonl"}

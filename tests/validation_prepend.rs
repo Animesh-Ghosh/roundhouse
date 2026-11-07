@@ -442,12 +442,16 @@ fn constant_prepend_on_validates_with_keeps_its_original_value() {
     );
 }
 
+/// One build for every case: each gets its own numbered `Item` and table, and a
+/// local of its own, so that no case widens another's. Not a build each: ten
+/// whole-runtime compiles in one test outran its CI shard. The tests above
+/// still compare each case alone with Rails.
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn registration_order_identity_ownership_and_truthiness_run_natively() {
-    app(&[("app/models/item.rb", OWNED_MULTI_VALIDATE)])
-        .run_spinel_with_db(OWNED_MULTI_SCRIPT)
-        .assert_passes();
+    // Two validators of this name differ in their superclass, so one is renamed.
+    let flag_with_validator = FLAG_WITH_VALIDATOR.replace("FlagValidator", "FlagWithValidator");
+    let flag_with_item = FLAG_WITH_ITEM.replace("FlagValidator", "FlagWithValidator");
     let cases: &[(&[(&str, &str)], &str, bool, &str)] = &[
         (
             &[
@@ -504,23 +508,43 @@ fn registration_order_identity_ownership_and_truthiness_run_natively() {
         ),
         (
             &[
-                ("app/validators/flag_validator.rb", FLAG_WITH_VALIDATOR),
-                ("app/models/item.rb", FLAG_WITH_ITEM),
+                ("app/validators/flag_with_validator.rb", &flag_with_validator),
+                ("app/models/item.rb", &flag_with_item),
             ],
             "Item",
             false,
             "false option",
         ),
     ];
-    for (files, class, valid, errors) in cases {
-        let script = format!(
-            r#"record = {class}.new(name: "", code: "", enabled: true)
-raise "validity" unless record.valid? == {valid}
-raise record.errors.to_a.inspect unless record.errors.to_a.join("|") == {errors:?}
-"#
-        );
-        app(files).run_spinel_with_db(&script).assert_passes();
+    let own = |source: &str, n: usize| source.replace("Item", &format!("Item{n}"));
+    // The app-owned batch `validate`'s own check is case 0; the table's cases follow it.
+    let mut tables = String::from("ActiveRecord::Schema.define do\n");
+    for n in 0..=cases.len() {
+        tables.push_str(&format!(
+            "  create_table :item{n}s, force: true do |t|\n    t.string :name\n    t.string :code\n    t.string :type\n    t.boolean :enabled\n  end\n"
+        ));
     }
+    tables.push_str("end\n");
+    let mut overlay = emit_and_run::empty_app()
+        .write("app/models/application_record.rb", BASE)
+        .write("db/schema.rb", tables.as_str())
+        .write("app/models/item0.rb", own(OWNED_MULTI_VALIDATE, 0).as_str());
+    let mut script = own(OWNED_MULTI_SCRIPT, 0);
+    for (i, (files, class, valid, errors)) in cases.iter().enumerate() {
+        let n = i + 1;
+        for (path, source) in *files {
+            let path = path.replace("item.rb", &format!("item{n}.rb"));
+            overlay = overlay.write(&path, own(source, n).as_str());
+        }
+        let class = own(class, n);
+        script.push_str(&format!(
+            r#"record{n} = {class}.new(name: "", code: "", enabled: true)
+raise "case {n} validity" unless record{n}.valid? == {valid}
+raise "case {n}: " + record{n}.errors.to_a.inspect unless record{n}.errors.to_a.join("|") == {errors:?}
+"#
+        ));
+    }
+    overlay.run_spinel_with_db(&script).assert_passes();
 }
 
 const METHODS: &str = r#"class Item < ApplicationRecord
