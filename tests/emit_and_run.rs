@@ -10385,6 +10385,16 @@ fn connected_to_with_a_shadowed_block_name_stays_unsupported() {
         )
         .check_errors();
     assert!(errors.iter().any(|e| e.contains("connected_to")), "{errors:?}");
+    // An arrow lambda binds it the same way, and a method that assigns it hands on what it assigned.
+    for body in [
+        "->(block) { ActiveRecord::Base.connected_to(role: :writing, &block) }.call(method(:count))",
+        "block = method(:count)\n    ActiveRecord::Base.connected_to(role: :writing, &block)",
+    ] {
+        let errors = emit_and_run::real_blog()
+            .edit("app/models/article.rb", "class Article < ApplicationRecord\n", &format!("class Article < ApplicationRecord\n  def self.tally(&block)\n    {body}\n  end\n"))
+            .check_errors();
+        assert!(errors.iter().any(|e| e.contains("connected_to")), "{body}: {errors:?}");
+    }
 }
 
 /// `def`s in a concern's `included do` are includer methods, instance and

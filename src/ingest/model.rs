@@ -3392,7 +3392,7 @@ pub(super) fn ingest_method(
     params.extend(formals.anonymous.map(super::forwarding::AnonymousFormal::into_param));
 
     let body = match def.body() {
-        Some(b) => super::expr::with_block_param(block_param.as_ref().map(|p| p.name.clone()), || ingest_expr(&b, file))?,
+        Some(b) => super::expr::with_block_param(super::expr::def_block_param(block_param.as_ref().map(|p| p.name.clone()), Some(&b)), || ingest_expr(&b, file))?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
 

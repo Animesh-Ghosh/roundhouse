@@ -1833,7 +1833,7 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let extra_params = block_extra_params(l.parameters(), file)?;
             let params = block_param_names(l.parameters());
             let mut rest_param = lambda_rest_param(l.parameters());
-            let body = ingest_block_body(|| l.parameters(), l.body(), &mut rest_param, file)?;
+            let body = unless_shadowed(l.parameters(), || ingest_block_body(|| l.parameters(), l.body(), &mut rest_param, file))?;
             // `->(x) { body }` literals always use brace form (Prism's
             // opening_loc is `{`); `->(x) do body end` exists but isn't
             // idiomatic and doesn't appear in any fixture yet.
@@ -3799,7 +3799,7 @@ fn ingest_call_block(
                 let extra_params = block_extra_params(lam.parameters(), file)?;
                 let params = block_param_names(lam.parameters());
                 let mut rest_param = lambda_rest_param(lam.parameters());
-                let body = ingest_block_body(|| lam.parameters(), lam.body(), &mut rest_param, file)?;
+                let body = unless_shadowed(lam.parameters(), || ingest_block_body(|| lam.parameters(), lam.body(), &mut rest_param, file))?;
                 let block_style = block_style_from_opening(lam.opening_loc().as_slice());
                 return Ok(Some(Expr::new(
                     Span::synthetic(),
@@ -3868,15 +3868,7 @@ fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str, keeps_
     let extra_params = block_extra_params(b.parameters(), file)?;
     let params = block_param_names(b.parameters());
     let mut rest_param = block_rest_param(b.parameters());
-    // Not the method's block inside a block that binds its name: `&block` there hands on the inner value.
-    let shadows = BLOCK_PARAM.with(|slot| {
-        slot.borrow().as_ref().is_some_and(|name| params.contains(name) || rest_param.as_ref() == Some(name) || block_param.as_ref() == Some(name) || block_shadows(b.parameters(), name))
-    });
-    let body = if shadows {
-        with_block_param(None, || ingest_block_body(|| b.parameters(), b.body(), &mut rest_param, file))?
-    } else {
-        ingest_block_body(|| b.parameters(), b.body(), &mut rest_param, file)?
-    };
+    let body = unless_shadowed(b.parameters(), || ingest_block_body(|| b.parameters(), b.body(), &mut rest_param, file))?;
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Expr::new(
         Span::synthetic(),
@@ -3884,11 +3876,45 @@ fn ingest_block_node_as_lambda(b: &ruby_prism::BlockNode<'_>, file: &str, keeps_
     ))
 }
 
-/// A block's own parameters and block-locals (`|a, (b, c); d|`) by any name, as written.
-fn block_shadows(params_node: Option<Node<'_>>, name: &Symbol) -> bool {
-    let Some(node) = params_node else { return false };
-    let text = String::from_utf8_lossy(node.location().as_slice()).into_owned();
-    text.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|word| word == name.as_str())
+/// Ingests a block or lambda body, outside the method's block when its parameters bind that name.
+// Not by the parsed parameter lists: a block-local (`|a; block|`) and a destructured one are in neither, and the written list names them all.
+fn unless_shadowed<T>(params_node: Option<Node<'_>>, f: impl FnOnce() -> T) -> T {
+    let text = params_node.map(|node| String::from_utf8_lossy(node.location().as_slice()).into_owned()).unwrap_or_default();
+    let shadows = BLOCK_PARAM.with(|slot| {
+        slot.borrow().as_ref().is_some_and(|name| text.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|word| word == name.as_str()))
+    });
+    if shadows { with_block_param(None, f) } else { f() }
+}
+
+/// The `&name` parameter a `def` is given, unless its body assigns the name: then `&name` may hand on another value.
+pub(super) fn def_block_param(name: Option<Symbol>, body: Option<&Node<'_>>) -> Option<Symbol> {
+    struct Writes<'n>(&'n str, bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Writes<'_> {
+        fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+            self.1 |= constant_id_str(&node.name()) == self.0;
+            ruby_prism::visit_local_variable_write_node(self, node);
+        }
+        fn visit_local_variable_or_write_node(&mut self, node: &ruby_prism::LocalVariableOrWriteNode<'pr>) {
+            self.1 |= constant_id_str(&node.name()) == self.0;
+            ruby_prism::visit_local_variable_or_write_node(self, node);
+        }
+        fn visit_local_variable_and_write_node(&mut self, node: &ruby_prism::LocalVariableAndWriteNode<'pr>) {
+            self.1 |= constant_id_str(&node.name()) == self.0;
+            ruby_prism::visit_local_variable_and_write_node(self, node);
+        }
+        fn visit_local_variable_operator_write_node(&mut self, node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>) {
+            self.1 |= constant_id_str(&node.name()) == self.0;
+            ruby_prism::visit_local_variable_operator_write_node(self, node);
+        }
+        fn visit_local_variable_target_node(&mut self, node: &ruby_prism::LocalVariableTargetNode<'pr>) {
+            self.1 |= constant_id_str(&node.name()) == self.0;
+        }
+    }
+    let name = name?;
+    let Some(body) = body else { return Some(name) };
+    let mut writes = Writes(name.as_str(), false);
+    ruby_prism::Visit::visit(&mut writes, body);
+    (!writes.1).then_some(name)
 }
 
 fn named_block_param(params_node: Option<Node<'_>>) -> Option<Symbol> {
