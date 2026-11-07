@@ -10257,6 +10257,23 @@ fn connected_to_the_writing_role_runs_its_block() {
         .assert_passes();
 }
 
+/// doorkeeper's `SecretStoring::BCrypt.secret_matches?`: a stored value that is not a bcrypt hash raises the
+/// gem's `BCrypt::Errors::InvalidHash`, which the caller rescues.
+#[test]
+fn a_bcrypt_invalid_hash_is_the_gems_error() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/secret_check.rb",
+            "class SecretCheck\n  def self.matches?(stored, input)\n    BCrypt::Password.new(stored) == input\n  rescue BCrypt::Errors::InvalidHash\n    false\n  end\nend\n",
+        )
+        .run_ruby(
+            "raise \"invalid\" if SecretCheck.matches?(\"not a hash\", \"pw\")\n\
+             raise \"valid\" unless SecretCheck.matches?(BCrypt::Password.create(\"pw\", cost: 4).to_s, \"pw\")\n\
+             raise \"hierarchy\" unless BCrypt::Errors::InvalidHash.ancestors.include?(BCrypt::Error)",
+        )
+        .assert_passes();
+}
+
 /// doorkeeper's `with_primary_role(&block)`: the block handed on to `connected_to(role: :writing, &block)` is the one called.
 #[test]
 fn connected_to_the_writing_role_calls_a_block_handed_on() {
