@@ -2376,13 +2376,16 @@ fn column_with_type(
     table: &str,
     file: &str,
 ) -> Result<Column, IngestError> {
+    // Strict ingest refuses a default it cannot carry. Survey records it and
+    // keeps the column without it: the name and type are still known, and a
+    // dropped column would make every use of its reader another error.
     let default_expression = opts.default_expression.as_ref().map(|(offset, result)| {
         result.clone().and_then(|sql| {
             if type_name == "boolean" && !sql.starts_with('\'') && !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str()) {
                 Err("Boolean function defaults require an unset value distinct from false".into())
             } else { Ok(sql) }
         }).map_err(|why| IngestError::Unsupported { file: file.into(), message: format!("line {}: default for {table}.{col_name}: {why}", super::sources::line_at(file, *offset).unwrap_or(1)) })
-    }).transpose()?;
+    }).transpose().or_else(|gap| super::survey::continue_or_fail(gap).map(|()| None))?;
     let col_type = match type_name {
         // An integer's `limit:` is its size in bytes, and Rails' PostgreSQL
         // and MySQL adapters make 5 to 8 a `bigint`. Rails 4.2 and earlier
@@ -3381,5 +3384,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(col_names(&schema, "articles"), ["id", "title", "created_at"]);
+    }
+
+    /// Strict ingest refuses a SQL default it cannot carry. Survey records
+    /// that gap and keeps the column's name, type and nullability without
+    /// the default, so the column's reader stays known.
+    #[test]
+    fn survey_keeps_a_column_whose_sql_default_is_refused() {
+        let source = "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :record_items do |t|\n    t.string :token, default: -> { \"random()\" }, null: false\n  end\nend\n";
+        let strict = ingest_schema(source.as_bytes(), "db/schema.rb").expect_err("strict refuses").to_string();
+        assert!(strict.contains("line 3: default for record_items.token"), "{strict}");
+        crate::ingest::survey::activate();
+        let schema = ingest_schema(source.as_bytes(), "db/schema.rb");
+        let gaps: Vec<String> = crate::ingest::survey::drain().iter().map(|gap| gap.to_string()).collect();
+        let schema = schema.expect("survey continues");
+        assert_eq!(col_names(&schema, "record_items"), ["id", "token"]);
+        let token = col(&schema, "record_items", "token");
+        assert_eq!((&token.col_type, token.nullable), (&ColumnType::String { limit: None }, false));
+        assert_eq!((token.default.as_deref(), token.default_expression.as_deref()), (None, None));
+        assert_eq!(gaps, [strict]);
+    }
+
+    /// The migration fold too: a refused default no longer takes its
+    /// table, or the rest of its migration, with it.
+    #[test]
+    fn survey_keeps_migration_columns_whose_sql_defaults_are_refused() {
+        let source = "class CreateRecordItems < ActiveRecord::Migration[8.1]\n  def change\n    create_table :record_items do |t|\n      t.string :token, default: -> { \"random()\" }, null: false\n    end\n    add_column :record_items, :code, :string, default: -> { \"random()\" }\n    add_column :record_items, :label, :string\n  end\nend\n";
+        let strict = ingest_migration(source.as_bytes(), "1_create.rb", &mut Schema::default()).expect_err("strict refuses");
+        assert!(strict.to_string().contains("line 4: default for record_items.token"), "{strict}");
+        crate::ingest::survey::activate();
+        let mut schema = Schema::default();
+        let folded = ingest_migration(source.as_bytes(), "1_create.rb", &mut schema);
+        let gaps: Vec<String> = crate::ingest::survey::drain().iter().map(|gap| gap.to_string()).collect();
+        folded.expect("survey continues");
+        assert_eq!(col_names(&schema, "record_items"), ["id", "token", "code", "label"]);
+        for name in ["token", "code"] {
+            assert_eq!(col(&schema, "record_items", name).default_expression, None);
+        }
+        assert_eq!(gaps.len(), 2, "{gaps:?}");
+        assert!(gaps[1].contains("line 6: default for record_items.code"), "{gaps:?}");
     }
 }

@@ -1,5 +1,7 @@
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/scratch.rs"]
+mod scratch;
 
 use roundhouse::emit::shared::schema_sql::{Dialect, render_schema_statements_for};
 use roundhouse::ingest::ingest_schema;
@@ -444,4 +446,31 @@ end
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains(EXPECTED) || stdout.contains("skip:"), "{stdout}");
+}
+
+/// `check --continue` keeps the column of a refused default, so its reader
+/// is known and the default is the one gap. Strict commands still refuse.
+#[test]
+fn survey_check_keeps_the_reader_of_a_column_whose_default_is_refused() {
+    let dir = scratch::dir("rh_refused_default_reader");
+    for (path, source) in [
+        ("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table :record_items do |t|\n    t.string :token, default: -> { \"random()\" }, null: false\n  end\nend\n"),
+        ("app/models/record_item.rb", "class RecordItem < ActiveRecord::Base\n  def self.lookup(id) = find(id).token\nend\n"),
+        ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+    ] {
+        std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
+        std::fs::write(dir.join(path), source).unwrap();
+    }
+    let out = dir.join("out").display().to_string();
+    let run = |args: &[&str]| std::process::Command::new(env!("CARGO_BIN_EXE_roundhouse")).args(args).arg(&dir).output().unwrap();
+    let survey = run(&["check", "--continue"]);
+    let strict = [run(&["check"]), run(&["--target", "spinel", "-o", &out])];
+    let _ = std::fs::remove_dir_all(&dir);
+    let report = String::from_utf8_lossy(&survey.stderr);
+    assert!(!report.contains("no known method `token`") && report.contains(", 0 error(s)"), "{report}");
+    assert!(report.contains("1 survey gap(s)") && report.contains("default for record_items.token"), "{report}");
+    for run in strict {
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(!run.status.success() && stderr.contains("default for record_items.token"), "{stderr}");
+    }
 }
