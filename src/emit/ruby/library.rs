@@ -1147,9 +1147,8 @@ pub(super) fn restore_extras_facades(files: &mut [(String, String)], app: &App) 
 /// have.
 ///
 /// A name the locals do not bind falls back to the enclosing method's
-/// own PARAMETER of that name before it falls back to nil. Same policy
-/// as the controller-side rewrite ("a same-named local wins"), and here
-/// it is what keeps the call type-correct: the partial's record
+/// own PARAMETER of that name before it falls back to nil. Here it is
+/// what keeps the call type-correct: the partial's record
 /// parameter is typed as its record (`unrenderable(Message message,
 /// …)`), so a nil there is a seed contradiction that stops a strict
 /// build. The divergence it buys is bounded and in the safe direction —
@@ -1296,12 +1295,8 @@ fn rewrite_library_partial_render(
     for n in &contract.closure {
         // Not the helper's same-named param: the partial's ivar is the rendering template's, which `rewrite_helper_ivars` reaches.
         let ivar = in_helper.then(|| Expr::new(span, ExprNode::Ivar { name: Symbol::from(n.as_str()) }));
-        // Nor a local of its name: Rails hands `post: other` to the partial's `post`, never its `@post`. Only a param the local shares (`shared_locals`) takes it.
-        let local = || locals_lookup(n).filter(|_| *n != contract.record);
-        let value = match contract.shared_locals.contains(n) {
-            true => local().or(ivar),
-            false => ivar.or_else(local),
-        };
+        // Nor a local of its name: Rails hands `post: other` to the partial's `post`, never its `@post`.
+        let value = ivar.or_else(|| locals_lookup(n).filter(|_| *n != contract.record));
         view_args.push(value.or_else(|| param_lookup(n)).unwrap_or_else(nil));
     }
     view_args.extend(contract.extras_args(
