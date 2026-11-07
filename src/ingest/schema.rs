@@ -100,8 +100,8 @@ pub fn ingest_schema_with_generated_expression_dialect(
                     .unwrap_or_default();
                 apply_add_foreign_key(&args, &mut schema);
             }
-            "add_check_constraint" => {
-                if let Err(gap) = apply_table_verb("add_check_constraint", &call_arguments(call), file, &mut schema, dialect) { gaps.push(gap); }
+            verb @ ("add_check_constraint" | "add_index") => {
+                if let Err(gap) = apply_table_verb(verb, &call_arguments(call), file, &mut schema, dialect) { gaps.push(gap); }
             }
             _ => {}
         }

@@ -23,6 +23,18 @@ fn check_constraint_reaches_both_ddl_dialects() {
 }
 
 #[test]
+fn top_level_schema_statements_reach_both_ddl_dialects() {
+    let source = "ActiveRecord::Schema[8.1].define(version: 1) do\n  create_table \"items\" do |t|\n    t.string \"name\"\n    t.integer \"amount\"\n  end\n  add_check_constraint \"items\", \"amount > 0\", name: \"positive_amount\"\n  add_index \"items\", \"lower(name)\", unique: true, name: \"index_items_on_lower_name\"\nend\n";
+    let schema = ingest_schema(source.as_bytes(), "db/schema.rb").unwrap();
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        let ddl = render_schema_statements_for(&schema, dialect).unwrap().join(";\n");
+        assert!(ddl.contains("CHECK (amount > 0)"), "{ddl}");
+        assert!(ddl.contains("CREATE UNIQUE INDEX"), "{ddl}");
+        assert!(ddl.contains("(lower(name))"), "{ddl}");
+    }
+}
+
+#[test]
 fn expression_index_reaches_both_ddl_dialects() {
     let schema = ingest_schema(SCHEMA.as_bytes(), "db/schema.rb").unwrap();
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {
