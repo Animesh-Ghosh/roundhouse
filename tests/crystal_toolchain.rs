@@ -37,6 +37,8 @@ mod content_tag_options;
 mod link_to_if_eval_order;
 #[path = "support/simple_format.rs"]
 mod simple_format;
+#[path = "support/link_to_computed_url.rs"]
+mod link_to_computed_url;
 #[path = "support/link_to_if_escape.rs"]
 #[allow(dead_code)]
 mod link_to_if_escape;
@@ -477,6 +479,18 @@ fn simple_format_renders() {
     let (ok, stdout, stderr) = render_probe(content_tag_options::app_rendering(simple_format::VIEW, simple_format::RENDERS));
     assert!(ok, "{stdout}\n{stderr}");
     for want in simple_format::RENDERS {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
+    }
+}
+
+/// #1865: `link_to` with a url the template computes renders as Rails
+/// 8.1.4 does (`link_to_computed_url::VIEW`).
+#[test]
+#[ignore]
+fn link_to_computed_url_renders() {
+    let (ok, stdout, stderr) = render_probe(content_tag_options::app_rendering(link_to_computed_url::VIEW, link_to_computed_url::RENDERS));
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in link_to_computed_url::RENDERS {
         assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
     }
 }
