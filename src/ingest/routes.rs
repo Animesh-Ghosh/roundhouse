@@ -3705,7 +3705,8 @@ fn ingest_explicit_route(
     if let (true, Some(segment), Some(symbol)) = (action_symbol, path_kwarg, path.clone()) {
         action_kwarg = action_kwarg.or_else(|| Some(symbol.replace('-', "_")));
         path = Some(format!("/{}", segment.trim_start_matches('/')));
-        if to.is_some() || action_kwarg.as_deref() != Some(symbol.replace('-', "_").as_str()) || !matches!(symbol.as_str(), "index" | "create" | "new" | "show" | "update" | "destroy") {
+        let targeted = to.is_some() || redirect_target.is_some() || to_is_unsupported.is_some();
+        if targeted || action_kwarg.as_deref() != Some(symbol.replace('-', "_").as_str()) || !matches!(symbol.as_str(), "index" | "create" | "new" | "show" | "update" | "destroy") {
             as_name = as_name.or_else(|| Some(Symbol::from(symbol.replace('-', "_").as_str())));
             action_symbol = false;
         }

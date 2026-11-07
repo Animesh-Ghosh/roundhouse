@@ -3912,4 +3912,18 @@ end
     assert_eq!(named("/sign_in", "post"), "session", "{flat:#?}");
     assert_eq!(named("/sign_in", "get"), "new_session", "{flat:#?}");
     assert_eq!(named("/abort", "get"), "cancel_session", "{flat:#?}");
+
+    // Outside a resource the action is a name of its own, and a route with a target of its own keeps the symbol.
+    let source = br#"Rails.application.routes.draw do
+  post :create, controller: "sessions", path: "log_in"
+  get :new, path: "away", to: redirect("/elsewhere")
+end
+"#;
+    let (result, _) = roundhouse::ingest::prism::scope(|| roundhouse::ingest::ingest_routes(source, "config/routes.rb"));
+    let mut app = roundhouse::App::default();
+    app.routes = result.expect("ingest");
+    let flat = roundhouse::lower::flatten_routes(&app);
+    let names: Vec<(&str, &str)> = flat.iter().map(|r| (r.path.as_str(), r.as_name.as_str())).collect();
+    assert!(names.contains(&("/log_in", "create")), "{names:?}");
+    assert!(names.contains(&("/away", "new")), "{names:?}");
 }

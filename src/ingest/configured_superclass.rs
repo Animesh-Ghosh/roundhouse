@@ -369,6 +369,8 @@ struct RouterState {
     ivars: HashMap<String, Val>,
     /// The scope the call stands in, as Rails' `@scope` holds it there: `{ path: "/admin", module: "auth", as: "admin" }`; `None` inside a resource, which the evaluation does not hold.
     enclosing: Option<Vec<(Val, Val)>>,
+    /// The routing method runs: what the initializers left is replayed, and writes reached by name may be this mapper's.
+    drawing: bool,
 }
 
 impl RouterState {
@@ -470,15 +472,12 @@ impl<'a> Eval<'a> {
     fn make_unsure(&mut self, (owner, side, name): &Tag) {
         self.tick += 1;
         if owner == CONSTANT_OWNER {
-            // A resolved name is that constant; a written one that did not resolve may be any constant it ends with.
-            let held: Vec<String> = self.consts.keys().filter(|k| *k == name || k.ends_with(&format!("::{name}"))).cloned().collect();
-            for key in held {
-                self.unsure.entry(Holder::Constant(key)).or_default().push(("*".into(), self.tick));
-            }
+            // Not only a constant read already: one read later is unsure too. A written name that did not resolve may be any constant it ends with.
+            self.unsure.entry(Holder::Constant(name.clone())).or_default().push(("*".into(), self.tick));
             return;
         }
-        // Not for a write on an unknown receiver: the mapper is the evaluation's own, which only its methods are handed.
-        if !*side && (owner == MAPPER || self.router.mixins.contains(owner)) {
+        // Not for a write on an unknown receiver before the mapper is made: an initializer's runs on no mapper. While a method draws, a mixin's method reached by name may be the mapper's.
+        if !*side && (owner == MAPPER || self.router.mixins.contains(owner) || (owner == "*" && self.router.drawing)) {
             self.unsure.entry(Holder::Router).or_default().push((name.clone(), self.tick));
         }
         let mut holders: Vec<Holder> = (0..self.heap.len())
@@ -1847,7 +1846,12 @@ impl<'a> Eval<'a> {
 
     fn note_constant_read(&self, key: &str) -> Res<()> {
         let h = Holder::Constant(key.to_string());
-        let last_unsure = self.unsure.get(&h).into_iter().flatten().map(|(_, t)| *t).max();
+        let last_unsure = self
+            .unsure
+            .iter()
+            .filter(|(holder, _)| matches!(holder, Holder::Constant(n) if n == key || key.ends_with(&format!("::{n}"))))
+            .flat_map(|(_, marks)| marks.iter().map(|(_, t)| *t))
+            .max();
         let written = self.written.get(&(h, String::new())).copied().unwrap_or(0);
         if last_unsure.is_some_and(|u| u > written) { Err(format!("`{key}` may have been changed by a statement passed over")) } else { Ok(()) }
     }
@@ -2296,12 +2300,13 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
             .filter_map(|(k, v)| v.map(|v| (Val::Sym(k.into()), Val::Str(v))))
             .collect()
     });
-    eval.router = RouterState { mixins, ivars: HashMap::default(), enclosing };
+    eval.router = RouterState { mixins, ivars: HashMap::default(), enclosing, drawing: false };
     for root in roots {
         eval.replay(initializers, root)?;
     }
     // Not what an initializer passed over may have written: the mapper the call runs on is the evaluation's own, made after them.
     eval.unsure.remove(&Holder::Router);
+    eval.router.drawing = true;
     let ExprNode::Send { args, block, .. } = &*call.node else { return Err("not a call".into()) };
     let mut frame = Frame { this: Val::Router, locals: HashMap::default(), block: None, scope: None };
     let argv = args.iter().map(|a| eval.value(a, &mut frame)).collect::<Res<Vec<_>>>()?;
