@@ -2172,7 +2172,7 @@ impl DeclBody {
         let order_independent = self.constants.iter().all(|(_, value)| is_order_safe_value(value))
             && self.class_initializers.iter().all(|expr| match &*expr.node {
                 ExprNode::Assign { value, .. } => is_order_safe_value(value),
-                _ => false,
+                _ => is_cvar_mutation(expr),
             });
         let literal_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
             ExprNode::Assign { value, .. } => is_literal_value(value),
@@ -2185,6 +2185,8 @@ impl DeclBody {
                     && !args.is_empty()
                     && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. })))
                     // A visibility declaration over names reads no class variable.
+                    || (method.as_str() == "autoload"
+                        && matches!(args.as_slice(), [name, path] if matches!(&*name.node, ExprNode::Lit { value: Literal::Sym { .. } }) && matches!(&*path.node, ExprNode::Lit { value: Literal::Str { .. } })))
                     || (matches!(method.as_str(), "private_constant" | "public_constant" | "private_class_method" | "public_class_method")
                         && args.iter().all(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } })))
             }
@@ -2192,7 +2194,7 @@ impl DeclBody {
         });
         let safe_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
             ExprNode::Assign { value, .. } => is_order_safe_value(value),
-            _ => false,
+            _ => is_cvar_mutation(expr),
         });
         // Not an ancestor whose `@@x` this body's would share: Ruby's own mixins hold none.
         let builtin_includes = self.includes.iter().all(|i| matches!(i.0.as_str(), "Comparable" | "Enumerable" | "Kernel"));
@@ -2208,6 +2210,29 @@ impl DeclBody {
         }
         Ok(())
     }
+}
+
+/// `@@x << v`, or `self.x = v` through the body's own writer: a call whose arguments are order-safe values.
+fn is_cvar_mutation(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Send { recv: Some(recv), args, block: None, .. } => {
+            (matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str().starts_with("@@")) || matches!(&*recv.node, ExprNode::SelfRef))
+                && args.iter().all(is_order_safe_value)
+        }
+        ExprNode::Assign { target: LValue::Attr { recv, .. }, value } => matches!(&*recv.node, ExprNode::SelfRef) && is_order_safe_value(value),
+        _ => false,
+    }
+}
+
+fn runs_own_writer(expr: &Expr, methods: &[crate::dialect::MethodDef]) -> bool {
+    let writer = match &*expr.node {
+        ExprNode::Send { recv: Some(recv), method, .. } if matches!(&*recv.node, ExprNode::SelfRef) => format!("{}", method.as_str()),
+        ExprNode::Assign { target: LValue::Attr { recv, name }, .. } if matches!(&*recv.node, ExprNode::SelfRef) => format!("{}=", name.as_str()),
+        _ => return false,
+    };
+    writer.ends_with('=')
+        && is_cvar_mutation(expr)
+        && methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Class && m.name.as_str() == writer)
 }
 
 /// A value whose answer does not depend on where the class body runs it:
@@ -3139,6 +3164,18 @@ fn walk_decl_body_with_visibility<'pr>(
             }
             continue;
         }
+        // `@@helpers << Devise::Controllers::Helpers`: not a call the replay rules carry, which dropped it without a word; it is the initializer's next step.
+        if stmt.as_call_node().is_some_and(|call| call.receiver().is_some_and(|r| r.as_class_variable_read_node().is_some()) && call.block().is_none()) {
+            let mutation = ingest_expr(&stmt, file)?;
+            if !is_cvar_mutation(&mutation) {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "class-variable mutation with a non-literal argument".into(),
+                });
+            }
+            out.class_initializers.push(mutation);
+            continue;
+        }
         // Retain native nil initialization in source order. Only a declared
         // cattr/mattr storage approximation may drop it, after the whole body
         // has been walked. Non-nil initializers remain outside this slice.
@@ -3780,7 +3817,12 @@ fn walk_decl_body_with_visibility<'pr>(
                             && !is_sorbet_annotation_mixin(&call)
                         {
                             if let Ok(e) = ingest_expr(&stmt, file) {
-                                out.unknown_calls.push(e);
+                                if !mode.is_class_side() && call.receiver().is_some() && runs_own_writer(&e, &out.methods) {
+                                    // `self.mailer = "Devise::Mailer"` after `def self.mailer=`: the initializers run after the methods, as it does.
+                                    out.class_initializers.push(e);
+                                } else {
+                                    out.unknown_calls.push(e);
+                                }
                             }
                         }
                     }

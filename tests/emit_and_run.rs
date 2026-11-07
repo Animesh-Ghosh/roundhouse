@@ -845,6 +845,28 @@ puts "struct include passed"
     assert!(run.stdout.contains("struct include passed"), "{}", run.stdout);
 }
 
+/// A module body as devise's: an `autoload` beside `mattr_*` initializers, a
+/// class variable appended to after its seed, and a writer the body defines
+/// called in it. Each runs where the source has it, the autoloaded constant
+/// read as the body loads.
+#[test]
+fn a_module_body_runs_its_class_variable_steps_in_order() {
+    let run = emit_and_run::real_blog()
+        .write("app/models/registry/item.rb", "module Registry\n  module Item\n    def self.tag\n      :item\n    end\n  end\nend\n")
+        .write(
+            "app/models/registry.rb",
+            "module Registry\n  autoload :Item, \"registry/item\"\n\n  mattr_reader :items\n  @@items = []\n  @@items << Registry::Item\n  @@items << :b\n\n  def self.ref(name)\n    \"ref:#{name}\"\n  end\n\n  def self.mailer\n    @@mailer_ref\n  end\n\n  def self.mailer=(name)\n    @@mailer_ref = ref(name)\n  end\n  self.mailer = \"Registry::Mailer\"\nend\n",
+        )
+        .run_ruby(
+            r##"raise "items: #{Registry.items.inspect}" unless Registry.items == [Registry::Item, :b]
+raise "mailer: #{Registry.mailer.inspect}" unless Registry.mailer == "ref:Registry::Mailer"
+puts "module body passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("module body passed"), "{}", run.stdout);
+}
+
 /// `String#strip_heredoc` as Rails takes it: the least indentation of a
 /// line that is not blank, by String order, off each line's start.
 #[test]

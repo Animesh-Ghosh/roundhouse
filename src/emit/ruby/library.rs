@@ -8936,6 +8936,12 @@ fn emit_library_class_decl_inner(
     for &i in &deferred {
         body_requires.extend(resolve_all(&lc.constants[i].1, true));
     }
+    // Not only the interleaved ones: an initializer written after the methods reads its constants as the body loads too (devise's `@@helpers << Devise::Controllers::Helpers`).
+    for init in lc.class_ivar_initializers.iter().filter(|init| {
+        !ordered_body || init.span.is_synthetic() || !matches!(&*init.node, ExprNode::Assign { target: LValue::Ivar { .. }, .. } | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. })
+    }) {
+        body_requires.extend(resolve_all(init, true));
+    }
     let factory_methods: Vec<&MethodDef> = lc
         .constants
         .iter()

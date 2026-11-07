@@ -276,13 +276,6 @@ pub(crate) fn resolve_default_controller(module_prefix: &str, controller: &str) 
     Some(format!("{module}::{}Controller", crate::naming::camelize(mapping)))
 }
 
-/// Expand `devise_for :users[, path:, path_names:, format:, controllers:
-/// { sessions: "users/sessions", … }]`.
-///
-/// Returns a `Scope` holding every Explicit entry, or `Unsupported` when
-/// the call carries options this expansion does not yet read (`skip:`,
-/// `only:`, `as:`, `class_name:`, `module:`, …).
-/// OmniAuth callback routes are intentionally omitted — providers are dynamic.
 thread_local! {
     static MODEL_MODULES: std::cell::RefCell<HashMap<String, Vec<String>>> = std::cell::RefCell::new(HashMap::default());
 }
@@ -305,6 +298,13 @@ fn module_route(module: &str) -> Option<Option<&'static str>> {
     }
 }
 
+/// Expand `devise_for :users[, path:, path_names:, format:, controllers:
+/// { sessions: "users/sessions", … }]`.
+///
+/// Returns a `Scope` holding every Explicit entry, or `Unsupported` when
+/// the call carries options this expansion does not yet read (`skip:`,
+/// `only:`, `as:`, `class_name:`, `module:`, …).
+/// OmniAuth callback routes are intentionally omitted — providers are dynamic.
 pub(super) fn ingest_devise_for(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
