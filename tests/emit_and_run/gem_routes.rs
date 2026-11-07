@@ -54,3 +54,49 @@ fn a_gems_routing_method_draws_routes_that_answer() {
         .run_test("test/controllers/pongs_controller_test.rb")
         .assert_passes();
 }
+
+const BELL_ROUTES: &str = r##"module Bells
+  mattr_accessor :prefix
+  @@prefix = "bells"
+
+  def self.setup
+    yield self
+  end
+
+  module Helper
+    def use_bells(*names)
+      options = names.extract_options!
+      names.map! { |name| name.to_sym }
+      base = { as: "bells" }.merge(options.slice(:as))
+      names.each do |name|
+        get "#{Bells.prefix}/#{name}", controller: "bells", action: name, as: "#{base[:as]}_#{name}"
+      end
+    end
+  end
+
+  def self.install!
+    ActionDispatch::Routing::Mapper.include Bells::Helper
+  end
+end
+"##;
+
+/// The method takes its options as devise's `devise_for` does
+/// (`extract_options!`, `map!`, a merged and sliced Hash), and reads a
+/// setting an initializer gave through the gem's `setup { |config| … }`.
+#[test]
+fn a_gems_routing_method_reads_its_options_and_its_setup_block() {
+    emit_and_run::real_blog()
+        .write("lib/bells.rb", BELL_ROUTES)
+        .write("config/initializers/bells.rb", "Bells.setup do |config|\n  config.prefix = \"chimes\"\nend\n")
+        .write(
+            "app/controllers/bells_controller.rb",
+            "class BellsController < ApplicationController\n  def ding\n    render plain: \"ding #{bell_ding_path} #{bell_dong_path}\"\n  end\n\n  def dong\n    render plain: \"dong\"\n  end\nend\n",
+        )
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  use_bells \"ding\", :dong, as: \"bell\"\n")
+        .write(
+            "test/controllers/bells_controller_test.rb",
+            "require \"test_helper\"\n\nclass BellsControllerTest < ActionDispatch::IntegrationTest\n  test \"the drawn routes answer\" do\n    get \"/chimes/ding\"\n    assert_response :success\n    assert_equal \"ding /chimes/ding /chimes/dong\", response.body\n  end\nend\n",
+        )
+        .run_test("test/controllers/bells_controller_test.rb")
+        .assert_passes();
+}

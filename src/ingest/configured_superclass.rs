@@ -260,7 +260,8 @@ enum Val {
     Obj(usize),
     Array(Vec<Val>),
     Hash(Vec<(Val, Val)>),
-    Proc { params: Vec<Symbol>, rest: Option<Symbol>, body: Expr, scope: Option<String> },
+    /// Its `self` and locals are the ones where the block is written, not where it is called (`yield` in `Devise.setup`).
+    Proc { params: Vec<Symbol>, rest: Option<Symbol>, body: Expr, scope: Option<String>, this: Box<Val>, locals: std::rc::Rc<HashMap<Symbol, Val>> },
     Regex(String),
     /// What a built-in answered that this does not model: carried, never tested or called on.
     Unknown,
@@ -597,7 +598,7 @@ impl<'a> Eval<'a> {
             }
             ExprNode::Lambda { params, rest_param, extra_params, body, .. } if extra_params.is_empty() => {
                 // The block's own `self` is the frame's; `instance_exec` binds another.
-                Val::Proc { params: params.clone(), rest: rest_param.clone(), body: body.clone(), scope: frame.scope.clone() }
+                Val::Proc { params: params.clone(), rest: rest_param.clone(), body: body.clone(), scope: frame.scope.clone(), this: Box::new(frame.this.clone()), locals: std::rc::Rc::new(frame.locals.clone()) }
             }
             ExprNode::Send { recv, method, args, block, .. } => self.send(recv.as_ref(), method.as_str(), args, block.as_ref(), frame)?,
             ExprNode::Super { args } => {
@@ -642,6 +643,11 @@ impl<'a> Eval<'a> {
                     self.value(e, frame)?;
                 }
                 v
+            }
+            ExprNode::Yield { args } => {
+                let proc_ = frame.block.clone().ok_or("a `yield` without a block")?;
+                let argv = args.iter().map(|a| self.value(a, frame)).collect::<Res<Vec<_>>>()?;
+                self.call_proc(&proc_, argv, frame)?
             }
             _ => return Err(format!("it cannot run {}", e.node.kind_str())),
         };
@@ -754,6 +760,37 @@ impl<'a> Eval<'a> {
             // Ruby's bang forms answer nil when nothing changed.
             return Ok(if method.ends_with('!') && !changed { Val::Nil } else { grown });
         }
+        // `options = resources.extract_options!`, `resources.map!(&:to_sym)`: the Array a local or ivar holds, changed in place.
+        if matches!(method, "extract_options!" | "map!" | "collect!")
+            && let Val::Array(items) = &this
+            && let Some(r) = recv
+            && matches!(&*r.node, ExprNode::Ivar { .. } | ExprNode::Var { .. })
+            && argv.is_empty()
+        {
+            let mut kept = items.clone();
+            let answer = if method == "extract_options!" {
+                match kept.last() {
+                    Some(Val::Hash(_)) => kept.pop().unwrap_or(Val::Nil),
+                    _ => Val::Hash(Vec::new()),
+                }
+            } else {
+                let Some(proc_) = blk.clone() else { return Err(format!("`{method}` without a block")) };
+                let mut mapped = Vec::new();
+                for item in kept {
+                    mapped.push(self.call_proc(&proc_, vec![item], frame)?);
+                }
+                kept = mapped;
+                Val::Array(kept.clone())
+            };
+            match &*r.node {
+                ExprNode::Ivar { name } => self.set_ivar(&frame.this, name.as_str(), Val::Array(kept))?,
+                ExprNode::Var { name, .. } => {
+                    frame.locals.insert(name.clone(), Val::Array(kept));
+                }
+                _ => unreachable!(),
+            }
+            return Ok(answer);
+        }
         // A method the program defines answers before anything built in.
         if let Some((def, scope)) = self.lookup(&this, method) {
             return self.invoke(&def, scope, this, argv, blk);
@@ -792,16 +829,12 @@ impl<'a> Eval<'a> {
                 Ok(obj)
             }
             ("instance_eval" | "instance_exec", _, _) => {
-                let Some(Val::Proc { params, rest, body, scope }) = blk else { return Err(format!("`{method}` without a block")) };
-                let mut inner = Frame { this, locals: HashMap::default(), block: None, scope };
+                let Some(Val::Proc { params, rest, body, scope, locals, .. }) = blk else { return Err(format!("`{method}` without a block")) };
+                let mut inner = Frame { this, locals: (*locals).clone(), block: None, scope };
                 bind(&mut inner.locals, &params, rest.as_ref(), argv);
                 self.value(&body, &mut inner)
             }
-            ("call", Val::Proc { params, rest, body, scope }, _) => {
-                let mut inner = Frame { this: frame.this.clone(), locals: frame.locals.clone(), block: None, scope: scope.clone() };
-                bind(&mut inner.locals, params, rest.as_ref(), argv);
-                self.value(body, &mut inner)
-            }
+            ("call", Val::Proc { .. }, _) => self.call_proc(&this, argv, frame),
             ("instance_variable_set", Val::Obj(_), [Val::Sym(name), value]) => {
                 let bare = name.strip_prefix('@').ok_or("an ivar name without `@`")?;
                 self.set_ivar(&this, bare, value.clone())?;
@@ -902,6 +935,51 @@ impl<'a> Eval<'a> {
                     _ => Val::Array(items.iter().zip(&truths).filter(|(_, t)| !**t).map(|(i, _)| i.clone()).collect()),
                 })
             }
+            ("merge", Val::Hash(entries), [Val::Hash(more)]) => {
+                let mut merged = entries.clone();
+                for (k, v) in more {
+                    match merged.iter_mut().find(|(ek, _)| same(ek, k)) {
+                        Some(slot) => slot.1 = v.clone(),
+                        None => merged.push((k.clone(), v.clone())),
+                    }
+                }
+                Ok(Val::Hash(merged))
+            }
+            ("slice" | "except", Val::Hash(entries), keys) => {
+                let named = |k: &Val| keys.iter().any(|n| same(n, k));
+                Ok(Val::Hash(entries.iter().filter(|(k, _)| named(k) == (method == "slice")).cloned().collect()))
+            }
+            ("keys", Val::Hash(entries), []) => Ok(Val::Array(entries.iter().map(|(k, _)| k.clone()).collect())),
+            ("values", Val::Hash(entries), []) => Ok(Val::Array(entries.iter().map(|(_, v)| v.clone()).collect())),
+            ("values_at", Val::Hash(entries), keys) => Ok(Val::Array(
+                keys.iter().map(|k| entries.iter().find(|(ek, _)| same(ek, k)).map(|(_, v)| v.clone()).unwrap_or(Val::Nil)).collect(),
+            )),
+            ("key?" | "has_key?" | "include?" | "member?", Val::Hash(entries), [key]) => Ok(Val::Bool(entries.iter().any(|(k, _)| same(k, key)))),
+            ("fetch", Val::Hash(entries), [key, rest @ ..]) if rest.len() <= 1 && blk.is_none() => match entries.iter().find(|(k, _)| same(k, key)) {
+                Some((_, v)) => Ok(v.clone()),
+                None => rest.first().cloned().ok_or_else(|| "a `fetch` of a key the Hash does not hold".into()),
+            },
+            ("empty?", Val::Hash(entries), []) => Ok(Val::Bool(entries.is_empty())),
+            ("each_pair" | "each", Val::Hash(entries), []) => {
+                let Some(proc_) = blk.clone() else { return Err(format!("`{method}` without a block")) };
+                for (k, v) in entries.clone() {
+                    self.call_proc(&proc_, vec![k, v], frame)?;
+                }
+                Ok(this.clone())
+            }
+            ("compact", Val::Array(items), []) => Ok(Val::Array(items.iter().filter(|v| !matches!(v, Val::Nil)).cloned().collect())),
+            ("uniq", Val::Array(items), []) => {
+                let mut kept: Vec<Val> = Vec::new();
+                for v in items {
+                    if !kept.iter().any(|k| same(k, v)) {
+                        kept.push(v.clone());
+                    }
+                }
+                Ok(Val::Array(kept))
+            }
+            ("last", Val::Array(items), []) => Ok(items.last().cloned().unwrap_or(Val::Nil)),
+            ("size" | "length" | "count", Val::Array(items), []) if blk.is_none() => Ok(Val::Int(items.len() as i64)),
+            ("size" | "length" | "count", Val::Hash(entries), []) if blk.is_none() => Ok(Val::Int(entries.len() as i64)),
             ("[]", Val::Hash(entries), [key]) => Ok(entries.iter().find(|(k, _)| same(k, key)).map(|(_, v)| v.clone()).unwrap_or(Val::Nil)),
             ("[]", Val::Array(items), [Val::Int(i)]) => Ok(usize::try_from(*i).ok().and_then(|i| items.get(i)).cloned().unwrap_or(Val::Nil)),
             ("==", _, [other]) => Ok(Val::Bool(same(&this, other))),
@@ -1059,8 +1137,9 @@ impl<'a> Eval<'a> {
     }
 
     fn call_proc(&mut self, proc_: &Val, argv: Vec<Val>, frame: &Frame) -> Res<Val> {
-        let Val::Proc { params, rest, body, scope } = proc_ else { return Err("a block that is not a block".into()) };
-        let mut inner = Frame { this: frame.this.clone(), locals: frame.locals.clone(), block: None, scope: scope.clone() };
+        let _ = frame;
+        let Val::Proc { params, rest, body, scope, this, locals } = proc_ else { return Err("a block that is not a block".into()) };
+        let mut inner = Frame { this: (**this).clone(), locals: (**locals).clone(), block: None, scope: scope.clone() };
         bind(&mut inner.locals, params, rest.as_ref(), argv);
         self.value(body, &mut inner)
     }
