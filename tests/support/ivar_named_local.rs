@@ -1,7 +1,9 @@
 //! A template local assigned from the controller ivar of its own name
 //! (`<% article = @article %>`). The ivar is the view's parameter
-//! `article`, so the assignment rebinds that parameter to itself. Each
-//! line is tagged `L<n>:`, and `RENDERS` is what Rails 8.1.4 renders.
+//! `article`, so the assignment rebinds that parameter to itself. L2 is
+//! the same rebind as the only statement of an `if`, a body the dropped
+//! rebind leaves empty. Each line is tagged `L<n>:`, and `RENDERS` is what
+//! Rails 8.1.4 renders.
 
 use super::emit_and_run::Overlay;
 
@@ -9,9 +11,10 @@ pub const VIEW: &str = concat!(
     "<% article = @article %>\n",
     "L0:<%= article.title %>\n",
     "L1:<%= @article.title %>\n",
+    "<% if @article.id > 0 %><% article = @article %><% end %>L2:<%= article.title %>\n",
 );
 
-pub const RENDERS: &[&str] = &["L0:t", "L1:t"];
+pub const RENDERS: &[&str] = &["L0:t", "L1:t", "L2:t"];
 
 /// `base` (a probe app over `fixtures/real-blog`) with the record the
 /// view reads.
