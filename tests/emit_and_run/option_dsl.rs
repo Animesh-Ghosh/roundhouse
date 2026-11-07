@@ -40,37 +40,40 @@ fn configured_superclass_app(initializer: Option<&str>) -> emit_and_run::Overlay
             "  stale_when_importmap_changes\n\n  private\n\n  def app_marker\n    \"app\"\n  end\n",
         )
         .write("app/controllers/settings_base_controller.rb", "class SettingsBaseController < Settings.config.resolve_controller(:base)\nend\n")
-        .write("app/controllers/pings_controller.rb", "class PingsController < SettingsBaseController\n  def show\n    render plain: \"pong\"\n  end\nend\n");
+        .write(
+            "app/controllers/pings_controller.rb",
+            "class PingsController < SettingsBaseController\n  def show\n    render plain: \"#{SettingsBaseController.superclass.name} #{respond_to?(:app_marker, true)}\"\n  end\nend\n",
+        )
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/ping\", to: \"pings#show\"\n");
     if let Some(body) = initializer {
         overlay = overlay.write("config/initializers/settings.rb", body);
     }
     overlay
 }
 
+fn ping_test(expected: &str) -> String {
+    format!(
+        "require \"test_helper\"\n\nclass PingsControllerTest < ActionDispatch::IntegrationTest\n  test \"the parent is the one the configuration names\" do\n    get \"/ping\"\n    assert_response :success\n    assert_equal {expected:?}, response.body\n  end\nend\n"
+    )
+}
+
 /// doorkeeper's `class ApplicationController < Doorkeeper.config.resolve_controller(:base)`: the host's
 /// initializer has configured the option by the time the class loads, so the parent is the one it names.
 #[test]
 fn a_superclass_read_off_the_configured_object_is_the_one_the_initializer_names() {
-    let run = configured_superclass_app(Some("Settings.configure do\n  base_controller \"ApplicationController\"\nend\n")).run_ruby(
-        r##"raise "parent: #{SettingsBaseController.superclass}" unless SettingsBaseController.superclass == ApplicationController
-raise "inherited" unless PingsController.new.send(:app_marker) == "app"
-puts "configured superclass passed"
-"##,
-    );
-    run.assert_passes();
-    assert!(run.stdout.contains("configured superclass passed"), "{}", run.stdout);
+    configured_superclass_app(Some("Settings.configure do\n  base_controller \"ApplicationController\"\nend\n"))
+        .write("test/controllers/pings_controller_test.rb", &ping_test("ApplicationController true"))
+        .run_test("test/controllers/pings_controller_test.rb")
+        .assert_passes();
 }
 
 /// With no initializer, the option's lambda default answers, run on the config as `instance_exec` runs it.
 #[test]
 fn a_superclass_read_off_an_unconfigured_object_is_its_default() {
-    let run = configured_superclass_app(None).run_ruby(
-        r##"raise "parent: #{SettingsBaseController.superclass}" unless SettingsBaseController.superclass == ActionController::Base
-puts "default superclass passed"
-"##,
-    );
-    run.assert_passes();
-    assert!(run.stdout.contains("default superclass passed"), "{}", run.stdout);
+    configured_superclass_app(None)
+        .write("test/controllers/pings_controller_test.rb", &ping_test("ActionController::Base false"))
+        .run_test("test/controllers/pings_controller_test.rb")
+        .assert_passes();
 }
 
 /// What the option holds is known only when the app boots (`ENV.fetch`): the superclass stays refused.

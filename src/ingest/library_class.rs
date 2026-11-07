@@ -1899,9 +1899,9 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
                 return None;
             }
             let body = block.body();
-            // Not a general block body: only `def`s become the class's methods without running anything at definition time.
+            // Not a general block body: the class body's own declarations, which run nothing of the app's at definition time.
             if let Some(statements) = body.as_ref().and_then(|b| b.as_statements_node()) {
-                if !statements.body().iter().all(|stmt| stmt.as_def_node().is_some()) {
+                if !statements.body().iter().all(|stmt| struct_block_declaration(&stmt)) {
                     return None;
                 }
                 // Not an `initialize` of its own: in Ruby the generated one is
@@ -1919,6 +1919,38 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
         }
     };
     Some(StructConstant { name: Symbol::from(""), members, keyword_init, positional_written, body })
+}
+
+fn struct_block_declaration(stmt: &ruby_prism::Node<'_>) -> bool {
+    if stmt.as_def_node().is_some() {
+        return true;
+    }
+    if let Some(sc) = stmt.as_singleton_class_node() {
+        return sc.expression().as_self_node().is_some()
+            && sc.body().is_none_or(|b| flatten_statements(b).iter().all(|s| s.as_def_node().is_some() || struct_block_marker(s)));
+    }
+    struct_block_marker(stmt)
+        || stmt.as_call_node().is_some_and(|call| {
+            call.receiver().is_none()
+                && call.block().is_none()
+                && matches!(
+                    constant_id_str(&call.name()).as_ref(),
+                    "delegate" | "attr_reader" | "attr_writer" | "attr_accessor" | "include" | "alias_method"
+                )
+        })
+}
+
+fn struct_block_marker(stmt: &ruby_prism::Node<'_>) -> bool {
+    stmt.as_call_node().is_some_and(|call| {
+        call.receiver().is_none()
+            && call.block().is_none()
+            && matches!(constant_id_str(&call.name()).as_ref(), "public" | "protected" | "private" | "private_class_method" | "public_class_method")
+    })
+}
+
+/// `X = Struct.new(…) do … end` whose block this ingest reads as the class's body: the walk of the enclosing body leaves it to that class.
+pub(super) fn struct_constant_block(value: &ruby_prism::Node<'_>) -> bool {
+    value.as_call_node().is_some_and(|c| c.block().is_some()) && struct_constant_spec(value).is_some_and(|s| s.body.is_some())
 }
 
 /// The classes `owner`'s body defines through `X = Struct.new(…)`, with
@@ -1942,7 +1974,13 @@ fn struct_constant_classes(
             },
         );
         if spec.body.is_some() {
-            class.methods.extend(walk_decl_body(spec.body, &id, file, DeclBodyMode::Instance)?.methods);
+            let body = walk_decl_body(spec.body, &id, file, DeclBodyMode::Instance)?;
+            class.methods.extend(body.methods);
+            class.includes.extend(body.includes);
+            class.include_spans.extend(body.include_spans);
+            class.constants.extend(body.constants);
+            class.unknown_calls.extend(body.unknown_calls);
+            class.class_ivar_initializers.extend(body.class_initializers);
         }
         out.push((spec.name, class));
     }

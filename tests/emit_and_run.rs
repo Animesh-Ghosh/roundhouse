@@ -794,6 +794,32 @@ puts "registry module passed"
     assert!(run.stdout.contains("registry module passed"));
 }
 
+/// doorkeeper's `Client::Credentials = Struct.new(:uid, :secret) do … end`: the block is the class's
+/// body, with `class << self`, a private class method and a `delegate`, not one the file is dropped for.
+#[test]
+fn a_struct_block_body_keeps_its_class_methods_visibility_and_delegates() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/cred.rb",
+            "class Cred\n  Pair = Struct.new(:uid, :secret) do\n    class << self\n      def from(text)\n        build(text)\n      end\n\n      private\n\n      def build(text)\n        new(*text.split(\":\", 2))\n      end\n    end\n\n    delegate :blank?, to: :uid\n  end\nend\n",
+        )
+        .run_ruby(
+            r##"pair = Cred::Pair.from("a:b")
+raise "from: #{pair.uid.inspect}" unless pair.uid == "a" && pair.secret == "b"
+raise "blank" unless Cred::Pair.new("", "x").blank?
+raise "present" if Cred::Pair.new("u", "x").blank?
+begin
+  Cred::Pair.build("x:y")
+  raise "build is public"
+rescue NoMethodError
+end
+puts "struct block passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("struct block passed"), "{}", run.stdout);
+}
+
 /// `String#strip_heredoc` as Rails takes it: the least indentation of a
 /// line that is not blank, by String order, off each line's start.
 #[test]
