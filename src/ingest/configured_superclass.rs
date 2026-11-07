@@ -254,6 +254,8 @@ enum Val {
     Regex(String),
     /// What a built-in answered that this does not model: carried, never tested or called on.
     Unknown,
+    /// The routing mapper a gem's routing method draws on: what is called on it is recorded, not run.
+    Router,
 }
 
 impl Val {
@@ -310,12 +312,18 @@ struct Eval<'a> {
     depth: usize,
     /// A class outside the library classes (a model) whose class side the evaluation reads: its methods, and the framework settings it answers.
     subject: Option<(String, Vec<MethodDef>, HashMap<String, Val>)>,
+    /// The methods running, innermost last: where each was found, its name and side, and what it was given, for `super`.
+    calls: Vec<(String, String, MethodReceiver, Vec<Val>, Option<Val>)>,
+    /// The routes drawn on a `Router`, one list per open block.
+    drawn: Vec<Vec<Expr>>,
+    /// Class variables, by the class whose body sets them first.
+    cvars: HashMap<(String, String), Val>,
 }
 
 impl<'a> Eval<'a> {
     fn new(app: &'a App) -> Self {
         let known = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
-        Eval { classes: &app.library_classes, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None }
+        Eval { classes: &app.library_classes, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default() }
     }
 
     /// The constant `expr` names once the initializers that call on its root have run.
@@ -401,6 +409,35 @@ impl<'a> Eval<'a> {
         if last_unsure.is_some_and(|u| u > written) { Err(format!("`@{name}` may have been written by a statement passed over")) } else { Ok(()) }
     }
 
+    /// Ruby's lookup order: the class, the modules it includes (last first), then its superclass's.
+    fn mro(&self, class: &str, side: MethodReceiver) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut at = Some(class.to_string());
+        for _ in 0..32 {
+            let Some(c) = at else { break };
+            if out.contains(&c) {
+                break;
+            }
+            out.push(c.clone());
+            let decls: Vec<&LibraryClass> = self.classes.iter().filter(|d| d.name.0.as_str() == c).collect();
+            if side == MethodReceiver::Instance {
+                for d in decls.iter().rev() {
+                    for inc in d.includes.iter().rev() {
+                        if let Some(m) = self.resolve(inc.0.as_str(), Some(&c)) {
+                            for x in self.mro(&m, side) {
+                                if !out.contains(&x) {
+                                    out.push(x);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            at = decls.iter().find_map(|d| d.parent.clone()).and_then(|p| self.resolve(p.0.as_str(), Some(&c)));
+        }
+        out
+    }
+
     /// The class and what its lookup reaches: superclasses and included modules.
     fn ancestry(&self, class: &str) -> Vec<String> {
         let mut out = Vec::new();
@@ -438,7 +475,19 @@ impl<'a> Eval<'a> {
             ExprNode::Return { value } => return Ok(Flow::Return(self.value(value, frame)?)),
             ExprNode::Lit { value } => literal(value)?,
             ExprNode::SelfRef => frame.this.clone(),
+            ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => self.cvar_get(frame.scope.as_deref(), name.as_str())?,
             ExprNode::Var { name, .. } => frame.locals.get(name).cloned().ok_or_else(|| format!("`{}` is not bound", name.as_str()))?,
+            // `defined?(@x)` as the parser can leave it, a call.
+            ExprNode::Send { recv: None, method, args, block: None, .. } if method.as_str() == "defined?" && args.len() == 1 => match &*args[0].node {
+                ExprNode::Ivar { name } => {
+                    self.note_read(&frame.this, name.as_str().to_string())?;
+                    match self.ivar(&frame.this, name.as_str()) {
+                        Some(_) => Val::Str("instance-variable".into()),
+                        None => Val::Nil,
+                    }
+                }
+                _ => return Err("a `defined?` of other than an instance variable".into()),
+            },
             ExprNode::Ivar { name } => {
                 self.note_read(&frame.this, name.as_str().to_string())?;
                 self.ivar(&frame.this, name.as_str()).unwrap_or(Val::Nil)
@@ -483,6 +532,7 @@ impl<'a> Eval<'a> {
             ExprNode::Assign { target, value } => {
                 let v = self.value(value, frame)?;
                 match target {
+                    LValue::Var { name, .. } if name.as_str().starts_with("@@") => self.cvar_set(frame.scope.as_deref(), name.as_str(), v.clone()),
                     LValue::Var { name, .. } => {
                         frame.locals.insert(name.clone(), v.clone());
                     }
@@ -524,6 +574,38 @@ impl<'a> Eval<'a> {
                 Val::Proc { params: params.clone(), rest: rest_param.clone(), body: body.clone(), scope: frame.scope.clone() }
             }
             ExprNode::Send { recv, method, args, block, .. } => self.send(recv.as_ref(), method.as_str(), args, block.as_ref(), frame)?,
+            ExprNode::Super { args } => {
+                let Some((owner, name, side, given, blk)) = self.calls.last().cloned() else { return Err("a `super` outside a method".into()) };
+                let argv = match args {
+                    None => given,
+                    Some(args) => args.iter().map(|a| self.value(a, frame)).collect::<Res<_>>()?,
+                };
+                let class = match (&frame.this, side) {
+                    (Val::Obj(i), MethodReceiver::Instance) => self.heap[*i].class.clone(),
+                    (Val::Class(c), MethodReceiver::Class) => c.clone(),
+                    _ => return Err("a `super` on a receiver it does not model".into()),
+                };
+                let order = self.mro(&class, side);
+                let after = order.iter().position(|c| *c == owner).map(|i| i + 1).unwrap_or(order.len());
+                let next = order[after..].iter().find_map(|c| {
+                    self.classes
+                        .iter()
+                        .filter(|d| d.name.0.as_str() == c)
+                        .flat_map(|d| d.methods.iter())
+                        .filter(|m| m.name.as_str() == name && m.receiver == side)
+                        .last()
+                        .map(|m| (m.clone(), m.enclosing_class.as_ref().map(|s| s.as_str().to_string()).unwrap_or_else(|| c.clone())))
+                });
+                match next {
+                    Some((def, scope)) => {
+                        let this = frame.this.clone();
+                        self.invoke(&def, scope, this, argv, blk)?
+                    }
+                    // `Object#initialize` and the like: nothing of the program's runs.
+                    None if name == "initialize" => Val::Nil,
+                    None => return Err(format!("a `super` past the program's own `{name}`")),
+                }
+            }
             // Not a rescue it can take: nothing here raises an exception it models, so one that would stops the evaluation.
             ExprNode::BeginRescue { body, else_branch, ensure, .. } => {
                 let mut v = self.value(body, frame)?;
@@ -559,6 +641,31 @@ impl<'a> Eval<'a> {
             None => None,
             Some(b) => Some(self.value(b, frame)?).filter(|v| !matches!(v, Val::Nil)),
         };
+        if matches!(this, Val::Router) {
+            return self.draw(method, argv, blk, frame);
+        }
+        // `@mapping.controllers.merge!(names)`: the Hash the reader answers is the ivar's, changed in place.
+        if matches!(method, "merge!" | "update" | "[]=")
+            && let Some(r) = recv
+            && let Some(slot) = self.held_by(r, frame)
+            && !argv.iter().any(|a| matches!(a, Val::Unknown))
+        {
+            let Some(Val::Hash(mut entries)) = self.slot_get(&slot)? else { return Err(format!("`{method}` on other than a Hash")) };
+            let pairs: Vec<(Val, Val)> = match (method, argv.as_slice()) {
+                ("[]=", [k, v]) => vec![(k.clone(), v.clone())],
+                (_, [Val::Hash(more)]) => more.clone(),
+                _ => return Err(format!("a `{method}` it does not model")),
+            };
+            for (k, v) in pairs {
+                match entries.iter_mut().find(|(ek, _)| same(ek, &k)) {
+                    Some(slot) => slot.1 = v,
+                    None => entries.push((k, v)),
+                }
+            }
+            let grown = Val::Hash(entries);
+            self.slot_set(&slot, grown.clone())?;
+            return Ok(if method == "[]=" { argv.last().cloned().unwrap_or(Val::Nil) } else { grown });
+        }
         // `@scopes.push(*names)`: the Array the ivar or local holds, grown in place.
         if matches!(method, "push" | "<<" | "concat" | "append" | "uniq!" | "compact!" | "flatten!")
             && let Val::Array(items) = &this
@@ -625,6 +732,15 @@ impl<'a> Eval<'a> {
         if let Some((def, scope)) = self.lookup(&this, method) {
             return self.invoke(&def, scope, this, argv, blk);
         }
+        // `mattr_reader :mapping` answers on instances too, as Rails defines it, though the library walk writes only the class's.
+        if let Val::Obj(i) = &this
+            && argv.is_empty()
+            && let class = Val::Class(self.heap[*i].class.clone())
+            && let Some((def, scope)) = self.lookup(&class, method)
+            && cvar_reader(&def).is_some()
+        {
+            return self.invoke(&def, scope, class, argv, blk);
+        }
         // Not answered from a value it does not model: `nil?` or `==` on one would guess.
         let stores = method == "instance_variable_set" && matches!(argv.first(), Some(Val::Sym(_)));
         if matches!(this, Val::Unknown) || (!stores && argv.iter().any(|a| matches!(a, Val::Unknown))) {
@@ -687,6 +803,26 @@ impl<'a> Eval<'a> {
             ("!", _, []) => Ok(Val::Bool(!this.truthy()?)),
             ("first", Val::Array(items), []) => Ok(items.first().cloned().unwrap_or(Val::Nil)),
             ("name", Val::Class(c), []) => Ok(Val::Str(c.clone())),
+            ("is_a?" | "kind_of?", _, [Val::Class(c)]) => {
+                let c = c.trim_start_matches("::");
+                let answer = match &this {
+                    Val::Obj(i) => {
+                        let class = self.heap[*i].class.clone();
+                        self.ancestry(&class).iter().any(|a| a == c) || matches!(c, "Object" | "BasicObject")
+                    }
+                    Val::Nil => c == "NilClass",
+                    Val::Bool(true) => c == "TrueClass",
+                    Val::Bool(false) => c == "FalseClass",
+                    Val::Str(_) => matches!(c, "String" | "Comparable"),
+                    Val::Sym(_) => matches!(c, "Symbol" | "Comparable"),
+                    Val::Int(_) => matches!(c, "Integer" | "Numeric" | "Comparable"),
+                    Val::Array(_) => matches!(c, "Array" | "Enumerable"),
+                    Val::Hash(_) => matches!(c, "Hash" | "Enumerable"),
+                    Val::Proc { .. } => c == "Proc",
+                    _ => return Err("an `is_a?` on a value it does not model".into()),
+                } || matches!(c, "Object" | "BasicObject" | "Kernel");
+                Ok(Val::Bool(answer))
+            }
             ("blank?" | "present?" | "presence", _, []) => {
                 let blank = match &this {
                     Val::Nil | Val::Bool(false) => true,
@@ -694,7 +830,7 @@ impl<'a> Eval<'a> {
                     Val::Array(items) => items.is_empty(),
                     Val::Hash(entries) => entries.is_empty(),
                     Val::Bool(true) | Val::Int(_) | Val::Sym(_) | Val::Class(_) | Val::Proc { .. } | Val::Regex(_) => false,
-                    Val::Obj(_) | Val::Unknown => return Err(format!("`{method}` on an object")),
+                    Val::Obj(_) | Val::Unknown | Val::Router => return Err(format!("`{method}` on an object")),
                 };
                 Ok(match method {
                     "blank?" => Val::Bool(blank),
@@ -771,6 +907,131 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// A routing call on the mapper, recorded as written with its values folded in, its block drawn as its nested routes.
+    fn draw(&mut self, method: &str, argv: Vec<Val>, blk: Option<Val>, frame: &mut Frame) -> Res<Val> {
+        let span = Span::synthetic();
+        let mut args: Vec<Expr> = Vec::new();
+        let last = argv.len().saturating_sub(1);
+        for (i, a) in argv.iter().enumerate() {
+            let mut e = to_expr(a, span)?;
+            if i == last
+                && let ExprNode::Hash { kwargs, .. } = &mut *e.node
+            {
+                *kwargs = true;
+            }
+            args.push(e);
+        }
+        let block = match blk {
+            None => None,
+            Some(proc_ @ Val::Proc { .. }) => {
+                self.drawn.push(Vec::new());
+                let ran = self.call_proc(&proc_, Vec::new(), frame);
+                let inner = self.drawn.pop().unwrap_or_default();
+                ran?;
+                Some(Expr::new(span, ExprNode::Lambda {
+                    params: Vec::new(),
+                    rest_param: None,
+                    extra_params: Vec::new(),
+                    block_param: None,
+                    body: Expr::new(span, ExprNode::Seq { exprs: inner }),
+                    block_style: crate::expr::BlockStyle::Do,
+                }))
+            }
+            Some(_) => return Err("a routing block that is not a block".into()),
+        };
+        let call = Expr::new(span, ExprNode::Send { recv: None, method: Symbol::from(method), args, block, parenthesized: true });
+        self.drawn.last_mut().ok_or("a route drawn outside the mapper")?.push(call);
+        Ok(Val::Nil)
+    }
+
+    /// Where a receiver expression's value lives: `@x`, `@@x`, or a reader of the program's that answers one.
+    fn held_by(&mut self, recv: &Expr, frame: &mut Frame) -> Option<Slot> {
+        match &*recv.node {
+            ExprNode::Ivar { name } => Some(Slot::Ivar(frame.this.clone(), name.as_str().to_string())),
+            ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => Some(Slot::Cvar(frame.scope.clone(), name.as_str().to_string())),
+            ExprNode::Send { recv: inner, method, args, block: None, .. } if args.is_empty() => {
+                let mut holder = match inner {
+                    Some(r) => self.value(r, frame).ok()?,
+                    None => frame.this.clone(),
+                };
+                let (def, scope) = match self.lookup(&holder, method.as_str()) {
+                    Some(found) => found,
+                    None => {
+                        let Val::Obj(i) = &holder else { return None };
+                        holder = Val::Class(self.heap[*i].class.clone());
+                        self.lookup(&holder, method.as_str()).filter(|(d, _)| cvar_reader(d).is_some())?
+                    }
+                };
+                if let Some(cvar) = cvar_reader(&def) {
+                    return Some(Slot::Cvar(Some(scope), cvar));
+                }
+                let body = match &*def.body.node {
+                    ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+                    _ => &def.body,
+                };
+                match &*body.node {
+                    ExprNode::Ivar { name } => Some(Slot::Ivar(holder, name.as_str().to_string())),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn slot_get(&mut self, slot: &Slot) -> Res<Option<Val>> {
+        Ok(match slot {
+            Slot::Ivar(holder, name) => self.ivar(holder, name),
+            Slot::Cvar(scope, name) => Some(self.cvar_get(scope.as_deref(), name)?),
+        })
+    }
+
+    fn slot_set(&mut self, slot: &Slot, v: Val) -> Res<()> {
+        match slot {
+            Slot::Ivar(holder, name) => self.set_ivar(holder, name, v),
+            Slot::Cvar(scope, name) => {
+                self.cvar_set(scope.as_deref(), name, v);
+                Ok(())
+            }
+        }
+    }
+
+    /// The class in `scope`'s chain whose body set `name` first, as Ruby shares a class variable down the hierarchy.
+    fn cvar_home(&self, scope: Option<&str>, name: &str) -> Option<String> {
+        let scope = scope?;
+        self.mro(scope, MethodReceiver::Instance).into_iter().find(|c| {
+            self.cvars.contains_key(&(c.clone(), name.to_string()))
+                || self.classes.iter().filter(|d| d.name.0.as_str() == c).any(|d| {
+                    d.class_ivar_initializers.iter().any(|i| matches!(&*i.node, ExprNode::Assign { target: LValue::Var { name: n, .. }, .. } if n.as_str() == name))
+                })
+        })
+    }
+
+    fn cvar_get(&mut self, scope: Option<&str>, name: &str) -> Res<Val> {
+        let home = self.cvar_home(scope, name).ok_or_else(|| format!("`{name}` is not set"))?;
+        if let Some(v) = self.cvars.get(&(home.clone(), name.to_string())) {
+            return Ok(v.clone());
+        }
+        let init = self
+            .classes
+            .iter()
+            .filter(|d| d.name.0.as_str() == home)
+            .flat_map(|d| d.class_ivar_initializers.iter())
+            .find_map(|i| match &*i.node {
+                ExprNode::Assign { target: LValue::Var { name: n, .. }, value } if n.as_str() == name => Some(value.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| format!("`{name}` is not set"))?;
+        let mut frame = Frame { this: Val::Class(home.clone()), locals: HashMap::default(), block: None, scope: Some(home.clone()) };
+        let v = self.value(&init, &mut frame)?;
+        self.cvars.insert((home, name.to_string()), v.clone());
+        Ok(v)
+    }
+
+    fn cvar_set(&mut self, scope: Option<&str>, name: &str, v: Val) {
+        let home = self.cvar_home(scope, name).or_else(|| scope.map(str::to_string)).unwrap_or_default();
+        self.cvars.insert((home, name.to_string()), v);
+    }
+
     fn call_proc(&mut self, proc_: &Val, argv: Vec<Val>, frame: &Frame) -> Res<Val> {
         let Val::Proc { params, rest, body, scope } = proc_ else { return Err("a block that is not a block".into()) };
         let mut inner = Frame { this: frame.this.clone(), locals: frame.locals.clone(), block: None, scope: scope.clone() };
@@ -824,10 +1085,32 @@ impl<'a> Eval<'a> {
             frame.locals.insert(p.name.clone(), v);
         }
         if let Some(b) = &def.block_param {
-            frame.locals.insert(b.name.clone(), blk.unwrap_or(Val::Nil));
+            frame.locals.insert(b.name.clone(), blk.clone().unwrap_or(Val::Nil));
+        }
+        // What a bare `super` passes: the parameters as bound, a default filled in, not the arguments as given.
+        let mut given_for_super = Vec::new();
+        let mut passed_keywords = Vec::new();
+        for p in &def.params {
+            let Some(v) = frame.locals.get(&p.name).cloned() else { continue };
+            if p.keyword || p.from_keyword {
+                passed_keywords.push((Val::Sym(p.name.as_str().to_string()), v));
+            } else if p.rest {
+                if let Val::Array(items) = v {
+                    given_for_super.extend(items);
+                }
+            } else {
+                given_for_super.push(v);
+            }
+        }
+        if !passed_keywords.is_empty() {
+            given_for_super.push(Val::Hash(passed_keywords));
         }
         self.depth += 1;
+        let owner = frame.scope.clone().unwrap_or_default();
+        let side = def.receiver;
+        self.calls.push((owner, def.name.as_str().to_string(), side, given_for_super, blk));
         let ran = self.value(&def.body, &mut frame);
+        self.calls.pop();
         self.depth -= 1;
         ran
     }
@@ -1218,3 +1501,67 @@ fn glob(pattern: &str, name: &str) -> bool {
     }
     true
 }
+
+fn to_expr(v: &Val, span: Span) -> Res<Expr> {
+    let lit = |value: Literal| Expr::new(span, ExprNode::Lit { value });
+    Ok(match v {
+        Val::Nil => lit(Literal::Nil),
+        Val::Bool(b) => lit(Literal::Bool { value: *b }),
+        Val::Int(i) => lit(Literal::Int { value: *i }),
+        Val::Str(t) => lit(Literal::Str { value: t.clone() }),
+        Val::Sym(t) => lit(Literal::Sym { value: Symbol::from(t.as_str()) }),
+        Val::Class(c) => Expr::new(span, ExprNode::Const { path: c.split("::").map(Symbol::from).collect() }),
+        Val::Array(items) => Expr::new(span, ExprNode::Array { elements: items.iter().map(|i| to_expr(i, span)).collect::<Res<_>>()?, style: Default::default() }),
+        Val::Hash(entries) => Expr::new(span, ExprNode::Hash {
+            entries: entries.iter().map(|(k, v)| Ok((to_expr(k, span)?, to_expr(v, span)?))).collect::<Res<_>>()?,
+            kwargs: false,
+        }),
+        _ => return Err("a routing argument it cannot write".into()),
+    })
+}
+
+/// The routes a gem's routing method draws (`use_doorkeeper do … end`), run with the mapper as the
+/// recording `Router` after the initializers that call on `root` have run.
+pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr, initializers: &[Expr], root: &str) -> Res<Vec<Expr>> {
+    let mut eval = Eval::new(app);
+    let top = Frame { this: Val::Class("Object".into()), locals: HashMap::default(), block: None, scope: None };
+    for statement in initializers.iter().filter(|s| root_constant(s).as_deref() == Some(root)) {
+        eval.statement(statement, &mut top.clone())?;
+    }
+    let ExprNode::Send { args, block, .. } = &*call.node else { return Err("not a call".into()) };
+    let mut frame = Frame { this: Val::Router, locals: HashMap::default(), block: None, scope: None };
+    let argv = args.iter().map(|a| eval.value(a, &mut frame)).collect::<Res<Vec<_>>>()?;
+    let blk = match block {
+        Some(b) => Some(eval.value(b, &mut frame)?),
+        None => None,
+    };
+    eval.drawn.push(Vec::new());
+    eval.invoke(def, scope, Val::Router, argv, blk)?;
+    Ok(eval.drawn.pop().unwrap_or_default())
+}
+
+pub(super) fn initializers_of<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<Expr> {
+    initializer_statements(vfs, dir)
+}
+
+/// A place a value lives, which a method on it can change in place.
+enum Slot {
+    Ivar(Val, String),
+    Cvar(Option<String>, String),
+}
+
+/// The class variable a `mattr_reader`-made reader answers (`def self.mapping; @@mapping; end`).
+fn cvar_reader(def: &MethodDef) -> Option<String> {
+    if !def.params.is_empty() {
+        return None;
+    }
+    let body = match &*def.body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        _ => &def.body,
+    };
+    match &*body.node {
+        ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => Some(name.as_str().to_string()),
+        _ => None,
+    }
+}
+

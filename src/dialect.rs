@@ -2259,6 +2259,16 @@ pub enum RouteSpec {
         within: ResourceScope,
         entries: Vec<RouteSpec>,
     },
+    /// A call to a routing method a gem adds to the mapper (doorkeeper's `use_doorkeeper`), kept where it
+    /// is written until its body can run against the expanded program (`ingest::gem_routes`). None
+    /// survives ingest: each becomes the scope of the routes it draws, or is dropped and reported.
+    Deferred {
+        call: crate::expr::Expr,
+        span: Span,
+        /// An enclosing `constraints` block's, applied to what it draws once it is drawn.
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        constraints: IndexMap<Symbol, String>,
+    },
 }
 
 /// One `get "/path", to: "c#a"` entry. Kept as a standalone struct so
