@@ -582,6 +582,13 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
         RouteSpec::RackMount { .. } => {}
         // Not drawn: ingest replaces every one with the routes its call draws.
         RouteSpec::Deferred { .. } => {}
+        // Not under the enclosing scopes: the method set its own path, module and name, as Rails' `@scope` swap does.
+        RouteSpec::Exclusive { entries } => {
+            let root = Ctx { helpers_enabled: ctx.helpers_enabled, mount_path: ctx.mount_path.clone(), ..Ctx::default() };
+            for entry in entries {
+                collect_flat_routes(entry, out, &root);
+            }
+        }
         RouteSpec::Explicit {
             method,
             path,
@@ -662,7 +669,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // route keeps the legacy action-name fallback in `as_name`
             // for consumers that key on it, but the helper generator
             // skips it.
-            let action_part = written_action(path);
+            // A canonical action's symbol is named by the action where `path:` moved its segment (`post :create, path: "sign_in"`), adding nothing on a member or collection; ingest roots only that path, a bare symbol's stays the symbol.
+            let action_part = if *action_symbol && path.starts_with('/') { Some(action.as_str()) } else { written_action(path) };
             let derived = match as_name.as_ref() {
                 // `as: nil`: no helper at all.
                 Some(s) if s.as_str().is_empty() => None,
@@ -853,6 +861,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             param,
             path: path_segment,
             constraints: resource_constraints,
+            path_names,
         } => {
             let materialized;
             let ctx = if ctx.within.is_nested() {
@@ -967,6 +976,13 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     continue;
                 }
                 let member = suffix.replace(":id", &format!(":{id_param}"));
+                let member = match path_names.get(&Symbol::from(action_name)) {
+                    Some(named) if matches!(action_name, "new" | "edit") => {
+                        let base = member.strip_suffix(&format!("/{action_name}")).unwrap_or(&member).to_string();
+                        if named.is_empty() { base } else { format!("{base}/{named}") }
+                    }
+                    _ => member,
+                };
                 // Empty for an index or show mounted with `path: "/"`; it
                 // stays empty through the nesting (`/account`, not
                 // `/account/`) and is the root `/` only at the very top.

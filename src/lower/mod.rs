@@ -1452,6 +1452,15 @@ pub(crate) fn for_each_hook_body_ref(
     app: &crate::app::App,
     f: &mut impl FnMut(&crate::expr::Expr),
 ) {
+    for_each_owned_hook_body_ref(app, &mut |_, body| f(body))
+}
+
+/// [`for_each_hook_body_ref`] with each body's owner, as
+/// [`for_each_owned_hook_body`] gives it.
+pub(crate) fn for_each_owned_hook_body_ref(
+    app: &crate::app::App,
+    f: &mut impl FnMut(Option<&crate::ident::ClassId>, &crate::expr::Expr),
+) {
     fn visit_param_defaults(
         params: &[crate::dialect::Param],
         f: &mut impl FnMut(&crate::expr::Expr),
@@ -1463,6 +1472,7 @@ pub(crate) fn for_each_hook_body_ref(
         }
     }
     for model in &app.models {
+        let f = &mut |e: &crate::expr::Expr| f(Some(&model.name), e);
         for item in &model.body {
             match item {
                 crate::dialect::ModelBodyItem::Method { method, .. } => {
@@ -1504,6 +1514,7 @@ pub(crate) fn for_each_hook_body_ref(
         }
     }
     for lc in &app.library_classes {
+        let f = &mut |e: &crate::expr::Expr| f(Some(&lc.name), e);
         for method in &lc.methods {
             visit_param_defaults(&method.params, f);
             f(&method.body);
@@ -1520,6 +1531,7 @@ pub(crate) fn for_each_hook_body_ref(
     }
     // Same set as the mutable twin — see the note there.
     if let Some(lc) = &app.rails_application {
+        let f = &mut |e: &crate::expr::Expr| f(Some(&lc.name), e);
         for method in &lc.methods {
             visit_param_defaults(&method.params, f);
             f(&method.body);
@@ -1535,6 +1547,7 @@ pub(crate) fn for_each_hook_body_ref(
         }
     }
     for controller in &app.controllers {
+        let f = &mut |e: &crate::expr::Expr| f(Some(&controller.name), e);
         for item in &controller.body {
             match item {
                 crate::dialect::ControllerBodyItem::Action { action, .. } => {
@@ -1561,10 +1574,10 @@ pub(crate) fn for_each_hook_body_ref(
         }
     }
     if let Some(seeds) = &app.seeds {
-        f(seeds);
+        f(None, seeds);
     }
     for stmt in &app.boot_program {
-        f(stmt);
+        f(None, stmt);
     }
 }
 

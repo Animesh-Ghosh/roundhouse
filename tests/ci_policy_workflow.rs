@@ -913,6 +913,76 @@ fn focused_framework_loop_runs_every_selection_and_preserves_failure() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// A slow suite is stopped and named inside the job's limit, with the shard's
+/// other suites reported and timed; `spinel` runs at the lane's `-O` level.
+#[cfg(unix)]
+#[test]
+fn framework_loop_stops_a_slow_suite_and_compiles_at_its_opt_level() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = scratch::dir(&format!("framework-budget-{unique}"));
+    let executable = |path: &std::path::Path, body: String| {
+        fs::write(path, body).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    executable(
+        &root.join("cargo"),
+        concat!(
+            "#!/bin/sh\n",
+            "prev=\n",
+            "for a in \"$@\"; do\n",
+            "  if [ \"$prev\" = --test ]; then\n",
+            "    printf '{\"reason\":\"compiler-artifact\",\"target\":{\"name\":\"%s\",\"kind\":[\"test\"]},\"executable\":\"%s/%s\"}\\n' \"$a\" \"$STUBS\" \"$a\"\n",
+            "  fi\n",
+            "  prev=$a\n",
+            "done\n",
+        )
+        .to_string(),
+    );
+    executable(&root.join("spinel"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RUN_LOG\"\n".to_string());
+    let stubs = root.join("stubs");
+    fs::create_dir(&stubs).unwrap();
+    executable(&stubs.join("slow"), "#!/bin/sh\nsleep 60\n".to_string());
+    executable(&stubs.join("quick"), "#!/bin/sh\necho quick-output\nspinel app.rb -o app\n".to_string());
+
+    for (opt, expected) in [(Some("0"), "-O0 app.rb -o app\n"), (Some("2"), "-O2 app.rb -o app\n"), (None, "app.rb -o app\n")] {
+        let log = root.join("run.log");
+        fs::write(&log, "").unwrap();
+        let timings = root.join("timings.jsonl");
+        fs::write(&timings, "").unwrap();
+        let mut command = Command::new("bash");
+        command
+            .args(["-e", "-o", "pipefail", "-c", "scripts/ci-spinel-framework.sh"])
+            .env("TESTS", "slow quick")
+            .env("RUN_LOG", &log)
+            .env("STUBS", &stubs)
+            .env("RUNNER_TEMP", &root)
+            .env("CI_SPINEL_TIMINGS_OUT", &timings)
+            .env("CI_SPINEL_FRAMEWORK_BUDGET", "3")
+            .env("CI_SPINEL_OPT", opt.unwrap_or(""))
+            .env("PATH", format!("{}:{}", root.display(), std::env::var("PATH").unwrap()));
+        let start = std::time::Instant::now();
+        let result = command.output().unwrap();
+        assert!(start.elapsed().as_secs() < 30, "the budget did not stop the suite: {result:?}");
+        assert!(!result.status.success(), "a stopped suite fails the shard: {result:?}");
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(stdout.contains("::error::slow stopped at this shard's 3s budget"), "{stdout}");
+        assert!(stdout.contains("::group::quick") && stdout.contains("quick-output"), "{stdout}");
+        assert_eq!(fs::read_to_string(&log).unwrap(), expected, "{stdout}");
+        let recorded = fs::read_to_string(&timings).unwrap();
+        assert!(
+            recorded.lines().any(|l| l.contains("\"name\": \"slow\"") && l.contains("\"timed_out\": true")),
+            "{recorded}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// The PostgreSQL Db gate runs in the native framework loop: the job has
 /// a PostgreSQL service, checks spinel-pg out at a pinned commit only when
 /// the plan selects the gate, and hands both to the loop step.

@@ -66,6 +66,12 @@ pub struct Column {
     pub col_type: ColumnType,
     pub nullable: bool,
     pub default: Option<String>,
+    /// A database expression is distinct from the model's literal default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_expression: Option<String>,
+    /// Target lowering may leave computed defaults on the legacy persistence path.
+    #[serde(skip)]
+    pub legacy_default_persistence: bool,
     pub primary_key: bool,
     /// The SQL expression and storage mode of a generated column. The
     /// declared `col_type` remains the column's result type; generated
@@ -108,6 +114,18 @@ pub struct Column {
 }
 
 impl Column {
+    pub fn persisted_computed_default(&self) -> Option<&str> {
+        if self.legacy_default_persistence { None } else { self.computed_default() }
+    }
+
+    /// A database-evaluated default, distinct from a quoted SQL literal.
+    pub fn computed_default(&self) -> Option<&str> {
+        self.default_expression.as_deref().filter(|sql| {
+            !(sql.len() >= 2 && sql.starts_with('\'') && sql.ends_with('\'')
+                && !sql[1..sql.len() - 1].replace("''", "").contains('\''))
+        })
+    }
+
     /// The schema default a target reads. An array column's `[]` counts
     /// only where the target stores the Array.
     pub fn stored_default(&self) -> Option<&str> {
@@ -163,6 +181,12 @@ pub enum ColumnType {
     /// PostgreSQL DDL still say `interval`.
     Interval,
     Reference { table: TableRef },
+}
+
+impl ColumnType {
+    pub(crate) fn stores_sql_literal_default_as_text(&self) -> bool {
+        matches!(self, Self::String { .. } | Self::Text | Self::Json | Self::Jsonb | Self::Uuid)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

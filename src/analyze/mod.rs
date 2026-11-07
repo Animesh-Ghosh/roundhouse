@@ -218,6 +218,24 @@ pub struct Analyzer {
     /// trees' shape, which typing does not change, and Phase B asked for
     /// it on every typing pass.
     written_ivars: Option<Option<BTreeSet<Symbol>>>,
+    /// Each class-owned unification work item's send sites and the
+    /// targets it calls, as the last unification collected them. A
+    /// site is read off its body's stamped types, so a body no typing
+    /// pass has rewritten since gives the same sites again.
+    site_cache: Vec<OwnedSites>,
+    /// The classes whose bodies a typing pass has rewritten since the
+    /// last unification; `None` when a pass rewrote every body.
+    retyped_since_unify: Option<crate::det::HashSet<ClassId>>,
+    /// The constant registry the last typing pass settled on, before the
+    /// generated helper constants were added. The next pass starts from
+    /// it: a registry that has not moved is confirmed in one round
+    /// instead of rebuilt from nothing in two or more.
+    settled_constants: Option<(HashMap<Symbol, Ty>, IdentityHashMap<DeclarationId, Ty>)>,
+    /// What each body contributed to the two whole-app surveys a
+    /// production pass makes ([`BodySurveys`]), and the classes whose
+    /// bodies a pass has rewritten since they were taken (`None`: all).
+    surveys: BodySurveys,
+    retyped_since_survey: Option<crate::det::HashSet<ClassId>>,
     /// Parameter rows and tables kept across fixpoint rounds (see `unify_memo`).
     unify_memo: unify_memo::UnifyMemo,
 }
@@ -1380,6 +1398,11 @@ impl Analyzer {
             fixpoint_checks: fixpoint_check::Checks::default(),
             settle: oscillation::Settle::default(),
             written_ivars: None,
+            site_cache: Vec::new(),
+            retyped_since_unify: None,
+            settled_constants: None,
+            surveys: BodySurveys::default(),
+            retyped_since_survey: None,
             unify_memo: unify_memo::UnifyMemo::default(),
         }
     }
@@ -1469,6 +1492,11 @@ impl Analyzer {
         self.fixpoint_checks = fixpoint_check::Checks::start();
         self.settle = oscillation::Settle::default();
         self.written_ivars = None;
+        self.site_cache = Vec::new();
+        self.retyped_since_unify = None;
+        self.settled_constants = None;
+        self.surveys = BodySurveys::default();
+        self.retyped_since_survey = None;
         self.unify_memo.reset();
         // Before any signature is copied. Anonymous `**` / `...` cannot
         // survive flattened keywords, and `check` does not lower.
@@ -2275,7 +2303,7 @@ impl Analyzer {
     /// The rounds continue until no value changes, so `B = A` can use
     /// the value of `A` from the round before.
     fn build_constant_registry(
-        &self,
+        &mut self,
         app: &App,
     ) -> (HashMap<Symbol, Ty>, IdentityHashMap<DeclarationId, Ty>) {
         // Ingest can move a constant to another IR owner: a file-level
@@ -2443,10 +2471,9 @@ impl Analyzer {
                 ))
             })
             .collect();
-        let mut map: HashMap<Symbol, Ty> = HashMap::default();
         let mut ambiguous: crate::det::HashSet<Symbol> = crate::det::HashSet::default();
         let seeded = || -> IdentityHashMap<DeclarationId, Ty> { data_classes.iter().cloned().collect() };
-        let mut resolved = seeded();
+        let (mut map, mut resolved) = self.settled_constants.take().unwrap_or_else(|| (HashMap::default(), seeded()));
         // Each round can type one more link of a `B = A` chain, so n
         // values need at most n + 1 rounds when no value changes after
         // it is typed. A cycle (`A = B`, `B = A`) never types and stays
@@ -2504,6 +2531,7 @@ impl Analyzer {
             map = next;
             resolved = next_resolved;
         }
+        self.settled_constants = Some((map.clone(), resolved.iter().map(|(id, ty)| (*id, ty.clone())).collect()));
         // These source-declared constants have modeled factory-generated
         // object methods even though their initializer is not a retained class.
         for constant in app.generated_helper_methods.keys() {
@@ -2513,6 +2541,14 @@ impl Analyzer {
             );
         }
         (map, resolved)
+    }
+
+    /// Records a class whose bodies a pass rewrote outside its frontier, for
+    /// both caches that reuse what its bodies gave.
+    fn note_retyped(&mut self, class: &ClassId) {
+        for retyped in [&mut self.retyped_since_unify, &mut self.retyped_since_survey].into_iter().flatten() {
+            retyped.insert(class.clone());
+        }
     }
 
     /// One full typing pass over the whole app. Extracted from
@@ -2543,6 +2579,11 @@ impl Analyzer {
         let global_constants = body::ConstScope::global(fallback);
         match mode {
             TypingMode::Production { dirty } => {
+                match (dirty, self.retyped_since_unify.as_mut()) {
+                    (Some(d), Some(retyped)) => retyped.extend(d.iter().cloned()),
+                    (None, _) => self.retyped_since_unify = None,
+                    (Some(_), None) => {}
+                }
                 self.type_production_bodies(
                     app,
                     dynamic_render_ivars,
@@ -4172,6 +4213,18 @@ impl Analyzer {
         // dirty sets already include every `current_attribute_classes`
         // entry (see `dirty_retype`); mailers stay surveyed either way
         // because their ivar harvest feeds views.
+        // Both surveys below read every body, and a body no pass has
+        // rewritten since the last survey gives what it gave then. Those
+        // are this pass's frontier, which models and controllers above
+        // have already retyped, and the classes earlier passes retyped
+        // after the last survey.
+        let stale: Option<crate::det::HashSet<ClassId>> = match (self.retyped_since_survey.take(), dirty) {
+            (Some(mut pending), Some(d)) => {
+                pending.extend(d.iter().cloned());
+                Some(pending)
+            }
+            _ => None,
+        };
         let current_attribute_writes: HashMap<ClassId, HashMap<Symbol, Ty>> = {
             let targets: crate::det::HashSet<&ClassId> = app
                 .current_attribute_classes
@@ -4181,13 +4234,28 @@ impl Analyzer {
                 })
                 .collect();
             let mut out: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::default();
+            // Kept current whether or not this pass reads it, so a later
+            // pass can trust what it reuses.
+            let all: crate::det::HashSet<&ClassId> = app.current_attribute_classes.iter().collect();
+            if !all.is_empty() {
+                self.surveys.attr_writes(app, &all, stale.as_ref());
+            }
             if !targets.is_empty() {
-                let mut collect = |body: &crate::expr::Expr| {
-                    collect_const_attr_writes(body, &targets, &mut out);
-                };
-                crate::lower::for_each_hook_body_ref(app, &mut collect);
+                let mut views = Vec::new();
                 for view in &app.views {
-                    collect(&view.body);
+                    collect_const_attr_writes(&view.body, &all, &mut views);
+                }
+                for (target, name, ty) in self.surveys.attr_writes.iter().flatten().chain(&views) {
+                    if !targets.contains(target) {
+                        continue;
+                    }
+                    let entry = out.entry(target.clone()).or_default();
+                    let merged = match entry.remove(name) {
+                        Some(prev) if prev == *ty => prev,
+                        Some(prev) => crate::analyze::body::union_of(prev, ty.clone()),
+                        None => ty.clone(),
+                    };
+                    entry.insert(name.clone(), merged);
                 }
             }
             out
@@ -4216,7 +4284,8 @@ impl Analyzer {
         // call site's kwargs (typed by the pass that walked the caller;
         // the fixpoint re-runs this with refined types) into one row
         // per mailer, union per key across sites.
-        let mailer_with_params = harvest_mailer_with_params(app, &mailer_names);
+        self.surveys.mailer_withs(app, &mailer_names, stale.as_ref());
+        let mailer_with_params = self.surveys.mailer_with_params();
         // `.with` rows advance from (possibly retyped) callers without
         // marking the mailer dirty via the caller-closure. Force body
         // retype when the params row moved so `@x = params[:x]` ivars
@@ -4238,6 +4307,13 @@ impl Analyzer {
                 }
             })
             .collect();
+        // What this pass retypes after the surveys, for the next one.
+        self.retyped_since_survey = dirty.map(|d| d.iter().chain(&mailers_needing_retype).cloned().collect());
+        // The frontier omits these mailers, and the next unification must
+        // not reuse the sites they had before this retype.
+        if let Some(retyped) = self.retyped_since_unify.as_mut() {
+            retyped.extend(mailers_needing_retype.iter().cloned());
+        }
         let mut mailer_params_by_view: HashMap<Symbol, Ty> = HashMap::default();
 
         let _typing_library = crate::timings::begin("typing: library");
@@ -5292,39 +5368,6 @@ impl Analyzer {
         )
     }
 
-    /// Record which classes call `(receiver class, method)`, for the
-    /// slice of sites one method body contributed. Keyed by the class
-    /// the receiver typed to rather than by the class whose `def` the
-    /// call reaches, because that is the key the walk in
-    /// `dirty_classes_for_retype` can resolve: dispatch chases the
-    /// receiver's own chain, and so does the frontier.
-    ///
-    /// View and seed trees walked under [`UnifyScope::WithViews`] still
-    /// contribute param observations, but their sends have no owning
-    /// production [`ClassId`] and are intentionally not passed here —
-    /// absorb dirty narrowing is production-class only today.
-    ///
-    /// A class's calls to ITSELF are dropped: when its own answer
-    /// moves it is already dirty, and implicit-self sends are most of
-    /// what a body contains.
-    fn record_callers(
-        &mut self,
-        caller: &ClassId,
-        sites: &[SendSite],
-    ) {
-        let mut seen: crate::det::HashSet<(&ClassId, &Symbol)> =
-            crate::det::HashSet::default();
-        for (class_id, method, _, _, _) in sites {
-            if class_id == caller || *class_id == unknown_receiver() || !seen.insert((class_id, method)) {
-                continue;
-            }
-            self.callers_by_target
-                .entry((class_id.clone(), method.clone()))
-                .or_default()
-                .insert(caller.clone());
-        }
-    }
-
     /// Walk every model + library_class method body and write its
     /// inferred body type into `self.classes[class].instance_methods`
     /// (or `class_methods` for `def self.x`). Conservative on widening:
@@ -6148,7 +6191,7 @@ impl Analyzer {
         // Class-level reverse call graph, rebuilt alongside the param
         // table off the same walk — each `collect_send_sites` call
         // already knows the class it is walking, so the edges are the
-        // slice of sites it appended. See `record_callers`.
+        // slice of sites it appended. See `called_targets`.
         self.callers_by_target.clear();
         for model in &app.models {
             for method in model.methods() {
@@ -6217,7 +6260,7 @@ impl Analyzer {
                 }
             }
         }
-        // WithViews: param sites only — no `record_callers` (no ClassId).
+        // WithViews: param sites only — no `called_targets` (no ClassId).
         if matches!(scope, UnifyScope::WithViews) {
             for view in &app.views {
                 work.push(Work { owner: None, roots: vec![(&view.body, false)], params: Vec::new() });
@@ -6230,57 +6273,97 @@ impl Analyzer {
             work.push(Work { owner: None, roots: vec![(stmt, false)], params: Vec::new() });
         }
 
-        // Walk immutable trees concurrently; replay caller boundaries and sites in order.
-        let mut sites = Vec::new();
-        if crate::par::workers_for(work.len()) == 1 {
-            // As with ingest's word index, serial work keeps one accumulator.
-            for item in work {
-                let from = sites.len();
-                for (root, class_body) in item.roots {
-                    self.collect_send_sites(root, item.owner, class_body, helpers, &item.params, &mut sites);
-                }
-                if let Some(owner) = item.owner { self.record_callers(owner, &sites[from..]); }
-            }
-        } else {
-        let collected = crate::par::map(&work, |item| {
+        // Class-owned items come first and are the same list in every
+        // scope, so the cache lines up with them by position. Each one a
+        // typing pass rewrote since the last unification is walked again;
+        // the rest give the sites they gave then. Items with no owning
+        // class (views, seeds, the boot program) are always walked.
+        let owned = work.iter().take_while(|item| item.owner.is_some()).count();
+        let retyped = self.retyped_since_unify.take();
+        let reusable = |i: usize, owner: Option<&ClassId>| {
+            i < owned
+                && self.site_cache.len() == owned
+                && retyped.as_ref().is_some_and(|r| owner.is_some_and(|o| !r.contains(o)))
+        };
+        let stale: Vec<usize> = (0..work.len()).filter(|&i| !reusable(i, work[i].owner)).collect();
+        let collect = |item: &Work<'_>| {
             let mut sites = Vec::new();
             for (root, class_body) in &item.roots {
                 self.collect_send_sites(root, item.owner, *class_body, helpers, &item.params, &mut sites);
             }
-            sites
-        });
-        for (item, item_sites) in work.into_iter().zip(collected) {
-            if let Some(owner) = item.owner { self.record_callers(owner, &item_sites); }
-            sites.extend(item_sites);
+            let targets = item.owner.map(|owner| called_targets(owner, &sites)).unwrap_or_default();
+            OwnedSites { sites, targets }
+        };
+        let fresh: Vec<OwnedSites> = if crate::par::workers_for(stale.len()) == 1 {
+            stale.iter().map(|&i| collect(&work[i])).collect()
+        } else {
+            crate::par::map(&stale, |&i| collect(&work[i]))
+        };
+        #[cfg(debug_assertions)]
+        let walked: Vec<Vec<SendSite>> = work[..owned].iter().map(|item| collect(item).sites).collect();
+        let mut cache = std::mem::take(&mut self.site_cache);
+        cache.resize_with(owned, OwnedSites::default);
+        let mut unowned: Vec<OwnedSites> = Vec::new();
+        for (i, collected) in stale.into_iter().zip(fresh) {
+            if i < owned { cache[i] = collected } else { unowned.push(collected) }
         }
+        // A kept entry has to say what walking its body says now. One that
+        // does not means something rewrote the body without recording it.
+        #[cfg(debug_assertions)]
+        for ((item, entry), walked) in work.iter().zip(&cache).zip(&walked) {
+            assert_eq!(walked, &entry.sites, "kept send sites of {:?} are stale", item.owner);
         }
-        let (sites, guessed) = expand_unknown_receivers(sites, app);
+        for (item, entry) in work.iter().zip(&cache) {
+            let owner = item.owner.expect("class-owned items come first");
+            for target in &entry.targets {
+                self.callers_by_target.entry(target.clone()).or_default().insert(owner.clone());
+            }
+        }
+        // Read in place: most sites reach no `def` of the app, so cloning
+        // every site to hand the list over cost more than reading it.
+        let unknown = unknown_receiver();
+        let total = cache.iter().chain(&unowned).map(|o| o.sites.len()).sum();
+        let mut direct: Vec<&SendSite> = Vec::with_capacity(total);
+        let mut unknown_sites: Vec<&SendSite> = Vec::new();
+        for site in cache.iter().chain(&unowned).flat_map(|o| &o.sites) {
+            if site.0 == unknown { unknown_sites.push(site) } else { direct.push(site) }
+        }
+        let guessed = guessed_receiver_sites(&unknown_sites, app);
         self.open_param_slots.clear();
         let mut open = std::mem::take(&mut self.open_param_slots);
-        let mut observations = self.param_observations(sites, params_by_method, defined, &mut open);
+        let mut observations = self.param_observations(&direct, params_by_method, defined, &mut open);
         // Not a row of its own: the site may be another class's method of the name, so it only widens a parameter some typed site reaches.
         // Not each position past a `*rest`: they all fill the one slot, so a typed `f("a")` reaches what a guessed `f("a", :b)` passes second.
         let slot = |key: &ParamKey, i: usize| {
             let rest = params_by_method.get(key).and_then(|shape| shape.slots.iter().position(|(_, kind)| matches!(kind, ParamKind::Rest)));
             rest.filter(|r| i >= *r).unwrap_or(i)
         };
-        let typed: BTreeSet<(ParamKey, usize)> = observations
-            .iter()
-            .map(|(key, tys)| (key, tys.as_slice()))
-            .chain(prev_rows.iter().map(|(key, row)| (key, row.as_slice())))
-            .flat_map(|(key, tys)| tys.iter().enumerate().filter(|(_, t)| !t.is_unknown()).map(move |(i, _)| (key.clone(), slot(key, i))))
-            .collect();
+        let guessed_refs: Vec<&SendSite> = guessed.iter().collect();
         let mut guessed_open = BTreeSet::new();
-        let guessed = self.param_observations(guessed, params_by_method, defined, &mut guessed_open);
-        for (key, tys) in guessed {
-            let tys = tys
-                .into_iter()
-                .enumerate()
-                .map(|(i, t)| if typed.contains(&(key.clone(), slot(&key, i))) { t } else { Ty::Var { var: NO_EVIDENCE } })
+        let guessed = self.param_observations(&guessed_refs, params_by_method, defined, &mut guessed_open);
+        let extra: Vec<(ParamKey, Vec<Ty>)> = {
+            let typed: BTreeSet<(&ParamKey, usize)> = observations
+                .iter()
+                .map(|(key, tys)| (key, tys.as_slice()))
+                .chain(prev_rows.iter().map(|(key, row)| (key, row.as_slice())))
+                .flat_map(|(key, tys)| tys.iter().enumerate().filter(|(_, t)| !t.is_unknown()).map(move |(i, _)| (key, slot(key, i))))
                 .collect();
-            observations.push((key, tys));
-        }
-        open.extend(guessed_open.into_iter().filter(|(key, i)| typed.contains(&(key.clone(), slot(key, *i)))));
+            open.extend(guessed_open.into_iter().filter(|(key, i)| typed.contains(&(key, slot(key, *i)))));
+            guessed
+                .into_iter()
+                .map(|(key, tys)| {
+                    let tys = tys
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, t)| if typed.contains(&(&key, slot(&key, i))) { t } else { Ty::Var { var: NO_EVIDENCE } })
+                        .collect();
+                    (key, tys)
+                })
+                .collect()
+        };
+        observations.extend(extra);
+        self.site_cache = cache;
+        self.retyped_since_unify = Some(crate::det::HashSet::default());
         self.open_param_slots = open;
         let mut rows = std::mem::take(&mut self.inferred_params);
         self.unify_memo.fold(scope, &mut rows, observations);
@@ -6305,10 +6388,10 @@ impl Analyzer {
 
     fn overlay_test_params(&mut self, app: &App) {
         let helpers = &app.helper_method_index;
-        let params_by_method = Self::param_shapes(app);
-        let defined = Self::defined_methods(app);
+        // The same shapes and defined methods unification reads, built once.
+        let tables = self.unify_memo.tables(|| (Self::param_shapes(app), Self::defined_methods(app)));
         let test_sites = self.collect_test_param_sites(app, helpers);
-        self.apply_param_sites(test_sites, &params_by_method, &defined);
+        self.apply_param_sites(test_sites, &tables.0, &tables.1);
     }
 
     fn collect_test_param_sites(
@@ -6341,8 +6424,9 @@ impl Analyzer {
         params_by_method: &HashMap<ParamKey, ParamShape>,
         defined: &BTreeSet<ParamKey>,
     ) {
-        let sites = sites.into_iter().filter(|site| site.0 != unknown_receiver()).collect();
-        let observations = self.param_observations(sites, params_by_method, defined, &mut BTreeSet::new());
+        let unknown = unknown_receiver();
+        let sites: Vec<&SendSite> = sites.iter().filter(|site| site.0 != unknown).collect();
+        let observations = self.param_observations(&sites, params_by_method, defined, &mut BTreeSet::new());
         fold_param_observations(&mut self.inferred_params, observations);
     }
 
@@ -6354,7 +6438,7 @@ impl Analyzer {
     /// observations, in the same order, and the union of the open slots.
     fn param_observations(
         &self,
-        sites: Vec<SendSite>,
+        sites: &[&SendSite],
         params_by_method: &HashMap<ParamKey, ParamShape>,
         defined: &BTreeSet<ParamKey>,
         open: &mut BTreeSet<(ParamKey, usize)>,
@@ -6363,18 +6447,10 @@ impl Analyzer {
         if sites.len() <= CHUNK || crate::par::workers_for(sites.len() / CHUNK + 1) == 1 {
             return self.param_observations_of(sites, params_by_method, defined, open);
         }
-        let mut chunks: Vec<Vec<SendSite>> = Vec::with_capacity(sites.len() / CHUNK + 1);
-        let mut rest = sites.into_iter();
-        loop {
-            let chunk: Vec<SendSite> = rest.by_ref().take(CHUNK).collect();
-            if chunk.is_empty() {
-                break;
-            }
-            chunks.push(chunk);
-        }
-        let parts = parallel::map(&mut chunks, |chunk| {
+        let chunks: Vec<&[&SendSite]> = sites.chunks(CHUNK).collect();
+        let parts = crate::par::map(&chunks, |chunk| {
             let mut part_open = BTreeSet::new();
-            let obs = self.param_observations_of(std::mem::take(chunk), params_by_method, defined, &mut part_open);
+            let obs = self.param_observations_of(chunk, params_by_method, defined, &mut part_open);
             (obs, part_open)
         });
         let mut observations = Vec::new();
@@ -6385,25 +6461,22 @@ impl Analyzer {
         observations
     }
 
+    /// A site's argument types are copied only once it is known to reach
+    /// a `def` of the app.
     fn param_observations_of(
         &self,
-        sites: Vec<SendSite>,
+        sites: &[&SendSite],
         params_by_method: &HashMap<ParamKey, ParamShape>,
         defined: &BTreeSet<ParamKey>,
         open: &mut BTreeSet<(ParamKey, usize)>,
     ) -> Vec<(ParamKey, Vec<Ty>)> {
-        let mut placed: HashMap<(ClassId, Symbol, SiteRecv), Option<ParamKey>> = HashMap::default();
-        let mut observations = Vec::with_capacity(sites.len());
-        for (class_id, method, arg_tys, kw_tys, recv) in sites {
-            let site = (class_id, method, recv);
-            let key = match placed.get(&site) {
-                Some(key) => key.clone(),
-                None => {
-                    let key = self.param_key(defined, site.0.clone(), site.1.clone(), recv);
-                    placed.insert(site, key.clone());
-                    key
-                }
-            };
+        let mut placed: HashMap<(&ClassId, &Symbol, SiteRecv), Option<ParamKey>> = HashMap::default();
+        let mut observations = Vec::new();
+        for (class_id, method, arg_tys, kw_tys, recv) in sites.iter().copied() {
+            let key = placed
+                .entry((class_id, method, *recv))
+                .or_insert_with(|| self.param_key(defined, class_id.clone(), method.clone(), *recv))
+                .clone();
             let Some(key) = key else { continue };
             // Not the placed row: keyword placement pads the slots a call leaves to their defaults with the same `Var`.
             let positional = arg_tys.len().saturating_sub(usize::from(kw_tys.group));
@@ -6415,7 +6488,7 @@ impl Analyzer {
                     open.insert((key.clone(), i));
                 }
             }
-            let arg_tys = Self::place_keyword_args(params_by_method.get(&key), arg_tys, kw_tys);
+            let arg_tys = Self::place_keyword_args(shape, arg_tys.clone(), kw_tys.clone());
             observations.push((key, arg_tys));
         }
         observations
@@ -8478,30 +8551,26 @@ fn unknown_receiver() -> ClassId {
 /// defines the instance method (raabro's `Tree#subgather`, which fugit
 /// calls with a Symbol on a tree the analysis does not type); otherwise
 /// dropped, as such a site always was.
-fn expand_unknown_receivers(sites: Vec<SendSite>, app: &App) -> (Vec<SendSite>, Vec<SendSite>) {
-    let unknown = unknown_receiver();
-    if !sites.iter().any(|site| site.0 == unknown) {
-        return (sites, Vec::new());
+/// A call on a receiver of unknown type, as a call of each app class
+/// that defines an instance method of that name, when the app pins its
+/// unresolved parameters.
+fn guessed_receiver_sites(unknown: &[&SendSite], app: &App) -> Vec<SendSite> {
+    if unknown.is_empty() || !app.pins_unresolved_params {
+        return Vec::new();
     }
     let mut defining: HashMap<&Symbol, Vec<&ClassId>> = HashMap::default();
-    if app.pins_unresolved_params {
-        for lc in &app.library_classes {
-            for m in lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance) {
-                defining.entry(&m.name).or_default().push(&lc.name);
-            }
+    for lc in &app.library_classes {
+        for m in lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Instance) {
+            defining.entry(&m.name).or_default().push(&lc.name);
         }
     }
-    let (mut direct, mut guessed) = (Vec::with_capacity(sites.len()), Vec::new());
-    for site in sites {
-        if site.0 != unknown {
-            direct.push(site);
-            continue;
-        }
+    let mut guessed = Vec::new();
+    for site in unknown {
         for class in defining.get(&site.1).into_iter().flatten() {
             guessed.push(((*class).clone(), site.1.clone(), site.2.clone(), site.3.clone(), site.4));
         }
     }
-    (direct, guessed)
+    guessed
 }
 
 fn leaves_unknown(t: &Ty) -> bool {
@@ -9490,8 +9559,42 @@ enum SiteRecv {
 
 type SendSite = (ClassId, Symbol, Vec<Ty>, SiteKeywords, SiteRecv);
 
+/// One unification work item's send sites, and the targets it calls
+/// ([`called_targets`]).
+#[derive(Default)]
+struct OwnedSites {
+    sites: Vec<SendSite>,
+    targets: Vec<(ClassId, Symbol)>,
+}
+
+/// The `(receiver class, method)` pairs one body calls, each once, for
+/// `callers_by_target`. Keyed by the class the receiver typed to rather
+/// than by the class whose `def` the call reaches, because that is the
+/// key the walk in `dirty_classes_for_retype` can resolve: dispatch
+/// chases the receiver's own chain, and so does the frontier.
+///
+/// View and seed trees walked under [`UnifyScope::WithViews`] still
+/// contribute param observations, but their sends have no owning
+/// production [`ClassId`] and are intentionally not passed here —
+/// absorb dirty narrowing is production-class only today.
+///
+/// A class's calls to ITSELF are dropped: when its own answer moves it
+/// is already dirty, and implicit-self sends are most of what a body
+/// contains.
+fn called_targets(caller: &ClassId, sites: &[SendSite]) -> Vec<(ClassId, Symbol)> {
+    let mut seen: crate::det::HashSet<(&ClassId, &Symbol)> = crate::det::HashSet::default();
+    let mut targets = Vec::new();
+    for (class_id, method, _, _, _) in sites {
+        if class_id == caller || *class_id == unknown_receiver() || !seen.insert((class_id, method)) {
+            continue;
+        }
+        targets.push((class_id.clone(), method.clone()));
+    }
+    targets
+}
+
 /// A call's trailing keyword arguments as `collect_send_sites` saw them.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct SiteKeywords {
     /// The last argument is the keyword group (`k: v` or `**splat`).
     group: bool,
@@ -9935,14 +10038,15 @@ fn bind_framework_assigned_ivars(body: &Expr, ivars: &mut HashMap<Symbol, Ty>) {
     walk(body, ivars);
 }
 
-/// `<Const>.<name> = <value>` where `<Const>` is one of `targets`, keyed
-/// class → attribute → the value's type. Unions across write sites and
-/// ignores a write whose value carries no shape, so one untyped setter
-/// call cannot erase what another site established.
+/// Each `<Const>.<name> = <value>` where `<Const>` is one of `targets`,
+/// in tree order: the class, the attribute and the value's type. A
+/// write whose value carries no shape is left out, so one untyped
+/// setter call cannot erase what another site established; the caller
+/// unions the rest across write sites.
 fn collect_const_attr_writes(
     expr: &crate::expr::Expr,
     targets: &crate::det::HashSet<&ClassId>,
-    out: &mut HashMap<ClassId, HashMap<Symbol, Ty>>,
+    out: &mut Vec<(ClassId, Symbol, Ty)>,
 ) {
     // `Current.user = bot` arrives as a SEND of `user=`, not as an
     // `Assign` — prism spells a receiver-ful attribute write as a call,
@@ -9956,19 +10060,117 @@ fn collect_const_attr_writes(
             ));
             if let Some(target) = targets.get(&id) {
                 if let Some(ty) = args[0].ty.as_ref().filter(|t| !t.is_open()) {
-                    let entry = out.entry((*target).clone()).or_default();
-                    let name = Symbol::from(attr);
-                    let merged = match entry.remove(&name) {
-                        Some(prev) if prev == *ty => prev,
-                        Some(prev) => crate::analyze::body::union_of(prev, ty.clone()),
-                        None => ty.clone(),
-                    };
-                    entry.insert(name, merged);
+                    out.push(((*target).clone(), Symbol::from(attr), ty.clone()));
                 }
             }
         }
     }
     expr.node.for_each_child(&mut |c| collect_const_attr_writes(c, targets, out));
+}
+
+/// What each body contributed, the last time it was read, to the two
+/// whole-app surveys a production pass makes. A body is read again only
+/// when a pass has rewritten it since (its class is in `stale`, or
+/// `stale` is `None`), or when the set of bodies or of surveyed classes
+/// changed; the rest give what they gave then, and the results are
+/// replayed in tree order, so they are what a full walk would give.
+#[derive(Default)]
+struct BodySurveys {
+    /// Per hook body (`lower::for_each_owned_hook_body_ref` order): its
+    /// writes to a `CurrentAttributes` class's attributes.
+    attr_writes: Vec<Vec<(ClassId, Symbol, Ty)>>,
+    attr_targets: Vec<ClassId>,
+    /// Per model method, controller action and library method body: its
+    /// mailer `.with(…)` calls, each a `None` (the call) followed by its
+    /// typed literal-symbol keyword pairs.
+    mailer_withs: Vec<Vec<(ClassId, Option<(Symbol, Ty)>)>>,
+    mailers: Vec<ClassId>,
+}
+
+impl BodySurveys {
+    fn attr_writes(&mut self, app: &App, targets: &crate::det::HashSet<&ClassId>, stale: Option<&crate::det::HashSet<ClassId>>) {
+        let mut keys: Vec<ClassId> = targets.iter().map(|id| (*id).clone()).collect();
+        keys.sort();
+        let mut bodies = 0usize;
+        crate::lower::for_each_owned_hook_body_ref(app, &mut |_, _| bodies += 1);
+        let reuse = stale.is_some() && self.attr_targets == keys && self.attr_writes.len() == bodies;
+        if !reuse {
+            self.attr_writes = vec![Vec::new(); bodies];
+            self.attr_targets = keys;
+        }
+        let mut at = 0usize;
+        let cache = &mut self.attr_writes;
+        crate::lower::for_each_owned_hook_body_ref(app, &mut |owner, body| {
+            let i = at;
+            at += 1;
+            if reuse && owner.is_some_and(|o| !stale.is_some_and(|s| s.contains(o))) {
+                return;
+            }
+            cache[i].clear();
+            collect_const_attr_writes(body, targets, &mut cache[i]);
+        });
+        #[cfg(debug_assertions)]
+        {
+            let mut at = 0usize;
+            crate::lower::for_each_owned_hook_body_ref(app, &mut |owner, body| {
+                let mut walked = Vec::new();
+                collect_const_attr_writes(body, targets, &mut walked);
+                assert_eq!(walked, self.attr_writes[at], "kept attribute writes of {owner:?} are stale");
+                at += 1;
+            });
+        }
+    }
+
+    fn mailer_withs(&mut self, app: &App, mailers: &crate::det::HashSet<ClassId>, stale: Option<&crate::det::HashSet<ClassId>>) {
+        let mut keys: Vec<ClassId> = mailers.iter().cloned().collect();
+        keys.sort();
+        if keys.is_empty() {
+            self.mailer_withs.clear();
+            self.mailers = keys;
+            return;
+        }
+        let bodies: Vec<(&ClassId, &Expr)> = app
+            .models
+            .iter()
+            .flat_map(|m| m.methods().map(move |method| (&m.name, &method.body)))
+            .chain(app.controllers.iter().flat_map(|c| c.actions().map(move |a| (&c.name, &a.body))))
+            .chain(app.library_classes.iter().flat_map(|lc| lc.methods.iter().map(move |m| (&lc.name, &m.body))))
+            .collect();
+        let reuse = stale.is_some() && self.mailers == keys && self.mailer_withs.len() == bodies.len();
+        if !reuse {
+            self.mailer_withs = vec![Vec::new(); bodies.len()];
+            self.mailers = keys;
+        }
+        for (i, (owner, body)) in bodies.iter().enumerate() {
+            if reuse && !stale.is_some_and(|s| s.contains(*owner)) {
+                continue;
+            }
+            self.mailer_withs[i].clear();
+            collect_mailer_withs(body, mailers, &mut self.mailer_withs[i]);
+        }
+        #[cfg(debug_assertions)]
+        for (i, (owner, body)) in bodies.iter().enumerate() {
+            let mut walked = Vec::new();
+            collect_mailer_withs(body, mailers, &mut walked);
+            assert_eq!(walked, self.mailer_withs[i], "kept mailer calls of {owner:?} are stale");
+        }
+    }
+
+    /// Parameterized mailers' params, unioned per key across `.with`
+    /// call sites in tree order.
+    fn mailer_with_params(&self) -> HashMap<ClassId, crate::ty::Row> {
+        let mut out: HashMap<ClassId, crate::ty::Row> = HashMap::default();
+        for (id, pair) in self.mailer_withs.iter().flatten() {
+            let row = out.entry(id.clone()).or_insert_with(crate::ty::Row::closed);
+            let Some((key, ty)) = pair else { continue };
+            let merged = match row.fields.get(key) {
+                Some(prev) => crate::analyze::body::union_of(prev.clone(), ty.clone()),
+                None => ty.clone(),
+            };
+            row.fields.insert(key.clone(), merged);
+        }
+        out
+    }
 }
 
 /// A binding worth carrying to a SUBCLASS: one that is an answer.
@@ -10386,12 +10588,15 @@ fn collect_attr_accessor_names(body: &[ModelBodyItem]) -> Vec<Symbol> {
 /// a site the current pass has not typed yet is simply absent until
 /// the fixpoint re-runs). The receiver must name a mailer class
 /// exactly — `Mailer.with` chained onto anything else is not this.
-fn harvest_mailer_with_params(
-    app: &App,
+/// Each `Mailer.with(k: v, …)` in `body`, in tree order: a `None` for the
+/// call, which makes the mailer's params row, then each typed
+/// literal-symbol keyword pair.
+fn collect_mailer_withs(
+    body: &Expr,
     mailers: &crate::det::HashSet<ClassId>,
-) -> HashMap<ClassId, crate::ty::Row> {
+    out: &mut Vec<(ClassId, Option<(Symbol, Ty)>)>,
+) {
     use crate::expr::Literal;
-    let mut out: HashMap<ClassId, crate::ty::Row> = HashMap::default();
     let mut visit = |e: &Expr| {
         let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else { return };
         if method.as_str() != "with" {
@@ -10404,7 +10609,7 @@ fn harvest_mailer_with_params(
         if !mailers.contains(&id) {
             return;
         }
-        let row = out.entry(id).or_insert_with(crate::ty::Row::closed);
+        out.push((id.clone(), None));
         for arg in args {
             let ExprNode::Hash { entries, .. } = &*arg.node else { continue };
             for (k, v) in entries {
@@ -10413,33 +10618,11 @@ fn harvest_mailer_with_params(
                 if matches!(ty, Ty::Var { .. }) {
                     continue;
                 }
-                let merged = match row.fields.get(key) {
-                    Some(prev) => crate::analyze::body::union_of(prev.clone(), ty),
-                    None => ty,
-                };
-                row.fields.insert(key.clone(), merged);
+                out.push((id.clone(), Some((key.clone(), ty))));
             }
         }
     };
-    let mut walk_all = |body: &Expr| {
-        walk_expr(body, &mut visit);
-    };
-    for model in &app.models {
-        for method in model.methods() {
-            walk_all(&method.body);
-        }
-    }
-    for controller in &app.controllers {
-        for action in controller.actions() {
-            walk_all(&action.body);
-        }
-    }
-    for lc in &app.library_classes {
-        for method in &lc.methods {
-            walk_all(&method.body);
-        }
-    }
-    out
+    walk_expr(body, &mut visit);
 }
 
 /// Pre-order walk over an expression tree.
@@ -11613,7 +11796,7 @@ impl Analyzer {
     /// is measured on a copy. Destructured without `..`, so a new field has
     /// to be listed here; `Copy` fields own no heap.
     pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
-        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, unify_memo } = self;
+        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
         let mut freed: Vec<(&str, i64)> = vec![
             ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
             ("module_self_types", crate::memory_census::freed_by(|| drop(module_self_types))),
@@ -11645,6 +11828,11 @@ impl Analyzer {
             ("fixpoint_checks", crate::memory_census::freed_by(|| drop(fixpoint_checks))),
             ("settle", crate::memory_census::freed_by(|| drop(settle))),
             ("written_ivars", crate::memory_census::freed_by(|| drop(written_ivars))),
+            ("site_cache", crate::memory_census::freed_by(|| drop(site_cache))),
+            ("retyped_since_unify", crate::memory_census::freed_by(|| drop(retyped_since_unify))),
+            ("settled_constants", crate::memory_census::freed_by(|| drop(settled_constants))),
+            ("surveys", crate::memory_census::freed_by(|| drop(surveys))),
+            ("retyped_since_survey", crate::memory_census::freed_by(|| drop(retyped_since_survey))),
             ("unify_memo", crate::memory_census::freed_by(|| drop(unify_memo))),
         ];
         let total: i64 = freed.iter().map(|(_, bytes)| bytes).sum();
@@ -11654,5 +11842,112 @@ impl Analyzer {
         }
         crate::memory_census::note("analyzer", format_args!("total {:.1}MB", total as f64 / 1e6));
         classes
+    }
+}
+
+#[cfg(test)]
+mod site_cache_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn analyzed(src: &str) -> (App, Analyzer) {
+        let tree = [(PathBuf::from("app/lib/probe.rb"), src.as_bytes().to_vec())].into_iter().collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        (app, analyzer)
+    }
+
+    fn param(analyzer: &Analyzer, class: &str, method: &str) -> Option<Vec<Ty>> {
+        analyzer
+            .inferred_param_types(&ClassId(Symbol::from(class)), &Symbol::from(method))
+            .map(<[Ty]>::to_vec)
+    }
+
+    // `Sink#take`'s argument is typed only once `Source.make` and then
+    // `Relay.pass` have been harvested, a round apart. Relay's body is
+    // retyped only in the round its callee moved; the sites of the
+    // classes left alone are the ones the round before collected.
+    const CHAIN: &str = "class Source\n  def self.make\n    41 + 1\n  end\nend\n\nclass Relay\n  def self.pass\n    Source.make\n  end\nend\n\nclass Caller\n  def self.run\n    Sink.new.take(Relay.pass)\n  end\nend\n\nclass Quiet\n  def self.run\n    Sink.new.take(\"s\")\n  end\nend\n\nclass Sink\n  def take(x)\n    x\n  end\nend\n";
+
+    #[test]
+    fn a_site_reached_rounds_later_types_its_parameter() {
+        let (_, analyzer) = analyzed(CHAIN);
+        let row = param(&analyzer, "Sink", "take").expect("Sink#take has a row");
+        let arms = match &row[0] {
+            Ty::Union { variants } => variants.iter().cloned().collect::<Vec<_>>(),
+            other => vec![other.clone()],
+        };
+        assert!(arms.contains(&Ty::Int) && arms.contains(&Ty::Str), "{row:?}");
+    }
+
+    // Past the first round's full retype, and with enough classes left alone
+    // that the frontier stays narrow, `Link0.get` reaches `Link5.get` a round
+    // per link.
+    fn analyzed_with_chain(files: &[(&str, &str)]) -> Analyzer {
+        let mut tree: std::collections::BTreeMap<PathBuf, Vec<u8>> = std::collections::BTreeMap::new();
+        for i in 0..6 {
+            let body = if i == 0 { "41 + 1".to_string() } else { format!("Link{}.get", i - 1) };
+            tree.insert(PathBuf::from(format!("lib/link{i}.rb")), format!("class Link{i}\n  def self.get\n    {body}\n  end\nend\n").into_bytes());
+        }
+        for i in 0..40 {
+            tree.insert(PathBuf::from(format!("lib/idle{i}.rb")), format!("class Idle{i}\n  def a\n    1\n  end\nend\n").into_bytes());
+        }
+        tree.insert(PathBuf::from("lib/sink.rb"), b"class Sink\n  def take(x)\n    x\n  end\nend\n".to_vec());
+        for (path, src) in files {
+            tree.insert(PathBuf::from(path), src.as_bytes().to_vec());
+        }
+        let mut app = crate::ingest::ingest_app_from_tree(tree.into_iter().collect()).expect("ingest");
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        analyzer
+    }
+
+    // Only the `.with` caller is on the frontier when `Link5.get` moves: the
+    // mailer is retyped because its `params` row moved. The debug build's
+    // walk of every kept entry is the check.
+    #[test]
+    fn a_mailer_retyped_for_its_params_gives_new_sites() {
+        let analyzer = analyzed_with_chain(&[
+            ("app/models/trigger.rb", "class Trigger < ActiveRecord::Base\n  def run\n    ProbeMailer.with(value: Link5.get).ping\n  end\nend\n"),
+            ("app/mailers/probe_mailer.rb", "class ProbeMailer < ActionMailer::Base\n  def ping\n    Sink.new.take(params[:value])\n    mail(to: 'x@y')\n  end\nend\n"),
+        ]);
+        let row = param(&analyzer, "Sink", "take").expect("Sink#take has a row");
+        assert!(format!("{row:?}").contains("Int"), "{row:?}");
+    }
+
+    // The configuration pass types these bodies whatever the frontier, so it
+    // has to say so itself; a controller with no such body stays reusable.
+    #[test]
+    fn the_configuration_pass_records_the_controllers_it_retypes() {
+        let tree = [
+            ("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n"),
+            ("app/controllers/concerns/prefs.rb", "module Prefs\n  extend ActiveSupport::Concern\n\n  included do\n    class_attribute :_defs, default: []\n  end\n\n  class_methods do\n    def add_def(x)\n      self._defs = x\n    end\n  end\nend\n"),
+            ("app/controllers/macro_controller.rb", "class MacroController < ApplicationController\n  include Prefs\n  add_def 1\nend\n"),
+            ("app/controllers/plain_controller.rb", "class PlainController < ApplicationController\n  def show\n    head :ok\n  end\nend\n"),
+        ]
+        .into_iter()
+        .map(|(path, src)| (PathBuf::from(path), src.as_bytes().to_vec()))
+        .collect();
+        let mut app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        analyzer.retyped_since_unify = Some(Default::default());
+        analyzer.retyped_since_survey = Some(Default::default());
+        analyzer.analyze_class_configuration(&mut app.controllers);
+        let expected: crate::det::HashSet<ClassId> = [ClassId(Symbol::from("MacroController"))].into_iter().collect();
+        assert_eq!(analyzer.retyped_since_unify.as_ref(), Some(&expected));
+        assert_eq!(analyzer.retyped_since_survey.as_ref(), Some(&expected));
+    }
+
+    #[test]
+    fn called_targets_skips_self_unknown_and_repeats() {
+        let site = |class: &str, method: &str| -> SendSite {
+            (ClassId(Symbol::from(class)), Symbol::from(method), Vec::new(), SiteKeywords { group: false, keys: Vec::new(), splat: None, anonymous_forward: false }, SiteRecv::Instance)
+        };
+        let caller = ClassId(Symbol::from("A"));
+        let sites = vec![site("A", "own"), site("B", "go"), site("B", "go"), site("C", "go"), (unknown_receiver(), Symbol::from("x"), Vec::new(), SiteKeywords { group: false, keys: Vec::new(), splat: None, anonymous_forward: false }, SiteRecv::Instance)];
+        let targets = called_targets(&caller, &sites);
+        assert_eq!(targets, [(ClassId(Symbol::from("B")), Symbol::from("go")), (ClassId(Symbol::from("C")), Symbol::from("go"))]);
     }
 }
