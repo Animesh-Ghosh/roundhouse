@@ -58,6 +58,7 @@ pub(crate) mod database_ownership;
 pub(crate) mod database_yml;
 pub mod sidekiq_yml;
 pub mod cable_yml;
+pub(crate) mod config_for;
 mod public_file_server_config;
 mod action_controller_caching_config;
 mod json_response_config;
@@ -217,3 +218,23 @@ impl From<std::io::Error> for IngestError {
 }
 
 type IngestResult<T> = Result<T, IngestError>;
+
+/// An empty reopen of `Rails::Application`, which ingest fills with the
+/// methods it lifts from the app's config.
+pub(crate) fn rails_application_class() -> crate::dialect::LibraryClass {
+    crate::dialect::LibraryClass {
+        name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
+        is_module: false,
+        parent: None,
+        parent_span: Default::default(),
+        includes: Vec::new(),
+        include_spans: Vec::new(),
+        methods: Vec::new(),
+        nullable_columns: Vec::new(),
+        origin: None,
+        constants: Vec::new(),
+        conditional_definitions: Vec::new(),
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+    }
+}

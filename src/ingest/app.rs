@@ -1969,19 +1969,9 @@ end
         }
         if !methods.is_empty() {
             app.rails_application = Some(crate::dialect::LibraryClass {
-                name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
-                is_module: false,
-                parent: None,
-                parent_span: Default::default(),
-                includes: Vec::new(),
-                include_spans: Vec::new(),
                 methods,
-                nullable_columns: Vec::new(),
-                origin: None,
                 constants,
-                conditional_definitions: Vec::new(),
-                unknown_calls: Vec::new(),
-                class_ivar_initializers: Vec::new(),
+                ..crate::ingest::rails_application_class()
             });
         }
     } else {
@@ -1999,19 +1989,8 @@ end
                 }
             })?;
             app.rails_application = Some(crate::dialect::LibraryClass {
-                name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
-                is_module: false,
-                parent: None,
-                parent_span: Default::default(),
-                includes: Vec::new(),
-                include_spans: Vec::new(),
                 methods,
-                nullable_columns: Vec::new(),
-                origin: None,
-                constants: Vec::new(),
-                conditional_definitions: Vec::new(),
-                unknown_calls: Vec::new(),
-                class_ivar_initializers: Vec::new(),
+                ..crate::ingest::rails_application_class()
             });
         }
     }
@@ -3311,6 +3290,8 @@ end
     crate::lower::known_super_forwarding::restate(&mut app);
     // After the controllers and views are in: their bodies read framework settings too.
     lift_read_framework_settings(vfs, dir, &mut app);
+    // After every body is in: a `config_for` call anywhere names a file.
+    super::config_for::lift(vfs, dir, &mut app);
     collect_binary_assets(vfs, dir, &mut app);
     let mut require_roots: Vec<PathBuf> = roots.iter().map(|root| dir.join(root)).collect();
     require_roots.extend(
@@ -11787,21 +11768,7 @@ fn lift_read_framework_settings<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut 
     if assignments.is_empty() {
         return;
     }
-    let rails_application = app.rails_application.get_or_insert_with(|| crate::dialect::LibraryClass {
-        name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
-        is_module: false,
-        parent: None,
-        parent_span: Default::default(),
-        includes: Vec::new(),
-        include_spans: Vec::new(),
-        methods: Vec::new(),
-        nullable_columns: Vec::new(),
-        origin: None,
-        constants: Vec::new(),
-        conditional_definitions: Vec::new(),
-        unknown_calls: Vec::new(),
-        class_ivar_initializers: Vec::new(),
-    });
+    let rails_application = app.rails_application.get_or_insert_with(crate::ingest::rails_application_class);
     let mut constants = String::new();
     if !rails_application.constants.iter().any(|(name, _)| name.as_str() == "CONFIG_LOCK") {
         constants.push_str("CONFIG_LOCK = Mutex.new\n");

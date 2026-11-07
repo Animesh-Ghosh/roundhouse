@@ -3439,6 +3439,7 @@ fn target_files_inner(
     // reference that it hides would leave the transpile with fewer
     // errors than the app has.
     report_unsupported_bundled_constants(app, target);
+    report_config_for(app, target);
     report_i18n_table_sites(app, target);
     report_controller_content_type_writers(app, target);
     // Snapshot the optional measurement override at the target boundary. The
@@ -8618,6 +8619,8 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
     "ActiveSupport::Notifications",
     "ActiveSupport::Notifications::Event",
     "ActiveSupport::ConfigurationFile",
+    // `config_for`'s Hash, which ships with ConfigurationFile.
+    "ActiveSupport::OrderedOptions",
     // Exception classes and their newly exposed owners in
     // `runtime/ruby/active_storage.rb`. Registering a nested error also
     // resolves its enclosing namespace as a value, which needs the same
@@ -8657,7 +8660,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
     // its `packages/net` stops short of net/protocol's `HTTPBadResponse`.
     if target == "spinel" {
         // The Arel ordering and predicate nodes live on the CRuby overlay (`arel_predicates.rb`).
-        if matches!(name, "ActiveSupport::ConfigurationFile" | "Arel::Nodes::Ascending" | "Arel::Nodes::Descending" | "Arel::Nodes::Predicate") {
+        if matches!(name, "ActiveSupport::ConfigurationFile" | "ActiveSupport::OrderedOptions" | "Arel::Nodes::Ascending" | "Arel::Nodes::Descending" | "Arel::Nodes::Predicate") {
             return Some("ruby_family_runtime_constant");
         }
         return if matches!(name, "JSON::GeneratorError" | "Net::HTTPBadResponse") {
@@ -8932,6 +8935,42 @@ fn report_not_nil(expr: &crate::expr::Expr, app: &App, target: &str) {
     {
         refuse_not_nil(expr, target);
     }
+}
+
+/// `config_for` parses YAML when it runs
+/// (`runtime/ruby/active_support_configuration_file.rb`). The CRuby and
+/// JRuby trees ship that file, `futamura` runs the app on Rails itself,
+/// and `blog` walks the source as written. Spinel leaves YAML out of its
+/// boot, and the other targets have no YAML parser. A call that ingest
+/// already refused (`ingest::config_for`) keeps that one error.
+fn report_config_for(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Futamura) {
+        return;
+    }
+    // The application's bodies are walked twice: the first walk counts
+    // only a call with no receiver or on `self`, which the second walk
+    // never counts.
+    fn visit(expr: &crate::expr::Expr, in_application: bool, target: &str) {
+        let bare = matches!(&*expr.node, crate::expr::ExprNode::Send { recv, .. }
+            if recv.as_ref().is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef)));
+        if crate::ingest::config_for::may_be_app_config_for(expr, in_application)
+            && bare == in_application
+            && !expr.span.is_synthetic()
+            && crate::expr::ExprCold::diagnostic(&expr.cold).is_none()
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "config_for",
+                format!("`config_for` parses its YAML file when it runs, and the {target} runtime has no YAML parser"),
+            );
+        }
+        expr.node.for_each_child(&mut |child| visit(child, in_application, target));
+    }
+    for method in app.rails_application.iter().flat_map(|class| class.methods.iter()) {
+        visit(&method.body, true, target.as_str());
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, false, target.as_str()));
 }
 
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {

@@ -19,6 +19,8 @@ mod time_change_usec_contract;
 mod time_change_usec;
 #[path = "emit_and_run/rate_limits.rs"]
 mod rate_limits;
+#[path = "emit_and_run/config_for.rs"]
+mod config_for;
 #[path = "emit_and_run/rack_mounts.rs"]
 mod rack_mounts;
 #[path = "support/i18n_locales_app.rs"]
@@ -21294,6 +21296,11 @@ fn link_to_if_shadowing_a_nested_local_is_refused() {
 
 #[path = "support/simple_format.rs"]
 mod simple_format;
+#[path = "support/link_to_computed_url.rs"]
+mod link_to_computed_url;
+#[path = "support/nested_route_helper_record.rs"]
+#[allow(dead_code)]
+mod nested_route_helper_record;
 
 /// `simple_format` with `sanitize: false`: paragraphs, line breaks, html
 /// options and `wrapper_tag:`, as Rails 8.1.4 renders them.
@@ -21489,4 +21496,50 @@ fn simple_format_in_an_unreachable_template_is_a_warning() {
         .edit("config/routes.rb", "Rails.application.routes.draw do\n", "Rails.application.routes.draw do\n  get \"orphan\", to: \"articles#orphan\"\n")
         .emit(roundhouse::project::BuildTarget::Typescript);
     assert!(errors.iter().any(|e| e.contains("simple_format not supported")), "a routed template keeps the error: {errors:?}");
+}
+
+/// #1865: `link_to` with a url the template computes renders as Rails
+/// 8.1.4 does (`link_to_computed_url::VIEW`).
+#[test]
+fn link_to_computed_url_renders_as_rails() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_computed_url::VIEW)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_computed_url::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1865: `link_to` with a url the template computes renders as Rails
+/// 8.1.4 does (`link_to_computed_url::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_computed_url_renders_as_rails_on_spinel() {
+    html_safe_method_owner::app()
+        .write("app/views/probes/show.html.erb", link_to_computed_url::VIEW)
+        .run_spinel(&helper_escape_at_output::render_script(link_to_computed_url::RENDERS))
+        .assert_passes();
+}
+
+/// #1890: a record handed to a route helper inside an output
+/// expression renders as Rails 8.1.4 does
+/// (`nested_route_helper_record::VIEW`).
+#[test]
+fn nested_route_helper_record_renders_as_rails() {
+    let (view, renders) = nested_route_helper_record::view(true, true);
+    nested_route_helper_record::app(content_tag_options::app_rendering(&view, &[]), true)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(&renders))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1890: a record handed to a route helper inside an output
+/// expression renders as Rails 8.1.4 does
+/// (`nested_route_helper_record::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn nested_route_helper_record_renders_as_rails_on_spinel() {
+    let (view, renders) = nested_route_helper_record::view(true, false);
+    nested_route_helper_record::app(content_tag_options::app_rendering(&view, &[]), true)
+        .run_spinel(&helper_escape_at_output::render_script(&renders))
+        .assert_passes();
 }
