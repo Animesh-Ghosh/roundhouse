@@ -3128,6 +3128,8 @@ end
     super::on_load_reopen::apply_pending(&mut app);
     splice_concerns_into_models(&mut app, &concern_class_method_spans);
     splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
+    // After both splices: a concern's `included do self.table_name = compute_…` and the class method it calls are the model's now.
+    super::configured_superclass::fold_table_names(vfs, dir, &mut app);
     let owned_validate_calls = decline_owned_validate_calls(&mut app, &sources, &concern_class_method_spans, &const_resolver.for_sources(&sources));
     // After the splice, so a concern's DSL on a tableless parent reaches
     // its subclasses too; before the macros, which read the result.

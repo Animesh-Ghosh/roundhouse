@@ -82,3 +82,26 @@ fn a_superclass_from_a_value_known_only_at_boot_stays_refused() {
     let errors = configured_superclass_app(Some("Settings.configure do\n  base_controller ENV.fetch(\"BASE_CONTROLLER\", \"ApplicationController\")\nend\n")).check_errors();
     assert!(errors.iter().any(|e| e.contains("superclass is an expression")), "{errors:?}");
 }
+
+/// doorkeeper's ORM mixins: `included do self.table_name = compute_doorkeeper_table_name end`, where the
+/// class method builds the name from ActiveRecord's `pluralize_table_names` and prefixes. The model reads
+/// the table the method names, here real-blog's `articles`, not the `notes` its class name would give.
+#[test]
+fn a_table_name_a_concern_computes_binds_the_models_columns() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/concerns/computed_table.rb",
+            "module ComputedTable\n  extend ActiveSupport::Concern\n\n  included do\n    self.table_name = compute_table_name\n  end\n\n  class_methods do\n    def compute_table_name\n      table_name = \"article\"\n      table_name = table_name.pluralize if pluralize_table_names\n      \"#{table_name_prefix}#{table_name}#{table_name_suffix}\"\n    end\n  end\nend\n",
+        )
+        .write("app/models/note.rb", "class Note < ApplicationRecord\n  include ComputedTable\nend\n")
+        .run_ruby(
+            r##"Article.create!(title: "Computed", body: "A body long enough to pass the validation")
+raise "count: #{Note.count}" unless Note.count == Article.count
+raise "title: #{Note.first.title.inspect}" unless Note.first.title == "Computed"
+puts "computed table passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("computed table passed"), "{}", run.stdout);
+}
+

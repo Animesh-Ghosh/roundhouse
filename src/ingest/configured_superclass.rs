@@ -109,6 +109,75 @@ pub(super) fn fold<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App) {
     }
 }
 
+/// A model's table set from a concern's `included do self.table_name = compute_doorkeeper_table_name end`
+/// (doorkeeper's ORM mixins): the name the class method answers, read against ActiveRecord's own settings,
+/// binds the schema row the model's attributes come from. A setting the app writes anywhere, or a name
+/// it cannot settle, leaves the model on the table ingest gave it.
+pub(super) fn fold_table_names<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App) {
+    let mut config = String::new();
+    for file in ["config/application.rb"] {
+        config.push_str(&vfs.read_to_string(&dir.join(file)).unwrap_or_default());
+    }
+    for sub in ["config/environments", "config/initializers"] {
+        let root = dir.join(sub);
+        if vfs.is_dir(&root) {
+            for file in super::app::read_rb_files(vfs, &root).unwrap_or_default() {
+                config.push_str(&vfs.read_to_string(&file).unwrap_or_default());
+            }
+        }
+    }
+    // Not the defaults when the app writes either: which value a model sees then turns on where and when it is set.
+    if config.contains("pluralize_table_names") || config.contains("table_name_suffix") {
+        return;
+    }
+    for index in 0..app.models.len() {
+        let model = &app.models[index];
+        let writes: Vec<(usize, Expr)> = model
+            .body
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| match item {
+                crate::dialect::ModelBodyItem::Unknown { expr, .. } => table_name_write(expr).map(|v| (i, v.clone())),
+                _ => None,
+            })
+            .collect();
+        let [(item, value)] = writes.as_slice() else { continue };
+        let name = model.name.0.as_str().to_string();
+        let conventional = crate::naming::rails_table_name(&name);
+        let Some(prefix) = model.table.0.as_str().strip_suffix(conventional.as_str()) else { continue };
+        let methods: Vec<MethodDef> = model.methods().filter(|m| m.receiver == MethodReceiver::Class).cloned().collect();
+        let mut answers = HashMap::default();
+        answers.insert("pluralize_table_names".to_string(), Val::Bool(true));
+        answers.insert("table_name_prefix".to_string(), Val::Str(prefix.to_string()));
+        answers.insert("table_name_suffix".to_string(), Val::Str(String::new()));
+        let mut eval = Eval::new(app);
+        eval.subject = Some((name.clone(), methods, answers));
+        let mut frame = Frame { this: Val::Class(name.clone()), locals: HashMap::default(), block: None, scope: Some(name.clone()) };
+        let Ok(Val::Str(table)) = eval.value(value, &mut frame) else { continue };
+        if !table.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') || !table.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            continue;
+        }
+        let row = app.schema.tables.get(&Symbol::from(table.as_str())).map(super::model::row_from_table);
+        let model = &mut app.models[index];
+        model.table = crate::ident::TableRef(Symbol::from(table.as_str()));
+        if let Some(row) = row {
+            model.attributes = row;
+        }
+        model.body.remove(*item);
+    }
+}
+
+fn table_name_write(expr: &Expr) -> Option<&Expr> {
+    match &*expr.node {
+        ExprNode::Assign { target: LValue::Attr { recv, name }, value } if matches!(&*recv.node, ExprNode::SelfRef) && name.as_str() == "table_name" => Some(value),
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. } if matches!(&*r.node, ExprNode::SelfRef) && method.as_str() == "table_name=" => match args.as_slice() {
+            [v] => Some(v),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The top-level statements of `config/initializers/*.rb`, in the order Rails loads them.
 fn initializer_statements<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<Expr> {
     let root = dir.join("config/initializers");
@@ -204,12 +273,14 @@ struct Eval<'a> {
     written: HashMap<(Holder, String), usize>,
     tick: usize,
     depth: usize,
+    /// A class outside the library classes (a model) whose class side the evaluation reads: its methods, and the framework settings it answers.
+    subject: Option<(String, Vec<MethodDef>, HashMap<String, Val>)>,
 }
 
 impl<'a> Eval<'a> {
     fn new(app: &'a App) -> Self {
         let known = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
-        Eval { classes: &app.library_classes, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0 }
+        Eval { classes: &app.library_classes, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None }
     }
 
     /// The constant `expr` names once the initializers that call on its root have run.
@@ -521,8 +592,16 @@ impl<'a> Eval<'a> {
         if matches!(this, Val::Unknown) || (!stores && argv.iter().any(|a| matches!(a, Val::Unknown))) {
             return Err(format!("`{method}` on or with a value it does not model"));
         }
+        if let (Val::Class(c), Some((subject, _, answers))) = (&this, &self.subject)
+            && c == subject
+            && argv.is_empty()
+            && let Some(v) = answers.get(method)
+        {
+            return Ok(v.clone());
+        }
         match (method, &this, argv.as_slice()) {
             ("block_given?", _, []) if recv.is_none() => Ok(Val::Bool(frame.block.is_some())),
+            ("pluralize", Val::Str(t), []) => Ok(Val::Str(crate::naming::pluralize_snake(t))),
             ("lambda" | "proc", _, []) if recv.is_none() => blk.ok_or_else(|| format!("`{method}` without a block")),
             ("new", Val::Class(name), _) if self.known.contains(name) => {
                 self.heap.push(Object { class: name.clone(), ivars: HashMap::default() });
@@ -717,6 +796,13 @@ impl<'a> Eval<'a> {
 
     /// The method `name` answers on `this`, and the class its body's constants resolve in.
     fn lookup(&self, this: &Val, name: &str) -> Option<(MethodDef, String)> {
+        if let (Val::Class(c), Some((subject, methods, _))) = (this, &self.subject)
+            && c == subject
+            && let Some(m) = methods.iter().rev().find(|m| m.name.as_str() == name)
+        {
+            let scope = m.enclosing_class.as_ref().map(|s| s.as_str().to_string()).unwrap_or_else(|| c.clone());
+            return Some((m.clone(), scope));
+        }
         let (class, receiver) = match this {
             Val::Obj(i) => (self.heap[*i].class.clone(), MethodReceiver::Instance),
             Val::Class(c) if self.known.contains(c) => (c.clone(), MethodReceiver::Class),
