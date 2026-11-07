@@ -34,6 +34,8 @@ use hoist::{hoisted_name, nested_namespaces_index, runtime_value_types};
 // without value Consts live in `CORE_RBS_BASE`; value Consts are one
 // table (`CORE_VALUE_CONSTS`) that builds both the RBS fields and the
 // typed answer — a second copy is how the type drifts from the graph.
+// A core class that neither this block nor the class registry declares
+// reads as an untyped constant (`raise LocalJumpError`, `Enumerator.new`).
 const CORE_RBS_BASE: &str = "\
 class Numeric < Object\nend\n\
 class Integer < Numeric\nend\n\
@@ -47,7 +49,9 @@ class FalseClass < Object\nend\n\
 class NilClass < Object\nend\n\
 class Regexp < Object\nend\n\
 class Exception < Object\nend\n\
-class StandardError < Exception\nend\n";
+class StandardError < Exception\nend\n\
+class LocalJumpError < StandardError\nend\n\
+class Enumerator < Object\nend\n";
 
 /// `(owner, field, type)` — Ruby's `Owner::FIELD` value Consts.
 /// `core_rbs()` emits the RBS; `core_value_type` answers the type.
