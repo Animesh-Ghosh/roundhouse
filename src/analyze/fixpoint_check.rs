@@ -510,6 +510,7 @@ impl Analyzer {
         snapshot: Option<&mut HashMap<super::ParamKey, Vec<Ty>>>,
     ) {
         let before = self.state_fp(app);
+        let prev = self.capture_inference_sig();
         match which {
             Loop::Production | Loop::Absorb => {
                 self.run_typing_passes(
@@ -544,6 +545,7 @@ impl Analyzer {
                 self.overlay_test_params(app);
             }
         }
+        self.settle_oscillations(&prev);
         let moved = self.state_fp(app).moved(&before);
         self.fixpoint_checks.verified.push((which.name(), moved));
     }
@@ -595,6 +597,8 @@ impl Analyzer {
             });
             line["harvest_untie_cut"] =
                 serde_json::json!(UNTIE_CUTS.load(Ordering::Relaxed) - self.fixpoint_checks.untie_cuts);
+            let (cycles, widened) = self.settle.counts();
+            line["settled"] = serde_json::json!({"cycles": cycles, "widened": widened});
         }
         eprintln!("rh-fixpoint: {line}");
     }

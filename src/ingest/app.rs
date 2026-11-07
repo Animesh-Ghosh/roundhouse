@@ -279,7 +279,7 @@ fn keep_initializer_defined(
     let referenced = |name: &str| {
         sources.iter().any(|f| {
             let rel = f.path.strip_prefix(root).unwrap_or(&f.path).trim_start_matches('/');
-            if !(rel.starts_with("app/") || rel.starts_with("lib/")) {
+            if !(rel.starts_with("app/") || rel.starts_with("lib/") || rel == "config/puma.rb") {
                 return false;
             }
             // In Ruby, a comment or a string naming it is not a reference.
@@ -611,6 +611,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             .collect();
         if more.is_empty() || auto.len() >= 32 {
             app.auto_source_gems = auto.into_iter().filter(|g| app.gem_lock.as_ref().is_some_and(|l| l.source.contains(g))).collect();
+            super::recurring_commands::apply(&mut app, vfs, dir)?;
             return Ok(app);
         }
         // Not the superseded pass's parse errors and survey gaps as well: the next pass reports them again.
@@ -621,6 +622,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
 }
 
 fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[String]) -> IngestResult<App> {
+    // Not left from an earlier ingest in this process: the hoists are checked against this app's modules.
+    super::library_class::included_hoist_conflicts(&[]);
+    super::configured_superclass::reset();
     super::sources::reset();
     super::each_validator::reset();
     let _source_root = super::sources::set_root(dir);
@@ -645,11 +649,11 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let mut source_gems = super::source_gems::resolve(vfs, dir, lock.as_ref(), &extensions.source_gems)
         .map_err(|message| IngestError::Parse { file: dir.join("roundhouse.yml").display().to_string(), message })?;
     // The queue's records: on solid_queue the compiler runs the jobs, but the records Rails keeps of them are
-    // solid_queue's own models, read from its installed source over the app's `db/queue_schema.rb`.
+    // solid_queue's own models, read from its installed source over a separate or primary queue schema.
     // Not every app on solid_queue: only one whose code (or a gem it carries) names solid_queue's classes reads its records.
     let solid_queue_models = (effective_queue_adapter(vfs, dir).as_deref() == Some("solid_queue")
-        && vfs.exists(&dir.join("db/queue_schema.rb"))
-        && names_solid_queue(vfs, dir, &source_gems))
+        && names_solid_queue(vfs, dir, &source_gems)
+        && (vfs.exists(&dir.join("db/queue_schema.rb")) || primary_schema_has_queue(vfs, dir)))
         .then(|| super::source_gems::framework_models(vfs, dir, lock.as_ref(), "solid_queue"))
         .flatten();
     let solid_queue_root = solid_queue_models.as_ref().and_then(|gem| gem.mount.strip_prefix(dir).ok().map(|m| m.join("app")));
@@ -706,6 +710,9 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let mut app = App::new();
     app.extensions = extensions;
     app.spinel_int_overflow = spinel_int_overflow;
+    // Not a framework gem's models (solid_queue's): only a gem compiled for the app runs its Railtie here.
+    let gem_libs: Vec<PathBuf> = source_gems.iter().map(|gem| gem.mount.join("lib")).collect();
+    (app.gem_middlewares, app.gem_middleware_refusals) = super::railtie_middleware::read(vfs, &gem_libs);
     // `enum` columns declared inside a concern's `included do`, keyed by
     // the module. Local rather than a field on `App`: they exist only
     // until the splice folds them into each including model's own
@@ -820,7 +827,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
         }
     }
     // Not its own database: the runtime opens only the primary, so solid_queue's tables join it.
-    if solid_queue_root.is_some() {
+    if solid_queue_root.is_some() && vfs.exists(&dir.join("db/queue_schema.rb")) {
         let queue_schema = dir.join("db/queue_schema.rb");
         if let Some(source) = read_or_ledger(vfs, &queue_schema)? {
             if let Some(queue) = unwrap_or_record(ingest_schema(&source, &queue_schema.display().to_string()))? {
@@ -992,7 +999,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     // just PORO classes. The singular path uses
                     // find_first_class and would drop a module.
                     if let Some(classes) =
-                        unwrap_or_record(ingest_library_classes(&source, &path_str))?
+                        unwrap_or_record(super::library_class::ingest_app_library_classes(&source, &path_str))?
                     {
                         app.library_classes.extend(classes);
                         // After the file is registered, so the spans name it.
@@ -1236,8 +1243,20 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     }
                 }
             }
-            let (ingested, mut aliases) =
-                super::inherited_alias::capturing(|| ingest_library_classes(&source, &path_str));
+            // A file of constants alone is carried only where Rails'
+            // autoloader maps it to its constant: an app root's
+            // directory, not `lib/`, a gem's lib or a boot-required file.
+            let autoloaded = !sub.is_empty()
+                && sub != "lib"
+                && sub != "extras"
+                && !gem_libs.iter().any(|lib| support_dir.starts_with(lib));
+            let (ingested, mut aliases) = super::inherited_alias::capturing(|| {
+                if autoloaded {
+                    super::library_class::ingest_app_library_classes(&source, &path_str)
+                } else {
+                    ingest_library_classes(&source, &path_str)
+                }
+            });
             match ingested {
                 Ok(mut classes) => {
                     // A gem's file runs more than its declarations when it
@@ -1950,19 +1969,9 @@ end
         }
         if !methods.is_empty() {
             app.rails_application = Some(crate::dialect::LibraryClass {
-                name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
-                is_module: false,
-                parent: None,
-                parent_span: Default::default(),
-                includes: Vec::new(),
-                include_spans: Vec::new(),
                 methods,
-                nullable_columns: Vec::new(),
-                origin: None,
                 constants,
-                conditional_definitions: Vec::new(),
-                unknown_calls: Vec::new(),
-                class_ivar_initializers: Vec::new(),
+                ..crate::ingest::rails_application_class()
             });
         }
     } else {
@@ -1980,19 +1989,8 @@ end
                 }
             })?;
             app.rails_application = Some(crate::dialect::LibraryClass {
-                name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
-                is_module: false,
-                parent: None,
-                parent_span: Default::default(),
-                includes: Vec::new(),
-                include_spans: Vec::new(),
                 methods,
-                nullable_columns: Vec::new(),
-                origin: None,
-                constants: Vec::new(),
-                conditional_definitions: Vec::new(),
-                unknown_calls: Vec::new(),
-                class_ivar_initializers: Vec::new(),
+                ..crate::ingest::rails_application_class()
             });
         }
     }
@@ -2220,6 +2218,8 @@ end
     );
     if !route_roots.is_empty() {
         let block_wrappers = mapper_extension_block_methods(&app, vfs, dir, &engine_dirs);
+        super::routes::set_gem_dsl(super::gem_routes::mapper_methods(&app));
+        super::devise_routes::set_model_modules(super::gem_hooks::devise_modules(&app));
         // The constants the route files read, folded from their owners
         // as a model body's are, for `constraints:` values. A route
         // names a controller's constant as often as a model's, so its
@@ -2655,10 +2655,30 @@ end
             app.engine_importmaps.push((engine.module.clone(), importmap));
         }
     }
+    super::puma_boot::install(&mut app, vfs, dir)?;
 
     app.vite_manifest = super::vite::read_manifest(vfs, dir);
     let vite_digest = app.vite_manifest.as_ref().map(|m| m.digest.clone());
     app.inertia = super::inertia::load_inertia_config(vfs, dir, vite_digest.as_deref())?;
+
+    // An engine's initializers run at boot as the host's do, and the boot
+    // program takes their top-level constant writes
+    // (`boot_program::is_engine_initializer_constant`): the source index
+    // has to see the files for a read of such a constant to resolve.
+    for engine_dir in &path_gems {
+        if !declares_rails_engine(vfs, &engine_dir.join("lib")) {
+            continue;
+        }
+        let initializers = engine_dir.join("config/initializers");
+        if !vfs.is_dir(&initializers) || path_has_symlink_component(vfs, engine_dir, &initializers) {
+            continue;
+        }
+        for entry in read_rb_files(vfs, &initializers).unwrap_or_default() {
+            if let Ok(text) = vfs.read_to_string(&entry) {
+                super::sources::register(&entry.display().to_string(), &text);
+            }
+        }
+    }
 
     // Every app source is registered by here. Rubydex resolves a
     // SNAPSHOT on another thread while the passes below run, and those
@@ -2922,7 +2942,7 @@ end
         .map(|n| n.split("::").next().unwrap_or(n).to_string())
         .collect();
     let gem_lock = app.gem_lock.clone();
-    let mut boot_taken = super::boot_program::build(vfs, dir, &mut app, gem_lock.as_ref(), &app_namespaces, &rate_limit_store_values)?;
+    let mut boot_taken = super::boot_program::build(vfs, dir, &path_gems, &mut app, gem_lock.as_ref(), &app_namespaces, &rate_limit_store_values)?;
     boot_taken.extend(super::engine_config::carry(&mut app, dir));
     super::boot_program::apply_call_sites(&mut app);
     super::initializer_ledger::record(
@@ -3073,6 +3093,7 @@ end
     // After it, not before: `Current`'s own `delegate` reads an
     // ATTRIBUTE's ivar, which that pass has the declarations for. What
     // reaches here is the general shape, whose target is a method.
+    super::forwardable::lower_forwardable(&mut app);
     super::delegate::lower_delegates(&mut app);
     // `Other.include(M)` written in another body: `Other`'s include,
     // before the concern splices read the includes.
@@ -3088,11 +3109,26 @@ end
     super::on_load_reopen::apply_pending(&mut app);
     splice_concerns_into_models(&mut app, &concern_class_method_spans);
     splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
+    // After both splices: a concern's `included do self.table_name = compute_…` and the class method it calls are the model's now.
+    super::configured_superclass::fold_table_names(vfs, dir, &mut app);
+    let owned_validate_calls = decline_owned_validate_calls(&mut app, &sources, &concern_class_method_spans, &const_resolver.for_sources(&sources));
     // After the splice, so a concern's DSL on a tableless parent reaches
     // its subclasses too; before the macros, which read the result.
     super::tableless_inheritance::inherit_tableless_parents(&mut app);
     super::tableless_inheritance::inherit_abstract_parent_validations(&mut app);
-    super::sti_validations::apply(&mut app, sti_validations);
+    for model in &mut app.models {
+        crate::dialect::replace_validation_callbacks(&mut model.body);
+    }
+    super::sti_validations::apply(&mut app, sti_validations, &owned_validate_calls);
+    // An app-owned macro, or a call with other unsupported options, did not
+    // keep a validation. Report its scheduling fallback only if a callback
+    // with that source span remains (including another concern includer).
+    super::prism::retain(|diagnostic| {
+        !matches!(&diagnostic.kind, crate::diagnostic::DiagnosticKind::IgnoredValidatorOption { validator, option, .. }
+            if validator.as_str() == "validate" && option.as_str() == "prepend")
+            || app.models.iter().any(|model| model.body.iter().any(|item|
+                matches!(item, crate::dialect::ModelBodyItem::Validation { span, .. } if *span == diagnostic.span)))
+    });
     super::acts_as_votable::expand_acts_as_votable(&mut app)?;
     // After the splice: `include Discard::Model` can arrive through a concern.
     super::discard::expand_discard_models(&mut app)?;
@@ -3119,12 +3155,18 @@ end
     // The sources do not change between the two: one word index serves both.
     let mentions = super::class_macros::Mentions::new(&sources);
     super::class_macros::expand_class_macros(&mut app, &sources, &mentions);
+    // After the macros: a configured object's readers and its builder's writers are methods by now.
+    super::configured_superclass::fold(vfs, dir, &mut app);
+    super::configured_superclass::fold_class_names(vfs, dir, &mut app);
+    super::gem_routes::expand(vfs, dir, &path_gems, &mut app);
     super::class_macros::drop_expanded_hook_macros(&mut app, &hook_macros_called, &mentions);
     super::model_callbacks::expand_model_callbacks(&mut app);
     // After the macros: an expanded `has_ancestry` is what writes the `extend`.
     super::extend_splice::splice_sole_extended_modules(&mut app);
     super::included_extend::splice_included_extends(&mut app);
     super::absence_guards::raise_undefined_capitalized_calls(&mut app);
+    // Not asked at `absence_guards::mark`: by then a source gem's methods no longer resolve their file.
+    let source_gem_classes = super::absence_guards::source_gem_classes(&app);
     super::column_accessors::rewrite_super(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
@@ -3249,6 +3291,8 @@ end
     crate::lower::known_super_forwarding::restate(&mut app);
     // After the controllers and views are in: their bodies read framework settings too.
     lift_read_framework_settings(vfs, dir, &mut app);
+    // After every body is in: a `config_for` call anywhere names a file.
+    super::config_for::lift(vfs, dir, &mut app);
     collect_binary_assets(vfs, dir, &mut app);
     let mut require_roots: Vec<PathBuf> = roots.iter().map(|root| dir.join(root)).collect();
     require_roots.extend(
@@ -3283,9 +3327,13 @@ end
     super::container_specialize::specialize(&mut app);
     super::unreachable_views::mark(&mut app);
     super::settled_conditionals::settle(&mut app);
+    // Not beside the hoists: later passes give an included module methods and ancestors (forwardable, carried includes, props bases, the queue adapter reader) or take an inactive branch's away.
+    app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);
+    // Here, once later passes stop giving modules methods: a concern's `to_param` before analysis types it on the model.
+    splice_concern_to_param_into_includers(&mut app);
     super::job_class_lookup::rewrite(&mut app);
     super::uncalled_definers::mark(&mut app);
-    super::absence_guards::mark(&mut app);
+    super::absence_guards::mark(&mut app, &source_gem_classes);
     // After every pass that changes a controller's methods, the concern
     // splice and the class-body macros above all: the lowering clones
     // from the controller they leave.
@@ -3750,6 +3798,96 @@ fn gap_uniqueness_on_polymorphic_attribute(app: &mut App) {
         super::prism::push(diagnostic);
         survey::record(&IngestError::Unsupported { file, message });
     }
+}
+
+/// A class-body `validate` is the Rails DSL only while the app has not
+/// replaced that class method. Leave app-owned calls to the ordinary
+/// class-body handling, before inherited validations are copied down.
+fn decline_owned_validate_calls(
+    app: &mut App,
+    sources: &[crate::span::SourceFile],
+    carriers: &[ConcernClassMethodSpans],
+    resolver: &crate::analyze::ConstResolver,
+) -> crate::det::HashSet<(crate::ClassId, crate::span::Span)> {
+    use crate::dialect::{MethodReceiver, ModelBodyItem, ValidationRule};
+    use crate::expr::ExprNode;
+    let classes = crate::analyze::source_finder_classes(app, resolver);
+    let class_side = concern_class_method_catalog(&app.library_classes, carriers);
+    let dependencies = concern_dependencies(app, carriers);
+    let name = Symbol::from("validate");
+    let modules: crate::det::HashMap<_, _> = app.library_classes.iter().filter(|c| c.is_module)
+        .map(|c| (c.name.clone(), c.methods.iter().any(|m| m.receiver == MethodReceiver::Instance && m.name == name))).collect();
+    let inherited = |parent: Option<&crate::ClassId>| parent.is_some_and(|parent|
+        crate::analyze::ClassInfo::source_class_method(&classes, parent, &name)
+            || crate::analyze::ClassInfo::class_method_ownership_unknown(&classes, parent, &name));
+    let concern_owns = |id: &crate::ClassId| with_dependencies(id, &dependencies, &mut Vec::new()).iter().any(|id|
+        class_side.get(id).is_some_and(|(methods, _)| methods.iter().any(|m| m.name == name)));
+    let mixin_owns = |owner: &str, expr: &crate::expr::Expr| {
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return false };
+        args.iter().any(|arg| {
+            let ExprNode::Const { path } = &*arg.node else { return false };
+            match method.as_str() {
+                "include" => concern_owns(&concern_named(owner, path, &class_side)),
+                "extend" => modules.get(&concern_named(owner, path, &modules)).copied().unwrap_or(false),
+                _ => false,
+            }
+        })
+    };
+    // STI subclasses remain library classes. Their methods, includes and
+    // unclaimed calls retain source spans, so ownership can be read in order
+    // before the harvested callbacks are moved onto their concrete model.
+    let mut declined = crate::det::HashSet::default();
+    for class in app.library_classes.iter().filter(|c| !c.is_module && c.origin.is_none()) {
+        let mut owned = inherited(class.parent.as_ref());
+        let mut events: Vec<(crate::span::Span, Option<&crate::expr::Expr>)> = class.methods.iter()
+            .filter(|m| m.receiver == MethodReceiver::Class && m.name == name)
+            .filter(|m| !class_side.values().any(|(methods, _)| methods.iter().any(|cm| cm.name_span == m.name_span)))
+            .map(|m| (m.name_span, None)).collect();
+        events.extend(class.includes.iter().zip(&class.include_spans).filter(|(id, _)| concern_owns(id)).map(|(_, span)| (*span, None)));
+        events.extend(class.unknown_calls.iter().map(|expr| (expr.span, Some(expr))));
+        events.sort_by_key(|(span, _)| (span.file.0, span.start));
+        for (span, expr) in events {
+            let Some(expr) = expr else { owned = true; continue };
+            owned |= mixin_owns(class.name.0.as_str(), expr);
+            if owned && matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method == &name) {
+                declined.insert((class.name.clone(), span));
+            }
+        }
+    }
+    for model in &mut app.models {
+        let mut owned = inherited(model.parent.as_ref());
+        let mut restored = crate::det::HashSet::default();
+        model.body.retain_mut(|item| {
+            match item {
+                ModelBodyItem::Method { method, .. }
+                    if method.receiver == MethodReceiver::Class && method.name == name => {
+                        owned = true;
+                    }
+                ModelBodyItem::Unknown { expr, .. } => {
+                    owned |= mixin_owns(model.name.0.as_str(), expr);
+                }
+                ModelBodyItem::Validation { validation, span, leading_comments, leading_blank_line }
+                    if owned && validation.rules.iter().any(|r| matches!(r, ValidationRule::Custom { .. })) => {
+                        // A symbol batch was split for callback scheduling. An
+                        // app-owned call must be restored only once, in place.
+                        if restored.contains(span) { return false; }
+                        let Some(source) = (span.file.0 as usize).checked_sub(1).and_then(|i| sources.get(i)) else { return true };
+                        let Some(text) = source.text.get(span.start as usize..span.end as usize) else { return true };
+                        let padded = format!("{}{}", " ".repeat(span.start as usize), text);
+                        let parsed = super::prism::parse_silent(padded.as_bytes());
+                        let root = parsed.node();
+                        let Some(stmt) = root.as_program_node().and_then(|p| p.statements().body().iter().next()) else { return true };
+                        if let Ok(expr) = super::expr::ingest_expr(&stmt, &source.path) {
+                            restored.insert(*span);
+                            *item = ModelBodyItem::Unknown { expr, leading_comments: leading_comments.clone(), leading_blank_line: *leading_blank_line };
+                        }
+                    }
+                _ => {}
+            }
+            true
+        });
+    }
+    declined
 }
 
 /// Splice each concern's `included do` DSL items (already parsed into
@@ -4522,6 +4660,77 @@ fn carry_included_block_includes_into_controllers(app: &mut App) {
             }
             *args = carried;
         }
+    }
+}
+
+/// A concern's `to_param`, copied onto each model that includes it and
+/// writes none of its own (#1897).
+///
+/// Rails fills a route helper's segment from the record's `to_param`, and
+/// an app often writes it in a concern (`include Sluggable`). A def in the
+/// concern's `included do` already reaches the model's body, with the
+/// block's other items (`splice_concerns_into_models`); a method of the
+/// module itself never did. Every model also gets a synthesized
+/// `to_param` (`lower::model_to_library::markers::push_to_param_method`),
+/// skipped only for a model whose body defines one. On the ruby target
+/// that default sat in the class, ahead of the module in Ruby's lookup,
+/// and answered `id.to_s`. The strict targets carry no module instance
+/// methods, so it was the only `to_param` they had. The view and route
+/// lowerings read the same model body to decide that a record fills its
+/// segment with `to_param` rather than its id.
+///
+/// The copy lands once in the IR for every target, like
+/// `splice_concern_class_methods_into_includers`, and takes its include
+/// order: the first module of the includer's include closure that defines
+/// `to_param` wins.
+fn splice_concern_to_param_into_includers(app: &mut App) {
+    use crate::det::{HashMap, HashSet};
+    use crate::dialect::{MethodReceiver, ModelBodyItem};
+    use crate::ident::{ClassId, Symbol};
+
+    let name = Symbol::from("to_param");
+    let mut defs: HashMap<ClassId, (crate::dialect::MethodDef, HashSet<Symbol>)> = HashMap::default();
+    let mut module_includes: HashMap<ClassId, Vec<ClassId>> = HashMap::default();
+    for lc in &app.library_classes {
+        module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.iter().cloned());
+        if !lc.is_module || defs.contains_key(&lc.name) {
+            continue;
+        }
+        // The last def of the name is the one Ruby keeps.
+        if let Some(m) = lc.methods.iter().rev().find(|m| m.name == name && m.receiver == MethodReceiver::Instance) {
+            defs.insert(lc.name.clone(), (m.clone(), lc.constants.iter().map(|(n, _)| n.clone()).collect()));
+        }
+    }
+    if defs.is_empty() {
+        return;
+    }
+    for model in &mut app.models {
+        if model.methods().any(|m| m.name == name && m.receiver == MethodReceiver::Instance) {
+            continue;
+        }
+        let mut queue = crate::analyze::model_includes(model);
+        let mut seen: HashSet<ClassId> = HashSet::default();
+        let mut found = None;
+        while !queue.is_empty() {
+            let id = queue.remove(0);
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(def) = defs.get(&id) {
+                found = Some((id, def));
+                break;
+            }
+            if let Some(nested) = module_includes.get(&id) {
+                queue.extend(nested.iter().cloned());
+            }
+        }
+        let Some((concern, (method, consts))) = found else { continue };
+        let mut method = method.clone();
+        method.enclosing_class = Some(model.name.0.clone());
+        if !consts.is_empty() {
+            qualify_lexical_consts(&mut method.body, &concern, consts);
+        }
+        model.body.push(ModelBodyItem::Method { method, leading_comments: Vec::new(), leading_blank_line: true });
     }
 }
 
@@ -11633,21 +11842,7 @@ fn lift_read_framework_settings<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut 
     if assignments.is_empty() {
         return;
     }
-    let rails_application = app.rails_application.get_or_insert_with(|| crate::dialect::LibraryClass {
-        name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
-        is_module: false,
-        parent: None,
-        parent_span: Default::default(),
-        includes: Vec::new(),
-        include_spans: Vec::new(),
-        methods: Vec::new(),
-        nullable_columns: Vec::new(),
-        origin: None,
-        constants: Vec::new(),
-        conditional_definitions: Vec::new(),
-        unknown_calls: Vec::new(),
-        class_ivar_initializers: Vec::new(),
-    });
+    let rails_application = app.rails_application.get_or_insert_with(crate::ingest::rails_application_class);
     let mut constants = String::new();
     if !rails_application.constants.iter().any(|(name, _)| name.as_str() == "CONFIG_LOCK") {
         constants.push_str("CONFIG_LOCK = Mutex.new\n");
@@ -12698,11 +12893,25 @@ pub(super) fn queue_adapter_line(line: &str) -> Option<Option<String>> {
     Some(literal.then(|| name.to_string()))
 }
 
-/// `App::queue_adapter`: `config/application.rb`, then
-/// `config/environments/production.rb`, then `config/initializers`, by
-/// line scan as `read_forgery_verification_strategy` reads them. The
-/// last setting wins, and a last setting that isn't a literal leaves the
-/// adapter unknown (`None`) rather than falling back to an earlier one.
+/// Use the ordinary schema readers for selection too. The normal primary schema
+/// pass remains the owner of its facts and diagnostics, including survey gaps.
+fn primary_schema_has_queue<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> bool {
+    let Some(path) = ["db/schema.rb", "db/structure.sql"].iter()
+        .map(|name| dir.join(name)).find(|path| vfs.exists(path)) else { return false };
+    let Ok(source) = vfs.read(&path) else { return false };
+    let marks = (super::survey::mark(), super::prism::mark());
+    let file = path.display().to_string();
+    let schema = if path.extension().is_some_and(|ext| ext == "rb") {
+        ingest_schema(&source, &file)
+    } else {
+        ingest_structure_sql(&source, &file)
+    };
+    let has_queue = schema.is_ok_and(|schema| schema.tables.contains_key(&Symbol::from("solid_queue_jobs")));
+    super::survey::rewind(marks.0);
+    super::prism::rewind(marks.1);
+    has_queue
+}
+
 /// Whether the app's own code, or a source gem's, writes `SolidQueue::`.
 fn names_solid_queue<V: Vfs + ?Sized>(vfs: &V, dir: &Path, source_gems: &[super::source_gems::SourceGem]) -> bool {
     let mut dirs: Vec<PathBuf> = ["app", "lib", "config"].iter().map(|d| dir.join(d)).collect();
@@ -12715,6 +12924,11 @@ fn names_solid_queue<V: Vfs + ?Sized>(vfs: &V, dir: &Path, source_gems: &[super:
     })
 }
 
+/// `App::queue_adapter`: `config/application.rb`, then
+/// `config/environments/production.rb`, then `config/initializers`, by
+/// line scan as `read_forgery_verification_strategy` reads them. The
+/// last setting wins, and a last setting that isn't a literal leaves the
+/// adapter unknown (`None`) rather than falling back to an earlier one.
 fn read_queue_adapter<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Option<String> {
     let mut adapter: Option<String> = None;
     for sub in ["config/application.rb", "config/environments/production.rb", "config/initializers"] {
@@ -14022,3 +14236,5 @@ mod path_gem_vfs_tests {
         }
     }
 }
+
+

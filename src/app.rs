@@ -131,6 +131,26 @@ pub struct App {
     /// (`ingest::boot_program`): run at boot on the ruby family and spinel.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boot_program: Vec<Expr>,
+    /// The constants an initializer statement held by a gem not compiled
+    /// from source calls (`Rack::Attack` of `Rack::Attack.throttle`):
+    /// `ingest::auto_source_gems` brings that gem in, and the statement
+    /// then joins [`App::boot_program`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boot_gem_constants: Vec<String>,
+    /// The Rack middleware a source gem's Railtie `use`s, outermost
+    /// first (`ingest::railtie_middleware`): both ruby-family boots stack
+    /// them in front of the routes, where Rails puts them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gem_middlewares: Vec<String>,
+    /// The insertions it could not read, reported by analyze.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gem_middleware_refusals: Vec<crate::diagnostic::Diagnostic>,
+    /// A def hoisted out of a concern's `included do` that a module the same block includes also defines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub included_hoist_conflicts: Vec<crate::diagnostic::Diagnostic>,
+    /// A superclass expression read off a configured object that did not fold to a constant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superclass_refusals: Vec<crate::diagnostic::Diagnostic>,
     /// Pins from `config/importmap.rb`, expanded (each
     /// `pin_all_from` has been resolved into explicit per-file
     /// pins via `app/javascript/**` walking). Consumed by the
@@ -436,6 +456,11 @@ pub struct App {
     /// can define one name, and only one of them mark it.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub html_safe_method_owners: BTreeSet<(String, String)>,
+    /// The same marks as `(class, method, singleton)`: `def self.badge`
+    /// and `def badge` on one class are separate definitions, and either
+    /// can be the marked one.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub html_safe_method_defs: BTreeSet<(String, String, bool)>,
     /// App-registered `to_fs` formats from `config/initializers/`, in
     /// both spellings Rails accepts: the current
     /// `ActiveSupport::TimeFormats.register(:name, fmt)` and the
@@ -1230,6 +1255,11 @@ impl App {
             fixtures: Vec::new(),
             seeds: None,
             boot_program: Vec::new(),
+            boot_gem_constants: Vec::new(),
+            gem_middlewares: Vec::new(),
+            gem_middleware_refusals: Vec::new(),
+            included_hoist_conflicts: Vec::new(),
+            superclass_refusals: Vec::new(),
             importmap: None,
             engine_importmaps: Vec::new(),
             inertia: None,
@@ -1266,6 +1296,7 @@ impl App {
             view_ivar_types: HashMap::default(),
             html_safe_methods: BTreeSet::new(),
             html_safe_method_owners: BTreeSet::new(),
+            html_safe_method_defs: BTreeSet::new(),
             time_formats: BTreeMap::new(),
             module_mixins: Vec::new(),
             rake_tasks_source: None,

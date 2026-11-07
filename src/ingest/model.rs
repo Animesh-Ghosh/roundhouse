@@ -114,8 +114,8 @@ pub(super) fn ingest_model_with_enum_constants(
         // class attribute its abstract base set.
         if prefix.is_empty()
             && !from_module
-            && let Some(parent) = class.superclass().and_then(|n| constant_path_of(&n))
-            && let Some(inherited) = base_prefixes.get(&model_bases.resolve_superclass(&scope, &parent))
+            && let Some(parent) = model_bases.resolve_class_superclass(&scope, &class)
+            && let Some(inherited) = base_prefixes.get(&parent)
         {
             prefix = inherited.clone();
         }
@@ -169,6 +169,13 @@ pub(super) fn ingest_model_with_enum_constants(
         // As the library walk does: a `define_method` loop over a literal list unrolls into the `def`s it makes.
         let _loop_constants = super::define_method_loop::Scope::enter(super::define_method_loop::ConstTable::of(&owner, &stmts));
         let loop_visibility = super::define_method_loop::named_visibility(&stmts);
+        let declared_attributes: Vec<Symbol> = stmts
+            .iter()
+            .filter_map(|st| st.as_call_node())
+            .filter(|c| c.receiver().is_none() && c.name().as_slice() == b"attribute")
+            .filter_map(|c| c.arguments()?.arguments().iter().next().and_then(|a| super::util::symbol_value(&a)))
+            .map(|n| Symbol::from(n.as_str()))
+            .collect();
         for statement in stmts {
             let definition = visibility::definition(&statement).map(|d| d.as_node());
             let stmt = definition.as_ref().unwrap_or(&statement);
@@ -446,7 +453,20 @@ pub(super) fn ingest_model_with_enum_constants(
             for (i, mut item) in items.into_iter().enumerate() {
                 if let ModelBodyItem::Method { method, .. } = &mut item {
                     visibility.apply(&statement, method);
-                } else if let ModelBodyItem::Unknown { .. } = &item {
+                } else if let ModelBodyItem::Unknown { expr, .. } = &item {
+                    if let Some(mut methods) = visibility.restricted_at(&statement).then(|| restricted_attr_methods(expr, &owner, &attributes, &declared_attributes)).flatten() {
+                        for method in &mut methods {
+                            visibility.apply(&statement, method);
+                        }
+                        for (j, method) in methods.into_iter().enumerate() {
+                            body.push(ModelBodyItem::Method {
+                                method,
+                                leading_comments: Vec::new(),
+                                leading_blank_line: leading_blank && i == 0 && j == 0,
+                            });
+                        }
+                        continue;
+                    }
                     if let Err(err) = visibility.check_model_item(&statement, file) {
                         super::survey::continue_or_fail(err)?;
                         continue;
@@ -464,12 +484,9 @@ pub(super) fn ingest_model_with_enum_constants(
         .superclass()
         .map(|n| super::util::node_span(&n, file))
         .unwrap_or_default();
-    let parent = class.superclass().and_then(|n| {
-        constant_path_of(&n).map(|p| {
-            let resolved = model_bases.resolve_superclass(&scope, &p);
-            ClassId(Symbol::from(model_bases.emit_superclass(&resolved)))
-        })
-    });
+    let parent = model_bases
+        .resolve_class_superclass(&scope, &class)
+        .map(|resolved| ClassId(Symbol::from(model_bases.emit_superclass(&resolved))));
 
     let class_loc = class.location();
     Ok(Some(Model {
@@ -607,6 +624,9 @@ pub(super) fn ingest_model_body_items(
                     // The lowered rules, and the call itself for its custom
                     // keys (`ingest::each_validator` lowers or reports them).
                     ParsedValidates::Custom(parsed, keys, kept) => {
+                        if !kept.is_empty() {
+                            return validations::split_custom_call(&call, owner, file, leading_comments, class_consts, &keys, &kept);
+                        }
                         let mut items = validation_items(parsed, leading_comments, span);
                         let expr = ingest_expr(stmt, file)?;
                         let text = String::from_utf8_lossy(call.location().as_slice()).into_owned();
@@ -635,6 +655,7 @@ pub(super) fn ingest_model_body_items(
                     attrs
                         .into_iter()
                         .map(|attribute| Validation {
+                            prepend: false,
                             attribute,
                             rules: vec![rule.clone()],
                             if_cond: None,
@@ -678,7 +699,9 @@ pub(super) fn ingest_model_body_items(
             }
         }
     }
-    Ok(vec![ingest_model_body_item(stmt, owner, file, leading_comments)?])
+    let mut items = vec![ingest_model_body_item(stmt, owner, file, leading_comments, class_consts)?];
+    crate::dialect::replace_validation_callbacks(&mut items);
+    Ok(items)
 }
 
 /// `mattr_*` / `cattr_*` with documented Rails defaults: `default:` and a
@@ -838,6 +861,26 @@ fn expand_mattr_cattr(
     }
 }
 
+/// `private` then `attr_reader :queue_adapter` (MissionControl::Jobs::RecurringTask): the
+/// readers as methods, each to carry its own visibility, which a class-body `attr_*`
+/// statement has nowhere to hold.
+fn restricted_attr_methods(expr: &Expr, owner: &ClassId, columns: &Row, attributes: &[Symbol]) -> Option<Vec<crate::dialect::MethodDef>> {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { return None };
+    // Not a writer: mass assignment refuses a private writer's key in Rails, which the model lowering does not model, so `check_model_item` still refuses one.
+    if method.as_str() != "attr_reader" {
+        return None;
+    }
+    args.iter()
+        .map(|arg| match &*arg.node {
+            // Not over a column or an `attribute`: Rails' reader then reads an ivar the record never sets, which the attribute reader the lowering keeps would not.
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } if !columns.fields.contains_key(value) && !attributes.contains(value) => {
+                Some(super::library_class::synth_attr_reader(owner, value, crate::dialect::MethodReceiver::Instance))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn synth_mattr_instance_reader(owner: &ClassId, name: &Symbol) -> crate::dialect::MethodDef {
     use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, MethodVisibility};
     MethodDef {
@@ -931,6 +974,7 @@ pub(super) fn ingest_model_body_item(
     owner: &ClassId,
     file: &str,
     leading_comments: Vec<Comment>,
+    class_consts: &ClassConsts,
 ) -> IngestResult<ModelBodyItem> {
     // Span of the whole statement — the typed variants (Association /
     // Validation / Callback) drop the source Expr during recognition,
@@ -992,6 +1036,7 @@ pub(super) fn ingest_model_body_item(
             let mut if_cond: Option<Expr> = None;
             let mut unless_cond: Option<Expr> = None;
             let mut on_guard: Option<Expr> = None;
+            let mut prepend = false;
             let mut options_ok = true;
             let mut option_args = 0usize;
             if let Some(args) = call.arguments() {
@@ -1006,6 +1051,19 @@ pub(super) fn ingest_model_body_item(
                         let key = symbol_value(&assoc.key());
                         let value = symbol_value(&assoc.value()).map(|v| Symbol::from(v.as_str()));
                         match (key.as_deref(), value) {
+                            (Some("prepend"), _) => match class_consts.truthiness(&assoc.value()) {
+                                Some(flag) => prepend = flag,
+                                None => super::prism::push(crate::diagnostic::Diagnostic {
+                                    span,
+                                    kind: crate::diagnostic::DiagnosticKind::IgnoredValidatorOption {
+                                        validator: Symbol::from("validate"),
+                                        option: Symbol::from("prepend"),
+                                        hint: None,
+                                    },
+                                    severity: crate::diagnostic::Severity::Warning,
+                                    message: "prepend value cannot be resolved; validation is kept in ordinary registration order".into(),
+                                }),
+                            },
                             (Some("if"), Some(v)) => if_method = Some(v),
                             (Some("unless"), Some(v)) => unless_method = Some(v),
                             (Some("if"), None) => match callback_condition(&assoc.value(), file) {
@@ -1036,6 +1094,7 @@ pub(super) fn ingest_model_body_item(
                 let attribute = symbols[0].clone();
                 return Ok(ModelBodyItem::Validation {
                     validation: crate::dialect::Validation {
+                        prepend,
                         attribute,
                         rules: symbols
                             .into_iter()
@@ -2122,6 +2181,8 @@ fn regexp_escape(text: &str) -> String {
 /// (`ROLE_B = ROLE_A`) resolves through the constant it names.
 #[derive(Default)]
 pub(super) struct ClassConsts {
+    /// Literal Ruby truth values used by callback scheduling, including aliases.
+    truth_values: crate::det::HashMap<String, bool>,
     /// `NAME = "x"`, `NAME = :x`, `NAME = 3`, `NAME = OTHER`.
     scalars: crate::det::HashMap<String, Literal>,
     /// `NAME = %i[…]` / `{ … }`, as the mapping an enum would build.
@@ -2214,6 +2275,9 @@ impl ClassConsts {
                 continue;
             }
             let value = cw.value();
+            if let Some(truth) = out.truthiness(&value) {
+                out.truth_values.insert(name.clone(), truth);
+            }
             // The right-hand side reads the constants as they stand
             // before this write (Ruby evaluates it first). A tainted one
             // is in no map, so nothing derived from it folds either.
@@ -2452,6 +2516,7 @@ impl ClassConsts {
     /// refused by [`enum_constants::EnumConstants::owner_constant`]'s
     /// write count, whichever value this keeps.
     pub(super) fn merge(&mut self, other: ClassConsts) {
+        self.truth_values.extend(other.truth_values);
         self.scalars.extend(other.scalars);
         self.mappings.extend(other.mappings);
         self.labels.extend(other.labels);
@@ -2508,6 +2573,9 @@ impl ClassConsts {
             }
             if let Some(value) = table.scalars.get(&member) {
                 self.scalars.insert(key.clone(), value.clone());
+            }
+            if let Some(value) = table.truth_values.get(&member) {
+                self.truth_values.insert(key.clone(), *value);
             }
             if let Some(value) = table.lists.get(&member) {
                 self.lists.insert(key.clone(), value.clone());
@@ -2645,6 +2713,30 @@ impl ClassConsts {
             Literal::Int { value } => Some(value.to_string()),
             _ => None,
         }
+    }
+
+    /// Only nil and false are falsey in Ruby; unknown expressions stay unknown.
+    pub(super) fn truthiness(&self, node: &Node<'_>) -> Option<bool> {
+        if let Some(inner) = single_parenthesized(node) {
+            return self.truthiness(&inner);
+        }
+        if let Some(key) = const_key(node) {
+            return self.truth_values.get(&key).copied();
+        }
+        if let Some(value) = list_atom(node) {
+            return Some(!matches!(value, Literal::Nil | Literal::Bool { value: false }));
+        }
+        if node.as_integer_node().is_some() {
+            return Some(true);
+        }
+        if let Some(hash) = node.as_hash_node() {
+            return hash.elements().iter().all(|el| el.as_assoc_node().is_some_and(|a|
+                list_atom(&a.key()).is_some() && self.truthiness(&a.value()).is_some())).then_some(true);
+        }
+        if (node.as_array_node().is_some() && self.list(node).is_some()) || node.as_regular_expression_node().is_some() {
+            return Some(true);
+        }
+        None
     }
 
     /// A scalar the class body can fold: a string, a symbol (stored as
@@ -3300,7 +3392,7 @@ pub(super) fn ingest_method(
     params.extend(formals.anonymous.map(super::forwarding::AnonymousFormal::into_param));
 
     let body = match def.body() {
-        Some(b) => ingest_expr(&b, file)?,
+        Some(b) => super::expr::with_block_param(super::expr::def_block_param(block_param.as_ref().map(|p| p.name.clone()), Some(&b)), || ingest_expr(&b, file))?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
 
@@ -4012,7 +4104,20 @@ fn parse_association(
             let value = assoc.value();
             match key.as_str() {
                 // `"::Portal"` names the top-level class `Portal`; kept as written it is a class no one defines.
-                "class_name" => class_name = string_value(&value).map(|s| s.trim_start_matches("::").to_string()),
+                "class_name" => {
+                    class_name = string_value(&value).map(|s| s.trim_start_matches("::").to_string());
+                    // `class_name: Doorkeeper.config.access_token_class.to_s`: what the initializers leave it naming, once known.
+                    if class_name.is_none()
+                        && let Ok(expr) = ingest_expr(&value, file)
+                    {
+                        let span = Span {
+                            file: super::sources::file_id(file),
+                            start: call.location().start_offset() as u32,
+                            end: call.location().end_offset() as u32,
+                        };
+                        super::configured_superclass::defer_class_name(span, expr);
+                    }
+                }
                 "foreign_key" => {
                     foreign_key = string_value(&value).or_else(|| symbol_value(&value))
                 }

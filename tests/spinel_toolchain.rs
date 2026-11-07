@@ -34,6 +34,8 @@ use roundhouse::ingest::ingest_app;
 
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/json_flash.rs"]
+mod json_flash_contract;
 #[path = "support/response_content_type.rs"]
 mod response_content_type_contract;
 #[path = "spinel_toolchain/response_content_type.rs"]
@@ -44,6 +46,10 @@ mod rack_mounts;
 mod time_change_usec_contract;
 #[path = "spinel_toolchain/time_change_usec.rs"]
 mod time_change_usec;
+#[path = "support/option_dsl.rs"]
+mod option_dsl;
+#[path = "spinel_toolchain/option_dsl.rs"]
+mod option_dsl_native;
 #[path = "support/string_truncate.rs"]
 mod string_truncate;
 #[path = "spinel_toolchain/string_truncate.rs"]
@@ -54,6 +60,10 @@ mod array_excluding;
 mod array_excluding_native;
 #[path = "spinel_toolchain/lobsters_zero.rs"]
 mod lobsters_zero;
+#[path = "support/addressable_gem.rs"]
+mod addressable_gem;
+#[path = "spinel_toolchain/addressable.rs"]
+mod addressable;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
 #[path = "support/class_configuration.rs"]
@@ -72,6 +82,10 @@ fn ordinary_class_body_calls_run_natively() {
 mod dry_initializer;
 #[path = "support/data_factory.rs"]
 mod data_factory;
+#[path = "support/data_record_siblings.rs"]
+mod data_record_siblings_contract;
+#[path = "spinel_toolchain/data_record_siblings.rs"]
+mod data_record_siblings;
 #[path = "support/relation_fork.rs"]
 mod relation_fork_contract;
 #[path = "spinel_toolchain/relation_fork.rs"]
@@ -92,6 +106,8 @@ mod cable_allowed_origins;
 mod public_file_server_headers_contract;
 #[path = "spinel_toolchain/public_file_server_headers.rs"]
 mod public_file_server_headers;
+#[path = "support/puma_boot.rs"]
+mod puma_boot_contract;
 #[path = "support/cable_actions.rs"]
 mod cable_actions_contract;
 #[path = "spinel_toolchain/cable_actions.rs"]
@@ -206,6 +222,29 @@ fn spinel_bundle_build() {
         return;
     };
     emit_and_run::bundle::build_all(std::path::Path::new(&collected), std::path::Path::new(&out));
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn spinel_bundle_plan() {
+    let (Some(collected), Some(out)) =
+        (std::env::var_os("RH_SPINEL_BUNDLE_COLLECT"), std::env::var_os("RH_SPINEL_BUNDLE_PLAN"))
+    else {
+        return;
+    };
+    emit_and_run::bundle::plan(std::path::Path::new(&collected), std::path::Path::new(&out));
+}
+
+#[test]
+fn only_an_edit_adding_methods_shares_a_build() {
+    use emit_and_run::bundle::adds_only_methods;
+    let class = "class Article < ApplicationRecord\n";
+    assert!(adds_only_methods(class, &format!("{class}  def probe\n    1\n  end\n")));
+    assert!(adds_only_methods("end\n", "  def self.probe\n    1\n  end\nend\n"));
+    assert!(!adds_only_methods(class, &format!("{class}  validates :title, length: {{ maximum: 3 }}\n")));
+    assert!(!adds_only_methods("validates :title, presence: true", "validates :title, presence: true, length: { maximum: 3 }"));
+    assert!(!adds_only_methods(class, &format!("{class}  def probe\n    1\n  end\n  private\n")));
+    assert!(!adds_only_methods("a", "b"));
 }
 
 /// Compile and execute the shared custom Data factory contract with Spinel;

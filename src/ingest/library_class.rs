@@ -18,9 +18,106 @@ use crate::span::Span;
 use crate::{ClassId, Symbol};
 
 use super::expr::{ingest_expr, ingest_expr_strict};
+
+/// A def hoisted out of a concern's `included do` that also includes modules (`include_hoists`).
+struct IncludedHoist {
+    owner: String,
+    name: Symbol,
+    span: Span,
+    includes: Vec<String>,
+}
+
+thread_local! {
+    static INCLUDED_HOISTS: std::cell::RefCell<Vec<IncludedHoist>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The hoisted defs a module the same `included do` includes also defines: Ruby defines the block's
+/// def on the includer, ahead of that module, where the hoisted copy on the concern sits behind it.
+pub(in crate::ingest) fn included_hoist_conflicts(classes: &[LibraryClass]) -> Vec<crate::diagnostic::Diagnostic> {
+    let hoists = INCLUDED_HOISTS.with(|h| std::mem::take(&mut *h.borrow_mut()));
+    let mut out = Vec::new();
+    for hoist in hoists {
+        let found = hoist.includes.iter().find(|written| module_may_define(classes, &hoist.owner, written, &hoist.name, &mut Vec::new()));
+        if let Some(module) = found {
+            out.push(crate::diagnostic::Diagnostic::unsupported(
+                hoist.span,
+                None,
+                crate::diagnostic::NESTED_DEF,
+                format!(
+                    "`def {}` in `included do` is the includer's own method in Ruby, ahead of `{module}`, which may define it too; carried on the concern it would lose to that module",
+                    hoist.name.as_str()
+                ),
+            ));
+        }
+    }
+    out
+}
+fn module_may_define(classes: &[LibraryClass], owner: &str, written: &str, name: &Symbol, seen: &mut Vec<String>) -> bool {
+    let rooted = written.starts_with("::");
+    let written = written.trim_start_matches("::");
+    let mut candidates = Vec::new();
+    let mut scope = (!rooted).then_some(owner);
+    while let Some(prefix) = scope {
+        candidates.push(format!("{prefix}::{written}"));
+        scope = prefix.rsplit_once("::").map(|(p, _)| p);
+    }
+    candidates.push(written.to_string());
+    let Some(resolved) = candidates.into_iter().find(|c| classes.iter().any(|lc| lc.name.0.as_str() == c)) else {
+        // A module the program does not define (Comparable) may define the name too: as unsafe as one that does.
+        return true;
+    };
+    if seen.contains(&resolved) {
+        return false;
+    }
+    seen.push(resolved.clone());
+    // Every reopen: each declaration of the module is an entry of its own.
+    let decls: Vec<&LibraryClass> = classes.iter().filter(|lc| lc.name.0.as_str() == resolved).collect();
+    decls.iter().any(|lc| lc.methods.iter().any(|m| m.name == *name && m.receiver == MethodReceiver::Instance))
+        || decls.iter().flat_map(|lc| lc.includes.iter()).any(|inc| module_may_define(classes, &resolved, inc.0.as_str(), name, seen))
+}
+// A computed module (`include Foo.for(:x)`) is kept as a name no module has, so the hoist beside it is refused.
+fn collect_block_includes(node: &Node<'_>, out: &mut Vec<String>) {
+    if let Some(c) = node.as_call_node() {
+        if c.receiver().is_none_or(|r| r.as_self_node().is_some()) && matches!(constant_id_str(&c.name()).as_ref(), "include" | "prepend") {
+            for arg in c.arguments().map(|a| a.arguments().iter().collect::<Vec<_>>()).unwrap_or_default() {
+                out.push(constant_path_of(&arg).map(|p| p.join("::")).unwrap_or_else(|| "<computed module>".to_string()));
+            }
+        }
+        return;
+    }
+    let branches: Vec<Node<'_>> = if let Some(n) = node.as_if_node() {
+        [n.statements().map(|s| s.as_node()), n.subsequent()].into_iter().flatten().collect()
+    } else if let Some(n) = node.as_unless_node() {
+        [n.statements().map(|s| s.as_node()), n.else_clause().map(|e| e.as_node())].into_iter().flatten().collect()
+    } else if let Some(n) = node.as_else_node() {
+        n.statements().map(|s| s.as_node()).into_iter().collect()
+    } else if let Some(n) = node.as_begin_node() {
+        let mut parts: Vec<Node<'_>> = n.statements().map(|s| s.as_node()).into_iter().collect();
+        let mut rescue = n.rescue_clause();
+        while let Some(r) = rescue {
+            parts.extend(r.statements().map(|s| s.as_node()));
+            rescue = r.subsequent();
+        }
+        parts.extend(n.else_clause().map(|e| e.as_node()));
+        parts.extend(n.ensure_clause().and_then(|e| e.statements()).map(|s| s.as_node()));
+        parts
+    } else if let Some(n) = node.as_case_node() {
+        n.conditions().iter().chain(n.else_clause().map(|e| e.as_node())).collect()
+    } else if let Some(n) = node.as_when_node() {
+        n.statements().map(|s| s.as_node()).into_iter().collect()
+    } else if let Some(n) = node.as_statements_node() {
+        n.body().iter().collect()
+    } else {
+        Vec::new()
+    };
+    for branch in &branches {
+        collect_block_includes(branch, out);
+    }
+}
 use super::visibility::{self, Visibility};
 use super::util::{
-    class_name_path, constant_id_str, constant_path_of, find_all_classes_with_scope,
+    class_name_path, constant_id_str, constant_path_is_rooted, constant_path_of,
+    find_all_classes_with_scope,
     find_all_module_declarations_with_scope, find_all_modules_with_scope, find_first_class,
     flatten_statements, module_name_path, symbol_value,
 };
@@ -72,6 +169,20 @@ pub fn ingest_library_classes(
     ingest_library_classes_impl(source, file, Walk::All)
 }
 
+/// [`ingest_library_classes`] for an app file Rails' autoloader loads
+/// (`app/models`, the autoloaded support dirs): a file that declares no
+/// class or module but writes file-level constants still defines them,
+/// so it is carried as a `LibraryClassOrigin::FileConstants` holder
+/// named for its first constant (`RemoteThing = Thing` in
+/// `remote_thing.rb`). Other callers ingest snippets, or files whose
+/// constants another path owns (initializers, gem sources).
+pub fn ingest_app_library_classes(
+    source: &[u8],
+    file: &str,
+) -> IngestResult<Vec<LibraryClass>> {
+    ingest_library_classes_impl(source, file, Walk::App)
+}
+
 /// Like [`ingest_library_classes`], but only classes/modules NESTED
 /// inside some other class or module body — never a top-level
 /// declaration. For a model file, the model's own top-level class is
@@ -119,6 +230,8 @@ pub fn ingest_library_classes_beside(
 #[derive(Clone, Copy)]
 enum Walk<'a> {
     All,
+    /// `All`, for a file Rails autoloads (`ingest_app_library_classes`).
+    App,
     NestedIn(&'a str),
     Beside(&'a str),
 }
@@ -155,12 +268,12 @@ fn ingest_library_classes_impl(
         Walk::NestedIn(outer) => Some(outer),
         _ => None,
     };
-    let file_level = matches!(walk, Walk::All);
+    let file_level = matches!(walk, Walk::All | Walk::App);
     let outside = |model: &str, name: &str| {
         name != model && !name.strip_prefix(model).is_some_and(|rest| rest.starts_with("::"))
     };
     let walked = |scope: &[String], path: Option<Vec<String>>| match walk {
-        Walk::All => true,
+        Walk::All | Walk::App => true,
         Walk::NestedIn(_) if !scope.is_empty() => true,
         Walk::NestedIn(outer) => path.is_some_and(|path| {
             path.join("::").strip_prefix(outer).is_some_and(|rest| rest.starts_with("::"))
@@ -233,9 +346,6 @@ fn ingest_library_classes_impl(
         }));
     }
     if out.is_empty() && file_level {
-        if let Some(lc) = file_data_class(&root, file)? {
-            return Ok(vec![lc]);
-        }
         // Not an initializer's: the boot program replays that statement, and a class beside it would define the constant twice.
         if !file.contains("config/initializers/")
             && let Some(lc) = file_struct_class(&root, file)?
@@ -266,12 +376,42 @@ fn ingest_library_classes_impl(
     // while defining the subclass. A file of nothing else defines just
     // those classes. The nested and beside walks take no top-level
     // declaration.
-    let made = match (file_level, root.as_program_node()) {
+    let mut made = match (file_level, root.as_program_node()) {
         (true, Some(program)) => {
             super::class_new_factory::constant_classes(None, Some(program.statements().as_node()), file)
         }
         _ => Vec::new(),
     };
+    if file_level && let Some(program) = root.as_program_node() {
+        for statement in program.statements().body().iter() {
+            if let Some(class) = file_data_class(&statement, file)
+                .map_err(|err| super::error_site::at(err, &statement))?
+            {
+                if out.iter().chain(made.iter().map(|(_, class)| class)).any(|other| other.name == class.name) {
+                    return Err(super::error_site::at(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "Data.define beside another declaration of the same class".into(),
+                    }, &statement));
+                }
+                made.push((class.name.0.clone(), class));
+            }
+        }
+        if made.iter().any(|(_, class)| class.data_define().is_some()) {
+            for statement in program.statements().body().iter() {
+                let qualified_factory = statement.as_constant_path_write_node()
+                    .and_then(|write| static_constant_path(&write.target().as_node()))
+                    .is_some_and(|path| made.iter().any(|(_, class)| class.name.0.as_str() == path.join("::")));
+                if statement.as_constant_write_node().is_none() && statement.as_class_node().is_none()
+                    && statement.as_module_node().is_none() && !qualified_factory
+                {
+                    return Err(super::error_site::at(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "file-level statements beside Data.define must be declarations".into(),
+                    }, &statement));
+                }
+            }
+        }
+    }
     // Hoist remaining file-level constants into the first class of the
     // file — including when that first class is a Class.new factory and
     // the file has no ordinary `class`/`module`. Otherwise a
@@ -284,6 +424,23 @@ fn ingest_library_classes_impl(
         Vec::new()
     };
     let mut factories: Vec<LibraryClass> = made.into_iter().map(|(_, c)| c).collect();
+    // No class, module or factory to host them: the file is its
+    // constants, which Ruby binds on Object as the autoloader loads it.
+    // Only when they are all it runs: the holder carries the writes
+    // alone, so a `Labels << "ready"` after `Labels = []` would be lost.
+    // Such a file is not carried, as before, and a read of its constants
+    // stays refused.
+    if matches!(walk, Walk::App) && out.is_empty() && factories.is_empty() && !file_constants.is_empty() {
+        let only_writes = root.as_program_node().is_some_and(|program| {
+            program.statements().body().iter().all(|stmt| stmt.as_constant_write_node().is_some())
+        });
+        if !only_writes {
+            return Ok(Vec::new());
+        }
+        let mut holder = file_constants_holder(file, &file_constants);
+        holder.constants = file_constants;
+        return Ok(vec![holder]);
+    }
     if !file_constants.is_empty() {
         // A Class.new-only file with admitted factories: hoist onto the
         // first factory. Refuse when there is no host, or when the hoist
@@ -387,8 +544,8 @@ fn data_block_classes(
     Ok(out)
 }
 
-/// The class that a file with the one statement `X = Data.define(:a,
-/// :b)` creates. This is the Zeitwerk shape of a value class: Ruby
+/// The class a file-level statement `X = Data.define(:a, :b)` creates.
+/// This is the Zeitwerk shape of a value class: Ruby
 /// creates the class when it assigns the constant, so it is a library
 /// class, not a file-level constant that is hoisted into another class.
 /// Only distinct literal Symbol members are admitted. Other factories
@@ -398,8 +555,8 @@ fn data_block_classes(
 /// the new class. A `class` or `module` in the block belongs to the
 /// enclosing scope, which the emitted reopen of `X` cannot express, so
 /// the file is rejected.
-fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Option<LibraryClass>> {
-    let Some((name, call)) = file_data_factory(root) else { return Ok(None) };
+fn file_data_class(statement: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Option<LibraryClass>> {
+    let Some((name, call)) = file_data_declaration(statement) else { return Ok(None) };
     let Some(members) = data_members(&call) else { return Ok(None) };
     let owner = ClassId(Symbol::from(name));
     let body = || call.block().and_then(|block| block.as_block_node()).and_then(|block| block.body());
@@ -472,17 +629,9 @@ fn file_struct_write<'pr>(root: &ruby_prism::Node<'pr>) -> Option<(String, Struc
     Some((name, struct_constant_spec(&value)?))
 }
 
-/// The constant name and the `Data.define` call of a file whose only
-/// statement is `X = Data.define(…)` or `A::X = Data.define(…)`, with no
-/// block or with a `do … end` block that takes no parameters.
-fn file_data_factory<'pr>(
-    root: &ruby_prism::Node<'pr>,
-) -> Option<(String, ruby_prism::CallNode<'pr>)> {
-    let statements = root.as_program_node()?.statements().body();
-    let mut iter = statements.iter();
-    let (Some(statement), None) = (iter.next(), iter.next()) else {
-        return None;
-    };
+/// A file-level `X = Data.define(…)` or `A::X = Data.define(…)`, with
+/// no block or with a block that takes no parameters.
+fn file_data_declaration<'pr>(statement: &ruby_prism::Node<'pr>) -> Option<(String, ruby_prism::CallNode<'pr>)> {
     let (name, value) = match statement.as_constant_write_node() {
         Some(write) => (constant_id_str(&write.name()).to_string(), write.value()),
         None => {
@@ -686,7 +835,9 @@ pub(super) fn library_class_and_struct_base(
         Some(_) => Some(struct_base_id(&owner)),
         None => parent,
     };
-    if parent.is_none() && class.superclass().is_some() {
+    let deferred = parent.is_none()
+        && class.superclass().is_some_and(|n| super::configured_superclass::defer(&owner, &n, source_parent_span, file));
+    if parent.is_none() && class.superclass().is_some() && !deferred {
         super::prism::push(crate::diagnostic::Diagnostic::unsupported(
             source_parent_span,
             None,
@@ -1767,9 +1918,18 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
                 return None;
             }
             let body = block.body();
-            // Not a general block body: only `def`s become the class's methods without running anything at definition time.
+            // Not a general block body: the class body's own declarations, which run nothing of the app's at definition time.
             if let Some(statements) = body.as_ref().and_then(|b| b.as_statements_node()) {
-                if !statements.body().iter().all(|stmt| stmt.as_def_node().is_some()) {
+                if !statements.body().iter().all(|stmt| struct_block_declaration(&stmt)) {
+                    return None;
+                }
+                // Not over a member: Ruby's block `attr_accessor :a` replaces the member's reader with one of `@a`, which this class cannot tell from the member.
+                if statements.body().iter().any(|stmt| {
+                    stmt.as_call_node().is_some_and(|call| {
+                        matches!(constant_id_str(&call.name()).as_ref(), "attr_reader" | "attr_writer" | "attr_accessor" | "delegate")
+                            && call.arguments().is_some_and(|a| a.arguments().iter().any(|arg| symbol_value(&arg).is_some_and(|n| members.iter().any(|m| m.as_str() == n))))
+                    })
+                }) {
                     return None;
                 }
                 // Not an `initialize` of its own: in Ruby the generated one is
@@ -1787,6 +1947,38 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
         }
     };
     Some(StructConstant { name: Symbol::from(""), members, keyword_init, positional_written, body })
+}
+
+fn struct_block_declaration(stmt: &ruby_prism::Node<'_>) -> bool {
+    if stmt.as_def_node().is_some() {
+        return true;
+    }
+    if let Some(sc) = stmt.as_singleton_class_node() {
+        return sc.expression().as_self_node().is_some()
+            && sc.body().is_none_or(|b| flatten_statements(b).iter().all(|s| s.as_def_node().is_some() || struct_block_marker(s)));
+    }
+    struct_block_marker(stmt)
+        || stmt.as_call_node().is_some_and(|call| {
+            call.receiver().is_none()
+                && call.block().is_none()
+                && matches!(
+                    constant_id_str(&call.name()).as_ref(),
+                    "delegate" | "attr_reader" | "attr_writer" | "attr_accessor" | "include"
+                )
+        })
+}
+
+fn struct_block_marker(stmt: &ruby_prism::Node<'_>) -> bool {
+    stmt.as_call_node().is_some_and(|call| {
+        call.receiver().is_none()
+            && call.block().is_none()
+            && matches!(constant_id_str(&call.name()).as_ref(), "public" | "protected" | "private" | "private_class_method" | "public_class_method")
+    })
+}
+
+/// `X = Struct.new(…) do … end` whose block this ingest reads as the class's body: the walk of the enclosing body leaves it to that class.
+pub(super) fn struct_constant_block(value: &ruby_prism::Node<'_>) -> bool {
+    value.as_call_node().is_some_and(|c| c.block().is_some()) && struct_constant_spec(value).is_some_and(|s| s.body.is_some())
 }
 
 /// The classes `owner`'s body defines through `X = Struct.new(…)`, with
@@ -1810,7 +2002,13 @@ fn struct_constant_classes(
             },
         );
         if spec.body.is_some() {
-            class.methods.extend(walk_decl_body(spec.body, &id, file, DeclBodyMode::Instance)?.methods);
+            let body = walk_decl_body(spec.body, &id, file, DeclBodyMode::Instance)?;
+            class.methods.extend(body.methods);
+            class.includes.extend(body.includes);
+            class.include_spans.extend(body.include_spans);
+            class.constants.extend(body.constants);
+            class.unknown_calls.extend(body.unknown_calls);
+            class.class_ivar_initializers.extend(body.class_initializers);
         }
         out.push((spec.name, class));
     }
@@ -1985,6 +2183,19 @@ impl DeclBody {
             .class_initializers
             .iter()
             .any(|expr| !expr.span.is_synthetic());
+        // Not where no `@@` initializer is written: there a writer call runs in place as a body statement already.
+        if has_source_ordered_init {
+            let methods = &self.methods;
+            let writes: Vec<Expr> = self.unknown_calls.extract_if(.., |call| runs_own_writer(call, methods)).collect();
+            for write in writes {
+                let at = self
+                    .class_initializers
+                    .iter()
+                    .position(|init| !init.span.is_synthetic() && init.span.file == write.span.file && init.span.start > write.span.start)
+                    .unwrap_or(self.class_initializers.len());
+                self.class_initializers.insert(at, write);
+            }
+        }
         // Constants and `@@` initializers whose values are all literals
         // cannot observe one another, so emitting them in a different order
         // than the source wrote them changes nothing (lobsters' `Twitter`:
@@ -1993,7 +2204,7 @@ impl DeclBody {
         let order_independent = self.constants.iter().all(|(_, value)| is_order_safe_value(value))
             && self.class_initializers.iter().all(|expr| match &*expr.node {
                 ExprNode::Assign { value, .. } => is_order_safe_value(value),
-                _ => false,
+                _ => is_cvar_mutation(expr),
             });
         let literal_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
             ExprNode::Assign { value, .. } => is_literal_value(value),
@@ -2006,6 +2217,8 @@ impl DeclBody {
                     && !args.is_empty()
                     && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. })))
                     // A visibility declaration over names reads no class variable.
+                    || (method.as_str() == "autoload"
+                        && matches!(args.as_slice(), [name, path] if matches!(&*name.node, ExprNode::Lit { value: Literal::Sym { .. } }) && matches!(&*path.node, ExprNode::Lit { value: Literal::Str { .. } })))
                     || (matches!(method.as_str(), "private_constant" | "public_constant" | "private_class_method" | "public_class_method")
                         && args.iter().all(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } })))
             }
@@ -2013,7 +2226,7 @@ impl DeclBody {
         });
         let safe_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
             ExprNode::Assign { value, .. } => is_order_safe_value(value),
-            _ => false,
+            _ => is_cvar_mutation(expr),
         });
         // Not an ancestor whose `@@x` this body's would share: Ruby's own mixins hold none.
         let builtin_includes = self.includes.iter().all(|i| matches!(i.0.as_str(), "Comparable" | "Enumerable" | "Kernel"));
@@ -2029,6 +2242,29 @@ impl DeclBody {
         }
         Ok(())
     }
+}
+
+/// `@@x << v`, or `self.x = v` through the body's own writer: a call whose arguments are order-safe values.
+fn is_cvar_mutation(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Send { recv: Some(recv), args, block: None, .. } => {
+            (matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str().starts_with("@@")) || matches!(&*recv.node, ExprNode::SelfRef))
+                && args.iter().all(is_order_safe_value)
+        }
+        ExprNode::Assign { target: LValue::Attr { recv, .. }, value } => matches!(&*recv.node, ExprNode::SelfRef) && is_order_safe_value(value),
+        _ => false,
+    }
+}
+
+fn runs_own_writer(expr: &Expr, methods: &[crate::dialect::MethodDef]) -> bool {
+    let writer = match &*expr.node {
+        ExprNode::Send { recv: Some(recv), method, .. } if matches!(&*recv.node, ExprNode::SelfRef) => format!("{}", method.as_str()),
+        ExprNode::Assign { target: LValue::Attr { recv, name }, .. } if matches!(&*recv.node, ExprNode::SelfRef) => format!("{}=", name.as_str()),
+        _ => return false,
+    };
+    writer.ends_with('=')
+        && is_cvar_mutation(expr)
+        && methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Class && m.name.as_str() == writer)
 }
 
 /// A value whose answer does not depend on where the class body runs it:
@@ -2960,6 +3196,18 @@ fn walk_decl_body_with_visibility<'pr>(
             }
             continue;
         }
+        // `@@helpers << Devise::Controllers::Helpers`: not a call the replay rules carry, which dropped it without a word; it is the initializer's next step.
+        if stmt.as_call_node().is_some_and(|call| call.receiver().is_some_and(|r| r.as_class_variable_read_node().is_some()) && call.block().is_none()) {
+            let mutation = ingest_expr(&stmt, file)?;
+            if !is_cvar_mutation(&mutation) {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "class-variable mutation with a non-literal argument".into(),
+                });
+            }
+            out.class_initializers.push(mutation);
+            continue;
+        }
         // Retain native nil initialization in source order. Only a declared
         // cattr/mattr storage approximation may drop it, after the whole body
         // has been walked. Non-nil initializers remain outside this slice.
@@ -3078,6 +3326,46 @@ fn walk_decl_body_with_visibility<'pr>(
                 let err = IngestError::Unsupported { file: file.into(), message: super::inherited_alias::REFUSAL.into() };
                 super::error_site::note(&err, span.start as usize, span.end as usize);
                 return Err(err);
+            }
+            // `alias_method :unescape, :unencode` in the singleton names a
+            // `def self.unencode` the class body defined before it
+            // (addressable's URI): the singleton walk saw only its own defs.
+            if own {
+                let mut kept = Vec::new();
+                for call in std::mem::take(&mut inner.unknown_calls) {
+                    let pair = match &*call.node {
+                        crate::expr::ExprNode::Send { recv: None, method, args, block: None, .. } if method.as_str() == "alias_method" => {
+                            match args.as_slice() {
+                                [to, from] => match (&*to.node, &*from.node) {
+                                    (
+                                        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value: to } },
+                                        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value: from } },
+                                    ) => Some((to.as_str().to_string(), from.as_str().to_string())),
+                                    _ => None,
+                                },
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    // Not a def written after the alias: Ruby's alias_method copies what exists at its line.
+                    let source = pair.as_ref().and_then(|(_, from)| {
+                        out.methods.iter().chain(inner.methods.iter()).rev().find(|m| {
+                            m.name.as_str() == from
+                                && m.receiver == MethodReceiver::Class
+                                && (m.name_span.file != call.span.file || m.name_span.start < call.span.start)
+                        })
+                    });
+                    match (pair.as_ref(), source) {
+                        (Some((to, _)), Some(source)) => {
+                            let mut copy = copy_aliased_method(source, to);
+                            copy.name_span = call.span;
+                            inner.methods.push(copy);
+                        }
+                        _ => kept.push(call),
+                    }
+                }
+                inner.unknown_calls = kept;
             }
             // The class's own singleton: its statements run, and its
             // constants live, there (`expr::SINGLETON_BODY`).
@@ -3224,14 +3512,11 @@ fn walk_decl_body_with_visibility<'pr>(
                     && block.parameters().is_none()
                     && let Some(block_body) = block.body()
                     && let inner_stmts = flatten_statements(block_body)
-                    // A module the block includes sits ahead of this one, so a
-                    // hoisted def would lose to it where the includer's own wins.
-                    && !inner_stmts.iter().any(|inner| {
-                        inner.as_call_node().is_some_and(|c| {
-                            c.receiver().is_none() && matches!(constant_id_str(&c.name()), "include" | "prepend")
-                        })
-                    })
                 {
+                    let mut block_includes = Vec::new();
+                    for inner in &inner_stmts {
+                        collect_block_includes(inner, &mut block_includes);
+                    }
                     let mut hoisted: Vec<(u32, u32)> = Vec::new();
                     for inner in inner_stmts {
                         // `class << self` here opens the includer's singleton:
@@ -3270,6 +3555,15 @@ fn walk_decl_body_with_visibility<'pr>(
                         visibility.apply(&inner, &mut m);
                         if class_side {
                             m.receiver = MethodReceiver::Class;
+                        } else if !block_includes.is_empty() {
+                            INCLUDED_HOISTS.with(|h| {
+                                h.borrow_mut().push(IncludedHoist {
+                                    owner: owner.0.as_str().to_string(),
+                                    name: m.name.clone(),
+                                    span: m.name_span,
+                                    includes: block_includes.clone(),
+                                })
+                            });
                         }
                         out.methods.push(m);
                         hoisted.push((inner.location().start_offset() as u32, inner.location().end_offset() as u32));
@@ -4322,8 +4616,8 @@ pub(super) fn ingest_library_method_with_keywords(
         });
 
     let body = match def.body() {
-        Some(b) => super::expr::with_anonymous_rest(formals.forwarded_rest_name.clone(), || {
-            ingest_expr(&b, file)
+        Some(b) => super::expr::with_block_param(super::expr::def_block_param(block_param.as_ref().map(|p| p.name.clone()), Some(&b)), || {
+            super::expr::with_anonymous_rest(formals.forwarded_rest_name.clone(), || ingest_expr(&b, file))
         })?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
@@ -4448,26 +4742,41 @@ impl ModelBases {
     /// `module ActionText` becomes `ActionText::Record` when that base
     /// is known. Qualified paths are unchanged. Falls back to the
     /// lexical spelling when no enclosing candidate is a known base.
-    pub fn resolve_superclass(&self, scope: &[String], parent_path: &[String]) -> String {
+    ///
+    /// `::ApplicationRecord` skips the enclosing modules. So does a bare
+    /// name that would find the class being declared: its superclass is
+    /// evaluated before the constant exists, so `module Ci; class
+    /// ApplicationRecord < ApplicationRecord` means the top-level one.
+    /// Either way a class is never its own parent, which would send
+    /// every walk up the chain around forever.
+    pub fn resolve_class_superclass(
+        &self,
+        scope: &[String],
+        class: &ruby_prism::ClassNode<'_>,
+    ) -> Option<String> {
+        let node = class.superclass()?;
+        let parent_path = constant_path_of(&node)?;
         let joined = parent_path.join("::");
         // Bare names: search enclosing scopes first (Ruby constant
         // lookup). A global `ApplicationRecord` base must not win over
         // a closer `Foo::ApplicationRecord` when both are known.
-        if parent_path.len() == 1 {
+        if parent_path.len() == 1 && !node.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)) {
+            let own = class_name_path(class).map(|path| {
+                let mut full = scope.to_vec();
+                full.extend(path);
+                full.join("::")
+            });
             let bare = &parent_path[0];
             let mut segs = scope.to_vec();
             while !segs.is_empty() {
                 let candidate = format!("{}::{}", segs.join("::"), bare);
-                if self.contains(&candidate) {
-                    return candidate;
+                if own.as_deref() != Some(candidate.as_str()) && self.contains(&candidate) {
+                    return Some(candidate);
                 }
                 segs.pop();
             }
         }
-        if self.contains(&joined) {
-            return joined;
-        }
-        joined
+        Some(joined)
     }
 
     /// One file's `class X < Y` pairs, for the closure below — but
@@ -4487,16 +4796,15 @@ impl ModelBases {
             let Some(path) = class_name_path(&class) else { continue };
             let mut full = scope.clone();
             full.extend(path);
-            let Some(parent) = class.superclass().and_then(|n| constant_path_of(&n)) else {
-                continue;
-            };
             if !declares_abstract_class(&class) {
                 continue;
             }
             // Resolve bare parents (`Record` under `module ActionText`)
             // before close_over, which matches on the stored parent
             // spelling against seeded qualified bases.
-            let parent = self.resolve_superclass(&scope, &parent);
+            let Some(parent) = self.resolve_class_superclass(&scope, &class) else {
+                continue;
+            };
             pairs.push((full.join("::"), parent));
         }
     }
@@ -4552,7 +4860,10 @@ impl ModelBases {
                 self.tableless.insert(full.join("::"));
             }
             None => {}
-            Some(parent) => self.tableless_pairs.push((full.join("::"), scope, parent, own_initialize)),
+            Some(parent) => {
+                let lookup = superclass_lookup_scope(&scope, &class).to_vec();
+                self.tableless_pairs.push((full.join("::"), lookup, parent, own_initialize))
+            }
         }
     }
 
@@ -4612,7 +4923,7 @@ impl ModelBases {
         segs.pop();
         while !segs.is_empty() {
             let candidate = format!("{}::{}", segs.join("::"), parent);
-            if self.names.contains(&candidate) {
+            if candidate != child && self.names.contains(&candidate) {
                 return true;
             }
             segs.pop();
@@ -4620,6 +4931,18 @@ impl ModelBases {
         false
     }
 
+}
+
+/// The modules a class's superclass is looked up through: none for
+/// `::Foo`, which is rooted at the top level.
+fn superclass_lookup_scope<'a>(
+    scope: &'a [String],
+    class: &ruby_prism::ClassNode<'_>,
+) -> &'a [String] {
+    match class.superclass() {
+        Some(node) if node.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)) => &[],
+        _ => scope,
+    }
 }
 
 /// Does this file's first class descend from an ActiveRecord base?
@@ -4641,10 +4964,9 @@ pub fn has_active_record_base(source: &[u8], bases: &ModelBases) -> bool {
     let Some((scope, class)) = super::util::primary_class_with_scope(&root) else {
         return false;
     };
-    class
-        .superclass()
-        .and_then(|n| constant_path_of(&n))
-        .is_some_and(|p| bases.contains(&bases.resolve_superclass(&scope, &p)))
+    bases
+        .resolve_class_superclass(&scope, &class)
+        .is_some_and(|p| bases.contains(&p))
 }
 
 /// A file whose primary class has no superclass and includes
@@ -4679,7 +5001,10 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         }
         // `Breadcrumb = Data.define(:name, :path)`: the file declares a
         // value class, not a model (see `file_data_class`).
-        if file_data_factory(&root).is_some_and(|(_, call)| data_members(&call).is_some()) || file_struct_write(&root).is_some() {
+        if root.as_program_node().is_some_and(|program| program.statements().body().iter()
+            .any(|stmt| file_data_declaration(&stmt).is_some_and(|(_, call)| data_members(&call).is_some())))
+            || file_struct_write(&root).is_some()
+        {
             return Some(ClassKind::LibraryClass);
         }
         // `ExampleError = Class.new(StandardError)`: the file declares a
@@ -4687,12 +5012,14 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         if super::class_new_factory::file_has_factory(&root) {
             return Some(ClassKind::LibraryClass);
         }
-        return None;
+        // `RemoteThing = Thing`: a file of file-level constants declares
+        // those (`ingest_app_library_classes`), not a model.
+        let writes_constants = root.as_program_node().is_some_and(|program| {
+            program.statements().body().iter().any(|stmt| stmt.as_constant_write_node().is_some())
+        });
+        return writes_constants.then_some(ClassKind::LibraryClass);
     };
-    let parent_path = class
-        .superclass()
-        .and_then(|n| constant_path_of(&n))
-        .map(|p| bases.resolve_superclass(&scope, &p));
+    let parent_path = bases.resolve_class_superclass(&scope, &class);
 
     Some(match parent_path.as_deref() {
         // Resolved through the app's own bases, not against two
@@ -4708,7 +5035,11 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
             if class
                 .superclass()
                 .and_then(|n| constant_path_of(&n))
-                .is_some_and(|p| bases.resolve_tableless(&scope, &p).is_some()) =>
+                .is_some_and(|p| {
+                    bases
+                        .resolve_tableless(superclass_lookup_scope(&scope, &class), &p)
+                        .is_some()
+                }) =>
         {
             ClassKind::Model
         }
@@ -6519,4 +6850,29 @@ fn inert_value(node: &ruby_prism::Node<'_>, targets: &[String]) -> bool {
             && call.block().is_none()
             && call.receiver().is_some_and(|r| inert_value(&r, targets))
     })
+}
+
+/// The `LibraryClassOrigin::FileConstants` holder of `file`, named for
+/// the constant Rails' autoloader maps the file to (`Labels` in
+/// `labels.rb`), so the emitted file keeps that path, or else for its
+/// first constant.
+fn file_constants_holder(file: &str, constants: &[(Symbol, Expr)]) -> LibraryClass {
+    let stem = std::path::Path::new(file).file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    let mapped = crate::naming::camelize(stem);
+    let name = constants.iter().find(|(name, _)| name.as_str() == mapped).unwrap_or(&constants[0]).0.clone();
+    LibraryClass {
+        name: ClassId(name),
+        is_module: false,
+        parent: None,
+        parent_span: Default::default(),
+        includes: Vec::new(),
+        include_spans: Vec::new(),
+        methods: Vec::new(),
+        nullable_columns: Vec::new(),
+        origin: Some(crate::dialect::LibraryClassOrigin::FileConstants),
+        constants: Vec::new(),
+        conditional_definitions: Vec::new(),
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+    }
 }

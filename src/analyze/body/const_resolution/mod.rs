@@ -34,6 +34,8 @@ use hoist::{hoisted_name, nested_namespaces_index, runtime_value_types};
 // without value Consts live in `CORE_RBS_BASE`; value Consts are one
 // table (`CORE_VALUE_CONSTS`) that builds both the RBS fields and the
 // typed answer — a second copy is how the type drifts from the graph.
+// A core class that neither this block nor the class registry declares
+// reads as an untyped constant (`raise LocalJumpError`, `Enumerator.new`).
 const CORE_RBS_BASE: &str = "\
 class Numeric < Object\nend\n\
 class Integer < Numeric\nend\n\
@@ -47,7 +49,9 @@ class FalseClass < Object\nend\n\
 class NilClass < Object\nend\n\
 class Regexp < Object\nend\n\
 class Exception < Object\nend\n\
-class StandardError < Exception\nend\n";
+class StandardError < Exception\nend\n\
+class LocalJumpError < StandardError\nend\n\
+class Enumerator < Object\nend\n";
 
 /// `(owner, field, type)` — Ruby's `Owner::FIELD` value Consts.
 /// `core_rbs()` emits the RBS; `core_value_type` answers the type.
@@ -251,6 +255,11 @@ module REXML\n\
   class Elements\n  end\n\
   class ParseException < StandardError\n  end\n\
 end\n";
+
+/// Whether `core_rbs()` declares `name` as a value constant (`Float::INFINITY`).
+pub(crate) fn is_core_value_constant(name: &str) -> bool {
+    core_value_type(name).is_some()
+}
 
 /// The value contract contributed by a constant declared in `core_rbs()`.
 fn core_value_type(name: &str) -> Option<Ty> {
@@ -1164,6 +1173,39 @@ fn answer_file(
         let target = graph
             .name_id_to_declaration_id(*reference.name_id())
             .and_then(|id| graph.declarations().get(id).map(|decl| (*id, decl)))
+            // An app's own alias of a class or module in a file of
+            // constants alone (`RemoteThing = Thing`, which the autoloader
+            // maps by name): Ruby binds the name to the very class, so
+            // `RemoteThing.find` is `Thing.find`. Only a name defined once,
+            // in a file that declares no class or module: elsewhere a later
+            // `Core &&= Class`, which the index records as no definition,
+            // can rebind it.
+            .map(|(id, declaration)| match declaration {
+                Declaration::ConstantAlias(_)
+                    if declaration.definitions().len() == 1
+                        && declaration.definitions().iter().all(|definition| {
+                            graph.definitions().get(definition).is_some_and(|definition| {
+                                matches!(definition, Definition::ConstantAlias(_))
+                                    && graph.documents().get(definition.uri_id()).is_some_and(|document| {
+                                        !document.uri().starts_with(RUNTIME_URI_PREFIX)
+                                            && document.definitions().iter().all(|other| {
+                                                !matches!(
+                                                    graph.definitions().get(other),
+                                                    Some(Definition::Class(_) | Definition::Module(_))
+                                                )
+                                            })
+                                    })
+                            })
+                        }) =>
+                {
+                    graph
+                        .resolve_alias(&id)
+                        .and_then(|target| graph.declarations().get(&target).map(|decl| (target, decl)))
+                        .filter(|(_, target)| target.as_namespace().is_some() && !is_assigned_value(graph, target))
+                        .unwrap_or((id, declaration))
+                }
+                _ => (id, declaration),
+            })
             .map(|(id, declaration)| {
                 if declaration.kind() == "Class" {
                     answers.class_references.insert(key);

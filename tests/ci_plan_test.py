@@ -127,6 +127,41 @@ class PublicationBoundary(unittest.TestCase):
 
 
 class Routing(unittest.TestCase):
+    def test_container_class_values_run_generated_sidecars_natively(self):
+        for path in ["src/analyze/mod.rs", "src/analyze/body/mod.rs", "tests/class_object_container_rbs.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("class_object_container_rbs", plan["spinel_tests"])
+
+    def test_class_object_return_analysis_runs_generated_sidecars_natively(self):
+        for path in ["src/analyze/mod.rs", "tests/class_object_return_rbs.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("class_object_return_rbs", plan["spinel_tests"])
+
+    def test_stream_error_sources_select_the_native_suite(self):
+        for path in [
+            "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
+            "runtime/spinel/tep/server_scheduled.rb", "runtime/spinel/tep/streamer.rb",
+            "tests/spinel_stream_error.rs", "tests/spinel_stream_error.rb",
+            "tests/spinel_stream_error_native.rb", "tests/spinel_stream_error_native_check.rb",
+            "tests/spinel_stream_error_puma.rb",
+            "tests/spinel_stream_error_io.rb", "tests/support/server_check_io.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("spinel_stream_error", plan["spinel_tests"])
+
+    def test_module_self_value_analysis_runs_generated_sidecars_natively(self):
+        for path in ["src/analyze/mod.rs", "src/analyze/body/mod.rs", "tests/module_self_argument_rbs.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("module_self_argument_rbs", plan["spinel_tests"])
+
     def test_shared_controller_base_runs_every_extra_language(self):
         for suffix in ("rb", "rbs"):
             with self.subTest(suffix=suffix):
@@ -229,6 +264,18 @@ class Routing(unittest.TestCase):
         self.assertFalse(
             any("campfire" in job for job in plan["jobs"] if job not in ci.BASE)
         )
+
+    def test_solid_queue_schema_selection_keeps_its_ruby_execution_coverage(self):
+        for path in [
+            "src/ingest/app.rs",
+            "tests/solid_queue_schema.rs",
+            "tests/emit_and_run/solid_queue_worker.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("unit-build", plan["jobs"])
+                self.assertIn("unit", plan["jobs"])
+                self.assertIn("compare-ruby", plan["jobs"])
 
     def test_sidekiq_live_runs_only_when_the_push_or_its_client_changes(self):
         for path in [
@@ -701,6 +748,22 @@ class Routing(unittest.TestCase):
                 self.assertIn("spinel-framework", plan["jobs"])
                 self.assertIn("conditional_expression_parens", plan["spinel_tests"])
 
+    def test_file_level_data_records_select_the_native_toolchain_lane(self):
+        for path in [
+            "src/analyze/data.rs",
+            "src/ingest/library_class.rs",
+            "tests/data_factory_constants.rs",
+            "tests/support/data_record_siblings.rs",
+            "tests/emit_and_run/data_record_siblings.rs",
+            "tests/spinel_toolchain/data_record_siblings.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("unit", plan["jobs"])
+                self.assertIn("spinel-toolchain", plan["jobs"])
+        # This is a toolchain test, not a framework-suite binary.
+        self.assertNotIn("data_record_siblings", ci.SPINEL_TESTS)
+
     def test_param_binds_owns_lowering_drivers_and_database_runtime(self):
         for path in [
             "src/lower/arel/visitor.rs",
@@ -717,11 +780,10 @@ class Routing(unittest.TestCase):
         ]:
             with self.subTest(path=path):
                 plan = ci.select([path])
-                if path in {
-                    "src/lower/arel/visitor.rs",
-                    "tests/support/emit_and_run.rs",
-                }:
-                    expected = [*ci.PARAM_BIND_TESTS, "generated_columns_spinel"]
+                if path == "tests/support/emit_and_run.rs":
+                    expected = [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_constraints"]
+                elif path == "src/lower/arel/visitor.rs":
+                    expected = [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_default_expressions"]
                 elif path.startswith("src/"):
                     expected = ci.PARAM_BIND_TESTS
                 else:
@@ -740,7 +802,7 @@ class Routing(unittest.TestCase):
         # must too when that file is the only change.
         self.assertEqual(
             ci.select(["src/emit/ruby/library.rs"])["spinel_tests"],
-            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel"],
+            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_constraints"],
         )
         self.assertEqual(
             ci.select(["runtime/spinel/db.rb"])["spinel_tests"],
@@ -843,6 +905,25 @@ class Routing(unittest.TestCase):
                 self.assertIn("spinel-framework", plan["jobs"])
         self.assertIn(suite, ci.select([], full=True)["spinel_tests"])
 
+    def test_validation_prepend_owns_its_registration_and_scheduling_inputs(self):
+        paths = [
+            "tests/validation_prepend.rs",
+            "src/dialect.rs",
+            "src/ingest/model.rs",
+            "src/ingest/model/validations.rs",
+            "src/ingest/each_validator.rs",
+            "src/ingest/app.rs",
+            "src/ingest/sti_validations.rs",
+            "src/ingest/validates_with.rs",
+            "src/lower/model_to_library/validations.rs",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("validation_prepend", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+        self.assertIn("validation_prepend", ci.select([], full=True)["spinel_tests"])
+
     def test_generated_columns_spinel_owns_schema_support_and_lowering_inputs(self):
         suite = "generated_columns_spinel"
         paths = [
@@ -876,6 +957,40 @@ class Routing(unittest.TestCase):
         shared = ci.select(["src/emit/shared/schema_sql.rs"])
         self.assertEqual(shared["spinel_tests"], ci.SPINEL_TESTS)
         self.assertIn(suite, shared["spinel_tests"])
+
+    def test_schema_constraints_owns_ddl_and_index_consumers(self):
+        for path in [
+            "tests/schema_constraints.rs", "tests/support/schema_constraints_schema.rb",
+            "tests/support/schema_constraints_contract.rb", "src/schema.rs", "src/ingest/schema.rs",
+            "src/schema/generated.rs", "tests/support/emit_and_run.rs",
+            "src/emit/shared/schema_sql.rs", "src/lower/model_to_library/schema.rs", "src/lower/scope_chain.rs",
+            "src/emit/roda.rs", "src/emit/ruby/library.rs",
+            "src/lower/model_to_library/mod.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("schema_constraints", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
+    def test_sql_default_expressions_own_declarations_and_renderers(self):
+        for path in [
+            "tests/schema_default_expressions.rs", "tests/support/schema_defaults_schema.rb",
+            "tests/support/schema_defaults_contract.rb", "src/schema.rs", "src/schema/generated.rs",
+            "src/ingest/schema.rs", "src/emit/shared/schema_sql.rs", "src/emit/roda.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("schema_default_expressions", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
+
+    def test_sqlite_model_defaults_own_insert_lowering(self):
+        for path in ["src/lower/arel/ir.rs", "src/lower/arel/visitor.rs",
+                     "src/lower/model_to_library/mod.rs", "src/lower/model_to_library/adapter_emit/mod.rs",
+                     "src/lower/model_to_library/schema.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("schema_default_expressions", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
 
     def test_jdbc_probes_select_the_existing_comparison_without_archives(self):
         for path, native_jobs, suites in [
@@ -1448,6 +1563,15 @@ class Results(unittest.TestCase):
         loads[-1] += ci.SPINEL_TOOLCHAIN_TAIL_SECONDS * ci.SPINEL_TOOLCHAIN_THREADS
         self.assertLess(max(loads) - min(loads), max(ci.SPINEL_TOOLCHAIN_SECONDS.values()))
 
+    def test_spinel_toolchain_shards_keep_a_shared_build_on_one_shard(self):
+        tests = [f"t{i:02}" for i in range(40)]
+        units = [["t01", "t07", "t13", "t19", "t25"], ["t02", "t30"], ["t03", "missing"]]
+        shards = [ci.spinel_toolchain_shard(tests, k, units=units) for k in range(ci.SPINEL_TOOLCHAIN_SHARDS)]
+        self.assertEqual(sorted(t for s in shards for t in s), sorted(tests))
+        for unit in units:
+            present = [t for t in unit if t in tests]
+            self.assertEqual(sum(all(t in s for t in present) for s in shards), 1, unit)
+
     def test_toolchain_shard_prints_nothing_for_an_empty_selection(self):
         out = subprocess.run(
             ["python3", spec.origin, "toolchain-shard", "--shard", "0"],
@@ -1546,6 +1670,17 @@ class Results(unittest.TestCase):
             ],
         )
         self.assertEqual(merged, {"toolchain": {"a": 150, "b": 50}, "framework": {"d": 30}})
+
+    def test_a_stopped_tests_seconds_only_raise_its_last_value(self):
+        merged = ci.merge_timings(
+            {"framework": {"slow": 100, "quick": 500}},
+            [
+                {"kind": "framework", "name": "slow", "seconds": 300, "ok": False, "timed_out": True},
+                {"kind": "framework", "name": "quick", "seconds": 200, "ok": False, "timed_out": True},
+                {"kind": "framework", "name": "new", "seconds": 90, "ok": False, "timed_out": True},
+            ],
+        )
+        self.assertEqual(merged, {"toolchain": {}, "framework": {"slow": 200, "quick": 500, "new": 90}})
 
     def test_timing_commands_record_runs_and_keep_failures(self):
         with tempfile.TemporaryDirectory() as tmp:

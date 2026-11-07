@@ -78,6 +78,16 @@ module ActiveSupport
       ::JSON.parse(text)
     end
 
+    # Rails' aliases (`alias_method :load, :decode`, `:dump, :encode`);
+    # solid_queue's recurring task arguments go through them.
+    def self.load(text)
+      ActiveSupport::JSON.decode(text)
+    end
+
+    def self.dump(value)
+      ActiveSupport::JSON.encode(value)
+    end
+
     # One `case` rather than a chain of tests: each read of the untyped
     # value is a site the runtime typing gate counts.
     def self.jsonable(value)
@@ -729,6 +739,28 @@ module ActiveSupport
     out = {}
     hash.each { |k, v| out[k.to_s] = v }
     out
+  end
+
+  def self.deep_stringify_keys(hash)
+    out = {}
+    hash.each do |key, value|
+      converted = case key
+                  when Symbol then key.name
+                  else key.to_s
+                  end
+      out[converted] = ActiveSupport.deep_stringify_keys_value(value)
+    end
+    out
+  end
+
+  def self.deep_stringify_keys_value(value)
+    if value.is_a?(Hash)
+      ActiveSupport.deep_stringify_keys(value)
+    elsif value.is_a?(Array)
+      value.map { |item| ActiveSupport.deep_stringify_keys_value(item) }
+    else
+      value
+    end
   end
 
   # Not `stringify_keys`: Rails' indifferent hash converts only a Symbol key, and its Hash and Array values all the way down.
@@ -1657,6 +1689,8 @@ module ActiveSupport
   end
 
   class TimeZone
+    MAPPING = ZONE_NAMES
+
     attr_reader :name
 
     def initialize(name, data)

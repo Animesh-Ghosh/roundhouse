@@ -756,6 +756,7 @@ fn emit_library_class_with_nested(
             .filter(|l| !l.starts_with("require"))
             .collect();
         let Some(block) = child_block(&body, depth, kid.name.0.as_str()) else { continue };
+        let block = within_namespaces(block, parent.name.0.as_str(), kid.name.0.as_str(), classes);
         blocks.push(NestedBlock {
             name: kid.name.0.as_str().to_string(),
             requires: nested_dependencies(kid, kids),
@@ -769,7 +770,7 @@ fn emit_library_class_with_nested(
         let sidecar = super::rbs::emit_library_class_rbs(kid, &rb_path);
         let lines: Vec<&str> = sidecar.content.lines().collect();
         if let Some(block) = child_block(&lines, depth, kid.name.0.as_str()) {
-            sidecar_blocks.push(block);
+            sidecar_blocks.push(within_namespaces(block, parent.name.0.as_str(), kid.name.0.as_str(), classes));
         }
     }
     if blocks.is_empty() {
@@ -992,6 +993,40 @@ impl NestedEmitter<'_> {
 /// segment is the runtime's — with ONE compact header naming the whole
 /// path (`module WebPush::Connections::Stages`), which is renamed to
 /// its last segment.
+/// A child two or more levels below the parent (`Rack::Attack::StoreProxy::RedisProxy`
+/// in `Rack::Attack`) inside the namespaces between them: `child_block` names it by its
+/// last segment, which alone would define `Rack::Attack::RedisProxy`.
+fn within_namespaces(block: String, parent: &str, child: &str, classes: &[LibraryClass]) -> String {
+    let Some(relative) = child.strip_prefix(&format!("{parent}::")) else { return block };
+    let segments: Vec<&str> = relative.split("::").collect();
+    let Some((_, between)) = segments.split_last() else { return block };
+    // Already inside them: `unwrapped` kept the source's own `module StoreProxy`.
+    let first = block.lines().find(|l| !l.trim().is_empty()).unwrap_or_default();
+    // Not a bare prefix test: `module StoreProxyHelpers` would pass for `StoreProxy`.
+    let opens = |kw: &str| {
+        first.strip_prefix(&format!("{kw} {}", between.first().copied().unwrap_or(""))).is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', ';']))
+    };
+    if between.is_empty() || opens("module") || opens("class") {
+        return block;
+    }
+    let mut out = String::new();
+    let mut name = parent.to_string();
+    for (i, seg) in between.iter().enumerate() {
+        name = format!("{name}::{seg}");
+        let keyword = if classes.iter().any(|c| c.name.0.as_str() == name && !c.is_module) { "class" } else { "module" };
+        out.push_str(&format!("{}{keyword} {seg}\n", "  ".repeat(i)));
+    }
+    out.push_str(&indent_lines(&block, between.len()));
+    out.push('\n');
+    for i in (0..between.len()).rev() {
+        out.push_str(&format!("{}end", "  ".repeat(i)));
+        if i > 0 {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn child_block(body: &[&str], depth: usize, full_name: &str) -> Option<String> {
     let first = body.iter().position(|l| !l.trim().is_empty())?;
     let header = body[first];
@@ -2053,7 +2088,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     let _span = crate::timings::begin("scope lowering: setup");
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
     let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
-    let unique_keys = crate::lower::scope_chain::build_unique_keys(&app.models, &app.schema);
+    let unique_keys = crate::lower::scope_chain::build_unique_keys(app);
     let regs = crate::lower::scope_chain::Registries {
         scopes: &scopes,
         models: &models,
@@ -2125,6 +2160,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &scopes,
                 &models,
                 &assocs,
+                &unique_keys,
             );
         }
         // User-written class methods the registry admitted as
@@ -2157,6 +2193,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         &scopes,
                         &models,
                         &assocs,
+                        &unique_keys,
                     );
                 }
             }
@@ -2204,6 +2241,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         &scopes,
                         &models,
                         &assocs,
+                        &unique_keys,
                     );
                 }
             }
@@ -3611,6 +3649,17 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         };
         let declared_instance = declared_on(false);
         let declared_class = declared_on(true);
+        let controller_shadows = app
+            .controllers
+            .iter()
+            .find(|controller| controller.name == lc.name)
+            .map(|controller| {
+                crate::lower::controller_to_library::route_helper_shadows(
+                    controller,
+                    &app.controllers,
+                )
+            })
+            .unwrap_or_default();
         // A framework-helper name the app defines on a SUPERCLASS or in an
         // INCLUDED module (`ApplicationRecord#dom_class`, a concern's
         // `number_to_currency`) is the same self-dispatch: qualifying it to
@@ -3675,6 +3724,9 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 MethodReceiver::Instance => declared_instance.clone(),
                 MethodReceiver::Class => declared_class.clone(),
             };
+            if m.receiver == MethodReceiver::Instance {
+                own_methods.extend(controller_shadows.iter().cloned());
+            }
             own_methods.extend(match m.receiver {
                 MethodReceiver::Instance => inherited_instance.iter().cloned(),
                 MethodReceiver::Class => inherited_class.iter().cloned(),
@@ -4730,51 +4782,11 @@ fn view_helpers_path() -> Vec<Symbol> {
 ///      `ActionView::ViewHelpers.name(args)`.
 /// Only receiver-less Sends are rewritten in (3)/(4): a call with a receiver
 /// already resolves, and a bare identifier with no call shape is a local read.
-fn rewrite_helper_calls(
-    expr: &mut Expr,
-    index: &HashMap<Symbol, ClassId>,
-    route_helpers: &crate::det::HashSet<Symbol>,
-    url_helper_classes: &crate::det::HashSet<Symbol>,
-    rewrite_request: bool,
-    own_methods: &crate::det::HashSet<Symbol>,
-    own_params: &crate::det::HashSet<Symbol>,
-    view_visible: &std::collections::BTreeSet<Symbol>,
-) {
-    expr.node.for_each_child_mut(&mut |c| {
-        rewrite_helper_calls(
-            c,
-            index,
-            route_helpers,
-            url_helper_classes,
-            rewrite_request,
-            own_methods,
-            own_params,
-            view_visible,
-        )
-    });
-
-    // Not left on `self` in a view or helper module: a helper reached as `self.x` is the bare `x` below, and the module function has no such method. A same-named param keeps `self`, which a bare call would read instead.
-    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
-        if rewrite_request
-            && matches!(&*r.node, ExprNode::SelfRef)
-            && (index.contains_key(method) || view_visible.contains(method))
-            && !own_methods.contains(method)
-            && !own_params.contains(method)
-        {
-            let ExprNode::Send { recv, .. } = &mut *expr.node else { unreachable!() };
-            *recv = None;
-        }
-    }
-
-    // Destructive `<lvalue>.<m>!(args)` on a frozen string raises under
-    // spinel (frozen literals) — lobsters' link_to_different_page does
-    // `path.sub!(/…/, "")` on a route-helper literal (`active_path` → a
-    // frozen "/active"). For the in-place string mutators whose bang form
-    // modifies self and returns self-or-nil, the non-destructive
-    // `<lvalue> = <lvalue>.<m>(args)` is equivalent when the bang return is
-    // unused (statement position) and is frozen-safe. Assignable receiver
-    // (Var/Ivar) only; `slice!` and friends (which return the removed part,
-    // not the modified string) are deliberately excluded.
+/// Destructive `<lvalue>.<m>!(args)` on a frozen string raises under
+/// spinel (frozen literals). For the in-place string mutators whose bang
+/// form modifies self and returns self-or-nil, `<lvalue> = <lvalue>.<m>(args)`
+/// is equivalent when the bang's value is unused, and frozen-safe.
+fn bang_to_reassign(expr: &mut Expr) {
     let bang_rewrite: Option<Symbol> =
         if let ExprNode::Send { recv: Some(r), method, block: None, .. } = &*expr.node {
             // A reserved-word local (`class:`) or a numbered parameter
@@ -4819,7 +4831,52 @@ fn rewrite_helper_calls(
             ExprNode::Send { recv: Some(r), method: base, args, block: None, parenthesized },
         );
         *expr.node = ExprNode::Assign { target, value: call };
-        return;
+    }
+}
+
+fn rewrite_helper_calls(
+    expr: &mut Expr,
+    index: &HashMap<Symbol, ClassId>,
+    route_helpers: &crate::det::HashSet<Symbol>,
+    url_helper_classes: &crate::det::HashSet<Symbol>,
+    rewrite_request: bool,
+    own_methods: &crate::det::HashSet<Symbol>,
+    own_params: &crate::det::HashSet<Symbol>,
+    view_visible: &std::collections::BTreeSet<Symbol>,
+) {
+    expr.node.for_each_child_mut(&mut |c| {
+        rewrite_helper_calls(
+            c,
+            index,
+            route_helpers,
+            url_helper_classes,
+            rewrite_request,
+            own_methods,
+            own_params,
+            view_visible,
+        )
+    });
+
+    // Not left on `self` in a view or helper module: a helper reached as `self.x` is the bare `x` below, and the module function has no such method. A same-named param keeps `self`, which a bare call would read instead.
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+        if rewrite_request
+            && matches!(&*r.node, ExprNode::SelfRef)
+            && (index.contains_key(method) || view_visible.contains(method))
+            && !own_methods.contains(method)
+            && !own_params.contains(method)
+        {
+            let ExprNode::Send { recv, .. } = &mut *expr.node else { unreachable!() };
+            *recv = None;
+        }
+    }
+
+    // Only a statement whose value nothing reads: `mod ||= path.gsub!(…)` tests the bang call's nil (addressable's normalize_path).
+    if let ExprNode::Seq { exprs } = &mut *expr.node
+        && let Some((_, statements)) = exprs.split_last_mut()
+    {
+        for statement in statements {
+            bang_to_reassign(statement);
+        }
     }
 
     // ActiveSupport `String#pluralize(count)` — count-aware inflection of
@@ -5050,9 +5107,13 @@ fn rewrite_helper_calls(
     //
     // Self wins here too: a class that defines `widgets_url` itself
     // calls that method (Rails mixes url helpers in beneath a class's
-    // own methods, and a plain class has none mixed in at all).
+    // own methods, and a plain class has none mixed in at all). So does
+    // an app helper of the `_url` name (`index`): Rails mixes the app's
+    // helpers in above the url helpers, and the bare call takes case 3's
+    // qualification to that module below.
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node
         && !own_methods.contains(method)
+        && !index.contains_key(method)
     {
         if let Some(stem) = method.as_str().strip_suffix("_url") {
             let path_name = Symbol::from(format!("{stem}_path"));
@@ -5069,15 +5130,16 @@ fn rewrite_helper_calls(
 
     // Cases 3/4: a bare call resolving to an app or framework helper module.
     let path: Option<Vec<Symbol>> = match &*expr.node {
-        ExprNode::Send { recv: None, method, args, block, .. } => {
+        ExprNode::Send { recv: None, method, args, block, parenthesized } => {
             // A method's own PARAM shadows the helper index only as a BARE
-            // reference (no args, no block) — that's a local read. `tag(x)`
-            // or `tag { }` is a method call that still needs helper
-            // qualification, so a same-named param must NOT capture it
-            // (that dropped the qualification → latent NameError). Real
-            // own-METHODS shadow at any arity (a self-dispatch).
+            // reference (no args, no block, no parens) — that's a local
+            // read. `tag(x)`, `tag()` or `tag { }` is a method call that
+            // still needs helper qualification, so a same-named param must
+            // NOT capture it (that dropped the qualification → latent
+            // NameError, or a partial local read in place of the helper's
+            // call). Real own-METHODS shadow at any arity (a self-dispatch).
             let param_shadow =
-                own_params.contains(method) && args.is_empty() && block.is_none();
+                own_params.contains(method) && args.is_empty() && block.is_none() && !parenthesized;
             if own_methods.contains(method) || param_shadow {
                 // Self wins: a bare call naming a method the enclosing
                 // class itself defines is a self-dispatch (Tag#to_param's
@@ -8532,6 +8594,45 @@ fn emit_library_class_decl_inner(
     let self_anchor = out_path.with_extension("").to_string_lossy().into_owned();
     let mut s = String::new();
 
+    // A file of constants alone: its writes at the top level, where Ruby
+    // binds them on Object. Each value runs as the file loads, so what it
+    // names is loaded just before it, after the constants written above
+    // it: a class body that file loads may read those. A stored lambda
+    // names its constants when it is called, not here.
+    if lc.is_file_constants() {
+        let mut required: BTreeSet<String> = BTreeSet::new();
+        for (cname, value) in &lc.constants {
+            let mut paths: BTreeSet<Vec<String>> = BTreeSet::new();
+            walk_load_time_const_paths(value, &mut paths);
+            let requires: BTreeSet<String> = paths
+                .iter()
+                .filter_map(|path| require_path_for_body_const(path, app, classes, ""))
+                .filter(|anchor| *anchor != self_anchor)
+                .map(|anchor| relpath(&out_dir, &anchor))
+                .filter(|require| !required.contains(require))
+                .collect();
+            if !requires.is_empty() {
+                if !s.is_empty() {
+                    writeln!(s).unwrap();
+                }
+                for require in &requires {
+                    writeln!(s, "require_relative {require:?}").unwrap();
+                }
+                writeln!(s).unwrap();
+                required.extend(requires);
+            }
+            // As an assignment, which groups a `(a; b)` or `(x if c)`
+            // value: bare, only its first statement, or only when `c`
+            // holds, would be the constant's.
+            let assign = Expr::new(
+                value.span,
+                ExprNode::Assign { target: LValue::Const { path: vec![cname.clone()] }, value: value.clone() },
+            );
+            writeln!(s, "{}", super::emit_expr(&assign)).unwrap();
+        }
+        return EmittedFile { path: out_path, content: s };
+    }
+
     let mut emitted_external_require = false;
     for included in &lc.includes {
         let detail = format!("{} includes unresolved {}", lc.name.0, included.0);
@@ -8837,6 +8938,16 @@ fn emit_library_class_decl_inner(
     }
     for &i in &deferred {
         body_requires.extend(resolve_all(&lc.constants[i].1, true));
+    }
+    // Not only the interleaved ones, which the split plan places: an ordered body writes the rest after its methods, where they read their constants as the body loads (devise's `@@helpers << Devise::Controllers::Helpers`).
+    if ordered_body {
+        for init in lc.class_ivar_initializers.iter().filter(|init| {
+            init.span.is_synthetic() || !matches!(&*init.node, ExprNode::Assign { target: LValue::Ivar { .. }, .. } | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. })
+        }) {
+            let mut paths = BTreeSet::new();
+            walk_load_time_paths(init, lc, &mut BTreeSet::new(), &mut paths);
+            body_requires.extend(paths.iter().filter_map(|p| resolve(p, true)));
+        }
     }
     let factory_methods: Vec<&MethodDef> = lc
         .constants
@@ -10691,6 +10802,14 @@ fn require_path_for_body_const(
         }
         return Some(format!("app/models/{}", crate::naming::underscore(&owner)));
     }
+    // Any constant of a file of constants alone is that file's, not only
+    // the one it is named for: `Labels = DEFAULT` beside `DEFAULT = […]`.
+    if let Some(file) = classes.iter().chain(&app.library_classes).find(|class| {
+        class.is_file_constants() && class.constants.iter().any(|(name, _)| name.as_str() == first)
+    }) {
+        let owner = file.name.0.as_str();
+        return (owner != self_name).then(|| format!("app/models/{}", crate::naming::underscore(owner)));
+    }
     if first == self_name {
         return None;
     }
@@ -10912,6 +11031,110 @@ pub(super) fn walk_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
     e.node.for_each_child(&mut |child| walk_const_paths(child, out));
 }
 
+/// [`walk_const_paths`], for what runs as the expression does: not the
+/// body of a closure it stores (`-> { … }`, `proc { … }`, `lambda { … }`,
+/// `Proc.new { … }`), which runs when something calls it, unless the
+/// expression calls it right there (`(-> { … }).call`). A block a call
+/// runs now (`map`, `each`) is walked, as `partition_deferred_constants`
+/// reads it.
+fn walk_load_time_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
+    /// The body of a stored closure literal.
+    fn stored_body(e: &Expr) -> Option<&Expr> {
+        let block = match &*e.node {
+            ExprNode::Lambda { .. } => return Some(e),
+            ExprNode::Send { recv, method, block: Some(block), .. }
+                if matches!(method.as_str(), "proc" | "lambda")
+                    || (method.as_str() == "new"
+                        && matches!(
+                            recv.as_ref().map(|r| &*r.node),
+                            Some(ExprNode::Const { path }) if path.len() == 1 && path[0].as_str() == "Proc"
+                        )) =>
+            {
+                block
+            }
+            _ => return None,
+        };
+        Some(block)
+    }
+    /// A closure that runs now with at least `given` positional
+    /// arguments: the parameter defaults those leave unfilled, then its
+    /// body. Ruby fills the required parameters first, then the optional
+    /// ones in order. Without a rest parameter the closure has no others
+    /// (ingest folds post-rest parameters into one), so the count is
+    /// exact; with one, every default is walked.
+    fn run(closure: &Expr, given: usize, out: &mut BTreeSet<Vec<String>>) {
+        let ExprNode::Lambda { params, rest_param, extra_params, body, .. } = &*closure.node else {
+            return walk_load_time_const_paths(closure, out);
+        };
+        let mut optional = 0;
+        for param in extra_params {
+            let positional = !param.keyword && !param.rest && !param.forwarding && !param.from_keyword;
+            let filled = positional && rest_param.is_none() && given > params.len() + optional;
+            optional += usize::from(positional);
+            if let Some(default) = param.default.as_ref().filter(|_| !filled) {
+                walk_load_time_const_paths(default, out);
+            }
+        }
+        walk_load_time_const_paths(body, out);
+    }
+    match &*e.node {
+        ExprNode::Lambda { .. } => {}
+        ExprNode::Send { recv, method, args, block, .. } => {
+            let stores_block = stored_body(e).is_some();
+            // `(-> { … }).call`, `.()`, `[]`, `yield`: the closure runs now.
+            if matches!(method.as_str(), "call" | "[]" | "yield" | "===") {
+                if let Some(closure) = recv.as_ref().and_then(stored_body) {
+                    // The arguments that are surely positional: not a
+                    // splat, which may spread to none, nor a hash, which
+                    // may be keywords. A keyword splat of known keys is
+                    // one positional hash to a closure that takes no
+                    // keywords; `**{}` passes nothing.
+                    let takes_keywords = matches!(
+                        &*closure.node,
+                        ExprNode::Lambda { extra_params, .. }
+                            if extra_params.iter().any(|param| param.keyword || param.from_keyword)
+                    );
+                    let given = args
+                        .iter()
+                        .filter(|arg| {
+                            let splatted = match &*arg.node {
+                                ExprNode::KeywordSplat { value } => Some(value),
+                                _ if arg.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0 => Some(*arg),
+                                _ => None,
+                            };
+                            if let Some(value) = splatted {
+                                return !takes_keywords
+                                    && matches!(&*value.node, ExprNode::Hash { entries, .. } if !entries.is_empty());
+                            }
+                            !matches!(
+                                &*arg.node,
+                                ExprNode::Splat { .. }
+                                    | ExprNode::Hash { .. }
+                                    | ExprNode::ForwardArgs
+                                    | ExprNode::ForwardKeywords
+                                    | ExprNode::ForwardKeywordsWithPairs { .. }
+                            )
+                        })
+                        .count();
+                    run(closure, given, out);
+                }
+            }
+            for child in recv.iter().chain(args.iter()) {
+                walk_load_time_const_paths(child, out);
+            }
+            if let Some(block) = block.as_ref().filter(|_| !stores_block) {
+                run(block, 0, out);
+            }
+        }
+        _ => {
+            if let ExprNode::Const { path } = &*e.node {
+                out.insert(path.iter().map(|s| s.as_str().to_string()).collect());
+            }
+            e.node.for_each_child(&mut |child| walk_load_time_const_paths(child, out));
+        }
+    }
+}
+
 // has_secure_password synthesis moved to the shared model lowering
 // (`lower::secure_password::push_secure_password_methods`) — every
 // target's model classes now carry authenticate + the plaintext
@@ -11056,6 +11279,7 @@ pub(crate) fn apply_typed_writer_cast_lowering(lcs: &mut [LibraryClass], app: &A
         // `:boolean` already casts inline (`markers::push_attribute_api_methods`).
         {
             for (name, ty) in crate::lower::model_to_library::markers::attribute_api_decls(&model.body) {
+                let Some(ty) = ty else { continue };
                 if model.enums.contains_key(&name) {
                     continue;
                 }

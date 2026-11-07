@@ -1223,7 +1223,7 @@ fn push_value_segment(segments: &mut Vec<Expr>, val: &Value, param: bool, binds:
             segments.push(lit_str("?".to_string()));
             binds.push(Bind { expr: expr.clone(), ty: *ty, nullable_column: None, parameterized: true });
         }
-        Value::Runtime { .. } => segments.push(escape_value(&db, val)),
+        Value::Runtime { .. } | Value::SqlDefault { .. } => segments.push(escape_value(&db, val)),
     }
 }
 
@@ -1232,6 +1232,11 @@ fn push_value_segment(segments: &mut Vec<Expr>, val: &Value, param: bool, binds:
 /// `push_value_segment` instead.
 fn escape_value(db: &ClassId, val: &Value) -> Expr {
     match val {
+        Value::SqlDefault { expr, ty, sql } => Expr::new(Span::synthetic(), ExprNode::If {
+            cond: send_to(expr.clone(), "nil?", vec![], true),
+            then_branch: lit_str(format!("({sql})")),
+            else_branch: escape_value(db, &Value::Runtime { expr: expr.clone(), ty: *ty }),
+        }),
         Value::Runtime { expr, ty } => {
             let method = match ty {
                 ValueType::Int => "escape_int",
@@ -1466,6 +1471,8 @@ mod tests {
                         col_type: ColumnType::Integer,
                         nullable: false,
                         default: None,
+                        default_expression: None,
+                        legacy_default_persistence: false,
                         primary_key: true,
                         generated: None,
                         generated_text_compatible: None,
@@ -1478,6 +1485,8 @@ mod tests {
                         col_type: ColumnType::Text,
                         nullable: false,
                         default: None,
+                        default_expression: None,
+                        legacy_default_persistence: false,
                         primary_key: false,
                         generated: None,
                         generated_text_compatible: None,
@@ -1488,6 +1497,7 @@ mod tests {
                 ],
                 indexes: vec![],
                 foreign_keys: vec![],
+                check_constraints: Vec::new(),
                 virtual_module: None,
                 known_keyless: false,
                 primary_key_columns: Vec::new(),

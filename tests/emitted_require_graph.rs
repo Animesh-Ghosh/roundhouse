@@ -147,9 +147,8 @@ fn spinel_target_require_graph_is_closed() {
 /// Separate from the `require_relative` graph above and for the same
 /// reason: the rule was written down once, inside `spin_shape`, so only
 /// the spinel tree got it. Ruby 4.0 autoloads `Set` and `Pathname` and
-/// hides the gap; Ruby 3.4 — what the scaffold claims and what
-/// `campfire-conformance` runs — raises, and campfire lost two test
-/// files to a `Pathname()` in a helper. Every ruby-family target is
+/// hides the gap; Ruby 3.4, the minimum when this was written, raised,
+/// and campfire lost two test files to a `Pathname()` in a helper. Every ruby-family target is
 /// checked here so the next target to be added is checked too.
 fn assert_no_missing_bundled_requires(files: &[(String, String)], label: &str) {
     let gaps = roundhouse::project::missing_bundled_requires(files);
@@ -282,6 +281,7 @@ fn ruby_family_runtime_constants_are_ledgered_on_other_targets() {
      ActiveRecord::Type::String, ActiveRecord::Type::Integer, ActiveRecord::Type::Value,
      ActiveSupport::IsolatedExecutionState, ActiveSupport::Notifications,
      ActiveSupport::Notifications::Event, ActiveSupport::ConfigurationFile,
+     ActiveSupport::OrderedOptions,
      ActiveStorage::Transformers, ActiveStorage::Transformers::Transformer,
      ActiveStorage::Transformers::ImageProcessingTransformer,
      ActiveStorage::Service::GCSService,
@@ -339,8 +339,8 @@ end
             continue;
         }
         if target == BuildTarget::Spinel {
-            assert_eq!(gaps.len(), 4, "{gaps:?}");
-            for name in ["ActiveSupport::ConfigurationFile", "Arel::Nodes::Ascending", "Arel::Nodes::Descending", "Arel::Nodes::Predicate"] {
+            assert_eq!(gaps.len(), 5, "{gaps:?}");
+            for name in ["ActiveSupport::ConfigurationFile", "ActiveSupport::OrderedOptions", "Arel::Nodes::Ascending", "Arel::Nodes::Descending", "Arel::Nodes::Predicate"] {
                 assert!(gaps.iter().any(|g| g.message.contains(name)), "{name}: {gaps:?}");
             }
             continue;

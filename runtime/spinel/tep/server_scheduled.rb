@@ -219,6 +219,8 @@ module Tep
           return false
         end
         req.listener_transport = transport
+        # Rack's REMOTE_ADDR: the peer a connection came from ("" over a UNIX socket).
+        req.remote_host = Sock.sp_net_peer_ip(client)
 
         # Before the drain, which is what held the bytes (Request#body_refusal).
         refusal = req.body_refusal(Tep.max_body_bytes)
@@ -320,7 +322,12 @@ module Tep
           head << "Connection: close\r\n\r\n"
           Sock.sphttp_write_str(client, head)
           out = Tep::Stream.new(client)
-          res.streamer.pump(out)
+          begin
+            res.streamer.pump(out)
+          rescue StandardError, ScriptError => e
+            Tep.log_dispatch_error(req.verb, req.path, e)
+            return false
+          end
           Sock.sphttp_write_chunk_end(client)
           return false
         end

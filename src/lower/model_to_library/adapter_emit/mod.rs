@@ -336,7 +336,10 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema, writes_
         .filter(|c| c.generated.is_none() && (!c.primary_key || supplied_key.is_some()))
         .map(|c| Assignment {
             column: c.name.clone(),
-            value: Value::Runtime { expr: storage_value(c), ty: value_type_for_column(c) },
+            value: match c.persisted_computed_default() {
+                Some(sql) => Value::SqlDefault { expr: storage_value(c), ty: value_type_for_column(c), sql: sql.into() },
+                None => Value::Runtime { expr: storage_value(c), ty: value_type_for_column(c) },
+            },
         })
         .collect();
 
@@ -348,7 +351,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema, writes_
     let insert_with_key = insert.clone();
     let op = ArelOp::Insert(insert.clone());
     let generated: Vec<&crate::schema::Column> =
-        table.columns.iter().filter(|c| c.generated.is_some()).collect();
+        table.columns.iter().filter(|c| c.generated.is_some() || c.persisted_computed_default().is_some()).collect();
     let ret_ty = supplied_key.map(|c| ty_of_column(&c.col_type)).unwrap_or(Ty::Int);
     let uuid_mint = supplied_key
         .filter(|c| matches!(c.col_type, ColumnType::Uuid))
@@ -543,6 +546,9 @@ fn hydrate_generated_after_insert(
             },
         );
         is_nil.ty = Some(Ty::Bool);
+        if col.persisted_computed_default().is_some() {
+            is_nil = Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: true } });
+        }
         let value = crate::lower::typing::with_ty(
             arel_db_call(
                 &db,
@@ -1428,7 +1434,7 @@ fn value_type_for_column(col: &crate::schema::Column) -> ValueType {
     if col.array_stored {
         return ValueType::StrOpt;
     }
-    let nullable = col.nullable && !col.primary_key;
+    let nullable = (col.nullable || col.persisted_computed_default().is_some()) && !col.primary_key;
     match ty_of_column(&col.col_type) {
         Ty::Int => {
             if nullable {

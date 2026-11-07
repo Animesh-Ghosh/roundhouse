@@ -711,7 +711,8 @@ const FATES: &[(&str, GemFate)] = &[
     // ── Modeled (each row names where) ───────────────────────────
     ("acts_as_tenant", GemFate::Modeled), // ingest/acts_as_tenant: acts_as_tenant -> belongs_to + dynamic default_scope + create stamp; validates_uniqueness_to_tenant; ActsAsTenant as CurrentAttributes (current_tenant, with_tenant, without_tenant); set_current_tenant_through_filter (not has_global_records/through/polymorphic/require_tenant/subdomain/immutability)
     ("acts_as_votable", GemFate::Modeled), // ingest/acts_as_votable: ActsAsVotable::Vote on `votes`; acts_as_votable/acts_as_voter macros -> votes_for/votes + vote_by/liked_by/unvote_by/update_cached_votes (not vote_up_for/get_voted/association extensions)
-    ("addressable", GemFate::Modeled), // catalog/gems: Addressable::URI
+    // Not Modeled: the catalog types Addressable::URI, but no tree has a body for it, so it runs as the gem itself.
+    ("addressable", GemFate::Unknown),
     ("bcrypt", GemFate::Modeled),      // catalog/gems: BCrypt::*; has_secure_password
     ("commonmarker", GemFate::Modeled), // catalog/gems: Commonmarker, Commonmarker::Node
     ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
@@ -920,6 +921,42 @@ pub(crate) fn is_stdlib_namespace(root: &str) -> bool {
         || FATES.iter().any(|(gem, fate)| matches!(fate, GemFate::Stdlib) && namespace_of(gem).eq_ignore_ascii_case(root))
 }
 
+/// Ruby's core classes and modules. The modules `is_stdlib_namespace`'s
+/// RUBY_OWN already holds (Kernel, Comparable, Math, Marshal, GC,
+/// ObjectSpace, Process, Signal, IO, Encoding, Fiber, Mutex, Warning) are
+/// not repeated here.
+const RUBY_CORE: &[&str] = &[
+    "ArgumentError", "Array", "BasicObject", "Binding", "Class", "ClosedQueueError", "ConditionVariable", "Complex",
+    "Data", "Dir", "EncodingError", "EOFError", "Enumerable", "Enumerator", "Exception", "FalseClass", "File",
+    "FileTest", "FiberError", "Float", "FloatDomainError", "FrozenError", "Hash", "IndexError", "Integer",
+    "Interrupt", "IOError", "KeyError", "LoadError", "LocalJumpError", "Method", "Module", "NameError", "NilClass",
+    "NoMatchingPatternError", "NoMatchingPatternKeyError", "NoMemoryError", "NoMethodError", "NotImplementedError",
+    "Numeric", "Object", "Proc", "Queue", "Random", "Range", "RangeError", "Rational", "Refinement", "Regexp",
+    "RegexpError", "RuntimeError", "ScriptError", "SecurityError", "SignalException", "SizedQueue", "StandardError",
+    "StopIteration", "String", "Struct", "Symbol", "SyntaxError", "SystemCallError", "SystemExit", "SystemStackError",
+    "ThreadError", "ThreadGroup", "TrueClass", "TypeError", "UnboundMethod", "UncaughtThrowError", "ZeroDivisionError",
+];
+
+/// A constant Ruby's core always defines: a core class or module itself, or
+/// a class or value constant Ruby declares inside one (`Enumerator::Lazy`,
+/// `Float::INFINITY`). Not any name under a core root: `String::Nope` is
+/// Ruby's NameError. A leading `Object::` is the top level.
+pub(crate) fn is_core_constant(written: &[&str]) -> bool {
+    let mut path = written;
+    while path.len() > 1 && path[0] == "Object" {
+        path = &path[1..];
+    }
+    match path {
+        [root] => RUBY_CORE.contains(root),
+        [root, ..] if RUBY_CORE.contains(root) => {
+            let full = path.join("::");
+            crate::emit::audit::CORE_CONSTANTS.binary_search(&full.as_str()).is_ok()
+                || crate::analyze::is_core_value_constant(&full)
+        }
+        _ => false,
+    }
+}
+
 pub fn fate_of(name: &str) -> GemFate {
     if PRELOADED.iter().any(|(feature, _, _)| *feature == name) {
         return GemFate::Stdlib;
@@ -1076,7 +1113,7 @@ pub fn loads_by_gem_name(gem: &str) -> bool {
 /// hand-written version of the rule, and every private gem that follows
 /// the same convention needed its own entry to be attributable at all —
 /// which, by definition, it cannot have here.
-fn namespace_candidates(gem: &str) -> Vec<String> {
+pub(crate) fn namespace_candidates(gem: &str) -> Vec<String> {
     let mut candidates = vec![namespace_of(gem)];
     if let Some((head, _)) = gem.split_once('-') {
         let first = camelize(head);
@@ -1796,6 +1833,18 @@ pub(crate) fn gems_owning_constant_with<'a>(census: &'a GemCensus, constant_path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A core class and what Ruby declares in it are defined; any other name
+    /// under a core root is not (`String::Nope` is Ruby's NameError).
+    #[test]
+    fn only_what_ruby_declares_under_a_core_class_is_a_core_constant() {
+        for defined in [&["Object"][..], &["String"], &["Object", "String"], &["Enumerator", "Lazy"], &["Float", "INFINITY"]] {
+            assert!(is_core_constant(defined), "{defined:?}");
+        }
+        for missing in [&["Object", "Missing"][..], &["String", "Nope"], &["Missing"], &["Float", "Nope"]] {
+            assert!(!is_core_constant(missing), "{missing:?}");
+        }
+    }
 
     /// rotp's façade only raises, so the gem is compiled from source; WebPush's
     /// also raises in gem_facades.rb, but the Spinel tree ports it, and a
