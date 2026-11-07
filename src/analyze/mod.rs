@@ -67,6 +67,7 @@ mod harvest_return;
 mod fixpoint_bound;
 mod fixpoint_check;
 mod fixpoint_rounds;
+mod oscillation;
 pub use fixpoint_rounds::{FixpointRounds, LoopEnd, Restamp};
 mod dirty_retype;
 mod typing_mode;
@@ -211,6 +212,8 @@ pub struct Analyzer {
     fixpoint_rounds: FixpointRounds,
     /// What the opt-in fixpoint canaries saw (`fixpoint_check`).
     fixpoint_checks: fixpoint_check::Checks,
+    /// Each return and parameter row's movement across the fixpoint's rounds (`oscillation`).
+    settle: oscillation::Settle,
     /// Parameter rows and tables kept across fixpoint rounds (see `unify_memo`).
     unify_memo: unify_memo::UnifyMemo,
 }
@@ -1371,6 +1374,7 @@ impl Analyzer {
             controller_action_meta_cache: HashMap::default(),
             fixpoint_rounds: FixpointRounds::default(),
             fixpoint_checks: fixpoint_check::Checks::default(),
+            settle: oscillation::Settle::default(),
             unify_memo: unify_memo::UnifyMemo::default(),
         }
     }
@@ -1458,6 +1462,7 @@ impl Analyzer {
         app.unknown_association_targets = unknown_association_targets(app, &self.classes);
         self.upload_array_fields = Some(crate::lower::controller_to_library::params::upload_array_fields(&app.controllers));
         self.fixpoint_checks = fixpoint_check::Checks::start();
+        self.settle = oscillation::Settle::default();
         self.unify_memo.reset();
         // Before any signature is copied. Anonymous `**` / `...` cannot
         // survive flattened keywords, and `check` does not lower.
@@ -1592,6 +1597,7 @@ impl Analyzer {
             crate::timings::phase(format_args!("round {round}: unify params"), || {
                 self.unify_params_from_call_sites(app, UnifyScope::Production)
             });
+            self.settle_oscillations(&prev_hints.sig);
             // Returns+params settle independently of block-value
             // verdicts (`DirtyHints`); both must be quiet before the
             // loop stops, or a newly block-valued method leaves its
@@ -1704,6 +1710,7 @@ impl Analyzer {
                     }
                 },
             );
+            self.settle_oscillations(&prev_hints.sig);
             if self.inference_matches(&prev_hints.sig)
                 && self.block_value_matches(&prev_hints)
             {
@@ -1754,6 +1761,7 @@ impl Analyzer {
                     snapshot.clone_from(&self.inferred_params);
                 }
                 self.overlay_test_params(app);
+                self.settle_oscillations(&absorb_hints.sig);
                 if self.inference_matches(&absorb_hints.sig)
                     && self.block_value_matches(&absorb_hints)
                 {
@@ -1779,7 +1787,10 @@ impl Analyzer {
                     TypingMode::Production { dirty: None },
                 )
             });
+            let before_harvest = self.capture_inference_sig();
             self.harvest_returns_to_registry(app, true);
+            // Not left as harvested: the raw return of a pinned entry would replace its join, and the restamp can exit without another harvest to restore it.
+            self.settle.returns(&mut self.classes, &before_harvest.instance, &before_harvest.class_methods);
             // …and that harvest can still move a helper's return, which
             // production bodies read. The absorb branch above ends on a
             // signature check, so it leaves production converged; this
@@ -1833,6 +1844,7 @@ impl Analyzer {
             self.unify_params_from_call_sites(app, UnifyScope::WithViews);
             self.overlay_test_params(app);
             self.apply_pinned_params();
+            self.settle.params(&mut self.inferred_params, &before);
             // Not pinned while the loop still moves: a `Var` mid-loop may be an argument the next round types.
             if self.inferred_params == before && returns_settled && !(app.pins_unresolved_params && self.pin_open_params()) {
                 rounds.restamp.end = LoopEnd::Settled(round);
@@ -1855,6 +1867,7 @@ impl Analyzer {
                     TypingMode::Production { dirty: None },
                 );
                 self.harvest_returns_to_registry(app, true);
+                self.settle.returns(&mut self.classes, &hints.sig.instance, &hints.sig.class_methods);
                 returns_settled = self.inference_matches(&hints.sig);
                 self.run_typing_passes(
                     app,
@@ -5181,6 +5194,12 @@ impl Analyzer {
             sig: self.capture_inference_sig(),
             block_value,
         }
+    }
+
+    /// Pin what oscillates since `prev` before the loop's signature check (`oscillation`).
+    fn settle_oscillations(&mut self, prev: &InferenceSig) {
+        self.settle.returns(&mut self.classes, &prev.instance, &prev.class_methods);
+        self.settle.params(&mut self.inferred_params, &prev.params);
     }
 
     fn inference_matches(&self, prev: &InferenceSig) -> bool {
@@ -11502,7 +11521,7 @@ impl Analyzer {
     /// is measured on a copy. Destructured without `..`, so a new field has
     /// to be listed here; `Copy` fields own no heap.
     pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
-        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, unify_memo } = self;
+        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, unify_memo } = self;
         let mut freed: Vec<(&str, i64)> = vec![
             ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
             ("module_self_types", crate::memory_census::freed_by(|| drop(module_self_types))),
@@ -11532,6 +11551,7 @@ impl Analyzer {
             ("controller_action_meta_cache", crate::memory_census::freed_by(|| drop(controller_action_meta_cache))),
             ("fixpoint_rounds", crate::memory_census::freed_by(|| drop(fixpoint_rounds))),
             ("fixpoint_checks", crate::memory_census::freed_by(|| drop(fixpoint_checks))),
+            ("settle", crate::memory_census::freed_by(|| drop(settle))),
             ("unify_memo", crate::memory_census::freed_by(|| drop(unify_memo))),
         ];
         let total: i64 = freed.iter().map(|(_, bytes)| bytes).sum();
