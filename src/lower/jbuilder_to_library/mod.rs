@@ -3106,6 +3106,34 @@ fn dynamic_partial_candidates(path: &Expr, resource_dir: &str, partials: &[Strin
     out
 }
 
+/// The span of every `json.partial!` with a path built at run time that
+/// lowers to a switch (`dynamic_partial_call`), whose fallback raises
+/// `ActionView::MissingTemplate`. Only the ruby family and Spinel ship
+/// that class: `project`'s availability gate ledgers it here on any
+/// other target, as it does for the controller's raise of it.
+pub(crate) fn dynamic_partial_raise_spans(app: &App) -> Vec<Span> {
+    fn walk(e: &Expr, dir: &str, paths: &[String], out: &mut Vec<Span>) {
+        if let ExprNode::Send { recv: Some(recv), block: None, .. } = &*e.node {
+            if is_json_receiver(recv) {
+                if let JbStmt::PartialDynamic { path, .. } = classify(e) {
+                    if !dynamic_partial_candidates(path, dir, paths).is_empty() {
+                        out.push(e.span);
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, dir, paths, out));
+    }
+    let views: Vec<&View> = app.views.iter().filter(|v| v.jbuilder && !v.analysis_only).collect();
+    let paths = jbuilder_partial_paths(&views);
+    let mut out = Vec::new();
+    for v in &views {
+        let (dir, _) = split_view_name(v.name.as_str());
+        walk(&v.body, dir, &paths, &mut out);
+    }
+    out
+}
+
 /// Every jbuilder partial of the app as the path that names it from
 /// anywhere: `widgets/widget` for `widgets/_widget.json.jbuilder`.
 fn jbuilder_partial_paths(views: &[&View]) -> Vec<String> {
