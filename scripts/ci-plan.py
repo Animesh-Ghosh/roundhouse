@@ -100,6 +100,7 @@ SPINEL_TESTS = [
     "spinel_pg_db",
     "spinel_db_contract",
     "generated_columns_spinel",
+    "schema_constraints",
     "postgres_json_types_spinel",
     "array_column_storage_spinel",
     "pessimistic_locking",
@@ -117,12 +118,14 @@ SPINEL_TESTS = [
     "plain_class_optional_keywords_spinel",
     "conditional_expression_parens",
     "class_object_return_rbs",
+    "class_object_container_rbs",
     "module_self_argument_rbs",
     "jbuilder_array_value_spinel",
     "active_job_payload",
     "render_json_encoder_spinel",
     "url_helpers_absolute_spinel",
     "jbuilder_extract_attributes_spinel",
+    "jbuilder_dynamic_partial_spinel",
     "hash_to_query_symbol_keys_spinel",
     "storage_proxy_path_spinel",
     "app_reopens_runtime_class",
@@ -513,6 +516,7 @@ def native_coverage(path):
         suites.add("class_object_return_rbs")
     if path in {"src/analyze/mod.rs", "src/analyze/body/mod.rs"}:
         suites.add("module_self_argument_rbs")
+        suites.add("class_object_container_rbs")
     if path in {
         "src/dialect.rs",
         "src/ingest/model.rs",
@@ -579,6 +583,14 @@ def native_coverage(path):
         or path.startswith("src/lower/model_to_library/adapter_emit/")
     ):
         suites.add("generated_columns_spinel")
+    if path in {
+        "tests/schema_constraints.rs", "src/schema.rs", "src/ingest/schema.rs",
+        "src/schema/generated.rs", "tests/support/emit_and_run.rs",
+        "src/emit/shared/schema_sql.rs", "src/lower/model_to_library/schema.rs", "src/lower/scope_chain.rs",
+        "src/emit/roda.rs", "src/emit/ruby/library.rs",
+        "src/lower/model_to_library/mod.rs",
+    } or path.startswith("tests/support/schema_constraints_"):
+        suites.add("schema_constraints")
     if path in JSON_TYPES_SPINEL_INPUTS:
         suites.add("postgres_json_types_spinel")
     if path in APP_REOPENS_INPUTS:

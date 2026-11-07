@@ -20678,6 +20678,10 @@ mod dynamic_where_forms;
 mod enum_cross_class_mapping;
 #[path = "emit_and_run/jbuilder_record_values.rs"]
 mod jbuilder_record_values;
+#[path = "support/jbuilder_dynamic_partial.rs"]
+mod jbuilder_dynamic_partial;
+#[path = "emit_and_run/jbuilder_dynamic_partial.rs"]
+mod jbuilder_dynamic_partial_test;
 #[path = "emit_and_run/nil_operand.rs"]
 mod nil_operand;
 #[path = "emit_and_run/descendant_ivar.rs"]
@@ -21369,6 +21373,12 @@ mod link_to_computed_url;
 #[path = "support/nested_route_helper_record.rs"]
 #[allow(dead_code)]
 mod nested_route_helper_record;
+#[path = "support/concern_to_param.rs"]
+#[allow(dead_code)]
+mod concern_to_param;
+#[path = "support/ivar_named_local.rs"]
+#[allow(dead_code)]
+mod ivar_named_local;
 
 /// `simple_format` with `sanitize: false`: paragraphs, line breaks, html
 /// options and `wrapper_tag:`, as Rails 8.1.4 renders them.
@@ -21609,5 +21619,65 @@ fn nested_route_helper_record_renders_as_rails_on_spinel() {
     let (view, renders) = nested_route_helper_record::view(true, false);
     nested_route_helper_record::app(content_tag_options::app_rendering(&view, &[]), true)
         .run_spinel(&helper_escape_at_output::render_script(&renders))
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a method of the module renders as Rails
+/// 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+fn concern_to_param_module_renders_as_rails() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::MODULE)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(concern_to_param::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a method of the module renders as Rails
+/// 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn concern_to_param_module_renders_as_rails_on_spinel() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::MODULE)
+        .run_spinel(&helper_escape_at_output::render_script(concern_to_param::RENDERS))
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a def in the concern's
+/// `included do` renders as Rails 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+fn concern_to_param_included_renders_as_rails() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::INCLUDED)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(concern_to_param::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a def in the concern's
+/// `included do` renders as Rails 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn concern_to_param_included_renders_as_rails_on_spinel() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::INCLUDED)
+        .run_spinel(&helper_escape_at_output::render_script(concern_to_param::RENDERS))
+        .assert_passes();
+}
+
+/// A template local assigned from the ivar of its own name renders as
+/// Rails 8.1.4 does (`ivar_named_local::VIEW`).
+#[test]
+fn ivar_named_local_renders_as_rails() {
+    ivar_named_local::app(content_tag_options::app_rendering(ivar_named_local::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(ivar_named_local::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// A template local assigned from the ivar of its own name renders as
+/// Rails 8.1.4 does (`ivar_named_local::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn ivar_named_local_renders_as_rails_on_spinel() {
+    ivar_named_local::app(content_tag_options::app_rendering(ivar_named_local::VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(ivar_named_local::RENDERS))
         .assert_passes();
 }
