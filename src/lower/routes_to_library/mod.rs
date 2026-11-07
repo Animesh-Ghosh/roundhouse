@@ -1189,7 +1189,7 @@ fn build_helper_function(
     // this means teaching the call-site padders to fill by position
     // from the left, not appending.
     let default_for = |p: &String| -> Option<&String> {
-        route.param_defaults.iter().find(|(n, _)| n == p).map(|(_, v)| v)
+        route.param_defaults.iter().find(|(n, _)| n == p).map(|(_, (v, _))| v)
     };
     let defaults_are_a_suffix = seg_params
         .iter()

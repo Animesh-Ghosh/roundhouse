@@ -2227,7 +2227,7 @@ pub enum RouteSpec {
         /// `user_profile_path` takes NO argument because the default
         /// supplies the segment.
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-        defaults: IndexMap<Symbol, String>,
+        defaults: IndexMap<Symbol, (String, Span)>,
         /// `nested do … end` — Rails' explicit form of the nesting a
         /// `resources` block applies to a child `resources`/verb call
         /// automatically. `scope` is NOT one of the calls that gets it,
