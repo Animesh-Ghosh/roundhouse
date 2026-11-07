@@ -21222,6 +21222,9 @@ mod link_to_computed_url;
 #[path = "support/nested_route_helper_record.rs"]
 #[allow(dead_code)]
 mod nested_route_helper_record;
+#[path = "support/concern_to_param.rs"]
+#[allow(dead_code)]
+mod concern_to_param;
 
 /// `simple_format` with `sanitize: false`: paragraphs, line breaks, html
 /// options and `wrapper_tag:`, as Rails 8.1.4 renders them.
@@ -21462,5 +21465,45 @@ fn nested_route_helper_record_renders_as_rails_on_spinel() {
     let (view, renders) = nested_route_helper_record::view(true, false);
     nested_route_helper_record::app(content_tag_options::app_rendering(&view, &[]), true)
         .run_spinel(&helper_escape_at_output::render_script(&renders))
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a method of the module renders as Rails
+/// 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+fn concern_to_param_module_renders_as_rails() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::MODULE)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(concern_to_param::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a method of the module renders as Rails
+/// 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn concern_to_param_module_renders_as_rails_on_spinel() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::MODULE)
+        .run_spinel(&helper_escape_at_output::render_script(concern_to_param::RENDERS))
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a def in the concern's
+/// `included do` renders as Rails 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+fn concern_to_param_included_renders_as_rails() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::INCLUDED)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(concern_to_param::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a def in the concern's
+/// `included do` renders as Rails 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn concern_to_param_included_renders_as_rails_on_spinel() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::INCLUDED)
+        .run_spinel(&helper_escape_at_output::render_script(concern_to_param::RENDERS))
         .assert_passes();
 }
