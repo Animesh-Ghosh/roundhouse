@@ -7156,8 +7156,38 @@ impl Analyzer {
 /// - `only: [...]` limits to the listed actions
 /// - `except: [...]` excludes the listed actions
 /// - both empty → applies to all actions on the controller
+/// The expressions a body's value comes from: the last expression of a
+/// `Seq`, both branches of an `If`, and every arm of a `case/when`.
+/// `None` for a `case/when` without `else`, whose value is nil when no
+/// arm matches.
+///
+/// Shared by the analyzer's relation return ([`body_tail_yields_relation`])
+/// and the lowering's (`lower::scope_chain::relation_return_model`), so
+/// both read the same branches.
+pub(crate) fn value_tails(body: &Expr) -> Option<Vec<&Expr>> {
+    match &*body.node {
+        ExprNode::Seq { exprs } => value_tails(exprs.last()?),
+        ExprNode::If { then_branch, else_branch, .. } => {
+            let mut tails = value_tails(then_branch)?;
+            tails.extend(value_tails(else_branch)?);
+            Some(tails)
+        }
+        ExprNode::Case { arms, .. } => {
+            if !arms.iter().any(|arm| matches!(arm.pattern, crate::expr::Pattern::Wildcard)) {
+                return None;
+            }
+            let mut tails = Vec::new();
+            for arm in arms {
+                tails.extend(value_tails(&arm.body)?);
+            }
+            Some(tails)
+        }
+        _ => Some(vec![body]),
+    }
+}
+
 /// Does this scope/class-method body *return* a relation? True iff
-/// the body's tail expression is a query-builder chain: the outermost
+/// every value tail ([`value_tails`]) is a query-builder chain: the outermost
 /// (tail) hop is a chain builder ([`crate::catalog::is_relation_builder_name`],
 /// or a Relation-context builder once the receiver is already a chain),
 /// a same-model scope call, or a relation root
@@ -7181,13 +7211,17 @@ fn body_tail_yields_relation(
     model_id: &ClassId,
     scope_names: &crate::det::HashSet<Symbol>,
 ) -> bool {
-    let mut e = match &*body.node {
-        ExprNode::Seq { exprs } => match exprs.last() {
-            Some(last) => last,
-            None => return false,
-        },
-        _ => body,
-    };
+    value_tails(body).is_some_and(|tails| {
+        tails.iter().all(|tail| tail_yields_relation(tail, model_id, scope_names))
+    })
+}
+
+fn tail_yields_relation(
+    tail: &Expr,
+    model_id: &ClassId,
+    scope_names: &crate::det::HashSet<Symbol>,
+) -> bool {
+    let mut e = tail;
     loop {
         let ExprNode::Send { recv, method, block, .. } = &*e.node else {
             return false;
