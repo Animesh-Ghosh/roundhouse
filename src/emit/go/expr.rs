@@ -355,7 +355,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             // else: ... }`. Invert before emit so we don't produce
             // an invalid bare-nil then-block.
             if is_nil_lit(then_branch) && !is_nil_lit(else_branch) {
-                let cond_s = emit_expr(ctx, cond);
+                let cond_s = emit_cond(ctx, cond);
                 let else_s = emit_block_body(&ctx.enter_scope(), else_branch);
                 return format!("if !({cond_s}) {{\n{else_s}\n}}");
             }
@@ -373,7 +373,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                     };
                     (init, cond.to_string(), child)
                 }
-                None => (String::new(), emit_expr(ctx, cond), ctx.enter_scope()),
+                None => (String::new(), emit_cond(ctx, cond), ctx.enter_scope()),
             };
             let then_s = emit_block_body(&then_ctx, then_branch);
             // `return X if cond` lowers to If { else: Lit::Nil } —
@@ -497,19 +497,28 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 let primitive_kind = |t: &Option<Ty>| {
                     matches!(t, Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float))
                 };
+                // A conditional whose branches are both non-nil scalars is
+                // truthy in Ruby whichever runs, 0 and "" included, so `||`
+                // never takes its fallback; `cmp.Or` would, on Go's zero.
+                if let ExprNode::If { then_branch, else_branch, .. } = &*left.node
+                    && primitive_kind(&then_branch.ty)
+                    && primitive_kind(&else_branch.ty)
+                {
+                    return emit_expr_as_value(ctx, left);
+                }
                 if primitive_kind(&left.ty) || primitive_kind(&right.ty) {
                     return format!(
                         "cmp.Or({}, {})",
-                        emit_expr(ctx, left),
-                        emit_expr(ctx, right)
+                        emit_expr_as_value(ctx, left),
+                        emit_expr_as_value(ctx, right)
                     );
                 }
                 let left_go = super::ty::go_ty_stub(left.ty.as_ref());
                 if left_go.starts_with("map[") || left_go.starts_with("[]") {
                     return format!(
                         "func() {left_go} {{ if v := {}; v != nil {{ return v }}; return {} }}()",
-                        emit_expr(ctx, left),
-                        emit_expr(ctx, right)
+                        emit_expr_as_value(ctx, left),
+                        emit_expr_as_value(ctx, right)
                     );
                 }
             }
@@ -518,10 +527,12 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                 BoolOpKind::And => "&&",
             };
             // `&&` binds tighter than `||` here as in Ruby, so an `||`
-            // operand under `&&` keeps its parentheses.
+            // operand under `&&` keeps its parentheses. A conditional
+            // operand (`(x ? a : b) && c`) is a value, which Go writes as
+            // a func literal: its `if` is a statement.
             let operand = |e: &Expr| match &*e.node {
                 ExprNode::BoolOp { op: BoolOpKind::Or, .. } if matches!(op, BoolOpKind::And) => format!("({})", emit_expr(ctx, e)),
-                _ => emit_expr(ctx, e),
+                _ => emit_expr_as_value(ctx, e),
             };
             format!("{} {} {}", operand(left), op_s, operand(right))
         }
@@ -2496,6 +2507,12 @@ pub(super) fn emit_send(
                 if result_ty.is_some_and(Ty::contains_time) {
                     return format!("{recv_s}.{go_m}()");
                 }
+                // A method the receiver's model defines itself
+                // (`def featured?`) is a call: the model emit writes it as
+                // a method (`FeaturedPred()`), not a field.
+                if recv_model_defines(r, method) {
+                    return format!("{recv_s}.{go_m}()");
+                }
                 // Bare field read (no parens) → suffix-stripped field
                 // name so `record.persisted?` → `record.Persisted`.
                 return format!("{recv_s}.{}", go_field_ident(method));
@@ -2729,7 +2746,7 @@ fn go_field_ident(ruby_name: &str) -> String {
     go_method_name(&normalized)
 }
 
-fn go_method_ident(ruby_name: &str) -> String {
+pub(super) fn go_method_ident(ruby_name: &str) -> String {
     // Mirror rust's `sanitize_ident` (src/emit/rust/expr/util.rs):
     // `?` predicate suffix maps to `_pred`, `!` maps to `_bang`. The `?`
     // affix (vs a bare strip) keeps a column predicate distinct from its
@@ -2820,6 +2837,25 @@ pub(super) struct IsAInit {
     /// Asserted identifier (`s`/`i`/`f`/...) — the new name bound
     /// in the if's scope.
     pub asserted_ident: &'static str,
+}
+
+/// An `if` condition. A record (a class Go holds by pointer) answers
+/// Ruby's truthiness, which for an object is "not nil"; Go wants a
+/// bool, so the condition is `!= nil`. Anything else emits as written.
+///
+/// An assignment as the condition (`if (rec = @article)`) is a statement
+/// in Go: it becomes the `if`'s init, and the test reads the local.
+fn emit_cond(ctx: &EmitCtx, cond: &Expr) -> String {
+    let cond_s = emit_expr(ctx, cond);
+    match cond.ty.as_ref().map(Ty::peel_nilable) {
+        Some(Ty::Class { id, .. }) if id.0.as_str() != "Time" => match &*cond.node {
+            ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, .. } => {
+                format!("{cond_s}; {} != nil", super::library::sanitize(name.as_str()))
+            }
+            _ => format!("{cond_s} != nil"),
+        },
+        _ => cond_s,
+    }
 }
 
 /// Build the `IsAInit` for an `is_a?` predicate that has a mapped
@@ -2983,6 +3019,10 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
         emit_expr(ctx, value)
     };
     match target {
+        // `_ = x`: Ruby's discard, which evaluates `x` and keeps nothing.
+        // Go's blank identifier is assigned, never declared (`_ := x`
+        // has no new variable on its left).
+        LValue::Var { name, .. } if name.as_str() == "_" => format!("_ = {v}"),
         LValue::Var { name, .. } => {
             // First assignment to this name → declare (`:=`).
             // Subsequent assignments → reassign (`=`). Matches Ruby's
@@ -4087,7 +4127,7 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
                     };
                     (init, cond.to_string(), child)
                 }
-                None => (String::new(), emit_expr(ctx, cond), ctx.enter_scope()),
+                None => (String::new(), emit_cond(ctx, cond), ctx.enter_scope()),
             };
             indent(out, depth);
             out.push_str(&format!("if {init}{cond_s} {{\n"));
@@ -4367,6 +4407,26 @@ pub(super) fn set_all_nullable_columns(columns: Vec<(String, String, String)>) {
     ALL_NULLABLE_COLUMNS.with(|c| *c.borrow_mut() = columns);
 }
 
+thread_local! {
+    /// Every model's Go methods, app-wide: `(Model path, method)`. A view
+    /// reads another record's method (`article.featured?`), and a bare
+    /// 0-arg read of one is a field read unless the model's type has it.
+    static ALL_MODEL_METHODS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(super) fn set_all_model_methods(methods: Vec<(String, String)>) {
+    ALL_MODEL_METHODS.with(|c| *c.borrow_mut() = methods);
+}
+
+/// Does the model this receiver resolves to have `method` as a Go
+/// method? A nilable receiver (`Article | nil`) is its model's; the
+/// model is matched by its full class path.
+fn recv_model_defines(recv: &Expr, method: &str) -> bool {
+    let Some(Ty::Class { id, .. }) = recv.ty.as_ref().and_then(union_non_nil_core) else { return false };
+    let model = id.0.as_str();
+    ALL_MODEL_METHODS.with(|c| c.borrow().iter().any(|(m, name)| m == model && name == method))
+}
+
 /// Is `column` nullable on the model this expression's receiver
 /// resolves to?
 fn recv_column_is_nullable(recv: &Expr, column: &str) -> bool {
@@ -4436,7 +4496,7 @@ fn static_is_a(r: &Expr, r_s: &str, class: &str) -> Option<String> {
 /// pointer, so unbox it (nil stays nil). Keyed by name because these
 /// are hand-written runtime functions, not LibraryClass methods with
 /// a param table.
-const UNTYPED_ARG_HELPERS: &[&str] = &["encode_value", "optional_value_attr"];
+const UNTYPED_ARG_HELPERS: &[&str] = &["encode_value", "optional_value_attr", "color_value_attr", "color_field_value_attr", "datetime_local_value_attr"];
 
 /// Unbox a nullable-column argument at an `interface{}` seam, in
 /// place — the call itself still renders through the normal path (its

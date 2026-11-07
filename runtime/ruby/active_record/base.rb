@@ -678,6 +678,11 @@ module ActiveRecord
       {}
     end
 
+    # Not the answer a record gives: each model overrides it with its columns' readers (`synth_serializable_hash`).
+    def serializable_hash
+      {}
+    end
+
     # Column-name indexer. Subclasses override with a per-column case
     # dispatch over the typed ivars (each model has a fixed set of
     # columns from the schema). The Base implementation raises so a
@@ -1120,6 +1125,12 @@ module ActiveRecord
     def attribute_changed?(name)
       changes = changes_to_save
       changes.key?(name)
+    end
+
+    # `to_s`: the pending diff is keyed by column-name String, and
+    # callers usually pass a Symbol.
+    def will_save_change_to_attribute?(name)
+      attribute_changed?(name.to_s)
     end
 
     # Rails' `changed?` / `has_changes_to_save?`: any column pending.

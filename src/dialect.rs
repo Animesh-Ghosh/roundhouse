@@ -137,6 +137,12 @@ pub struct Model {
 }
 
 impl Model {
+    /// Validation execution order: each prepended callback goes ahead of earlier ones.
+    pub fn validation_order(&self) -> impl Iterator<Item = &ModelBodyItem> {
+        let prepended = |item: &&ModelBodyItem| matches!(item, ModelBodyItem::Validation { validation, .. } if validation.prepend);
+        self.body.iter().filter(prepended).rev().chain(self.body.iter().filter(move |item| !prepended(item)))
+    }
+
     /// Rails' `human_attribute_name(attr)` for this model.
     pub fn human_attribute_name(&self, attr: &str) -> String {
         self.i18n.human_attribute_name(attr)
@@ -239,6 +245,38 @@ impl Model {
             _ => None,
         })
     }
+}
+
+/// Symbol callbacks have identity: a later registration replaces the earlier
+/// one, including its conditions and position. Validator objects do not share
+/// this identity. Keep individual symbols so scheduling can prepend each one.
+pub(crate) fn replace_validation_callbacks(body: &mut Vec<ModelBodyItem>) {
+    let mut registered: Vec<ModelBodyItem> = Vec::with_capacity(body.len());
+    for item in std::mem::take(body) {
+        let ModelBodyItem::Validation { validation, leading_comments, leading_blank_line, span } = &item else {
+            registered.push(item);
+            continue;
+        };
+        if !validation.rules.iter().all(|r| matches!(r, ValidationRule::Custom { .. })) || validation.rules.is_empty() {
+            registered.push(item);
+            continue;
+        }
+        for (i, rule) in validation.rules.iter().enumerate() {
+            let ValidationRule::Custom { method, .. } = rule else { unreachable!() };
+            registered.retain(|previous| !matches!(previous, ModelBodyItem::Validation { validation, .. }
+                if validation.rules.iter().any(|r| matches!(r, ValidationRule::Custom { method: old, .. } if old == method))));
+            let mut validation = validation.clone();
+            validation.attribute = method.clone();
+            validation.rules = vec![rule.clone()];
+            registered.push(ModelBodyItem::Validation {
+                validation,
+                leading_comments: if i == 0 { leading_comments.clone() } else { Vec::new() },
+                leading_blank_line: i == 0 && *leading_blank_line,
+                span: *span,
+            });
+        }
+    }
+    *body = registered;
 }
 
 /// One statement inside a model's class body, in source order. Known DSL
@@ -542,6 +580,15 @@ pub enum Association {
 }
 
 impl Association {
+    pub fn set_target(&mut self, to: ClassId) {
+        match self {
+            Association::BelongsTo { target, .. }
+            | Association::HasMany { target, .. }
+            | Association::HasOne { target, .. }
+            | Association::HasAndBelongsToMany { target, .. } => *target = to,
+        }
+    }
+
     pub fn name(&self) -> &Symbol {
         match self {
             Association::BelongsTo { name, .. }
@@ -599,6 +646,8 @@ pub enum Dependent {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Validation {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prepend: bool,
     pub attribute: Symbol,
     pub rules: Vec<ValidationRule>,
     /// `if: :pred` / `if: -> { … }` / `if: lambda { … }` / `if: proc { … }`.
@@ -610,7 +659,8 @@ pub struct Validation {
     /// `unless_cond` are set, the rules run only when `if:` holds and
     /// `unless:` does not. Anything else (an arity>0 lambda, a String,
     /// a captured local, a body survey mode had to stub with `nil`) is
-    /// not stored; ingest refuses the whole call instead of checking
+    /// not stored; ingest refuses the whole call (the rule, for a
+    /// condition in the rule's own hash) instead of checking
     /// unconditionally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_cond: Option<Expr>,
@@ -1183,6 +1233,12 @@ pub struct LibraryClass {
 }
 
 impl LibraryClass {
+    /// A file of constants alone, which declares no class
+    /// (`LibraryClassOrigin::FileConstants`).
+    pub fn is_file_constants(&self) -> bool {
+        matches!(self.origin, Some(LibraryClassOrigin::FileConstants))
+    }
+
     /// The members and the `Data.define` span of a class that a
     /// file-level `X = Data.define(…)` creates.
     pub fn data_define(&self) -> Option<(&[Symbol], Span)> {
@@ -1310,8 +1366,8 @@ pub enum LibraryClassOrigin {
     DryValidation,
     /// dry-monads' Result and do-notation stand-ins (`ingest::dry_monads`).
     DryMonads,
-    /// The class a file-level `X = Data.define(:a, :b)` creates, in a
-    /// file that declares nothing else. `members` are the literal
+    /// The class a file-level `X = Data.define(:a, :b)` creates.
+    /// `members` are the literal
     /// Symbol members in declaration order; `span` is the
     /// `Data.define` call. The statements of a `do … end` block are the
     /// class body, and its constants are the class's `constants`. Ruby
@@ -1324,6 +1380,18 @@ pub enum LibraryClassOrigin {
     },
     /// The `Oj` stand-in an app under `Oj.mimic_JSON` reaches (`ingest::oj`).
     Oj,
+    /// Not a class: an autoloaded app file that declares no class or
+    /// module and holds only file-level constants (`RemoteThing =
+    /// Thing`, `Labels = LabelFactory.build(...)`). Named for the
+    /// constant Rails' autoloader maps the file to (else its first), so
+    /// the file keeps that path; `constants` are the file's writes, in
+    /// source order, and a read of any of them requires the file. The
+    /// analyzer gives it no class entry (an alias of a class resolves to
+    /// that class through the source index) and types each
+    /// value as a top-level constant; the CRuby and JRuby trees write the
+    /// constants at the top level of the file, and every other target
+    /// refuses it (`project::refuse_file_constants`).
+    FileConstants,
 }
 
 /// A graphql-ruby object type (a class descending from
@@ -1344,6 +1412,10 @@ pub struct GraphqlObjectType {
     /// methods are checked (search_object calls the rest).
     #[serde(default, skip_serializing_if = "is_false")]
     pub resolver: bool,
+    /// Class-level calls along its chain the ingest pass did not read, so
+    /// the coverage line can name them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unread_macros: Vec<Symbol>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1363,6 +1435,10 @@ pub struct GraphqlField {
     /// The synthesized method holding the value graphql-ruby would
     /// resolve, or why there is none.
     pub resolution: GraphqlResolution,
+    /// Extensions its field class applies to every field that could not be
+    /// shown to keep the value, so the coverage line can name them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unproven_extensions: Vec<Symbol>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2130,6 +2206,10 @@ pub enum RouteSpec {
         /// only the block form this field carries.
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
         constraints: IndexMap<Symbol, String>,
+        /// `resource :registration, path_names: { new: "sign_up" }` (devise's): the URL segment of
+        /// the `new` and `edit` actions, in place of the action name (`/users/sign_up`).
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        path_names: IndexMap<Symbol, String>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with
@@ -2168,6 +2248,11 @@ pub enum RouteSpec {
         /// to the engine's mounted proxy, which this runtime does not model.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         suppress_helpers: bool,
+        /// An isolated engine's routes under the path it is mounted at: Rails
+        /// joins the mount's script name and the engine's own `/`, so its
+        /// root's helper keeps the trailing slash a scope's root drops.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mount: bool,
         /// Set when the scope is written inside a `member do … end` /
         /// `collection do … end` block: Rails keeps that scope level, so
         /// the scope's `path` lands AFTER the resource's own segment
@@ -2178,6 +2263,19 @@ pub enum RouteSpec {
         within: ResourceScope,
         entries: Vec<RouteSpec>,
     },
+    /// A call to a routing method a gem adds to the mapper (doorkeeper's `use_doorkeeper`), kept where it
+    /// is written until its body can run against the expanded program (`ingest::gem_routes`). None
+    /// survives ingest: each becomes the scope of the routes it draws, or is dropped and reported.
+    Deferred {
+        call: crate::expr::Expr,
+        span: Span,
+        /// An enclosing `constraints` block's, applied to what it draws once it is drawn.
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        constraints: IndexMap<Symbol, String>,
+    },
+    /// Routes a gem's routing method draws under a scope it sets for itself (devise's
+    /// `with_devise_exclusive_scope`): they take none of the enclosing scopes' path, module or name.
+    Exclusive { entries: Vec<RouteSpec> },
 }
 
 /// One `get "/path", to: "c#a"` entry. Kept as a standalone struct so

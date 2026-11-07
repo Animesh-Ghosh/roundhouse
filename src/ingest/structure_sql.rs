@@ -294,6 +294,7 @@ fn handle_create_table(
         columns,
         indexes: Vec::new(),
         foreign_keys: Vec::new(),
+        check_constraints: Vec::new(),
         virtual_module: None,
         known_keyless: false,
         primary_key_columns,
@@ -402,7 +403,8 @@ fn parse_column_def(
         col_type,
         nullable,
         default,
-        primary_key: false,
+        primary_key: top_level_words(modifiers).windows(2)
+            .any(|words| words[0].1 == "PRIMARY" && words[1].1 == "KEY"),
         generated,
         generated_text_compatible,
         generated_int4_compatible,
@@ -691,6 +693,7 @@ fn handle_create_index(stmt: &str, file: &str, schema: &mut Schema, gaps: &mut V
             table.indexes.push(Index {
                 name: Symbol::from(index_name),
                 columns: cols,
+                expression: None,
                 unique,
                 using,
                 predicate,
@@ -1004,6 +1007,29 @@ fn skip_quoted_or_comment(bytes: &[u8], i: usize) -> Option<usize> {
                     return Some(j + 1);
                 }
                 j += 1;
+            }
+        }
+        // PostgreSQL's escape string, `E'…'`: a backslash escapes the next
+        // byte, so `E'it\'s'` is one literal. Only where the `E` starts a
+        // token, not where it ends an identifier (which may hold `$` or non-ASCII).
+        Some(b'E' | b'e')
+            if bytes.get(i + 1) == Some(&b'\'')
+                && (i == 0
+                    || !(bytes[i - 1].is_ascii_alphanumeric()
+                        || matches!(bytes[i - 1], b'_' | b'$')
+                        || bytes[i - 1] >= 0x80)) =>
+        {
+            let mut j = i + 2;
+            loop {
+                if j >= bytes.len() {
+                    return Some(bytes.len());
+                }
+                match bytes[j] {
+                    b'\\' => j += 2,
+                    b'\'' if bytes.get(j + 1) == Some(&b'\'') => j += 2,
+                    b'\'' => return Some(j + 1),
+                    _ => j += 1,
+                }
             }
         }
         Some(b'"') => {

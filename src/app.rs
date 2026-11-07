@@ -65,14 +65,17 @@ pub struct ConcernGuardedItem {
 /// deliverable — the thing ingesters produce and emitters consume.
 
 /// A `validates` call kept for its custom keys (`ingest::each_validator`):
-/// the model, the call's span and source text, and each key with the app
-/// `EachValidator` class it names.
+/// the model, the call's span and source text, each key with the app
+/// `EachValidator` class it names, and the call's built-in rules.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EachValidatorCall {
     pub model: ClassId,
     pub span: Span,
     pub text: String,
     pub keys: Vec<(String, String)>,
+    /// The call's lowered built-in rules, by key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -86,6 +89,11 @@ pub struct App {
     /// otherwise → here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub library_classes: Vec<LibraryClass>,
+    /// A parameter some caller passes a value the analysis could not
+    /// type stays `untyped` instead of taking the other callers' type
+    /// (#617). Set for the Ruby family: Spinel trusts the RBS it ships.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pins_unresolved_params: bool,
     /// Framework calls still use their lowered ABI; native argument
     /// preservation requires a source library declaration.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -123,6 +131,26 @@ pub struct App {
     /// (`ingest::boot_program`): run at boot on the ruby family and spinel.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boot_program: Vec<Expr>,
+    /// The constants an initializer statement held by a gem not compiled
+    /// from source calls (`Rack::Attack` of `Rack::Attack.throttle`):
+    /// `ingest::auto_source_gems` brings that gem in, and the statement
+    /// then joins [`App::boot_program`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub boot_gem_constants: Vec<String>,
+    /// The Rack middleware a source gem's Railtie `use`s, outermost
+    /// first (`ingest::railtie_middleware`): both ruby-family boots stack
+    /// them in front of the routes, where Rails puts them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gem_middlewares: Vec<String>,
+    /// The insertions it could not read, reported by analyze.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gem_middleware_refusals: Vec<crate::diagnostic::Diagnostic>,
+    /// A def hoisted out of a concern's `included do` that a module the same block includes also defines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub included_hoist_conflicts: Vec<crate::diagnostic::Diagnostic>,
+    /// A superclass expression read off a configured object that did not fold to a constant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superclass_refusals: Vec<crate::diagnostic::Diagnostic>,
     /// Pins from `config/importmap.rb`, expanded (each
     /// `pin_all_from` has been resolved into explicit per-file
     /// pins via `app/javascript/**` walking). Consumed by the
@@ -130,6 +158,11 @@ pub struct App {
     /// None when the app has no importmap.rb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub importmap: Option<Importmap>,
+    /// An engine's own import map (`MissionControl::Jobs.importmap`), by
+    /// the module it is drawn onto: `Importmap.pins_for_<module>` in the
+    /// emitted tree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_importmaps: Vec<(String, Importmap)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inertia: Option<InertiaConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,7 +271,7 @@ pub struct App {
     pub binary_assets: Vec<(String, Vec<u8>)>,
     /// `config/locales` for the default locale (see `crate::i18n`).
     #[serde(default, skip_serializing_if = "crate::i18n::Catalog::is_empty")]
-    pub i18n: crate::i18n::Catalog,
+    pub i18n: std::sync::Arc<crate::i18n::Catalog>,
     /// The sites of a `t` whose answer differs by locale
     /// (`lower::i18n_translate`), whose entries the ruby-family trees write
     /// to the translation table the runtime reads.
@@ -423,6 +456,11 @@ pub struct App {
     /// can define one name, and only one of them mark it.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub html_safe_method_owners: BTreeSet<(String, String)>,
+    /// The same marks as `(class, method, singleton)`: `def self.badge`
+    /// and `def badge` on one class are separate definitions, and either
+    /// can be the marked one.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub html_safe_method_defs: BTreeSet<(String, String, bool)>,
     /// App-registered `to_fs` formats from `config/initializers/`, in
     /// both spellings Rails accepts: the current
     /// `ActiveSupport::TimeFormats.register(:name, fmt)` and the
@@ -617,6 +655,11 @@ pub struct App {
     /// computed from the bodies as they stand.
     #[serde(skip)]
     pub helper_diagnostics: Option<Vec<crate::diagnostic::Diagnostic>>,
+    /// Associations whose class nothing in the program defines (a gem's
+    /// model: `has_many :widgets, class_name: "Vendor::Widget"`), refused
+    /// as naming that constant is; set by analysis.
+    #[serde(skip)]
+    pub unknown_association_targets: Vec<crate::diagnostic::Diagnostic>,
     /// Every `app/helpers/**/*_helper.rb` module, including one whose
     /// method names a later helper all redefines (and so owns in
     /// `helper_method_index`).
@@ -635,6 +678,11 @@ pub struct App {
     /// descriptions then disagree about the parameter types.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_spliced_class_methods: HashMap<ClassId, HashMap<Symbol, ClassId>>,
+    /// The name spans of the class-side methods a concern's `class_methods
+    /// do` / `module ClassMethods` declares. Rails gives them to includers
+    /// only, never to the module itself (`lower::spliced_concern_bodies`).
+    #[serde(default, skip_serializing_if = "crate::det::HashSet::is_empty")]
+    pub concern_class_side_spans: crate::det::HashSet<crate::span::Span>,
     /// Model DSL declared inside a concern module's `included do`
     /// (`Account::Associations` → its `has_many :statuses` etc.),
     /// keyed by the module and classified as the same
@@ -986,6 +1034,29 @@ pub struct ImportmapPin {
 }
 
 impl App {
+    /// Drop the spare capacity ingest leaves in the unit collections.
+    ///
+    /// Building a tree by pushing leaves every `Vec` and `String` in it
+    /// with up to twice the capacity it holds, and an app's IR is almost
+    /// all such trees. A clone allocates exactly what each one holds, so
+    /// each unit is replaced by its clone, one at a time: the extra memory
+    /// in flight is one unit, and the result is equal to what it replaces.
+    pub fn compact_units(&mut self) {
+        fn compact<T: Clone>(units: &mut Vec<T>) {
+            for unit in units.iter_mut() {
+                *unit = unit.clone();
+            }
+            units.shrink_to_fit();
+        }
+        compact(&mut self.library_classes);
+        compact(&mut self.models);
+        compact(&mut self.controllers);
+        compact(&mut self.views);
+        compact(&mut self.test_modules);
+        compact(&mut self.fixtures);
+        compact(&mut self.file_programs);
+    }
+
     pub(crate) fn model_param_key(&self, name: &str) -> String {
         let name = name.trim_start_matches("::");
         let relative = self.isolated_namespaces.iter()
@@ -1023,21 +1094,7 @@ impl App {
             direct.insert(lc.name.clone(), lc.includes.clone());
         }
         for model in &self.models {
-            let mut ids = Vec::new();
-            for item in &model.body {
-                if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item {
-                    if let crate::expr::ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
-                        if method.as_str() == "include" {
-                            for arg in args {
-                                if let crate::expr::ExprNode::Const { path } = &*arg.node {
-                                    ids.push(crate::analyze::mixin_path_id(path));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            direct.entry(model.name.clone()).or_default().extend(ids);
+            direct.entry(model.name.clone()).or_default().extend(model_includes(model));
         }
         // Controllers include concerns too, and a module shared between
         // a controller and a channel (campfire's
@@ -1181,12 +1238,13 @@ impl App {
             schema_version: Self::SCHEMA_VERSION,
             schema: Schema::default(),
             binary_assets: Vec::new(),
-            i18n: crate::i18n::Catalog::default(),
+            i18n: Default::default(),
             i18n_table: Vec::new(),
             i18n_runtime_sites: Vec::new(),
             i18n_table_sites: Vec::new(),
             models: Vec::new(),
             library_classes: Vec::new(),
+            pins_unresolved_params: false,
             native_library_keywords: false,
             file_programs: Vec::new(),
             boot_gem_entries: Vec::new(),
@@ -1197,7 +1255,13 @@ impl App {
             fixtures: Vec::new(),
             seeds: None,
             boot_program: Vec::new(),
+            boot_gem_constants: Vec::new(),
+            gem_middlewares: Vec::new(),
+            gem_middleware_refusals: Vec::new(),
+            included_hoist_conflicts: Vec::new(),
+            superclass_refusals: Vec::new(),
             importmap: None,
+            engine_importmaps: Vec::new(),
             inertia: None,
             vite_manifest: None,
             stylesheets: Vec::new(),
@@ -1232,6 +1296,7 @@ impl App {
             view_ivar_types: HashMap::default(),
             html_safe_methods: BTreeSet::new(),
             html_safe_method_owners: BTreeSet::new(),
+            html_safe_method_defs: BTreeSet::new(),
             time_formats: BTreeMap::new(),
             module_mixins: Vec::new(),
             rake_tasks_source: None,
@@ -1257,8 +1322,10 @@ impl App {
             concern_spliced_actions: HashMap::default(),
             unreachable_views: BTreeSet::new(),
             helper_diagnostics: None,
+            unknown_association_targets: Vec::new(),
             helper_modules: BTreeSet::new(),
             concern_spliced_class_methods: HashMap::default(),
+            concern_class_side_spans: crate::det::HashSet::default(),
             concern_model_items: HashMap::default(),
             concern_guarded_items: HashMap::default(),
             concern_included_redefs: HashMap::default(),
@@ -1444,4 +1511,23 @@ pub struct IngestDrop {
     /// noted one.
     pub span: crate::span::Span,
     pub message: String,
+}
+
+/// The modules a model's body includes, as `include X` sends it keeps
+/// until the concerns are spliced.
+pub(crate) fn model_includes(model: &Model) -> Vec<crate::ident::ClassId> {
+    let mut ids = Vec::new();
+    for item in &model.body {
+        if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item
+            && let crate::expr::ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node
+            && method.as_str() == "include"
+        {
+            for arg in args {
+                if let crate::expr::ExprNode::Const { path } = &*arg.node {
+                    ids.push(crate::analyze::mixin_path_id(path));
+                }
+            }
+        }
+    }
+    ids
 }

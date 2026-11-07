@@ -44,7 +44,12 @@ their CRuby gates (`framework_tests_ruby`, `uuid_key_ruby`, tiny_api's
 `cruby_gate_` cases, `roda_toolchain`) from that archive with
 `ci-unit-tests.py select`, and compare-ruby emits with build-roundhouse's
 binary, so neither compiles Roundhouse; they wait for those builds, not for
-the unit shards. **Spinel is not part of `BASE`.**
+the unit shards. compare and compare-extra do the same for every target's
+toolchain, framework, and `emit_and_run` cases: each step selects its cases
+from the archive (`suite::name` for one case, as `cargo test --exact` did),
+and `scripts/compare` runs the archive's `emit_preview` through
+`ROUNDHOUSE_EMIT_PREVIEW`. They wait for unit-build instead of each leg
+compiling Roundhouse for 4 to 5 minutes. **Spinel is not part of `BASE`.**
 
 That floor is the merge claim for ordinary analyzer, lowerer, and runtime
 work: the Ruby shape runs, and Campfire still matches Rails. Crystal, Go,
@@ -246,16 +251,17 @@ broaden comparison masks merely to turn CI green.
 
 ## Publication is separate
 
-PR checks never deploy Pages. Both publication workflows accept only canonical
-`rubys/roundhouse` main. Neither workflow publishes a PR or fork branch.
+PR checks never deploy Pages. Both publication workflows accept only
+`roundhouse-rb/roundhouse` main. Neither workflow publishes a PR or fork
+branch.
 
 ### Update the site without full validation
 
-1. Merge the site changes into `rubys/roundhouse` main.
+1. Merge the site changes into `roundhouse-rb/roundhouse` main.
 2. Start the site-only workflow:
 
    ```sh
-   gh workflow run publish-site.yml --repo rubys/roundhouse --ref main
+   gh workflow run publish-site.yml --repo roundhouse-rb/roundhouse --ref main
    ```
 
 3. Check the **Publish site** run. Its `site` job checks the assembled files;

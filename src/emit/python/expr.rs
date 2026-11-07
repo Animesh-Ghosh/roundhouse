@@ -500,9 +500,22 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
         {
             match &*then_branch.node {
                 ExprNode::Seq { .. } => {
-                    format!("if {}:\n{}", emit_expr(cond), emit_block_body(then_branch, void_return))
+                    // A body the lowering emptied (`<% x = x %>` dropped) still needs a statement.
+                    format!("if {}:\n{}", emit_expr(cond), block_or_pass(then_branch, void_return))
                 }
-                _ => format!("if {}: {}", emit_expr(cond), emit_stmt(then_branch, false, true)),
+                _ => {
+                    let body = emit_stmt(then_branch, false, true);
+                    // Only a simple statement may follow `if c:` on its
+                    // line; a compound one (a nested `if`, a loop, or
+                    // anything spanning lines) takes the block form.
+                    let compound = body.contains('\n')
+                        || ["if ", "for ", "while ", "with ", "try:", "def ", "class "].iter().any(|k| body.starts_with(k));
+                    if compound {
+                        format!("if {}:\n{}", emit_expr(cond), super::shared::indent_py(&body))
+                    } else {
+                        format!("if {}: {}", emit_expr(cond), body)
+                    }
+                }
             }
         }
         // General `if / elsif / else` in statement position (a non-empty
@@ -579,7 +592,7 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
         ExprNode::While { cond, body, until_form } => {
             let c = emit_expr(cond);
             let c = if *until_form { format!("not ({c})") } else { c };
-            format!("while {c}:\n{}", emit_block_body(body, true))
+            format!("while {c}:\n{}", block_or_pass(body, true))
         }
         // Valueless `next`/`break` in statement position: the each/while
         // bodies above emit as native Python loops, where these are

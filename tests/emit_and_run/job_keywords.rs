@@ -5,9 +5,9 @@
 //! does, in one trailing Hash marked `_aj_ruby2_keywords` (activejob
 //! 8.1.3). An optional keyword the caller leaves at its default is not
 //! written, as Rails doesn't write a keyword the caller omits, and reads
-//! back as that default; one no caller passes (`tag:`, whose default
-//! `'#{tag}'` must stay text) is never written, and the writer raises
-//! if handed any other value.
+//! back as that default; that holds for one no caller passes too
+//! (`tag:`, whose default `'#{tag}'` must stay text), and any other
+//! value for it is written.
 
 use super::emit_and_run;
 
@@ -69,13 +69,9 @@ args = JSON.parse(JobRegistry.payload_gadget_job(article, 3, "touched"))["argume
 raise "default arguments #{args.inspect}" unless args[1] == { "count" => 3, "_aj_ruby2_keywords" => ["count"] }
 args = JSON.parse(JobRegistry.payload_gadgets__sync_job(article.id, nil, '#{tag}'))["arguments"]
 raise "sync arguments #{args.inspect}" unless args == [{ "article_id" => article.id, "_aj_ruby2_keywords" => ["article_id"] }]
-# A keyword no call site passes can't be written: another value raises.
-begin
-  JobRegistry.payload_gadgets__sync_job(article.id, nil, "other")
-  raise "an unpassed keyword was dropped"
-rescue ArgumentError => e
-  raise "unpassed keyword #{e.message}" unless e.message.include?("keyword `tag`")
-end
+# A keyword no call site passes is still written when it isn't its default.
+args = JSON.parse(JobRegistry.payload_gadgets__sync_job(article.id, nil, "other"))["arguments"]
+raise "other tag #{args.inspect}" unless args == [{ "article_id" => article.id, "tag" => "other", "_aj_ruby2_keywords" => ["article_id", "tag"] }]
 
 article.enqueue_gadget
 article.enqueue_gadget_default
@@ -149,16 +145,15 @@ fn a_keyword_job_on_sidekiq_is_pushed_as_a_payload() {
         );
         assert!(
             registry.contains(
-                "ActiveJob::Arguments.keywords([\"count\", (label == \"touched\" ? \"\" : \"label\")], \
-                 [ActiveJob::Arguments.int(count), (label == \"touched\" ? \"\" : ActiveJob::Arguments.str(label))])"
+                "ActiveJob::Arguments.keywords([\"count\", (label == +\"touched\" ? \"\" : \"label\")], \
+                 [ActiveJob::Arguments.int(count), (label == +\"touched\" ? \"\" : ActiveJob::Arguments.str(label))])"
             ),
             "{registry}"
         );
         assert!(
             registry.contains(
-                "      kw = ActiveJob::Arguments.keywords_at(args, 1, [\"count\", \"label\"])\n      \
-                 GadgetJob.new.perform(locate_article_at(args, 0), count: ActiveJob::Arguments.int_at(kw, 0), \
-                 label: (ActiveJob::Arguments.null_at(kw, 1) ? \"touched\" : ActiveJob::Arguments.str_at(kw, 1)))\n"
+                "label: (ActiveJob::Arguments.keyword_given?(args, \"label\") ? \
+                 ActiveJob::Arguments.str_at(ActiveJob::Arguments.keyword_args(args, \"label\"), 0) : +\"touched\")"
             ),
             "{registry}"
         );

@@ -7,6 +7,8 @@
 pub mod adapter;
 pub mod analyze;
 pub mod app;
+#[cfg(feature = "memory-census")]
+pub mod memory_census;
 pub mod builder;
 pub mod bytecode;
 pub mod catalog;
@@ -112,3 +114,12 @@ pub use span::{FileId, Span};
 pub use ty::{Param, ParamKind, Row, Ty};
 
 pub mod shared;
+
+// Linux builds allocate Rust's heap through mimalloc: with glibc's
+// allocator, malloc and free were 28% of the samples of a one-worker
+// Mastodon transpile, and mimalloc runs it in 30% less time, with the
+// same output. Other targets, not measured, keep the system allocator,
+// and so does the `memory-census` build, whose counting allocator wraps it.
+#[cfg(all(target_os = "linux", not(feature = "memory-census")))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

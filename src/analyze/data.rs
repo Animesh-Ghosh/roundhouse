@@ -16,11 +16,13 @@ use super::body::ConstResolver;
 
 /// Register class identities for built-in `Data.define` constants with distinct
 /// literal members, retaining any lifted custom methods. Generated readers stay
-/// untyped; rejected declarations are absent from the returned span-to-type map.
+/// untyped unless a sidecar supplies their types; rejected declarations are
+/// absent from the returned span-to-type map.
 pub(super) fn register(
     app: &App,
     resolver: &ConstResolver,
     classes: &mut HashMap<ClassId, ClassInfo>,
+    rbs_only_classes: &HashSet<ClassId>,
 ) -> HashMap<Span, Ty> {
     let mut factories = HashMap::default();
     // Source overrides can replace `.define`; only the built-in factory is modeled here.
@@ -70,8 +72,11 @@ pub(super) fn register(
         let reopened = app.library_classes.iter().any(|class| {
             class.name == id && !class.is_module && class.parent.is_none()
         });
+        let sidecar_only = rbs_only_classes.contains(&id)
+            && !classes.get(&id).is_some_and(|info| info.app_declared)
+            && !app.gem_boundary.classes.contains_key(&id);
         if id.0.as_str() != format!("{}::{}", owner.0.as_str(), name.as_str())
-            || (classes.contains_key(&id) && !custom && !reopened)
+            || (classes.contains_key(&id) && !custom && !reopened && !sidecar_only)
             || (custom && app.library_classes.iter().filter(|class| class.name == id).count() != 1)
         {
             return;
@@ -116,12 +121,46 @@ pub(super) fn register(
 /// or whose generated class is subclassed. Lifting methods alone does not establish
 /// that the original factory belongs to the supported subset.
 pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
-    if !app.library_classes.iter().any(|class| matches!(class.origin, Some(LibraryClassOrigin::DataFactory { .. }))) {
+    if !app.library_classes.iter().any(|class| matches!(class.origin,
+        Some(LibraryClassOrigin::DataFactory { .. } | LibraryClassOrigin::DataDefine { .. }))) {
         return Vec::new();
     }
     let resolver = app.const_resolver.for_sources(&app.sources);
     let mut diagnostics = Vec::new();
     for factory in &app.library_classes {
+        if factory.data_define().is_some() {
+            for (_, value) in &factory.constants {
+                if let ExprNode::Send { recv: Some(recv), method, .. } = &*value.node
+                    && let ExprNode::Const { path } = &*recv.node
+                    && method.as_str() == "define" && resolver.is_runtime_class(recv.span, path, "Data")
+                {
+                    // Ingest can strip a lifted block; check the original call before admitting it.
+                    let source = value.span.file.0.checked_sub(1).and_then(|i| app.sources.get(i as usize))
+                        .and_then(|s| s.text.get(value.span.start as usize..value.span.end as usize));
+                    if source.is_some_and(|source| {
+                        let parsed = ruby_prism::parse(source.as_bytes());
+                        parsed.errors().next().is_none() && parsed.node().as_program_node().is_some_and(|root| root.statements().body().iter().next().and_then(|n| n.as_call_node()).is_some_and(|call| call.block().is_none()))
+                    }) { continue; }
+                    diagnostics.push(Diagnostic::unsupported(value.span, None, "Data.define", "nested Data.define factories cannot retain their bodies and lexical identity"));
+                }
+            }
+        }
+        if let Some((_, span)) = factory.data_define()
+            && app.library_classes.iter().any(|other| other.name == factory.name && !std::ptr::eq(other, factory)
+                && (other.data_define().is_some() || !other.methods.is_empty() || !other.constants.is_empty()
+                    || !other.includes.is_empty() || !other.unknown_calls.is_empty()
+                    || !other.class_ivar_initializers.is_empty() || !other.conditional_definitions.is_empty()))
+        {
+            diagnostics.push(Diagnostic::unsupported(span, None, "Data.define", "cross-file reopening of a Data record cannot preserve definition order"));
+            continue;
+        }
+        if let Some((_, span)) = factory.data_define()
+            && resolver.has_source_namespace("Data")
+        {
+            diagnostics.push(Diagnostic::unsupported(span, None, "Data.define",
+                "file-level Data factories require the built-in Data"));
+            continue;
+        }
         let Some(LibraryClassOrigin::DataFactory { declaration_span }) = factory.origin else {
             continue;
         };

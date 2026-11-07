@@ -121,6 +121,7 @@ pub fn ingest_routes_with_dsl(
         draws,
         block_wrappers,
         &HashMap::default(),
+        &HashMap::default(),
         &RackAppTargets::default(),
         &OnceCell::new(),
         &|| Vec::new(),
@@ -138,6 +139,7 @@ pub(super) fn ingest_routes_with_engines(
     draws: &HashMap<String, (Vec<u8>, String)>,
     block_wrappers: &HashSet<String>,
     engine_routes: &HashMap<String, EngineRouteSource>,
+    engine_refusals: &HashMap<String, String>,
     rack_apps: &RackAppTargets,
     helper_sources: &OnceCell<Vec<RouteHelperSource>>,
     load_helper_sources: &dyn Fn() -> Vec<RouteHelperSource>,
@@ -149,6 +151,7 @@ pub(super) fn ingest_routes_with_engines(
         draws,
         block_wrappers,
         engine_routes,
+        engine_refusals,
         rack_apps,
         helper_sources,
         load_helper_sources,
@@ -200,6 +203,7 @@ pub(super) fn ingest_route_file(
     draws: &HashMap<String, (Vec<u8>, String)>,
     block_wrappers: &HashSet<String>,
     engine_routes: &HashMap<String, EngineRouteSource>,
+    engine_refusals: &HashMap<String, String>,
     rack_apps: &RackAppTargets,
     helper_sources: &OnceCell<Vec<RouteHelperSource>>,
     load_helper_sources: &dyn Fn() -> Vec<RouteHelperSource>,
@@ -211,6 +215,7 @@ pub(super) fn ingest_route_file(
         draws,
         wrappers: block_wrappers,
         engine_routes,
+        engine_refusals,
         rack_apps,
         helper_sources,
         load_helper_sources,
@@ -222,6 +227,7 @@ pub(super) fn ingest_route_file(
         scope_controller: RefCell::new(None),
         mounted_engines: RefCell::new(HashSet::default()),
         mounted_rack_apps: RefCell::new(HashSet::default()),
+        strict: false,
     };
 
     // Every `Rails.application.routes.draw do … end` in the file: Rails
@@ -340,6 +346,8 @@ struct Ctx<'a> {
     wrappers: &'a HashSet<String>,
     /// Exact source-backed engine classes with literal isolated namespaces.
     engine_routes: &'a HashMap<String, EngineRouteSource>,
+    /// Why an isolated source engine's mount is not admitted, by class.
+    engine_refusals: &'a HashMap<String, String>,
     /// Literal app constants with a source-defined public singleton call(env).
     rack_apps: &'a RackAppTargets,
     /// Per-route-ingest snapshot shared by all accepted-mount helper scans.
@@ -367,6 +375,8 @@ struct Ctx<'a> {
     /// in this supported slice: Rails route helper proxies are mount-specific.
     mounted_engines: RefCell<HashSet<String>>,
     mounted_rack_apps: RefCell<HashSet<String>>,
+    /// A mounted engine's route set: a statement the host walk drops quietly fails it instead.
+    strict: bool,
 }
 
 impl Ctx<'_> {
@@ -630,6 +640,9 @@ fn ingest_literal_mount(
                 },
             });
         }
+        None if cx.engine_refusals.contains_key(&engine_name) => {
+            return unsupported(&format!("engine `{engine_name}` is not mounted: {}", cx.engine_refusals[&engine_name]));
+        }
         None => return unsupported(&format!(
             "Rack target `{engine_name}` is not a unique in-app class or module with a source-defined public singleton `call(env)` taking one positional argument"
         )),
@@ -654,12 +667,6 @@ fn ingest_literal_mount(
         return unsupported("engine route source must contain exactly one top-level matching `<Engine>.routes.draw` block and no other top-level code");
     }
     let mut entries = Vec::new();
-    let empty_draws = HashMap::default();
-    let empty_wrappers = HashSet::default();
-    let empty_engine_routes = HashMap::default();
-    let empty_rack_apps = RackAppTargets::default();
-    let empty_helper_sources = OnceCell::new();
-    let empty_helper_loader = || Vec::new();
     for draw in draws {
         let Some(block) = draw.block().and_then(|node| node.as_block_node()) else { continue };
         let Some(body) = block.body() else { continue };
@@ -689,58 +696,103 @@ fn ingest_literal_mount(
             route_mount_gap(&draw, &engine.file, cx, "engine `direct` URL helpers and mounted helper proxies are not composed");
             return None;
         }
-        if !engine_route_body_is_plain(&body) {
-            route_mount_gap(
-                &draw,
-                &engine.file,
-                cx,
-                "engine routes support only literal root and HTTP shortcut declarations; dynamic targets, resource DSL and unmodeled wrappers are not composed",
-            );
+        if has_mount_block_call(&body, &["redirect"]) {
+            route_mount_gap(&draw, &engine.file, cx, "engine `redirect` targets are not composed");
             return None;
         }
-        let engine_cx = Ctx {
-            draws: &empty_draws,
-            wrappers: &empty_wrappers,
-            engine_routes: &empty_engine_routes,
-            rack_apps: &empty_rack_apps,
-            helper_sources: &empty_helper_sources,
-            load_helper_sources: &empty_helper_loader,
-            concerns: RefCell::new(HashMap::default()),
-            active: RefCell::new(Vec::new()),
-            hoisted: RefCell::new(Vec::new()),
-            diagnostics: RefCell::new(Vec::new()),
-            mount_scope_depth: Cell::new(1),
-            scope_controller: RefCell::new(None),
-            mounted_engines: RefCell::new(HashSet::default()),
-            mounted_rack_apps: RefCell::new(HashSet::default()),
-        };
-        match ingest_route_body(body, &engine.file, None, &engine_cx) {
-            Ok(mut inner) => {
-                if !engine_cx.diagnostics.borrow().is_empty() {
-                    route_mount_gap(&draw, &engine.file, cx, "engine route set contains nested or unsupported mounts");
-                    return None;
-                }
-                entries.append(&mut inner);
+        match walk_engine_body(body, &engine.file) {
+            Ok(EngineWalk { recorded: Some(recorded), .. }) => {
+                let detail = format!("engine route set contains unsupported routing DSL ({recorded})");
+                route_mount_gap(&draw, &engine.file, cx, &detail);
+                return None;
             }
-            Err(_) => {
-                route_mount_gap(&draw, &engine.file, cx, "engine route set contains unsupported routing DSL");
+            Ok(EngineWalk { diagnosed: true, .. }) => {
+                route_mount_gap(&draw, &engine.file, cx, "engine route set contains nested or unsupported mounts");
+                return None;
+            }
+            Ok(EngineWalk { entries: mut inner, .. }) => entries.append(&mut inner),
+            Err(err) => {
+                route_mount_gap(&draw, &engine.file, cx, &format!("engine route set contains unsupported routing DSL ({err})"));
                 return None;
             }
         }
     }
     diagnose_engine_helper_uses(&engine_name, &engine.namespace, &entries, cx);
 
-    Some(RouteSpec::Scope {
+    let scope = RouteSpec::Scope {
         path: Some(path),
         module: Some(engine.namespace.clone()),
-        as_prefix: None,
+        // Not on a proxy object as Rails keeps them: `engine_helpers` rewrites each call to the prefixed name.
+        as_prefix: Some(engine_proxy_name(&engine.namespace)),
         defaults: IndexMap::new(),
         nest: false,
-        // Route dispatch shares the host table. Engine helper names do not:
-        // Rails keeps them on a per-mount proxy, which remains unsupported.
-        suppress_helpers: true, within: ResourceScope::Nested,
+        suppress_helpers: false, mount: true, within: ResourceScope::Nested,
         entries,
-    })
+    };
+    super::engine_helpers::mounted(&engine.namespace, &scope);
+    Some(scope)
+}
+
+struct EngineWalk {
+    entries: Vec<RouteSpec>,
+    recorded: Option<String>,
+    diagnosed: bool,
+}
+
+/// One engine draw body walked on its own: no host draws, wrappers or mounts.
+fn walk_engine_body(body: Node<'_>, file: &str) -> IngestResult<EngineWalk> {
+    let empty_draws = HashMap::default();
+    let empty_wrappers = HashSet::default();
+    let empty_engine_routes = HashMap::default();
+    let empty_engine_refusals = HashMap::default();
+    let empty_rack_apps = RackAppTargets::default();
+    let empty_helper_sources = OnceCell::new();
+    let empty_helper_loader = || Vec::new();
+    let engine_cx = Ctx {
+        draws: &empty_draws,
+        wrappers: &empty_wrappers,
+        engine_routes: &empty_engine_routes,
+        engine_refusals: &empty_engine_refusals,
+        rack_apps: &empty_rack_apps,
+        helper_sources: &empty_helper_sources,
+        load_helper_sources: &empty_helper_loader,
+        concerns: RefCell::new(HashMap::default()),
+        active: RefCell::new(Vec::new()),
+        hoisted: RefCell::new(Vec::new()),
+        diagnostics: RefCell::new(Vec::new()),
+        mount_scope_depth: Cell::new(1),
+        scope_controller: RefCell::new(None),
+        mounted_engines: RefCell::new(HashSet::default()),
+        mounted_rack_apps: RefCell::new(HashSet::default()),
+        strict: true,
+    };
+    // Not the survey's recovery: a route it records and skips would leave the engine's table short.
+    let mark = super::survey::mark();
+    let walked = ingest_route_body(body, file, None, &engine_cx);
+    let recorded = super::survey::first_since(mark);
+    super::survey::rewind(mark);
+    let diagnosed = !engine_cx.diagnostics.borrow().is_empty();
+    walked.map(|entries| EngineWalk { entries, recorded, diagnosed })
+}
+
+/// The name Rails gives an isolated engine's route proxy: `MissionControl::Jobs` → `mission_control_jobs`.
+pub(super) fn engine_proxy_name(namespace: &str) -> String {
+    let proxy = namespace.split("::").map(crate::naming::snake_case).collect::<Vec<_>>().join("_");
+    if proxy.is_empty() { "engine".to_string() } else { proxy }
+}
+
+/// The helper names an engine's own code calls bare, read from its route file
+/// alone so the code that calls them can be rewritten as it is ingested.
+pub(super) fn engine_helper_names(engine_name: &str, engine: &EngineRouteSource) -> HashSet<String> {
+    let parsed = super::prism::parse_silent(&engine.source);
+    let mut names = HashSet::default();
+    for draw in top_level_engine_draws(parsed.node(), engine_name) {
+        let Some(body) = draw.block().and_then(|node| node.as_block_node()).and_then(|block| block.body()) else { continue };
+        if let Ok(walk) = walk_engine_body(body, &engine.file) {
+            names.extend(engine_route_helper_methods(&walk.entries));
+        }
+    }
+    names
 }
 
 /// Reject helper calls that would require Rails' engine-specific route helper
@@ -753,8 +805,7 @@ fn diagnose_engine_helper_uses(
     cx: &Ctx<'_>,
 ) {
     let engine_helpers = engine_route_helper_methods(entries);
-    let proxy = namespace.split("::").map(crate::naming::snake_case).collect::<Vec<_>>().join("_");
-    let proxy = if proxy.is_empty() { "engine".to_string() } else { proxy };
+    let proxy = engine_proxy_name(namespace);
     let mounted_helpers = HashSet::from_iter([
         format!("{proxy}_path"),
         format!("{proxy}_url"),
@@ -815,7 +866,7 @@ fn engine_route_helper_methods(entries: &[RouteSpec]) -> HashSet<String> {
         as_prefix: None,
         defaults: IndexMap::new(),
         nest: false,
-        suppress_helpers: false, within: ResourceScope::Nested,
+        suppress_helpers: false, mount: false, within: ResourceScope::Nested,
         entries: entries.to_vec(),
     });
     let mut methods = HashSet::default();
@@ -862,7 +913,19 @@ impl<'h, 'pr> ruby_prism::Visit<'pr> for HelperUseFinder<'h, 'pr> {
                                     || receiver_chain_has(recv, "main_app")
                             })))
             };
-            if matched {
+            // `ingest::engine_helpers` rewrites a literal call it can see; a reflective one stays a gap.
+            let rewritten = constant_id_str(&call.name()) == helper.as_str()
+                && engine_helper
+                && if self.engine_origin {
+                    receiver.as_ref().is_none_or(|recv| recv.as_self_node().is_some())
+                } else {
+                    receiver.as_ref().and_then(|recv| recv.as_call_node()).is_some_and(|recv| {
+                        constant_id_str(&recv.name()) == self.proxy
+                            && recv.arguments().is_none()
+                            && recv.receiver().is_none_or(|r| r.as_self_node().is_some())
+                    })
+                };
+            if matched && !rewritten {
                 self.matches.push((call.location(), helper));
             }
         }
@@ -1005,153 +1068,6 @@ fn unsupported_engine_route_guard(node: &Node<'_>) -> Option<&'static str> {
     let mut finder = GuardFinder { detail: None };
     ruby_prism::Visit::visit(&mut finder, node);
     finder.detail
-}
-
-/// The host route walker intentionally ignores some Ruby statement kinds
-/// and receiver-qualified calls while continuing through the route table.
-/// A mounted engine cannot use that recovery path: a skipped branch or a
-/// dynamic target such as `root to: redirect(root_path)` would change the
-/// engine's exported route set. This first slice admits only literal root
-/// and HTTP shortcut entries with path/controller targets the shared route
-/// parser preserves exactly.
-fn engine_route_body_is_plain(node: &Node<'_>) -> bool {
-    let Some(statements) = node.as_statements_node() else { return false };
-    statements.body().iter().all(|statement| {
-        let Some(call) = statement.as_call_node() else { return false };
-        if call.receiver().is_some() {
-            return false;
-        }
-        if call.block().is_some() {
-            return false;
-        }
-        let method = constant_id_str(&call.name());
-        if method == "root" {
-            return engine_root_call_is_literal(&call);
-        }
-        if http_method_from(method).is_some() {
-            return engine_explicit_call_is_literal(&call, method);
-        }
-        false
-    })
-}
-
-/// Accept a root route only when it has one literal controller/action target
-/// and, optionally, a literal helper alias.
-fn engine_root_call_is_literal(call: &ruby_prism::CallNode<'_>) -> bool {
-    let Some(arguments) = call.arguments() else { return false };
-    let mut target = None;
-    let mut as_seen = false;
-    for argument in arguments.arguments().iter() {
-        if let Some(value) = string_value(&argument) {
-            if target.replace(value).is_some() {
-                return false;
-            }
-            continue;
-        }
-        let Some(hash) = argument.as_keyword_hash_node() else { return false };
-        for element in hash.elements().iter() {
-            let Some(assoc) = element.as_assoc_node() else { return false };
-            let Some(key) = symbol_value(&assoc.key()) else { return false };
-            match key.as_str() {
-                "to" => {
-                    let Some(value) = string_value(&assoc.value()) else { return false };
-                    if target.replace(value).is_some() {
-                        return false;
-                    }
-                }
-                "as" => {
-                    if as_seen || symbol_or_string_value(&assoc.value()).is_none_or(|name| name.is_empty()) {
-                        return false;
-                    }
-                    as_seen = true;
-                }
-                _ => return false,
-            }
-        }
-    }
-    target.is_some_and(|value| valid_controller_action(&value))
-}
-
-/// Validate the literal path and target option shapes supported for HTTP
-/// shortcuts and `match`; dynamic values and unrecognized options fail closed.
-fn engine_explicit_call_is_literal(call: &ruby_prism::CallNode<'_>, method: &str) -> bool {
-    let Some(arguments) = call.arguments() else { return false };
-    let mut path_seen = false;
-    let mut target = false;
-    let mut controller = false;
-    let mut action = false;
-    let mut as_seen = false;
-    let mut via_seen = false;
-    for argument in arguments.arguments().iter() {
-        if string_value(&argument).is_some() || symbol_value(&argument).is_some() {
-            if path_seen {
-                return false;
-            }
-            path_seen = true;
-            continue;
-        }
-        let Some(hash) = argument.as_keyword_hash_node() else { return false };
-        for element in hash.elements().iter() {
-            let Some(assoc) = element.as_assoc_node() else { return false };
-            let key_node = assoc.key();
-            if string_value(&key_node).is_some() {
-                let Some(value) = string_value(&assoc.value()) else { return false };
-                if path_seen || !valid_controller_action(&value) {
-                    return false;
-                }
-                path_seen = true;
-                target = true;
-                continue;
-            }
-            let Some(key) = symbol_value(&key_node) else { return false };
-            match key.as_str() {
-                "to" => {
-                    let Some(value) = string_value(&assoc.value()) else { return false };
-                    if !valid_controller_action(&value) || target {
-                        return false;
-                    }
-                    target = true;
-                }
-                "controller" => {
-                    if controller || symbol_or_string_value(&assoc.value()).is_none_or(|name| name.is_empty()) {
-                        return false;
-                    }
-                    controller = true;
-                }
-                "action" => {
-                    if action || symbol_or_string_value(&assoc.value()).is_none_or(|name| name.is_empty()) {
-                        return false;
-                    }
-                    action = true;
-                }
-                "as" => {
-                    if as_seen || symbol_or_string_value(&assoc.value()).is_none_or(|name| name.is_empty()) {
-                        return false;
-                    }
-                    as_seen = true;
-                }
-                "via" if method == "match" => {
-                    if via_seen {
-                        return false;
-                    }
-                    via_seen = true;
-                }
-                _ => return false,
-            }
-        }
-    }
-    path_seen
-        && ((target && !controller && !action)
-            || (!target && controller && action))
-        && (method != "match" || match_via_names(call).is_ok())
-}
-
-/// Check the plain nonempty `controller#action` target shape consumed by the
-/// shared route parser.
-fn valid_controller_action(value: &str) -> bool {
-    value
-        .split_once('#')
-        .is_some_and(|(controller, action)| !controller.is_empty() && !action.is_empty())
 }
 
 struct Concern {
@@ -1397,6 +1313,9 @@ fn ingest_route_stmts<'pr>(
                     "receiver-qualified mount targets are not composed",
                 );
             }
+            if cx.strict {
+                return Err(receiver_block_route_stmt(&call, file));
+            }
             // `Rails.application.routes.draw` gets re-found as a nested
             // call when we walk a weird input; skip anything with an
             // explicit receiver here.
@@ -1498,6 +1417,9 @@ fn ingest_route_stmts<'pr>(
                 Err(err) => return Err(err),
             },
             Ok(Some(spec)) => entries.push(spec),
+            Ok(None) if cx.strict && (method == "root" || http_method_from(&method).is_some()) => {
+                return Err(IngestError::Unsupported { file: file.into(), message: format!("`{method}` route dropped from an engine's route set") });
+            }
             Ok(None) => {}
             Err(err) if super::survey::is_active() => super::survey::record(&err),
             Err(err) => return Err(err),
@@ -1774,7 +1696,7 @@ fn retag_scope(entries: &mut Vec<RouteSpec>, scope: ResourceScope) {
                     as_prefix: None,
                     defaults: IndexMap::new(),
                     nest: false,
-                    suppress_helpers: false,
+                    suppress_helpers: false, mount: false,
                     within: scope,
                     entries: vec![resource],
                 };
@@ -1797,6 +1719,10 @@ fn retag_scope(entries: &mut Vec<RouteSpec>, scope: ResourceScope) {
 /// time the outer block merges here, any param the inner block set is
 /// already present on the child's `constraints` map and `or_insert`
 /// leaves it alone.
+pub(super) fn apply_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, String>) {
+    merge_outer_constraints(entries, outer)
+}
+
 fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, String>) {
     if outer.is_empty() {
         return;
@@ -1814,13 +1740,21 @@ fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, S
                 }
                 merge_outer_constraints(nested, outer);
             }
-            RouteSpec::Scope { entries, .. } => {
+            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => {
                 merge_outer_constraints(entries, outer);
             }
             RouteSpec::Root { .. } | RouteSpec::RackMount { .. } => {}
+            RouteSpec::Deferred { constraints, .. } => {
+                for (k, v) in outer {
+                    constraints.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
         }
     }
 }
+
+/// The call `ingest::gem_routes` writes around routes drawn under a scope the method set for itself.
+pub(super) const EXCLUSIVE_SCOPE: &str = "__roundhouse_exclusive_scope";
 
 std::thread_local! {
     /// The constants the app's route files read, folded from their owners
@@ -2365,7 +2299,7 @@ fn redirect_expression_is_string_in(
         }
         ExprNode::Send { method, recv, args, .. } => {
             // `strip` returns a string. `empty?`, `present?`, and `!`
-            // return booleans (`present?` lowers to `!(...).strip.empty?`),
+            // return booleans (`present?` lowers to the runtime predicate),
             // so a redirect whose value is that predicate stays unsupported.
             if matches!(method.as_str(), "!" | "empty?" | "present?") {
                 for arg in args {
@@ -2394,6 +2328,15 @@ fn redirect_expression_is_string_in(
         }
         _ => false,
     }
+}
+
+thread_local! {
+    static GEM_DSL: RefCell<HashSet<String>> = RefCell::new(HashSet::default());
+}
+
+/// The routing methods gems add to the mapper (`ingest::gem_routes`), read in place for later.
+pub(super) fn set_gem_dsl(names: HashSet<String>) {
+    GEM_DSL.with(|g| *g.borrow_mut() = names);
 }
 
 /// Recognize a route DSL call; unknown calls return an unsupported-DSL error.
@@ -2439,9 +2382,9 @@ fn ingest_route_call(
         return Ok(Some(entries.into_iter().reduce(|left, right| match (left, right) {
             (RouteSpec::Scope { mut entries, .. }, route) => {
                 entries.push(route);
-                RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, suppress_helpers: false, within: ResourceScope::Nested, entries }
+                RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, suppress_helpers: false, mount: false, within: ResourceScope::Nested, entries }
             }
-            (left, right) => RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, suppress_helpers: false, within: ResourceScope::Nested, entries: vec![left, right] },
+            (left, right) => RouteSpec::Scope { path: None, module: None, as_prefix: None, defaults: IndexMap::new(), nest: false, suppress_helpers: false, mount: false, within: ResourceScope::Nested, entries: vec![left, right] },
         }).expect("via produced a route")));
     }
     match method {
@@ -2463,7 +2406,7 @@ fn ingest_route_call(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: true,
-            suppress_helpers: false, within: ResourceScope::Nested,
+            suppress_helpers: false, mount: false, within: ResourceScope::Nested,
             entries: block_entries(call, file, None, cx)?,
         })),
         // `controller :domains do get "x", action: :y end` — the block
@@ -2483,7 +2426,7 @@ fn ingest_route_call(
                 as_prefix: None,
                 defaults: IndexMap::new(),
                 nest: false,
-                suppress_helpers: false, within: ResourceScope::Nested,
+                suppress_helpers: false, mount: false, within: ResourceScope::Nested,
                 entries,
             }))
         }
@@ -2527,6 +2470,10 @@ fn ingest_route_call(
         // `ingest::devise_routes`. Controllers override via
         // `controllers:`. Does not model Warden or OmniAuth callbacks.
         "devise_for" => super::devise_routes::ingest_devise_for(call, file),
+        // Written only by `ingest::gem_routes`: the routes a gem's method drew under a scope it set for itself.
+        EXCLUSIVE_SCOPE if call.receiver().is_none() && GEM_DSL.with(|g| !g.borrow().is_empty()) => {
+            Ok(Some(RouteSpec::Exclusive { entries: block_entries(call, file, None, cx)? }))
+        }
         // A block-taking method the app added to the mapper
         // (`routing_method :x do … end`): a scope over the enclosing
         // mapper that changes no path.
@@ -2536,9 +2483,19 @@ fn ingest_route_call(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: false,
-            suppress_helpers: false, within: ResourceScope::Nested,
+            suppress_helpers: false, mount: false, within: ResourceScope::Nested,
             entries: block_entries(call, file, parent, cx)?,
         })),
+        // A gem's own routing method: kept where it stands, drawn once its body can run.
+        _ if call.receiver().is_none() && GEM_DSL.with(|g| g.borrow().contains(method)) => {
+            let call_expr = super::expr::ingest_expr(&call.as_node(), file)?;
+            let span = Span {
+                file: super::sources::file_id(file),
+                start: call.location().start_offset() as u32,
+                end: call.location().end_offset() as u32,
+            };
+            Ok(Some(RouteSpec::Deferred { call: call_expr, span, constraints: IndexMap::new() }))
+        }
         // Unknown DSL — `concern`, `use_doorkeeper`, and Devise's
         // route-authentication guards (`authenticate` / `authenticated` /
         // `unauthenticated`), among others, land here. Strict ingest fails
@@ -2767,7 +2724,7 @@ fn ingest_namespace_route(
         // the parent's `/shops/:shop_id` (and `shop_` name) lands BEFORE the
         // namespace's own segment, unlike a plain `scope`.
         nest: true,
-        suppress_helpers: false, within: ResourceScope::Nested,
+        suppress_helpers: false, mount: false, within: ResourceScope::Nested,
         entries,
     })
 }
@@ -2835,7 +2792,7 @@ fn ingest_scope_route(
         }
         None => block_entries(call, file, None, cx)?,
     };
-    Ok(RouteSpec::Scope { path, module, as_prefix, defaults, nest: false, suppress_helpers: false, within: ResourceScope::Nested, entries })
+    Ok(RouteSpec::Scope { path, module, as_prefix, defaults, nest: false, suppress_helpers: false, mount: false, within: ResourceScope::Nested, entries })
 }
 
 /// `draw(:admin)` / `load(root.join("config", "routes", "admin.rb"))` /
@@ -2929,7 +2886,7 @@ fn ingest_route_file_include(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: false,
-            suppress_helpers: false, within: ResourceScope::Nested,
+            suppress_helpers: false, mount: false, within: ResourceScope::Nested,
             entries,
         }))
     })();
@@ -3051,7 +3008,7 @@ fn ingest_concerns(
         as_prefix: None,
         defaults: IndexMap::new(),
         nest: false,
-        suppress_helpers: false, within: ResourceScope::Nested,
+        suppress_helpers: false, mount: false, within: ResourceScope::Nested,
         entries,
     }))
 }
@@ -3450,7 +3407,7 @@ fn ingest_glob_draw_each(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: false,
-            suppress_helpers: false, within: ResourceScope::Nested,
+            suppress_helpers: false, mount: false, within: ResourceScope::Nested,
             entries: ingest_routes_file_entries(source, path, cx)?,
         });
     }
@@ -3744,11 +3701,15 @@ fn ingest_explicit_route(
     // A symbol verb with `path:` keeps the symbol as its action and name
     // (`post :render_x, path: "x"` is `render_x`) and takes the option as
     // its URL segment; a string verb ignores the option, as Rails does.
+    // Not `as:` a canonical action's symbol: Rails names the route by it as it names a bare symbol verb, so on a member or collection it adds nothing (devise's `post :create, path: "sign_in"` is `user_session`).
     if let (true, Some(segment), Some(symbol)) = (action_symbol, path_kwarg, path.clone()) {
         action_kwarg = action_kwarg.or_else(|| Some(symbol.replace('-', "_")));
-        as_name = as_name.or_else(|| Some(Symbol::from(symbol.replace('-', "_").as_str())));
         path = Some(format!("/{}", segment.trim_start_matches('/')));
-        action_symbol = false;
+        let targeted = to.is_some() || redirect_target.is_some() || to_is_unsupported.is_some();
+        if targeted || action_kwarg.as_deref() != Some(symbol.replace('-', "_").as_str()) || !matches!(symbol.as_str(), "index" | "create" | "new" | "show" | "update" | "destroy") {
+            as_name = as_name.or_else(|| Some(Symbol::from(symbol.replace('-', "_").as_str())));
+            action_symbol = false;
+        }
     }
 
     // `scope controller: :x do get :y end` — the scope's controller is the
@@ -4080,6 +4041,7 @@ fn ingest_resources_route(
     // and into this node's own `constraints` field below, once the
     // block body has been ingested.
     let mut constraints: IndexMap<Symbol, String> = IndexMap::new();
+    let mut path_names: IndexMap<Symbol, String> = IndexMap::new();
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -4164,16 +4126,13 @@ fn ingest_resources_route(
                             ),
                         });
                     };
-                    // A dynamic segment (`"categories/:category_id/parts"`),
-                    // a glob or an optional group adds route params the
-                    // flattener does not carry yet; refuse rather than
-                    // serve a path whose `:category_id` never reaches
-                    // `params`.
-                    if raw.contains([':', '*', '(']) {
+                    // A glob or an optional group adds a variant the flattener does not
+                    // expand for a resource; a plain `:name` segment is a param of each route.
+                    if raw.contains(['*', '(']) {
                         return Err(IngestError::Unsupported {
                             file: file.into(),
                             message: format!(
-                                "resources :{name_str} `path: {raw:?}` has a dynamic segment"
+                                "resources :{name_str} `path: {raw:?}` has a glob or optional segment"
                             ),
                         });
                     }
@@ -4204,6 +4163,23 @@ fn ingest_resources_route(
                             file,
                             &ctx,
                         )?);
+                    }
+                }
+                // `path_names: { new: "sign_up" }` renames the `new` and `edit` segments. Rails also names a block's own action by it (`get :cancel`), which is read only where the name is the action's own.
+                "path_names" => {
+                    let Some(h) = value.as_hash_node() else {
+                        return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names:` is not a literal Hash") });
+                    };
+                    for element in h.elements().iter() {
+                        let pair = element.as_assoc_node().and_then(|a| Some((symbol_or_string_value(&a.key())?, symbol_or_string_value(&a.value())?)));
+                        let Some((action, named)) = pair else {
+                            return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names:` entry is not a literal name") });
+                        };
+                        if matches!(action.as_str(), "new" | "edit") {
+                            path_names.insert(Symbol::from(action.as_str()), named.trim_matches('/').to_string());
+                        } else if named != action {
+                            return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names: {{ {action}: {named:?} }}` renames a block action") });
+                        }
                     }
                 }
                 // `shallow:` lands when a fixture demands it.
@@ -4265,6 +4241,7 @@ fn ingest_resources_route(
         param,
         path,
         constraints,
+        path_names,
     };
     Ok(match module {
         Some(module) => RouteSpec::Scope {
@@ -4273,7 +4250,7 @@ fn ingest_resources_route(
             as_prefix: None,
             defaults: IndexMap::new(),
             nest: false,
-            suppress_helpers: false,
+            suppress_helpers: false, mount: false,
             within: ResourceScope::Nested,
             entries: vec![resource],
         },
@@ -4338,6 +4315,7 @@ mod lazy_helper_source_tests {
             &HashMap::default(),
             &HashSet::default(),
             engines,
+            &HashMap::default(),
             &RackAppTargets::default(),
             helper_sources,
             load_helper_sources,
@@ -4430,8 +4408,8 @@ mod lazy_helper_source_tests {
         assert!(helper_sources.get().is_some());
         assert_eq!(
             routes.diagnostics.len(),
-            4,
-            "engine and mounted-proxy helper uses remain diagnosed"
+            2,
+            "the host's mounted helpers stay diagnosed; its proxy calls are rewritten"
         );
         let helper_file_id = super::super::sources::file_id("app/controllers/route_helpers.rb");
         assert_ne!(helper_file_id.0, 0, "diagnostic source must be registered");
@@ -4451,6 +4429,6 @@ mod lazy_helper_source_tests {
             })
             .collect();
         diagnostic_lines.sort_unstable();
-        assert_eq!(diagnostic_lines, vec![1, 2, 3, 4]);
+        assert_eq!(diagnostic_lines, vec![2, 4]);
     }
 }

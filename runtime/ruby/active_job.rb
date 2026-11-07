@@ -215,6 +215,10 @@ module ActiveJob
   class DeserializationError < StandardError
   end
 
+  # Raised by `Arguments.serialize` for an argument it cannot write.
+  class SerializationError < ArgumentError
+  end
+
   # `raise ActiveJob::EnqueueError, message` — the job was not queued.
   class EnqueueError < StandardError
   end
@@ -307,6 +311,12 @@ module ActiveJob
     HELD.clear
     HELD_NAMES.clear
     nil
+  end
+
+  # Rails' adapter classes, for the extensions an engine mixes into them at boot (`engine_config::carry_boot_mixin`).
+  module QueueAdapters
+    class AsyncAdapter
+    end
   end
 
   class Base

@@ -40,13 +40,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # CI selects the latest patch on this MRI line. The local minimum lives in
+  # CI runs exactly this MRI patch, which is also the local minimum in
   # .ruby-version; keep both anchors aligned. Exact repro pins remain separate.
-  MRI_RUBY: '3.4'
+  MRI_RUBY: '4.0.9'
   # The next MRI line, exercised by compare-ruby-next as a forward-
   # compatibility lane. MRI_RUBY stays the supported minimum; once this
   # line has run green for a while, swap the two.
-  MRI_RUBY_NEXT: '4.0'
+  MRI_RUBY_NEXT: '4.1.0-preview1'
   # The Rails apps the /ide/ + /playground/ demos ship (in-browser). Pinned
   # so the page — and any blog post's claims about it — stay stable against
   # upstream churn; bump deliberately. Each bundle embeds the app's LICENSE
@@ -168,7 +168,7 @@ jobs:
       - name: Cache installed fixture gems
         # Weekly keys refresh dependencies only within the same runner
         # image version, Ruby patch/platform and RubyGems/Bundler. Generation
-        # checks for the latest Rails release, even on a gem-cache hit.
+        # installs the pinned Rails, even on a gem-cache hit.
         continue-on-error: true
         uses: actions/cache@v6
         with:
@@ -183,12 +183,16 @@ jobs:
             ${{ env.GEM_HOME }}/specifications
           key: fixture-gems-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-${{ steps.gems.outputs.week }}
           restore-keys: fixture-gems-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.gems.outputs.platform }}-
+      # The tests assume this exact Rails (tests/boot_wiring.rs, the
+      # activerecord probes); bump it here and in the tests together.
+      # `--rails` also pins the app's lock, so a newer 8.1.4.x in the
+      # gem cache is not locked instead.
       - name: Install Rails
         if: steps.fixture.outputs.generate == 'true'
-        run: gem install rails --no-document
+        run: gem install rails -v 8.1.4 --no-document
       - name: Generate fixtures/real-blog
         if: steps.fixture.outputs.generate == 'true'
-        run: bin/rh fixture
+        run: bin/rh fixture --rails 8.1.4
       # The Rails Guides store rides the same artifact: the /ide/
       # default app and a picker entry, so build-site and
       # browser-smoke-ide bundle it without a second Rails install.
@@ -573,13 +577,24 @@ jobs:
           ruby-version: ${{ env.MRI_RUBY }}
       # These gates exercise the actual gems, not optional runtime fallbacks.
       - name: System libvips for the emitted ruby-vips processor
+        # One shard in most runs drew a slow mirror and waited 4-5 min on these debs.
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips42
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
           gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt rest-client elastic-apm
-          gem install --no-document activerecord -v '~> 8.1.0'
+          # The Rails the fixture locks (see generate-fixture).
+          gem install --no-document activerecord -v 8.1.4
+          gem install --no-document sequel -v 5.99.0
+          # solid_queue's record models, at the fixture's locked version (tests/support/solid_queue_worker.rs).
+          gem install --no-document --ignore-dependencies solid_queue -v "$(sed -n 's/^    solid_queue (\(.*\))$/\1/p' fixtures/real-blog/Gemfile.lock)"
+          # rack-attack, compiled from its source (tests/emit_and_run/rack_attack.rs).
+          gem install --no-document --ignore-dependencies rack-attack -v 6.7.0
+          # addressable and its public_suffix, compiled from source (tests/emit_and_run/addressable.rs).
+          gem install --no-document --ignore-dependencies public_suffix -v 7.0.5
+          gem install --no-document --ignore-dependencies addressable -v 2.9.0
       - name: Download current-run test bundle
         uses: actions/download-artifact@v8
         with:
@@ -938,7 +953,8 @@ jobs:
     runs-on: ubuntu-latest
     # 30m: upstream's shards take 11-14m, but a fork's runners take about
     # 1.7x that (a 20m bound cut a passing shard 2 there, fork run
-    # 38923600903). Still short of papering over a hung suite.
+    # 38923600903). Still short of papering over a hung suite. The script
+    # stops its suites at 27m, so this bound only catches a slow setup.
     timeout-minutes: 30
 
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
@@ -966,7 +982,7 @@ jobs:
           repository: roundhouse-rb/spinel-pg
           ref: ${{ env.SPINEL_PG_SHA }}
           path: spinel-pg
-      # Not the runner's system Ruby: a suite compares the binary with CRuby, and the baseline's messages are 3.4's
+      # Not the runner's system Ruby: a suite compares the binary with CRuby, and the baseline's messages must match this Ruby's
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
@@ -999,8 +1015,9 @@ jobs:
           CI_SPINEL_TIMINGS: ${{ needs.plan.outputs.spinel-timings }}
           CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/framework-${{ matrix.shard }}.jsonl
         run: scripts/ci-spinel-framework.sh
+      # Not !cancelled(): a job past its limit reads as cancelled, and its finished suites' seconds still count.
       - name: Upload recorded test seconds
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: spinel-timings-framework-${{ matrix.shard }}
@@ -1149,8 +1166,9 @@ jobs:
       - name: System libvips
         # Same slow-mirror bound as libvips-dev (#590) / campfire-conformance.
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 sqlite3
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips42 sqlite3
       - name: Cache the prepared oracle
         id: oracle
         uses: actions/cache@v6
@@ -1561,8 +1579,9 @@ jobs:
         name: Install libvips (ruby-vips binds it through FFI) and ffmpeg
         # libvips42 and ffmpeg are a slow apt install on a shared runner.
         timeout-minutes: 20
-        run: |
-          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips42 ffmpeg
+        uses: ./.github/actions/ci-apt-install-cached
+        with:
+          packages: libvips42 ffmpeg
       # concurrent-ruby, net-http-persistent, web-push: WebPush::Pool
       # loads them. concurrent-ruby is named even though sentry-ruby
       # also depends on it.
@@ -1756,8 +1775,8 @@ jobs:
     name: spinel-toolchain (suite, ${{ matrix.shard }})
     # Tracks matz/spinel master UNPINNED. Advisory unless ci:spinel focus
     # hardens the CORE lane (spinel-advisory=false).
-    needs: [generate-fixture, spinel-build, spinel-toolchain-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' && needs.spinel-toolchain-build.outputs.artifact-id != '' }}
+    needs: [generate-fixture, spinel-build, spinel-toolchain-build, spinel-toolchain-plan, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' && needs.spinel-toolchain-build.outputs.artifact-id != '' && needs.spinel-toolchain-plan.outputs.artifact-id != '' }}
     # Four shards, balanced by `ci-plan.py toolchain-shard` on recorded
     # seconds: a new test lands on the lightest shard instead of growing a
     # hand-kept catch-all one (two such shards reached 25 of 25 minutes).
@@ -1820,6 +1839,11 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.spinel-toolchain-plan.outputs.artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/bundle-plan
       - name: Install libsqlite3-dev + libjemalloc-dev
         timeout-minutes: 8
         # jemalloc for the same reason the emitted README now lists it:
@@ -1832,6 +1856,11 @@ jobs:
           ruby-version: ${{ env.MRI_RUBY }}
           bundler-cache: true
           working-directory: ./runtime/spinel/scaffold
+      - name: Install gems compiled from their source
+        run: |
+          # addressable and its public_suffix, built natively (tests/spinel_toolchain/addressable.rs).
+          gem install --no-document --ignore-dependencies public_suffix -v 7.0.5
+          gem install --no-document --ignore-dependencies addressable -v 2.9.0
       # One process per test, as many as libtest's threads, so each test's seconds are its own.
       - name: run spinel_toolchain ignored suite (${{ matrix.shard }})
         env:
@@ -1841,19 +1870,35 @@ jobs:
           RUST_MIN_STACK: "33554432"
         run: |
           test -x "$SPINEL_TOOLCHAIN_BIN"
-          mapfile -t mine < <("$SPINEL_TOOLCHAIN_BIN" --ignored --list --format terse | sed -n 's/: test$//p' | grep -vx spinel_bundle_build | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }})
-          test "${#mine[@]}" -gt 0
-          # Not a compile per contract: this shard's run_spinel contracts are collected (each test stops
-          # at its contract) and built in shared groups first; a contract left out compiles in its test.
+          # The tests, cases and units spinel-toolchain-plan collected once for every shard.
+          mapfile -t all < "$RUNNER_TEMP/bundle-plan/tests.txt"
           start=$(date +%s)
-          printf '%s\n' "${mine[@]}" | RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-cases" \
-            xargs -P "$(( $(nproc) * 2 ))" -I{} timeout 60 "$SPINEL_TOOLCHAIN_BIN" --ignored --exact {} >/dev/null 2>&1 || true
-          echo "collected $(ls "$RUNNER_TEMP/bundle-cases" 2>/dev/null | wc -l) contracts in $(( $(date +%s) - start ))s"
+          mapfile -t mine < <(printf '%s\n' "${all[@]}" | python3 scripts/ci-plan.py toolchain-shard --shard ${{ matrix.shard }} --units "$RUNNER_TEMP/bundle-plan/bundle-plan.json")
+          test "${#mine[@]}" -gt 0
+          mkdir -p "$RUNNER_TEMP/bundle-cases"
+          printf '%s\n' "${mine[@]}" | python3 -c 'import json, pathlib, shutil, sys
+          mine = set(sys.stdin.read().split())
+          src, dst = map(pathlib.Path, sys.argv[1:])
+          for case in src.glob("*.json"):
+              if json.loads(case.read_text()).get("test") in mine:
+                  shutil.copy(case, dst / case.name)' "$RUNNER_TEMP/bundle-plan/bundle-all" "$RUNNER_TEMP/bundle-cases"
+          echo "$(ls "$RUNNER_TEMP/bundle-cases" | wc -l) of $(ls "$RUNNER_TEMP/bundle-plan/bundle-all" | wc -l) collected cases are this shard's"
+          # Not after the shared builds: a test no planned build takes compiles alone, so it runs
+          # while they build.
+          printf '%s\n' "${mine[@]}" | python3 -c 'import json, sys
+          units = {t for unit in json.load(open(sys.argv[1])) for t in unit} if len(sys.argv) > 1 else set()
+          for t in sys.stdin.read().split():
+              print(("later " if t in units else "now ") + t)' "$RUNNER_TEMP/bundle-plan/bundle-plan.json" > "$RUNNER_TEMP/split.txt"
+          sed -n 's/^now //p' "$RUNNER_TEMP/split.txt" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact &
+          alone=$!
           RH_SPINEL_BUNDLE_COLLECT="$RUNNER_TEMP/bundle-cases" RH_SPINEL_BUNDLE_OUT="$RUNNER_TEMP/spinel-bundles" \
             "$SPINEL_TOOLCHAIN_BIN" --ignored --exact spinel_bundle_build --nocapture || true
           echo "bundled in $(( $(date +%s) - start ))s"
-          export RH_SPINEL_BUNDLE="$RUNNER_TEMP/spinel-bundles"
-          printf '%s\n' "${mine[@]}" | python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact
+          status=0
+          sed -n 's/^later //p' "$RUNNER_TEMP/split.txt" | RH_SPINEL_BUNDLE="$RUNNER_TEMP/spinel-bundles" \
+            python3 scripts/ci-plan.py run-tests --kind toolchain --parallel "$(nproc)" -- "$SPINEL_TOOLCHAIN_BIN" --ignored --nocapture --exact || status=1
+          wait "$alone" || status=1
+          exit "$status"
       # fixtures/tiny-api, the API-only app (#321): `spin build` of the
       # app entry, HTTP requests to the binary, and the model script
       # compiled natively. Filtered by name, so the ignored test named
@@ -1933,15 +1978,91 @@ jobs:
   # transpiled server against Rails over HTTP. Matrixed from nine
   # near-identical jobs; every per-target difference (toolchain install +
   # versions) is a guarded step below. ruby/setup-ruby runs LAST on every
-  # target so its MRI 3.4 wins PATH when Rails boots — required by the JVM
+  # target so its MRI wins PATH when Rails boots — required by the JVM
   # targets (setup-java/gradle otherwise leave system Ruby 3.2 resolving
   # bin/rails; see the old compare-kotlin note) and harmless everywhere
   # else. fail-fast off so one target's failure doesn't cancel the rest
   # (matches the old independent jobs). ruby/jruby/spinel stay separate
   # below: two setup-ruby steps / an extra spinel-build dependency don't
   # fit this shape.
+  # Not per shard: a case one shard's collection missed would plan its unit apart, so that shard
+  # could place a test elsewhere than the rest did and it would run twice or never.
+  spinel-toolchain-plan:
+    name: spinel-toolchain-plan (bundles)
+    needs: [generate-fixture, spinel-build, spinel-toolchain-build, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-toolchain') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' && needs.spinel-toolchain-build.outputs.artifact-id != '' }}
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
+    env:
+      ROUNDHOUSE_SPINEL_SLIM: ${{ inputs.full && '0' || '1' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.spinel-toolchain-build.outputs.artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/spinel-toolchain
+      - name: Restore spinel_toolchain binaries
+        run: |
+          python3 scripts/ci-spinel-toolchain.py restore \
+            --archive "$RUNNER_TEMP/spinel-toolchain/spinel-toolchain.tar.gz" \
+            --inventory "$RUNNER_TEMP/spinel-toolchain/inventory.json" \
+            --env-file "$RUNNER_TEMP/spinel-toolchain/bins.env"
+          set -a
+          # shellcheck disable=SC1090
+          . "$RUNNER_TEMP/spinel-toolchain/bins.env"
+          set +a
+          echo "SPINEL_TOOLCHAIN_BIN=$SPINEL_TOOLCHAIN_BIN" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v8
+        with:
+          name: spinel-dist
+          path: spinel-dist
+      - name: Stage spinel binaries
+        run: |
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
+          echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      # Every run_spinel contract and HTTP server overlay is collected (each test stops at it), and
+      # the cases one build can share are planned as units; a case left out compiles in its test.
+      - name: Collect and plan shared toolchain builds
+        env:
+          RUST_MIN_STACK: "33554432"
+        run: |
+          test -x "$SPINEL_TOOLCHAIN_BIN"
+          out="$RUNNER_TEMP/bundle-plan"
+          mkdir -p "$out/bundle-all"
+          "$SPINEL_TOOLCHAIN_BIN" --ignored --list --format terse | sed -n 's/: test$//p' \
+            | grep -vx -e spinel_bundle_build -e spinel_bundle_plan > "$out/tests.txt"
+          test -s "$out/tests.txt"
+          start=$(date +%s)
+          # Not checked: a collected test stops by failing, and one that is not collected is killed.
+          RH_SPINEL_BUNDLE_COLLECT="$out/bundle-all" xargs -P "$(( $(nproc) * 2 ))" -I{} \
+            timeout 60 "$SPINEL_TOOLCHAIN_BIN" --ignored --exact {} < "$out/tests.txt" >/dev/null 2>&1 || true
+          RH_SPINEL_BUNDLE_COLLECT="$out/bundle-all" RH_SPINEL_BUNDLE_PLAN="$out/bundle-plan.json" \
+            "$SPINEL_TOOLCHAIN_BIN" --ignored --exact spinel_bundle_plan
+          python3 -c 'import json, sys; units = json.load(open(sys.argv[1])); assert units and all(units), units' "$out/bundle-plan.json"
+          echo "collected $(ls "$out/bundle-all" | wc -l) cases into $(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$out/bundle-plan.json") units in $(( $(date +%s) - start ))s"
+      - name: Upload the toolchain plan
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: spinel-toolchain-plan
+          overwrite: true
+          path: ${{ runner.temp }}/bundle-plan
+          if-no-files-found: error
+          retention-days: 1
+
   compare:
-    needs: [generate-fixture, plan]
+    # Waits for unit-build, never for tests: the suites run from its archive
+    # instead of each leg compiling Roundhouse again (about 4-5 min a leg).
+    needs: [generate-fixture, plan, unit-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare') }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -1958,13 +2079,23 @@ jobs:
         target: ${{ fromJSON(needs.plan.outputs.compare) }}
     steps: &compare-steps
       - uses: actions/checkout@v7
+      # tools/compare (scripts/compare's HTTP differ) and the Rust target's emitted project still build here.
+      # No job-wide CARGO_TARGET_DIR: the default is already the archive's workspace/target, and set,
+      # it would also send the emitted Rust project's build there instead of its own target/.
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-nextest
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - name: Download current-run test bundle
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.unit-build.outputs.unit-test-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/unit-tests
       - name: Refresh apt index
         if: matrix.target == 'crystal'
         run: sudo apt-get update -qq
@@ -2050,7 +2181,7 @@ jobs:
         uses: astral-sh/setup-uv@v10.2.0
         with:
           cache-dependency-glob: src/emit/python/pyproject.rs
-      # setup-ruby LAST — see the job comment (MRI 3.4 must win PATH).
+      # setup-ruby LAST — see the job comment (MRI must win PATH).
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
@@ -2060,38 +2191,55 @@ jobs:
       - name: cargo test --test rust_toolchain controller identity values
         if: ${{ !cancelled() && matrix.target == 'rust' }}
         run: |
-          if output=$(cargo test --locked --test rust_toolchain real_blog_controller_identity_values_match_rails -- --ignored --nocapture --exact 2>&1); then
-            cargo_status=0
-          else
-            cargo_status=$?
-          fi
-          printf '%s\n' "$output"
-          if [ "$cargo_status" -ne 0 ]; then
-            exit "$cargo_status"
-          fi
-          if ! grep -Fxq 'test real_blog_controller_identity_values_match_rails ... ok' <<< "$output"; then
-            echo '::error::Rust controller identity test did not execute successfully'
-            exit 1
-          fi
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/rust-identity.json" \
+            --select rust_toolchain::real_blog_controller_identity_values_match_rails
       - name: cargo test --test rust_toolchain real_blog_i18n_locales_run
         if: ${{ !cancelled() && matrix.target == 'rust' }}
-        run: cargo test --locked --test rust_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/rust_toolchain-real_blog_i18n_locales_run.json" \
+            --select rust_toolchain::real_blog_i18n_locales_run
       - name: cargo test --test rust_toolchain real_blog_begin_rescue_runs
         if: ${{ !cancelled() && matrix.target == 'rust' }}
-        run: cargo test --locked --test rust_toolchain real_blog_begin_rescue_runs -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/rust_toolchain-real_blog_begin_rescue_runs.json" \
+            --select rust_toolchain::real_blog_begin_rescue_runs
       - name: cargo test --test rust_toolchain real_blog_rescue_from_runs
         if: ${{ !cancelled() && matrix.target == 'rust' }}
-        run: cargo test --locked --test rust_toolchain real_blog_rescue_from_runs -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/rust_toolchain-real_blog_rescue_from_runs.json" \
+            --select rust_toolchain::real_blog_rescue_from_runs
       - name: cargo test --test emit_and_run render json writer on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
-        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_rust -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_rust.json" \
+            --select emit_and_run::render_json_record_writer_runs_on_rust
       - name: cargo test --test framework_tests_rust (green subset)
         id: inflector
         if: ${{ !cancelled() && matrix.target == 'rust' }}
         env:
           ROUNDHOUSE_CI_REUSE: ${{ github.event_name == 'pull_request' && 'rust-inflector' || '' }}
           GH_TOKEN: ${{ github.token }}
-        run: cargo test --test framework_tests_rust -- --ignored --nocapture inflector
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/framework_tests_rust-inflector.json" \
+            --select framework_tests_rust:inflector
       - name: Upload actual inflector execution receipt
         if: success() && matrix.target == 'rust' && steps.inflector.outcome == 'success' && steps.inflector.outputs.recorded == 'true'
         continue-on-error: true
@@ -2102,116 +2250,300 @@ jobs:
           retention-days: 7
       - name: cargo test --test json_builder_nested_values on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
-        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_rust -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/json_builder_nested_values-nested_values_encode_on_rust.json" \
+            --select json_builder_nested_values::nested_values_encode_on_rust
       - name: cargo test --test json_builder_nested_values on go
         if: ${{ !cancelled() && matrix.target == 'go' }}
-        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_go -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/json_builder_nested_values-nested_values_encode_on_go.json" \
+            --select json_builder_nested_values::nested_values_encode_on_go
       - name: cargo test --test json_builder_nested_values on csharp
         if: ${{ !cancelled() && matrix.target == 'csharp' }}
-        run: cargo test --locked --test json_builder_nested_values nested_values_encode_on_csharp -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/json_builder_nested_values-nested_values_encode_on_csharp.json" \
+            --select json_builder_nested_values::nested_values_encode_on_csharp
       - name: cargo test --test truncate_separator on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
-        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_rust -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/truncate_separator-truncate_separator_runs_on_rust.json" \
+            --select truncate_separator::truncate_separator_runs_on_rust
       - name: cargo test --test truncate_separator on go
         if: ${{ !cancelled() && matrix.target == 'go' }}
-        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_go -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/truncate_separator-truncate_separator_runs_on_go.json" \
+            --select truncate_separator::truncate_separator_runs_on_go
       - name: cargo test --test truncate_separator on csharp
         if: ${{ !cancelled() && matrix.target == 'csharp' }}
-        run: cargo test --locked --test truncate_separator truncate_separator_runs_on_csharp -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/truncate_separator-truncate_separator_runs_on_csharp.json" \
+            --select truncate_separator::truncate_separator_runs_on_csharp
       - name: cargo test --test crystal_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
-        run: cargo test --test crystal_toolchain -- --ignored --nocapture
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/crystal_toolchain.json" \
+            --select crystal_toolchain
       - name: cargo test --test framework_tests_crystal -- --ignored
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
-        run: cargo test --test framework_tests_crystal -- --ignored --nocapture
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/framework_tests_crystal.json" \
+            --select framework_tests_crystal
       - name: cargo test --test emit_and_run render json writer on crystal
         if: ${{ !cancelled() && matrix.target == 'crystal' }}
-        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_crystal -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_crystal.json" \
+            --select emit_and_run::render_json_record_writer_runs_on_crystal
       - name: cargo test --test framework_tests_kotlin
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
-        run: cargo test --test framework_tests_kotlin -- --ignored --nocapture
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/framework_tests_kotlin.json" \
+            --select framework_tests_kotlin
       - name: cargo test --test emit_and_run render json writer on kotlin
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
-        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_kotlin -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_kotlin.json" \
+            --select emit_and_run::render_json_record_writer_runs_on_kotlin
       - name: cargo test --test kotlin_toolchain real_blog_i18n_locales_run
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
-        run: cargo test --locked --test kotlin_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/kotlin_toolchain-real_blog_i18n_locales_run.json" \
+            --select kotlin_toolchain::real_blog_i18n_locales_run
       - name: cargo test --test kotlin_toolchain controller_ivars_named_like_base_state_compile
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
-        run: cargo test --locked --test kotlin_toolchain controller_ivars_named_like_base_state_compile -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/kotlin_toolchain-controller_ivars_named_like_base_state_compile.json" \
+            --select kotlin_toolchain::controller_ivars_named_like_base_state_compile
       - name: cargo test --test kotlin_toolchain controller_ivars_named_like_base_state_render
         if: ${{ !cancelled() && matrix.target == 'kotlin' }}
-        run: cargo test --locked --test kotlin_toolchain controller_ivars_named_like_base_state_render -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/kotlin_toolchain-controller_ivars_named_like_base_state_render.json" \
+            --select kotlin_toolchain::controller_ivars_named_like_base_state_render
       - name: cargo test --test framework_tests_swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
         run: |
-          # scripts/compare then runs emit_preview; compiling it here reuses
-          # the libroundhouse just built for the test harness.
-          cargo build --bin emit_preview --quiet
-          cargo test --test framework_tests_swift -- --ignored --nocapture
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/framework-tests-swift.json" \
+            --select framework_tests_swift
       - name: cargo test --test emit_and_run render json writer on swift
         if: ${{ !cancelled() && matrix.target == 'swift' }}
-        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_swift -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_swift.json" \
+            --select emit_and_run::render_json_record_writer_runs_on_swift
       - name: cargo test --test swift_toolchain real_blog_i18n_locales_run
         if: ${{ !cancelled() && matrix.target == 'swift' }}
-        run: cargo test --locked --test swift_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/swift_toolchain-real_blog_i18n_locales_run.json" \
+            --select swift_toolchain::real_blog_i18n_locales_run
       - name: cargo test --test swift_toolchain real_blog_rescue_modifier_runs
         if: ${{ !cancelled() && matrix.target == 'swift' }}
-        run: cargo test --locked --test swift_toolchain real_blog_rescue_modifier_runs -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/swift_toolchain-real_blog_rescue_modifier_runs.json" \
+            --select swift_toolchain::real_blog_rescue_modifier_runs
       - name: cargo test --test swift_toolchain controller_ivars_named_like_base_state_build
         if: ${{ !cancelled() && matrix.target == 'swift' }}
-        run: cargo test --locked --test swift_toolchain controller_ivars_named_like_base_state_build -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/swift_toolchain-controller_ivars_named_like_base_state_build.json" \
+            --select swift_toolchain::controller_ivars_named_like_base_state_build
       - name: cargo test --test swift_toolchain controller_ivars_named_like_base_state_render
         if: ${{ !cancelled() && matrix.target == 'swift' }}
-        run: cargo test --locked --test swift_toolchain controller_ivars_named_like_base_state_render -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/swift_toolchain-controller_ivars_named_like_base_state_render.json" \
+            --select swift_toolchain::controller_ivars_named_like_base_state_render
       - name: cargo test --test typescript_toolchain real_blog -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
-        run: cargo test --test typescript_toolchain real_blog -- --ignored --nocapture
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/typescript_toolchain-real_blog.json" \
+            --select typescript_toolchain:real_blog
       - name: cargo test --test typescript_toolchain controller_ivars_named_like_base_state_compile_and_render
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
-        run: cargo test --locked --test typescript_toolchain controller_ivars_named_like_base_state_compile_and_render -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/typescript_toolchain-controller_ivars_named_like_base_state_compile_and_render.json" \
+            --select typescript_toolchain::controller_ivars_named_like_base_state_compile_and_render
       - name: cargo test --test emit_and_run render json writer on typescript
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
-        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_typescript -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_typescript.json" \
+            --select emit_and_run::render_json_record_writer_runs_on_typescript
       - name: cargo test --test framework_tests_typescript -- --ignored
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
-        run: cargo test --test framework_tests_typescript -- --ignored --nocapture
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/framework_tests_typescript.json" \
+            --select framework_tests_typescript
       - name: cargo test --test elixir_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'elixir' }}
-        run: cargo test --test elixir_toolchain -- --ignored --nocapture
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/elixir_toolchain.json" \
+            --select elixir_toolchain
       - name: cargo test --test emit_and_run render json writer on elixir
         if: ${{ !cancelled() && matrix.target == 'elixir' }}
-        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_elixir -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_elixir.json" \
+            --select emit_and_run::render_json_record_writer_runs_on_elixir
       - name: cargo test --test emit_and_run implicit self on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
-        run: cargo test --locked --test emit_and_run model_methods_read_the_record_on_implicit_self_on_rust -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-model_methods_read_the_record_on_implicit_self_on_rust.json" \
+            --select emit_and_run::model_methods_read_the_record_on_implicit_self_on_rust
       - name: cargo test --test emit_and_run controller params on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
-        run: cargo test --locked --test emit_and_run a_controller_reads_params_into_a_local_on_rust -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-a_controller_reads_params_into_a_local_on_rust.json" \
+            --select emit_and_run::a_controller_reads_params_into_a_local_on_rust
       - name: cargo test --test emit_and_run setup fixture on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
-        run: cargo test --locked --test emit_and_run a_controller_test_reads_the_fixture_its_setup_names_on_rust -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-a_controller_test_reads_the_fixture_its_setup_names_on_rust.json" \
+            --select emit_and_run::a_controller_test_reads_the_fixture_its_setup_names_on_rust
       - name: cargo test --test emit_and_run implicit self on typescript
         if: ${{ !cancelled() && matrix.target == 'typescript' }}
-        run: cargo test --locked --test emit_and_run model_methods_read_the_record_on_implicit_self_on_typescript -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-model_methods_read_the_record_on_implicit_self_on_typescript.json" \
+            --select emit_and_run::model_methods_read_the_record_on_implicit_self_on_typescript
       - name: cargo test --test emit_and_run implicit self on go
         if: ${{ !cancelled() && matrix.target == 'go' }}
-        run: cargo test --locked --test emit_and_run model_methods_read_the_record_on_implicit_self_on_go -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-model_methods_read_the_record_on_implicit_self_on_go.json" \
+            --select emit_and_run::model_methods_read_the_record_on_implicit_self_on_go
       - name: cargo test --test python_toolchain -- --ignored
         if: ${{ !cancelled() && matrix.target == 'python' }}
-        run: cargo test --test python_toolchain -- --ignored --nocapture
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/python_toolchain.json" \
+            --select python_toolchain
       - name: cargo test --test go_toolchain real_blog_i18n_locales_run
         if: ${{ !cancelled() && matrix.target == 'go' }}
-        run: cargo test --locked --test go_toolchain real_blog_i18n_locales_run -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/go_toolchain-real_blog_i18n_locales_run.json" \
+            --select go_toolchain::real_blog_i18n_locales_run
       - name: cargo test --test go_toolchain real_blog_flash_each_yields
         if: ${{ !cancelled() && matrix.target == 'go' }}
-        run: cargo test --locked --test go_toolchain real_blog_flash_each_yields -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/go_toolchain-real_blog_flash_each_yields.json" \
+            --select go_toolchain::real_blog_flash_each_yields
       - name: cargo test --test emit_and_run render json writer on go
         if: ${{ !cancelled() && matrix.target == 'go' }}
-        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_go -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_go.json" \
+            --select emit_and_run::render_json_record_writer_runs_on_go
       - name: cargo test --test emit_and_run render json writer on python
         if: ${{ !cancelled() && matrix.target == 'python' }}
-        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_python -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_python.json" \
+            --select emit_and_run::render_json_record_writer_runs_on_python
+      - name: cargo test --test emit_and_run route format on python
+        if: ${{ !cancelled() && matrix.target == 'python' }}
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-python_route_format-python_requests_take_rails_format_and_requireme.json" \
+            --select emit_and_run::python_route_format::python_requests_take_rails_format_and_requirement
       - name: Warm the dotnet CLI (first-run config is not concurrency-safe)
         if: ${{ !cancelled() && matrix.target == 'csharp' }}
         env:
@@ -2225,16 +2557,30 @@ jobs:
           DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
           DOTNET_NOLOGO: '1'
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
-        run: cargo test --test csharp_toolchain -- --ignored --nocapture --test-threads=1
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/csharp_toolchain.json" \
+            --test-threads 1 \
+            --select csharp_toolchain
       - name: cargo test --test emit_and_run render json writer on csharp
         if: ${{ !cancelled() && matrix.target == 'csharp' }}
         env:
           DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
           DOTNET_NOLOGO: '1'
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
-        run: cargo test --locked --test emit_and_run render_json_record_writer_runs_on_csharp -- --ignored --nocapture --exact
+        run: |
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-select/emit_and_run-render_json_record_writer_runs_on_csharp.json" \
+            --select emit_and_run::render_json_record_writer_runs_on_csharp
       - name: scripts/compare ${{ matrix.target }}
         if: ${{ !cancelled() }}
+        env:
+          # The archive's selections extracted it; building it again would compile Roundhouse.
+          ROUNDHOUSE_EMIT_PREVIEW: ${{ github.workspace }}/target/debug/emit_preview
         run: scripts/compare ${{ matrix.target }}
 
   # Same commands, distinct result: extra-target failures must not be confused
@@ -2242,7 +2588,7 @@ jobs:
   # jobs are selected). Anchors preserve physical job names used by the
   # existing strict PR-local execution receipts.
   compare-extra:
-    needs: [generate-fixture, plan]
+    needs: [generate-fixture, plan, unit-build]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-extra') }}
     # Ledger by default: Full/path extras do not fail the workflow conclusion.
     # Focus labels set extras-advisory=false so fix rounds stay hard.
@@ -2375,9 +2721,9 @@ jobs:
 
   # compare-jruby: same emitted tree as compare-ruby but served by Puma
   # on the JVM via JRuby with the JDBC db backend (runtime/db.rb =
-  # db_jruby.rb). The Rails reference runs under CRuby 3.4 (the default
+  # db_jruby.rb). The Rails reference runs under CRuby MRI_RUBY (the default
   # `ruby`); the target is launched with an explicit `jruby`, so the two
-  # setup-ruby steps are ordered jruby-first / CRuby-last to leave 3.4 as
+  # setup-ruby steps are ordered jruby-first / CRuby-last to leave MRI_RUBY as
   # the default. JRuby must be >= 10 — the runtime uses Fiber[:k] storage
   # (Ruby 3.2+), which JRuby 9.4 (Ruby 3.1) lacks. No node/tailwind:
   # assets aren't built (the DOM diff compares asset tags, not files —
@@ -3826,7 +4172,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain-plan, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

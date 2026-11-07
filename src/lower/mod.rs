@@ -29,7 +29,6 @@ pub mod chain;
 pub mod controller;
 pub mod controller_test;
 pub mod nil_operand;
-pub mod where_bounds;
 pub mod fixtures;
 pub(crate) mod forwarding;
 pub mod functionalize;
@@ -171,6 +170,8 @@ pub mod assoc_primary_key;
 pub mod has_one_builder;
 pub mod inquiry;
 pub mod byte_size;
+pub mod ruby2_keywords_hash;
+pub mod redirect_back;
 pub mod numeric_unary;
 pub mod tag_builder;
 pub mod kwsplat;
@@ -919,7 +920,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     expect_string_key::apply_expect_string_keys(app);
     ran!("expect_string_key");
     diags.extend(crate::timings::phase("post-analyze: blank", || {
-        blank::apply_blank_lowering(app)
+        blank::apply_blank_lowering_for(app, target)
     }));
     ran!("blank");
     as_json_super::apply_as_json_super_grounding(app);
@@ -946,7 +947,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("try_guard");
     record_snapshot::apply_record_snapshot_lowering(app);
     ran!("record_snapshot");
-    diags.extend(where_range_split::apply_where_range_split(app));
+    diags.extend(where_range_split::apply_where_range_split(app, target));
     ran!("where_range_split");
     for_each_hook_body(app, &mut |body| {
         fn walk(body: &mut crate::expr::Expr, registry: &crate::det::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>, diags: &mut Vec<crate::diagnostic::Diagnostic>) {
@@ -1451,6 +1452,15 @@ pub(crate) fn for_each_hook_body_ref(
     app: &crate::app::App,
     f: &mut impl FnMut(&crate::expr::Expr),
 ) {
+    for_each_owned_hook_body_ref(app, &mut |_, body| f(body))
+}
+
+/// [`for_each_hook_body_ref`] with each body's owner, as
+/// [`for_each_owned_hook_body`] gives it.
+pub(crate) fn for_each_owned_hook_body_ref(
+    app: &crate::app::App,
+    f: &mut impl FnMut(Option<&crate::ident::ClassId>, &crate::expr::Expr),
+) {
     fn visit_param_defaults(
         params: &[crate::dialect::Param],
         f: &mut impl FnMut(&crate::expr::Expr),
@@ -1462,6 +1472,7 @@ pub(crate) fn for_each_hook_body_ref(
         }
     }
     for model in &app.models {
+        let f = &mut |e: &crate::expr::Expr| f(Some(&model.name), e);
         for item in &model.body {
             match item {
                 crate::dialect::ModelBodyItem::Method { method, .. } => {
@@ -1503,6 +1514,7 @@ pub(crate) fn for_each_hook_body_ref(
         }
     }
     for lc in &app.library_classes {
+        let f = &mut |e: &crate::expr::Expr| f(Some(&lc.name), e);
         for method in &lc.methods {
             visit_param_defaults(&method.params, f);
             f(&method.body);
@@ -1519,6 +1531,7 @@ pub(crate) fn for_each_hook_body_ref(
     }
     // Same set as the mutable twin — see the note there.
     if let Some(lc) = &app.rails_application {
+        let f = &mut |e: &crate::expr::Expr| f(Some(&lc.name), e);
         for method in &lc.methods {
             visit_param_defaults(&method.params, f);
             f(&method.body);
@@ -1534,6 +1547,7 @@ pub(crate) fn for_each_hook_body_ref(
         }
     }
     for controller in &app.controllers {
+        let f = &mut |e: &crate::expr::Expr| f(Some(&controller.name), e);
         for item in &controller.body {
             match item {
                 crate::dialect::ControllerBodyItem::Action { action, .. } => {
@@ -1560,10 +1574,10 @@ pub(crate) fn for_each_hook_body_ref(
         }
     }
     if let Some(seeds) = &app.seeds {
-        f(seeds);
+        f(None, seeds);
     }
     for stmt in &app.boot_program {
-        f(stmt);
+        f(None, stmt);
     }
 }
 

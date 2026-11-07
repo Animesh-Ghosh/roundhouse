@@ -15,9 +15,11 @@
 //! ledgered as residue (see `fold_set_chains`).
 //!
 //! Job classes are those whose parent chain (within the ingested set)
-//! reaches ActiveJob::Base. A `perform` with keywords gets a wrapper
-//! with its own parameter list that forwards each keyword by name
-//! (`new.perform(article, count: count)`). A `**rest` keyword, a block,
+//! reaches ActiveJob::Base. On a target with native keywords (the Ruby
+//! family), a `perform` with keywords gets a wrapper with its own
+//! parameter list that forwards each keyword by name
+//! (`new.perform(article, count: count)`); elsewhere it stays unwrapped
+//! on the residue ledger. A `**rest` keyword, a block,
 //! `...` forwarding or a keyword default that isn't a literal stays
 //! unwrapped on the residue ledger, and each call to the missing
 //! entry point is an error.
@@ -160,6 +162,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
     // The jobs given a synthesized `perform_later`: the ones
     // `lower::job_payload` can plan a payload for.
     let mut payload_jobs: BTreeSet<String> = BTreeSet::new();
+    let native_keywords = app.native_library_keywords;
     // Jobs refused a wrapper: their `perform_later` / `perform_now`
     // call sites call nothing, so each is an error below.
     let mut refused: std::collections::BTreeMap<String, BTreeSet<String>> = std::collections::BTreeMap::new();
@@ -247,13 +250,16 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             refused.insert(own_name, missing);
             continue;
         }
+        // Not on a target whose keywords are trailing positionals: there a required keyword has no slot a caller can name.
         // A job's named keywords forward by name (`count: count`), as
         // ActiveJob's do; a `**rest` keyword bundle and a worker's
         // keywords don't. Sidekiq passes a worker its JSON args
         // positionally, so a worker has no keywords to forward.
-        if perform.params.iter().any(|p| p.keyword && (p.rest || is_worker)) {
+        if perform.params.iter().any(|p| p.keyword && (!native_keywords || p.rest || is_worker)) {
             diags.push(residue(&perform, "keyword parameters do not forward positionally"));
-            if !is_worker {
+            // Only where a job's keywords forward at all: elsewhere a
+            // keyword job is unwrapped on the ledger as before.
+            if native_keywords && !is_worker {
                 refused.insert(own_name, missing);
             }
             continue;
@@ -265,7 +271,7 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
         // or `label: default_label` would be evaluated at the wrong time
         // or not resolve at all.
         if perform.params.iter().any(|p| {
-            p.keyword && p.default.as_ref().is_some_and(|d| super::job_payload::literal_ruby(d).is_none())
+            p.keyword && p.default.as_ref().is_some_and(|d| !matches!(&*d.node, ExprNode::Lit { .. }))
         }) {
             diags.push(residue(&perform, "a keyword default that isn't a literal is evaluated by perform, not the wrapper"));
             refused.insert(own_name, missing);
@@ -293,10 +299,13 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             if class_side.contains(entry) {
                 continue;
             }
-            let mut args: Vec<Expr> = Vec::new();
             let mut keywords: Vec<(Expr, Expr)> = Vec::new();
-            for (i, (p, ty)) in perform.params.iter().zip(param_tys.iter()).enumerate() {
-                let arg = {
+            let mut args: Vec<Expr> = perform
+                .params
+                .iter()
+                .zip(param_tys.iter())
+                .enumerate()
+                .filter_map(|(i, (p, ty))| {
                     let mut v = Expr::new(
                         span,
                         ExprNode::Var {
@@ -305,24 +314,19 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                         },
                     );
                     v.ty = ty.clone();
+                    if p.keyword {
+                        let mut key = Expr::new(span, ExprNode::Lit { value: crate::expr::Literal::Sym { value: p.name.clone() } });
+                        key.ty = Some(Ty::Sym);
+                        keywords.push((key, v));
+                        return None;
+                    }
                     if p.rest {
                         v.ty = Some(Ty::Array { elem: std::sync::Arc::new(ty.clone().unwrap_or(Ty::Untyped)) });
-                        Expr::new(span, ExprNode::Splat { value: v })
-                    } else {
-                        v
+                        return Some(Expr::new(span, ExprNode::Splat { value: v }));
                     }
-                };
-                if p.keyword {
-                    let mut key = Expr::new(
-                        span,
-                        ExprNode::Lit { value: crate::expr::Literal::Sym { value: p.name.clone() } },
-                    );
-                    key.ty = Some(Ty::Sym);
-                    keywords.push((key, arg));
-                } else {
-                    args.push(arg);
-                }
-            }
+                    Some(v)
+                })
+                .collect();
             // `new.perform(article, count: count, label: label)`.
             if !keywords.is_empty() {
                 args.push(Expr::new(span, ExprNode::Hash { entries: keywords, kwargs: true }));

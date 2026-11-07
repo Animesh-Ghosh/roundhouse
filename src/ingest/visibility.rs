@@ -386,6 +386,16 @@ impl Visibility {
                 defaults.extend(visibility.defaults);
             }
             for statement in flatten_statements(body) {
+                // `X = Struct.new(…) do … end`: the block is that class's body, with defaults of its own.
+                if let Some(cw) = statement.as_constant_write_node()
+                    && super::library_class::struct_constant_block(&cw.value())
+                {
+                    let block_body = cw.value().as_call_node().and_then(|c| c.block()).and_then(|b| b.as_block_node()).and_then(|b| b.body());
+                    if let Ok(visibility) = Self::resolve_carrying_inherited(block_body.as_ref(), file, None) {
+                        defaults.extend(visibility.defaults);
+                    }
+                    continue;
+                }
                 let Some(call) = statement.as_call_node() else { continue };
                 if call.receiver().is_some() || constant_id_str(&call.name()) != "included" {
                     continue;
@@ -528,6 +538,12 @@ impl Visibility {
         if let Some(value) = self.values.get(&(offset, name)) {
             method.visibility = *value;
         }
+    }
+
+    /// Whether any name a statement declares was given a visibility other than public.
+    pub(super) fn restricted_at(&self, statement: &Node<'_>) -> bool {
+        let offset = statement.location().start_offset();
+        self.values.iter().any(|((at, _), value)| *at == offset && *value != MethodVisibility::Public)
     }
 
     pub(super) fn check_model_item(&self, statement: &Node<'_>, file: &str) -> IngestResult<()> {
@@ -1090,7 +1106,7 @@ impl Visibility {
                 // not this body's; `library_class::data_block_classes`
                 // gives them a class of their own.
                 if node.as_constant_write_node().is_some_and(|cw| {
-                    super::library_class::data_define_block(&cw.value()).is_some()
+                    super::library_class::data_define_block(&cw.value()).is_some() || super::library_class::struct_constant_block(&cw.value())
                 }) {
                     continue;
                 }

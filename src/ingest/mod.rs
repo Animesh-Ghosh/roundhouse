@@ -41,21 +41,40 @@ mod dry_types;
 mod oj;
 pub(crate) mod source_gems;
 mod auto_source_gems;
+mod forwardable;
+mod railtie_middleware;
+mod absence_guards;
+mod uncalled_definers;
+mod job_class_lookup;
+mod settled_conditionals;
 mod dry_monads;
 mod dry_validation;
 mod representable;
 mod active_model_serializer;
 mod action_cable_config;
+mod recurring_commands;
 mod session_config;
 pub(crate) mod database_ownership;
 pub(crate) mod database_yml;
 pub mod sidekiq_yml;
 pub mod cable_yml;
+pub(crate) mod config_for;
 mod public_file_server_config;
 mod action_controller_caching_config;
+mod json_response_config;
 mod active_job_config;
 mod caches_page;
 mod boot_program;
+mod engine_config;
+mod engine_helpers;
+mod interpolated_renders;
+mod container_specialize;
+mod controller_delegates;
+mod active_model_super;
+mod queue_adapter_reader;
+mod library_concern_items;
+mod unreached_gem_modules;
+pub(crate) mod puma_boot;
 pub mod allow_browser;
 pub mod app;
 mod concern_accessors;
@@ -96,10 +115,14 @@ mod external_include;
 mod hook_class_attribute;
 pub(crate) mod inherited_alias;
 mod class_macros;
+mod configured_superclass;
+mod gem_hooks;
+mod gem_routes;
 mod column_accessors;
 mod model_macros;
 mod referenced_carriers;
 mod extend_splice;
+mod included_extend;
 pub mod on_load_reopen;
 pub mod prism;
 pub(crate) mod prism_api;
@@ -131,10 +154,13 @@ pub(crate) mod rake_tasks;
 pub mod util;
 pub mod view;
 pub mod vite;
+pub mod current_page;
 pub mod time_tag;
 mod visibility;
 
 pub use app::{ingest_app, ingest_app_from_tree, ingest_app_with_vfs};
+pub use concern_accessors::{defer as defer_accessor_surface, DeferredAccessorSurface};
+pub use puma_boot::preserve_config as preserve_puma_config;
 
 /// The construct an ActiveRecord class outside app/models is reported
 /// under (`app::report_unmodelled_records`): the CLI keys its per-target
@@ -193,3 +219,23 @@ impl From<std::io::Error> for IngestError {
 }
 
 type IngestResult<T> = Result<T, IngestError>;
+
+/// An empty reopen of `Rails::Application`, which ingest fills with the
+/// methods it lifts from the app's config.
+pub(crate) fn rails_application_class() -> crate::dialect::LibraryClass {
+    crate::dialect::LibraryClass {
+        name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
+        is_module: false,
+        parent: None,
+        parent_span: Default::default(),
+        includes: Vec::new(),
+        include_spans: Vec::new(),
+        methods: Vec::new(),
+        nullable_columns: Vec::new(),
+        origin: None,
+        constants: Vec::new(),
+        conditional_definitions: Vec::new(),
+        unknown_calls: Vec::new(),
+        class_ivar_initializers: Vec::new(),
+    }
+}
