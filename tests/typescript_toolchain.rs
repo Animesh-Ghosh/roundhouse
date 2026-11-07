@@ -42,6 +42,9 @@ mod link_to_if_eval_order;
 mod simple_format;
 #[path = "support/link_to_computed_url.rs"]
 mod link_to_computed_url;
+#[path = "support/nested_route_helper_record.rs"]
+#[allow(dead_code)]
+mod nested_route_helper_record;
 #[path = "support/nested_classes.rs"]
 mod nested_classes;
 #[path = "support/array_methods.rs"]
@@ -775,6 +778,25 @@ fn simple_format_renders() {
 #[ignore]
 fn link_to_computed_url_renders() {
     let (emitted, errors) = content_tag_options::app_rendering(link_to_computed_url::VIEW, link_to_computed_url::RENDERS).emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let install = Command::new("npm").args(["install", "--silent", "--no-audit", "--no-fund"]).current_dir(&*emitted).output().expect("run npm install");
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    let output = Command::new("./node_modules/.bin/tsx")
+        .args(["--test", "test/probes_controller.test.ts"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run tsx --test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("pass 1"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1890: a record handed to a route helper inside an output
+/// expression renders as Rails 8.1.4 does
+/// (`nested_route_helper_record::VIEW`).
+#[test]
+#[ignore]
+fn nested_route_helper_record_renders() {
+    let (emitted, errors) = nested_route_helper_record::strict_app().0.emit(roundhouse::project::BuildTarget::Typescript);
     assert!(errors.is_empty(), "{errors:?}");
     let install = Command::new("npm").args(["install", "--silent", "--no-audit", "--no-fund"]).current_dir(&*emitted).output().expect("run npm install");
     assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));

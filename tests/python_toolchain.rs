@@ -28,6 +28,9 @@ mod link_to_if_eval_order;
 mod simple_format;
 #[path = "support/link_to_computed_url.rs"]
 mod link_to_computed_url;
+#[path = "support/nested_route_helper_record.rs"]
+#[allow(dead_code)]
+mod nested_route_helper_record;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -250,6 +253,26 @@ fn simple_format_renders() {
 #[ignore]
 fn link_to_computed_url_renders() {
     let (emitted, errors) = content_tag_options::app_rendering(link_to_computed_url::VIEW, link_to_computed_url::RENDERS).emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("tests/test_probes_controller.py");
+    let source = std::fs::read_to_string(&test).expect("test_probes_controller.py");
+    std::fs::write(&test, source.replace(".include_p(", ".__contains__(")).expect("write probe");
+    let output = Command::new("python3")
+        .args(["-m", "unittest", "tests.test_probes_controller"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run python unittest");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success() && stderr.contains("Ran 1 test"), "{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
+}
+
+/// #1890: a record handed to a route helper inside an output
+/// expression renders as Rails 8.1.4 does
+/// (`nested_route_helper_record::VIEW`).
+#[test]
+#[ignore]
+fn nested_route_helper_record_renders() {
+    let (emitted, errors) = nested_route_helper_record::strict_app().0.emit(roundhouse::project::BuildTarget::Python);
     assert!(errors.is_empty(), "{errors:?}");
     let test = emitted.join("tests/test_probes_controller.py");
     let source = std::fs::read_to_string(&test).expect("test_probes_controller.py");
