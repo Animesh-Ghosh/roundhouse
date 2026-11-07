@@ -1438,8 +1438,16 @@ fn ingest_route_stmts<'pr>(
 }
 
 fn empty_route_splat(node: &Node<'_>) -> bool {
-    node.as_assoc_splat_node().and_then(|s| s.value()).and_then(|v| v.as_hash_node())
-        .is_some_and(|h| h.elements().iter().all(|item| empty_route_splat(&item)))
+    node.as_assoc_splat_node().and_then(|s| s.value()).is_some_and(|v| empty_splat_value(&v))
+}
+
+/// `nil`, `{}` (whose own entries are empty splats) or a parenthesized one: a keyword splat Ruby reads as nothing.
+fn empty_splat_value(value: &Node<'_>) -> bool {
+    if let Some(p) = value.as_parentheses_node() {
+        let stmts: Vec<Node<'_>> = p.body().and_then(|b| b.as_statements_node()).map(|s| s.body().iter().collect()).unwrap_or_default();
+        return matches!(stmts.as_slice(), [only] if empty_splat_value(only));
+    }
+    value.as_nil_node().is_some() || value.as_hash_node().is_some_and(|h| h.elements().iter().all(|item| empty_route_splat(&item)))
 }
 
 /// Literal `defaults:` the table keeps (scope ones are checked per route), and no option the ingesters skip.

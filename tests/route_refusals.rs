@@ -397,12 +397,19 @@ fn route_option_refusal_keeps_recursively_empty_literal_splats() {
         "get '/catalog', to: 'catalog#show', **{ **{} }",
         "scope defaults: { **{} } do\nget '/catalog', to: 'catalog#show'\nend",
         "get '/catalog', to: 'catalog#show', defaults: { **{ **{} }, format: 'json', **{} }",
+        "get '/catalog', to: 'catalog#show', **({})",
+        "get '/catalog', to: 'catalog#show', **{ **({}) }",
+        "get '/catalog', to: 'catalog#show', **nil",
+        "get '/catalog', to: 'catalog#show', defaults: { **nil }",
+        "get '/catalog', to: 'catalog#show', **{ **nil }",
     ] {
         kept(&drawn(body));
     }
     for body in [
         "get '/catalog', to: 'catalog#show', **{ **{ as: :catalog } }",
         "get '/catalog', to: 'catalog#show', defaults: { **{ format: 'json' } }",
+        "get '/catalog', to: 'catalog#show', **({ as: :catalog })",
+        "get '/catalog', to: 'catalog#show', defaults: { **(nil || { format: 'json' }) }",
     ] {
         refused(&drawn(body), "route defaults", "config/routes.rb:2:");
     }
