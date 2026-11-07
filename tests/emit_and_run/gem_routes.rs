@@ -68,8 +68,10 @@ const BELL_ROUTES: &str = r##"module Bells
       options = names.extract_options!
       names.map! { |name| name.to_sym }
       base = { as: "bells" }.merge(options.slice(:as))
-      names.each do |name|
-        get "#{Bells.prefix}/#{name}", controller: "bells", action: name, as: "#{base[:as]}_#{name}"
+      with_options controller: "bells" do |routes|
+        names.each do |name|
+          routes.get "#{Bells.prefix}/#{name}", action: name, as: "#{base[:as]}_#{name}"
+        end
       end
     end
   end
@@ -81,8 +83,9 @@ end
 "##;
 
 /// The method takes its options as devise's `devise_for` does
-/// (`extract_options!`, `map!`, a merged and sliced Hash), and reads a
-/// setting an initializer gave through the gem's `setup { |config| … }`.
+/// (`extract_options!`, `map!`, a merged and sliced Hash), draws through
+/// `with_options`, and reads a setting an initializer gave through the
+/// gem's `setup { |config| … }`.
 #[test]
 fn a_gems_routing_method_reads_its_options_and_its_setup_block() {
     emit_and_run::real_blog()

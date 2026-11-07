@@ -267,6 +267,8 @@ enum Val {
     Unknown,
     /// The routing mapper a gem's routing method draws on: what is called on it is recorded, not run.
     Router,
+    /// `with_options(model: true) { |d| d.add_module … }`: each call on it goes to the target with the options merged into its last Hash.
+    Merger { target: Box<Val>, options: Vec<(Val, Val)> },
 }
 
 impl Val {
@@ -673,7 +675,20 @@ impl<'a> Eval<'a> {
             None => None,
             Some(b) => Some(self.value(b, frame)?).filter(|v| !matches!(v, Val::Nil)),
         };
-        if matches!(this, Val::Router) {
+        self.dispatch(recv, this, method, argv, blk, frame)
+    }
+
+    /// A call whose receiver and arguments are values; `recv` is the receiver as written, when an in-place change writes back through it.
+    fn dispatch(&mut self, recv: Option<&Expr>, this: Val, method: &str, mut argv: Vec<Val>, blk: Option<Val>, frame: &mut Frame) -> Res<Val> {
+        if let Val::Merger { target, options } = &this {
+            match argv.last_mut() {
+                Some(Val::Hash(last)) => *last = deep_merge(options, last),
+                _ => argv.push(Val::Hash(options.clone())),
+            }
+            return self.dispatch(None, (**target).clone(), method, argv, blk, frame);
+        }
+        // Not a route: `Object#with_options` on the mapper hands its routes the options.
+        if matches!(this, Val::Router) && !(method == "with_options" && matches!(argv.as_slice(), [Val::Hash(_)])) {
             return self.draw(method, argv, blk, frame);
         }
         // `@mapping.controllers.merge!(names)`: the Hash the reader answers is the ivar's, changed in place.
@@ -818,6 +833,21 @@ impl<'a> Eval<'a> {
         }
         match (method, &this, argv.as_slice()) {
             ("block_given?", _, []) if recv.is_none() => Ok(Val::Bool(frame.block.is_some())),
+            ("with_options", _, [Val::Hash(options)]) if !matches!(this, Val::Unknown) => {
+                let merger = Val::Merger { target: Box::new(this.clone()), options: options.clone() };
+                match &blk {
+                    // A block that takes no argument runs with the merger as its `self`, as Rails' `instance_eval` does.
+                    Some(Val::Proc { params, rest: None, body, scope, locals, .. }) if params.is_empty() => {
+                        let mut inner = Frame { this: merger.clone(), locals: (**locals).clone(), block: None, scope: scope.clone() };
+                        self.value(body, &mut inner)?;
+                    }
+                    Some(proc_) => {
+                        self.call_proc(proc_, vec![merger.clone()], frame)?;
+                    }
+                    None => {}
+                }
+                Ok(merger)
+            }
             ("pluralize", Val::Str(t), []) => Ok(Val::Str(crate::naming::pluralize_snake(t))),
             ("lambda" | "proc", _, []) if recv.is_none() => blk.ok_or_else(|| format!("`{method}` without a block")),
             ("new", Val::Class(name), _) if self.known.contains(name) => {
@@ -889,7 +919,7 @@ impl<'a> Eval<'a> {
                     Val::Array(items) => items.is_empty(),
                     Val::Hash(entries) => entries.is_empty(),
                     Val::Bool(true) | Val::Int(_) | Val::Sym(_) | Val::Class(_) | Val::Proc { .. } | Val::Regex(_) => false,
-                    Val::Obj(_) | Val::Unknown | Val::Router => return Err(format!("`{method}` on an object")),
+                    Val::Obj(_) | Val::Unknown | Val::Router | Val::Merger { .. } => return Err(format!("`{method}` on an object")),
                 };
                 Ok(match method {
                     "blank?" => Val::Bool(blank),
@@ -1500,6 +1530,23 @@ impl<'a> Eval<'a> {
         }
         Some(out)
     }
+}
+
+/// `Hash#deep_merge`: a key both hold with Hash values merges them, otherwise `more`'s value wins.
+fn deep_merge(base: &[(Val, Val)], more: &[(Val, Val)]) -> Vec<(Val, Val)> {
+    let mut merged = base.to_vec();
+    for (k, v) in more {
+        match merged.iter_mut().find(|(ek, _)| same(ek, k)) {
+            Some(slot) => {
+                slot.1 = match (&slot.1, v) {
+                    (Val::Hash(a), Val::Hash(b)) => Val::Hash(deep_merge(a, b)),
+                    _ => v.clone(),
+                };
+            }
+            None => merged.push((k.clone(), v.clone())),
+        }
+    }
+    merged
 }
 
 fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {

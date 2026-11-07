@@ -104,6 +104,14 @@ fn consume_installs(app: &mut App) {
         }
         app.library_classes[index] = lc;
     }
+    // Not left in the emitted program: an extension's methods run only on the mapper, which drew its routes here (devise_for's body names OmniAuth).
+    let included_elsewhere = |name: &str| {
+        app.library_classes.iter().any(|lc| lc.name.0.as_str() != "ActionDispatch::Routing::Mapper" && lc.includes.iter().any(|i| i.0.as_str() == name))
+    };
+    let dead: HashSet<String> = modules.into_iter().filter(|m| !included_elsewhere(m)).collect();
+    for lc in app.library_classes.iter_mut().filter(|lc| dead.contains(lc.name.0.as_str())) {
+        lc.methods.retain(|m| m.receiver != MethodReceiver::Instance);
+    }
 }
 
 fn placeholder() -> LibraryClass {
