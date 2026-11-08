@@ -922,7 +922,11 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             // An empty block maps each element to nil; it emits no expression.
             let value = if matches!(&*body.node, ExprNode::Seq { exprs } if exprs.is_empty()) { "None".to_string() } else { emit_expr(body) };
             match params.as_slice() {
-                [p] => format!("[{} for {} in {}]", value, p, emit_expr(recv)),
+                // A comprehension takes one expression: a body of several
+                // statements is refused below, not written into it.
+                [p] if !matches!(&*body.node, ExprNode::Seq { exprs } if exprs.len() > 1) => {
+                    format!("[{} for {} in {}]", value, p, emit_expr(recv))
+                }
                 // A block with no parameter of any kind binds none, as
                 // `each` does (`|*args|` would read an unbound name). A
                 // comprehension takes one expression, so a body of several

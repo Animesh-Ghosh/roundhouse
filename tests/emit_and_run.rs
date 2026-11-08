@@ -116,6 +116,8 @@ mod discard;
 mod callback_abort;
 #[path = "emit_and_run/dirty_clear_restore.rs"]
 mod dirty_clear_restore;
+#[path = "emit_and_run/partial_writes.rs"]
+mod partial_writes;
 #[path = "emit_and_run/will_save_change_to_attribute.rs"]
 mod will_save_change_to_attribute;
 #[path = "emit_and_run/pundit_source.rs"]
@@ -477,6 +479,8 @@ mod config_require_relative;
 mod defined_const_fold;
 #[path = "emit_and_run/job_payload.rs"]
 mod job_payload;
+#[path = "emit_and_run/job_keywords.rs"]
+mod job_keywords;
 #[path = "emit_and_run/sidekiq_push.rs"]
 mod sidekiq_adapter;
 #[path = "emit_and_run/sidekiq_retry_on.rs"]

@@ -46,6 +46,9 @@ mod each_no_param;
 #[path = "support/view_unless_no_else.rs"]
 #[allow(dead_code)]
 mod view_unless_no_else;
+#[path = "support/python_map_statements.rs"]
+#[allow(dead_code)]
+mod python_map_statements;
 #[path = "support/nilable_string_view.rs"]
 #[allow(dead_code)]
 mod nilable_string_view;
@@ -410,7 +413,15 @@ fn each_no_param_map_statements_are_refused() {
     assert!(errors.iter().any(|e| e.contains("map-block not supported (python)")), "{errors:?}");
 }
 
-/// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
+/// #1939: a `map` block whose body is several statements is refused,
+/// not written into a comprehension that isn't Python
+/// (`python_map_statements::VIEW`).
+#[test]
+fn python_map_statements_are_refused() {
+    let (_emitted, errors) = python_map_statements::strict_app().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.iter().any(|e| e.contains("map-block not supported (python)")), "{errors:?}");
+}
+
 /// #1910: a block whose only parameter is a rest (`|*args|`) is refused,
 /// as before, not emitted as a loop or comprehension over `_`
 /// (`each_no_param::REST_VIEW`).
@@ -422,6 +433,7 @@ fn each_no_param_rest_blocks_are_refused() {
     }
 }
 
+/// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
 /// does (`view_unless_no_else::VIEW`).
 #[test]
 #[ignore]

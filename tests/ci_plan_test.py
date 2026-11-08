@@ -62,6 +62,20 @@ def git_repository():
             os.chdir(previous)
 
 
+class EncryptsRefusalCoverage(unittest.TestCase):
+    def test_model_encryption_refusal_runs_in_the_unit_floor(self):
+        # These are CLI emission checks; they do not require native compilation.
+        for path in [
+            "tests/model_encrypts_refusal.rs",
+            "src/lower/model_to_library/mod.rs",
+            "src/analyze/diagnostics.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("unit", plan["jobs"])
+                self.assertIn("build-roundhouse", plan["jobs"])
+
+
 class PublicationBoundary(unittest.TestCase):
     def test_scheduled_full_on_canonical_main_may_publish(self):
         for event in ("schedule", "workflow_dispatch"):
@@ -425,6 +439,16 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn("did_you_mean", ci.select([path])["spinel_tests"])
         self.assertIn("did_you_mean", ci.select([], full=True)["spinel_tests"])
+
+    def test_net_http_exception_inputs_select_native_contract(self):
+        for path in [
+            "src/analyze/registry/stdlib.rs", "src/project.rs",
+            "tests/net_http_exceptions.rs", "tests/net_http_patch.rs",
+            "tests/emit_and_run/net_http_patch.rs",
+        ]:
+            with self.subTest(path=path):
+                self.assertIn("net_http_exceptions", ci.select([path])["spinel_tests"])
+        self.assertIn("net_http_exceptions", ci.select([], full=True)["spinel_tests"])
 
     def test_campfire_latest_is_not_planned(self):
         # Dropped: tip drift against once-campfire main is not a standing job.

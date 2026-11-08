@@ -80,6 +80,7 @@ SPINEL_TESTS = [
     "spinel_chunked_body",
     "spinel_stream_error",
     "did_you_mean",
+    "net_http_exceptions",
     "validation_prepend",
     "spinel_faye_websocket",
     "spinel_websocket_lifecycle",
@@ -114,6 +115,7 @@ SPINEL_TESTS = [
     "spinel_mini_profiler",
     "spinel_active_support_instrumentation",
     "around_block_filter_spinel",
+    "included_hook_constructor_spinel",
     "after_initialize_bare_new_spinel",
     "find_or_create_bang_records",
     "before_action_return_spinel",
@@ -564,6 +566,12 @@ def native_coverage(path):
         "tests/stdlib_gem_fates.rs",
     } or path.startswith("tests/did_you_mean/"):
         suites.add("did_you_mean")
+    if path in {
+        "src/analyze/registry/stdlib.rs", "src/project.rs",
+        "tests/net_http_exceptions.rs", "tests/net_http_patch.rs",
+        "tests/emit_and_run/net_http_patch.rs",
+    }:
+        suites.add("net_http_exceptions")
     if path in {"tests/spinel_net_http_transport.rb", "tests/spinel_net_http_stream.rb", "tests/spinel_net_http_raise.rb"}:
         suites.add("spinel_net_http_start")
     if path.startswith("tests/spinel_stream_error") or path in {
