@@ -4744,6 +4744,8 @@ fn splice_concerns_into_controllers(app: &mut App) {
         crate::ident::ClassId,
         crate::det::HashSet<crate::ident::Symbol>,
     > = HashMap::default();
+    let mut module_includes: HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> =
+        HashMap::default();
     // An `included do … delegate … end` runs in the includer: its forwarders are the controller's (`controller_delegates`).
     let module_delegates: HashMap<crate::ident::ClassId, Vec<crate::expr::Expr>> = app
         .concern_model_items
@@ -4774,11 +4776,9 @@ fn splice_concerns_into_controllers(app: &mut App) {
         );
         module_constants
             .insert(lc.name.clone(), lc.constants.iter().map(|(n, _)| n.clone()).collect());
+        module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.iter().cloned());
     }
-    let module_includes = resolved_module_includes(app);
     let filter_edges = filter_dependency_edges(app, &module_includes);
-    let known_modules: crate::det::HashSet<String> =
-        library_class_names(app).into_iter().map(str::to_string).collect();
 
     // controller -> (spliced method -> the module it came from). Built
     // alongside the splice and stored on the App: the copy is typed
@@ -4800,14 +4800,7 @@ fn splice_concerns_into_controllers(app: &mut App) {
     let routed_here = routed_actions_with_descendants(app);
 
     for controller in &mut app.controllers {
-        let known: crate::det::HashSet<&str> = known_modules.iter().map(String::as_str).collect();
-        let statements: Vec<(usize, Vec<crate::ident::ClassId>)> =
-            crate::analyze::controller_include_statements(controller)
-                .into_iter()
-                .map(|(at, group)| {
-                    (at, group.iter().map(|m| resolve_mixin(m, controller.name.0.as_str(), &known)).collect())
-                })
-                .collect();
+        let statements = crate::analyze::controller_include_statements(controller);
         let include_groups: Vec<Vec<crate::ident::ClassId>> =
             statements.iter().map(|(_, group)| group.clone()).collect();
         let includes: Vec<crate::ident::ClassId> = include_groups.iter().flatten().cloned().collect();
@@ -5146,7 +5139,7 @@ fn refuse_unread_concern_filters(app: &App) -> super::IngestResult<()> {
     let mut reported = crate::det::HashSet::default();
     for controller in &app.controllers {
         let Some(surface) = surfaces.controllers.get(&controller.name) else { continue };
-        for module in &surface.includes {
+        for module in &surface.filter_includes {
             if !reported.insert(module.clone()) {
                 continue;
             }
@@ -5161,57 +5154,15 @@ fn refuse_unread_concern_filters(app: &App) -> super::IngestResult<()> {
     Ok(())
 }
 
-/// The name a mixin written `written` inside `scope` refers to: Ruby looks
-/// it up from the innermost namespace outward. A name no library class
-/// answers to is returned as written.
-fn resolve_mixin(
-    written: &crate::ident::ClassId,
-    scope: &str,
-    known: &crate::det::HashSet<&str>,
-) -> crate::ident::ClassId {
-    let id = |name: String| crate::ident::ClassId(crate::ident::Symbol::from(name));
-    let name = written.0.as_str();
-    if let Some(top) = name.strip_prefix("::") {
-        return id(top.to_string());
-    }
-    let mut prefix = Some(scope);
-    while let Some(current) = prefix {
-        let candidate = format!("{current}::{name}");
-        if known.contains(candidate.as_str()) {
-            return id(candidate);
-        }
-        prefix = current.rsplit_once("::").map(|(outer, _)| outer);
-    }
-    written.clone()
-}
-
-fn library_class_names(app: &App) -> crate::det::HashSet<&str> {
-    app.library_classes.iter().map(|lc| lc.name.0.as_str()).collect()
-}
-
-/// Each library class's includes, reopenings merged, under the names
-/// they resolve to.
-fn resolved_module_includes(
-    app: &App,
-) -> HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> {
-    let known = library_class_names(app);
-    let mut out: HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> = HashMap::default();
-    for lc in &app.library_classes {
-        let includes = lc.includes.iter().map(|inc| resolve_mixin(inc, lc.name.0.as_str(), &known));
-        out.entry(lc.name.clone()).or_default().extend(includes);
-    }
-    out
-}
-
 /// The include edges filter registration follows. A plain module's are
 /// not among them: `include` on it already ran the `included` hooks of
 /// what it includes, on the module itself, and including the module
 /// later does not run them again.
 fn filter_dependency_edges(
     app: &App,
-    resolved: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+    module_includes: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
 ) -> HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> {
-    resolved.iter().filter(|(m, _)| !app.plain_mixins.contains(*m)).map(|(m, inc)| (m.clone(), inc.clone())).collect()
+    module_includes.iter().filter(|(m, _)| !app.plain_mixins.contains(*m)).map(|(m, inc)| (m.clone(), inc.clone())).collect()
 }
 
 /// The order a controller's concern filters REGISTER in — the order
@@ -5276,6 +5227,9 @@ pub(super) struct ControllerConcernSurface {
     pub direct_includes: Vec<crate::ident::ClassId>,
     pub includes: Vec<crate::ident::ClassId>,
     pub inherited_includes: Vec<crate::ident::ClassId>,
+    /// The modules whose `included` blocks run on this controller: `includes`
+    /// without what is reached only through a plain module.
+    pub filter_includes: Vec<crate::ident::ClassId>,
 }
 
 pub(super) struct ControllerConcernSurfaces {
@@ -5295,9 +5249,7 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
     for controller in &app.controllers {
         parts.entry(&controller.name).or_default().push(controller);
     }
-    let resolved = resolved_module_includes(app);
-    let filter_edges = filter_dependency_edges(app, &resolved);
-    let known = library_class_names(app);
+    let filter_edges = filter_dependency_edges(app, &module_includes);
     let mut controllers = HashMap::default();
     for name in parts.keys() {
         let mut direct_includes = Vec::new();
@@ -5318,7 +5270,7 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
                             direct_includes.push(inc.clone());
                         }
                     }
-                    groups.push(group.iter().map(|m| resolve_mixin(m, c.0.as_str(), &known)).collect());
+                    groups.push(group);
                 }
             }
             // Ancestors register before descendants; each class's statements
@@ -5330,8 +5282,9 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
             cur = declarations.iter().find_map(|part| part.parent.as_ref());
         }
         controllers.insert((*name).clone(), ControllerConcernSurface {
-            includes: filter_registration_order(&include_groups, &filter_edges),
-            inherited_includes: filter_registration_order(&inherited_groups, &filter_edges),
+            filter_includes: filter_registration_order(&include_groups, &filter_edges),
+            includes: filter_registration_order(&include_groups, &module_includes),
+            inherited_includes: filter_registration_order(&inherited_groups, &module_includes),
             direct_includes,
         });
     }
