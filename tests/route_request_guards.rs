@@ -64,3 +64,16 @@ get "/ping", to: "pings#show""#,
     let error = app.routes.diagnostics.iter().find(|d| d.message.contains("request constraint")).expect("located refusal");
     assert!(!error.span.is_synthetic(), "{error:?}");
 }
+
+#[test]
+fn constraints_that_do_not_ingest_while_surveying_keep_their_own_places() {
+    roundhouse::ingest::survey::activate();
+    let app = app(
+        r#"get "/reports", to: "reports#index", constraints: ->(req, &block) { true }
+get "/audits", to: "audits#index", constraints: ->(req, &block) { true }"#,
+    );
+    roundhouse::ingest::survey::drain();
+    let spans: Vec<_> = app.routes.diagnostics.iter().filter(|d| d.message.contains("request constraint")).map(|d| d.span).collect();
+    assert_eq!(spans.len(), 2, "{:#?}", app.routes.diagnostics);
+    assert!(spans.iter().all(|s| !s.is_synthetic()) && spans[0] != spans[1], "{spans:?}");
+}
