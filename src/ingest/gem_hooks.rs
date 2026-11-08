@@ -50,6 +50,12 @@ impl Facts {
                 devise_configured.insert(model.name.0.as_str().to_string());
             }
         }
+        // A subclass's are its parent's too (`class_attribute`): chatwoot's `SuperAdmin < User` declares none of its own.
+        for (name, _) in classes(app) {
+            if ancestors(app, name).any(|a| devise_configured.contains(a)) {
+                devise_configured.insert(name.to_string());
+            }
+        }
         Facts { devise_models: devise_modules(app), devise_configured }
     }
 
@@ -59,8 +65,47 @@ impl Facts {
     }
 }
 
-/// Each model's `devise :a, :b` declaration, by class name, as `Devise::Models#devise` reads it.
-pub(super) fn devise_modules(app: &App) -> HashMap<String, Vec<String>> {
+/// The app's classes with their superclasses: a subclass of a model with no table of its own is a library class (chatwoot's `SuperAdmin < User`).
+fn classes(app: &App) -> impl Iterator<Item = (&str, Option<&str>)> {
+    fn parent(p: &Option<crate::ident::ClassId>) -> Option<&str> {
+        p.as_ref().map(|p| p.0.as_str().trim_start_matches("::"))
+    }
+    app.models.iter().map(|m| (m.name.0.as_str(), parent(&m.parent))).chain(app.library_classes.iter().map(|c| (c.name.0.as_str(), parent(&c.parent))))
+}
+
+/// A class's superclasses among the app's, nearest first.
+fn ancestors<'a>(app: &'a App, class: &str) -> impl Iterator<Item = &'a str> {
+    let mut seen: HashSet<&str> = HashSet::default();
+    let mut current = classes(app).find(|(name, _)| *name == class).and_then(|(_, parent)| parent);
+    std::iter::from_fn(move || {
+        let name = current.filter(|name| seen.insert(name))?;
+        current = classes(app).find(|(n, _)| *n == name).and_then(|(_, parent)| parent);
+        Some(name)
+    })
+}
+
+/// Each model's `devise :a, :b` declaration, by class name, as `Devise::Models#devise` reads it: its superclasses' first, as `devise_modules |=` keeps them.
+fn devise_modules(app: &App) -> HashMap<String, Vec<String>> {
+    let own = declared_devise_modules(app);
+    let mut out: HashMap<String, Vec<String>> = HashMap::default();
+    for (name, _) in classes(app) {
+        let mut chain: Vec<&str> = ancestors(app, name).collect();
+        chain.reverse();
+        chain.push(name);
+        let mut modules: Option<Vec<String>> = None;
+        for class in chain {
+            if let Some(declared) = own.get(class) {
+                modules.get_or_insert_with(Vec::new).extend(declared.iter().cloned());
+            }
+        }
+        if let Some(modules) = modules {
+            out.insert(name.to_string(), modules);
+        }
+    }
+    out
+}
+
+fn declared_devise_modules(app: &App) -> HashMap<String, Vec<String>> {
     let mut out: HashMap<String, Vec<String>> = HashMap::default();
     for model in &app.models {
         for item in &model.body {

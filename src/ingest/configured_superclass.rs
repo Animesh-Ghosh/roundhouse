@@ -1047,8 +1047,8 @@ impl<'a> Eval<'a> {
         if let Some((def, scope)) = self.lookup(&this, method) {
             return self.invoke(&def, scope, this, argv, blk);
         }
+        // Not only a model's: a subclass with no table of its own is a library class, and what `devise` gave its superclass it has too.
         if let Val::Class(c) = &this
-            && !self.known.contains(c)
             && self.facts.answers_for(c)
         {
             let all = match self.constant(&[Symbol::from("Devise"), Symbol::from("ALL")], None) {
