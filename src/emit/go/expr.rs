@@ -1143,7 +1143,11 @@ pub(super) fn emit_send(
     // drop it, matching Go's "discarded return is fine" semantics.
     if method == "each" && args.is_empty() {
         if let (Some(recv_e), Some(block_e)) = (recv, block) {
-            if let ExprNode::Lambda { params, body, .. } = &*block_e.node {
+            if let ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } = &*block_e.node {
+                // No parameter of any kind: `|*args|`, `|a = 1|`, `|k:|` and
+                // `|&b|` leave `params` empty too, and their body reads a
+                // name a bare `for range` wouldn't bind.
+                let no_params = params.is_empty() && rest_param.is_none() && extra_params.is_empty() && block_param.is_none();
                 let raw_recv_s = emit_expr(ctx, recv_e);
                 // If recv resolves to `interface{}` (Untyped/Var/
                 // Bottom from go_ty_stub), Go can't range over it
@@ -1170,7 +1174,10 @@ pub(super) fn emit_send(
                 // IIFE introduces fresh Go scope.
                 let body_ctx = ctx.enter_scope();
                 let range_vars = match params.len() {
-                    0 => String::new(),
+                    0 if no_params => String::new(),
+                    0 => {
+                        return crate::emit::diagnostics::report_unsupported(block_e.span, "go2", method, "a block with only a rest, optional, keyword or block parameter");
+                    }
                     1 => {
                         let name = params[0].as_str();
                         body_ctx.declare_param(name);
@@ -1248,12 +1255,19 @@ pub(super) fn emit_send(
     // 8d9f06d but for the IIFE result instead of an Array literal.
     if method == "map" && args.is_empty() {
         if let (Some(recv_e), Some(block_e)) = (recv, block) {
-            if let ExprNode::Lambda { params, body, .. } = &*block_e.node {
+            if let ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } = &*block_e.node {
+                // No parameter of any kind: `|*args|`, `|a = 1|`, `|k:|` and
+                // `|&b|` leave `params` empty too, and their body reads a
+                // name a bare `for range` wouldn't bind.
+                let no_params = params.is_empty() && rest_param.is_none() && extra_params.is_empty() && block_param.is_none();
                 let recv_s = emit_expr(ctx, recv_e);
                 // IIFE introduces fresh Go scope.
                 let body_ctx = ctx.enter_scope();
                 let range_vars = match params.len() {
-                    0 => String::new(),
+                    0 if no_params => String::new(),
+                    0 => {
+                        return crate::emit::diagnostics::report_unsupported(block_e.span, "go2", method, "a block with only a rest, optional, keyword or block parameter");
+                    }
                     1 => {
                         let name = params[0].as_str();
                         body_ctx.declare_param(name);

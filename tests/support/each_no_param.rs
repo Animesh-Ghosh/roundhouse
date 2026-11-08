@@ -33,3 +33,16 @@ pub const MAP_STATEMENTS_VIEW: &str = "L0:<%= [1, 2].map { x = \"x\"; x }.join(\
 pub fn strict_map_statements_app() -> Overlay {
     app(super::content_tag_options::app_rendering(MAP_STATEMENTS_VIEW, &["L0:x,x|"]))
 }
+
+/// Blocks whose only parameter is a rest (`|*args|`). Their `params`
+/// are empty too, but the body reads the rest, so they are not blocks
+/// with no parameter. Rails 8.1.4 renders `"L0:1,1,|"` and `"L1:1,1|"`.
+pub const REST_VIEW: &str = concat!(
+    "L0:<% [1, 2].each do |*args| %><%= args.length %>,<% end %>|\n",
+    "L1:<%= [1, 2].map { |*a| a.length }.join(\",\") %>|\n",
+);
+
+/// The strict targets' probe app for `REST_VIEW`.
+pub fn strict_rest_app() -> Overlay {
+    app(super::content_tag_options::app_rendering(REST_VIEW, &["L0:1,1,|", "L1:1,1|"]))
+}

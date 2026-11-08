@@ -539,9 +539,12 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
                 && args.is_empty()
                 && matches!(&*block.node, ExprNode::Lambda { .. }) =>
         {
-            let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
+            let ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } = &*block.node else { unreachable!() };
             let pnames: Vec<String> = params.iter().map(|s| s.to_string()).collect();
-            emit_for_each(r, &pnames, body).unwrap_or_else(|| {
+            // `|*args|` and the other non-positional parameters leave
+            // `params` empty, and the loop wouldn't bind what the body reads.
+            let other_params = rest_param.is_some() || !extra_params.is_empty() || block_param.is_some();
+            (!other_params).then(|| emit_for_each(r, &pnames, body)).flatten().unwrap_or_else(|| {
                 crate::emit::diagnostics::report_unsupported(e.span, "python", "each-block", "")
             })
         }
@@ -914,13 +917,15 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             if matches!(method.as_str(), "map" | "collect")
                 && matches!(&*block.node, ExprNode::Lambda { .. }) =>
         {
-            let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
+            let ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } = &*block.node else { unreachable!() };
+            let other_params = rest_param.is_some() || !extra_params.is_empty() || block_param.is_some();
             match params.as_slice() {
                 [p] => format!("[{} for {} in {}]", emit_expr(body), p, emit_expr(recv)),
-                // A block with no parameter binds none, as `each` does. A
+                // A block with no parameter of any kind binds none, as
+                // `each` does (`|*args|` would read an unbound name). A
                 // comprehension takes one expression, so a body of several
                 // statements stays refused below.
-                [] if !matches!(&*body.node, ExprNode::Seq { exprs } if exprs.len() > 1) => {
+                [] if !other_params && !matches!(&*body.node, ExprNode::Seq { exprs } if exprs.len() > 1) => {
                     format!("[{} for _ in {}]", emit_expr(body), emit_expr(recv))
                 }
                 _ => crate::emit::diagnostics::report_unsupported(e.span, "python", "map-block", ""),

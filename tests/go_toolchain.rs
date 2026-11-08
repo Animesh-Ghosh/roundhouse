@@ -655,6 +655,19 @@ fn each_no_param_renders() {
 }
 
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
+/// #1910: a block whose only parameter is a rest (`|*args|`) is refused,
+/// not emitted as a loop that binds nothing (`each_no_param::REST_VIEW`).
+#[test]
+fn each_no_param_rest_blocks_are_refused() {
+    let (_emitted, errors) = each_no_param::strict_rest_app().emit(roundhouse::project::BuildTarget::Go);
+    for method in ["each", "map"] {
+        assert!(
+            errors.iter().any(|e| e.contains(&format!("{method} not supported")) && e.contains("a block with only a rest")),
+            "{method}: {errors:?}"
+        );
+    }
+}
+
 /// does (`view_unless_no_else::VIEW`).
 #[test]
 #[ignore]

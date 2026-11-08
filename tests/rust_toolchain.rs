@@ -844,6 +844,28 @@ fn each_no_param_renders() {
 }
 
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
+/// #1910: a block whose only parameter is a rest (`|*args|`) doesn't
+/// take the `_` closure a block with no parameter takes, so the rest
+/// isn't left unbound (`each_no_param::REST_VIEW`).
+#[test]
+fn each_no_param_rest_blocks_keep_their_parameter() {
+    let (emitted, _errors) = each_no_param::strict_rest_app().emit(roundhouse::project::BuildTarget::Rust);
+    let mut view = String::new();
+    let mut stack = vec![emitted.join("src")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read emitted dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.to_string_lossy().contains("probes") && path.extension().is_some_and(|x| x == "rs") {
+                view.push_str(&std::fs::read_to_string(&path).expect("read view"));
+            }
+        }
+    }
+    assert!(view.contains("args"), "no probes view found");
+    assert!(!view.contains("|_|"), "{view}");
+}
+
 /// does (`view_unless_no_else::VIEW`).
 #[test]
 #[ignore]
