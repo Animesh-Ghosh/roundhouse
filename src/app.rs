@@ -151,6 +151,9 @@ pub struct App {
     /// A superclass expression read off a configured object that did not fold to a constant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub superclass_refusals: Vec<crate::diagnostic::Diagnostic>,
+    /// Routes a gem's routing method draws that are left out (`ingest::gem_hooks::omits_on_failure`), at the call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gem_route_gaps: Vec<crate::diagnostic::Diagnostic>,
     /// Pins from `config/importmap.rb`, expanded (each
     /// `pin_all_from` has been resolved into explicit per-file
     /// pins via `app/javascript/**` walking). Consumed by the
@@ -1260,6 +1263,7 @@ impl App {
             gem_middleware_refusals: Vec::new(),
             included_hoist_conflicts: Vec::new(),
             superclass_refusals: Vec::new(),
+            gem_route_gaps: Vec::new(),
             importmap: None,
             engine_importmaps: Vec::new(),
             inertia: None,

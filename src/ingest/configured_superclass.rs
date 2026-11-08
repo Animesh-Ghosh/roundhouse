@@ -330,6 +330,9 @@ enum Holder {
 
 const MAPPER: &str = "ActionDispatch::Routing::Mapper";
 
+/// Marks an error no statement is passed over for (a gem hook's).
+const STOP: &str = "\u{0}stop ";
+
 /// The owner a write to a constant's value is tagged with.
 const CONSTANT_OWNER: &str = "::constant";
 
@@ -360,6 +363,8 @@ struct Eval<'a> {
     consts: HashMap<String, Val>,
     /// Methods a `class_eval` string defined, by class, the latest last.
     evaled: HashMap<String, Vec<MethodDef>>,
+    /// What the drawing left out, and why (`gem_hooks::omits_on_failure`).
+    omitted: Vec<String>,
 }
 
 /// The mapper a routing method runs on: the program's classes that answer on it, and its instance variables.
@@ -394,7 +399,7 @@ const SCOPE_KEYS: &[&str] = &["path", "as", "module", "constraints", "defaults",
 impl<'a> Eval<'a> {
     fn new(app: &'a App) -> Self {
         let known = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
-        Eval { classes: &app.library_classes, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default(), evaled: HashMap::default() }
+        Eval { classes: &app.library_classes, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default(), evaled: HashMap::default(), omitted: Vec::new() }
     }
 
     /// The constant `expr` names once the initializers that call on its root have run.
@@ -440,7 +445,8 @@ impl<'a> Eval<'a> {
         match self.eval(e, frame) {
             Ok(Flow::Return(v)) => Ok(Some(v)),
             Ok(Flow::Value(_)) => Ok(None),
-            Err(why) if !matches!(&*e.node, ExprNode::Return { .. }) => {
+            // Not one a gem hook gave: what it says is not known stops the evaluation where a statement passed over would leave a guess.
+            Err(why) if !matches!(&*e.node, ExprNode::Return { .. }) && !why.starts_with(STOP) => {
                 let (owner, side) = self.tag_of(&frame.this);
                 let Some(writes) = self.may_write(e, &owner, side, &mut HashSet::default()) else {
                     return Err(format!("{why}, in a statement whose writes are not known"));
@@ -805,6 +811,12 @@ impl<'a> Eval<'a> {
                     Val::Array(items) => argv.extend(items),
                     _ => return Err("a splat of other than an Array".into()),
                 },
+                // `resource :registration, **options do` (devise 5): the keywords a Hash holds.
+                ExprNode::KeywordSplat { value } => match self.value(value, frame)? {
+                    hash @ Val::Hash(_) => argv.push(hash),
+                    Val::Nil => {}
+                    _ => return Err("a keyword splat of other than a Hash".into()),
+                },
                 _ => argv.push(self.value(a, frame)?),
             }
         }
@@ -833,7 +845,28 @@ impl<'a> Eval<'a> {
                 _ => (method.to_string(), argv.clone()),
             };
             if let Some((def, scope)) = self.lookup(&this, &name) {
-                return self.invoke(&def, scope, this, given, blk);
+                let owner = def.enclosing_class.as_ref().map(|s| s.as_str().to_string()).unwrap_or_else(|| scope.clone());
+                let Some(why) = super::gem_hooks::omits_on_failure(&self.known, &owner, &name) else {
+                    return self.invoke(&def, scope, this, given, blk);
+                };
+                // Not half its routes, nor the `@scope` it changed on the way: what it drew is the call's or none of it.
+                let drawn = self.drawn.last().map_or(0, Vec::len);
+                let ivars = self.router.ivars.clone();
+                // Nor when it wrote them: a restored value keeps the uncertainty it had.
+                let written: Vec<_> = self.written.iter().filter(|((h, _), _)| matches!(h, Holder::Router)).map(|(k, t)| (k.clone(), *t)).collect();
+                return match self.invoke(&def, scope, this, given, blk) {
+                    Ok(v) => Ok(v),
+                    Err(err) => {
+                        if let Some(last) = self.drawn.last_mut() {
+                            last.truncate(drawn);
+                        }
+                        self.router.ivars = ivars;
+                        self.written.retain(|(h, _), _| !matches!(h, Holder::Router));
+                        self.written.extend(written);
+                        self.omitted.push(format!("{why} ({err})"));
+                        Ok(Val::Nil)
+                    }
+                };
             }
             if let Some(hook) = super::gem_hooks::router_call(&self.known, self.calls.last().map(|c| (c.0.as_str(), c.1.as_str())), method, &argv) {
                 return match hook {
@@ -1008,7 +1041,7 @@ impl<'a> Eval<'a> {
             let answer = super::gem_hooks::class_answer(&facts, c, method, &argv, all.as_deref(), &mut config);
             self.facts = facts;
             if let Some(v) = answer {
-                return Ok(v);
+                return v.map_err(|why| format!("{STOP}{why}"));
             }
         }
         // `mattr_reader :mapping` answers on instances too, as Rails defines it, though the library walk writes only the class's.
@@ -2292,7 +2325,7 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
 /// The routes a gem's routing method draws (`use_doorkeeper do … end`), run with the mapper as the
 /// recording `Router` after the initializers that call on `root` have run.
 /// `enclosing` is the scope the call stands in (`path`, `module`, `as`, as Rails accumulates them), `None` inside a resource.
-pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr, initializers: &[Expr], roots: &[String], mixins: Vec<String>, enclosing: Option<(Option<String>, Option<String>, Option<String>)>) -> Res<Vec<Expr>> {
+pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr, initializers: &[Expr], roots: &[String], mixins: Vec<String>, enclosing: Option<(Option<String>, Option<String>, Option<String>)>) -> Res<(Vec<Expr>, Vec<String>)> {
     let mut eval = Eval::new(app);
     let enclosing = enclosing.map(|(path, module, as_)| {
         [("path", path), ("module", module), ("as", as_)]
@@ -2315,8 +2348,8 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
         None => None,
     };
     eval.drawn.push(Vec::new());
-    eval.invoke(def, scope, Val::Router, argv, blk)?;
-    Ok(eval.drawn.pop().unwrap_or_default())
+    eval.invoke(def, scope, Val::Router, argv, blk).map_err(|why| why.trim_start_matches(STOP).to_string())?;
+    Ok((eval.drawn.pop().unwrap_or_default(), eval.omitted))
 }
 
 pub(super) fn initializers_of<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path::PathBuf]) -> Vec<Expr> {

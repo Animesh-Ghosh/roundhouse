@@ -198,3 +198,55 @@ fn a_gems_routing_method_inside_a_scope_draws_under_its_own() {
         .run_test("test/controllers/chimes_controller_test.rb")
         .assert_passes();
 }
+
+const DEVISE_SHAPED: &str = r##"module Devise
+  def self.providers
+    ENV.fetch("SIGN_IN_PROVIDERS", "").split(",")
+  end
+end
+
+module ActionDispatch::Routing
+  class Mapper
+    def sign_in_routes_for(resource)
+      scope "/#{resource}", as: resource do
+        devise_session(resource)
+        devise_omniauth_callback(resource)
+      end
+    end
+
+    protected
+
+    def devise_session(resource)
+      get "sign_in", to: "articles#index", as: "sign_in"
+    end
+
+    def devise_omniauth_callback(resource)
+      Devise.providers.each do |provider|
+        get "auth/#{provider}", to: "articles#index"
+      end
+    end
+  end
+end
+"##;
+
+fn devise_shaped() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("Gemfile.lock", "GEM\n", "PATH\n  remote: vendor/gems/devise_shaped\n  specs:\n    devise_shaped (1.0.0)\n\nGEM\n")
+        .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  devise_shaped!\n")
+        .write("vendor/gems/devise_shaped/lib/devise_shaped.rb", DEVISE_SHAPED)
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  sign_in_routes_for :users\n")
+}
+
+/// devise's OmniAuth callbacks are one route per provider the app sets up,
+/// often from ENV at boot: not known here, they are left out and reported
+/// at the call, and the rest of what the call draws stands.
+#[test]
+fn a_devise_omniauth_callback_whose_providers_are_not_known_is_reported_and_the_rest_drawn() {
+    let errors = devise_shaped().check_errors();
+    assert!(errors.iter().any(|e| e.contains("OmniAuth callback routes are not drawn")), "{errors:#?}");
+    // Not a request: the left-out routes are an error, which keeps the tree's tests from being written.
+    let (tree, _) = devise_shaped().emit(roundhouse::build_target::BuildTarget::Ruby);
+    let routes = std::fs::read_to_string(tree.join("config/routes.rb")).expect("routes.rb");
+    assert!(routes.contains("\"/users/sign_in\""), "{routes}");
+    assert!(!routes.contains("/users/auth/"), "{routes}");
+}
