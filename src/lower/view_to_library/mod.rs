@@ -48,7 +48,7 @@ use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::{camelize_path, last_segment, singularize, snake_case};
 use crate::span::Span;
 
-use self::extra_params::{drop_closure_names, flash_params, local_reads, rewritten_extras};
+use self::extra_params::{drop_closure_names, flash_params, rewritten_extras};
 
 pub(crate) use self::extra_params::{flash_param_in_scope, flash_slot_of, local_key_of};
 pub(crate) use self::walker::link_to_if_params_shadowing_nested_locals;
@@ -475,11 +475,12 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         .as_ref()
         .and_then(|k| lx.closures.get(k).cloned())
         .unwrap_or_default();
-    let record_apart = view_key
-        .as_ref()
-        .and_then(|k| record_apart_from_ivar(view, k, &arg_name, &lx.ivar_records));
-    let ivar_locals = view_ivar_locals(view, &closure_raw, record_apart);
     let keys = view_key.as_ref().and_then(|k| lx.locals_keys.get(k));
+    let apart = view_key
+        .as_ref()
+        .map(|k| locals_apart_from_ivars(view, k, &arg_name, &lx.ivar_records, keys.map(Vec::as_slice)))
+        .unwrap_or_default();
+    let ivar_locals = view_ivar_locals(view, &closure_raw, &apart);
     // Flash rename → ivar rewrite → extras collect, one pipeline shared
     // with the call-site contracts (see `extra_params::rewritten_extras`).
     let (rewritten, extra_params) =
@@ -720,7 +721,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // among them when it stands for its ivar (`ivar_record_partials`).
     let mut held_ivars: Vec<String> = closure_ivars
         .iter()
-        .filter(|iv| is_action_view || **iv != arg_name || (is_partial && record_apart.is_none()))
+        .filter(|iv| is_action_view || **iv != arg_name || (is_partial && !apart.contains(&arg_name)))
         .cloned()
         .collect();
 
@@ -2749,7 +2750,9 @@ pub(crate) fn render_locals_keys(
 /// turbo stream's `partial:`, a controller's or a helper's render, a
 /// dynamic render's pooled entry whose `locals:` name the record) or
 /// an object render (`render @posts` into `posts/_post`) leaves it out,
-/// and such a partial takes the ivar as a param of its own
+/// as does a body that reads the record as a local too
+/// (`local_assigns[:post]`, `partial_local_names`), and such a partial
+/// takes the ivar as a param of its own
 /// (`view_ivar_locals`). Sites are matched by the partial's base name,
 /// so a doubtful one only ever leaves a partial out.
 pub(crate) fn ivar_record_partials(
@@ -2854,7 +2857,8 @@ pub(crate) fn ivar_record_partials(
             let name = base.strip_prefix('_').filter(|_| !dir.is_empty())?;
             let record = effective_record_arg(v, &collection_locals, &[], &stems);
             let key = stems.key(&camelize_path(&snake_case(dir)), base);
-            (name != record && !bound.contains(name)).then_some(key)
+            let reads_record = partial_local_names(v, &record, &[]).contains(&record);
+            (name != record && !bound.contains(name) && !reads_record).then_some(key)
         })
         .collect()
 }
@@ -2865,7 +2869,7 @@ pub(crate) fn ivar_record_partials(
 /// record (singular of the partial's dir), then the render-tree closure
 /// ivars (minus a record-named one), then the trailing nil-default
 /// extras. The controller rewrite passes the locals value for the
-/// record, `@<name>` for each closure ivar (a same-named local wins),
+/// record, `@<name>` for each closure ivar (never a same-named local),
 /// and locals-or-nil for extras.
 #[derive(Clone, Debug)]
 pub struct PartialCallContract {
@@ -2878,10 +2882,6 @@ pub struct PartialCallContract {
     /// no record passes the caller's `@<ivar>` there, as Rails shares it.
     pub record_ivar: Option<String>,
     pub closure: Vec<String>,
-    /// The closure ivars the partial also reads as a local of their name
-    /// (`local_assigns[:class]` beside `@class`). The two share one param
-    /// (`drop_closure_names`), which a caller's same-named local fills.
-    pub shared_locals: Vec<String>,
     pub extras: Vec<String>,
     /// A strict-locals partial (`<%# locals: (…) -%>`) takes its
     /// non-record locals as KEYWORD params (see the strict-locals
@@ -3002,7 +3002,6 @@ pub(crate) fn partial_call_contracts(
                     record: declared[0].clone(),
                     record_ivar: None,
                     closure,
-                    shared_locals: Vec::new(),
                     // The request-context keywords the def adds (`request_context_views`).
                     extras: declared[1..]
                         .iter()
@@ -3022,9 +3021,9 @@ pub(crate) fn partial_call_contracts(
         }
         let record = effective_record_arg(view, &collection_locals, &[], &stems);
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
-        let ivar_locals =
-            view_ivar_locals(view, &closure_raw, record_apart_from_ivar(view, &key, &record, &ivar_records));
         let keys = keys_map.get(&key).map(Vec::as_slice);
+        let ivar_locals =
+            view_ivar_locals(view, &closure_raw, &locals_apart_from_ivars(view, &key, &record, &ivar_records, keys));
         let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &record, keys, request_context.contains(view.name.as_str()));
         // The def side names each closure param by `ivar_locals` and
         // skips the one the record covers. The caller passes `@<ivar>`
@@ -3035,14 +3034,6 @@ pub(crate) fn partial_call_contracts(
             .map(|s| (s.as_str().to_string(), ivar_local(&ivar_locals, s.as_str())))
             .filter(|(_, local)| local != &record)
             .unzip();
-        // What the body reads, not the extras: those also hold the flash pair every view takes, and a `notice:` a render hands keeps `notice` there beside an `@notice`.
-        let reads = local_reads(view, &ivar_locals, &record, keys);
-        let shared_locals: Vec<String> = closure
-            .iter()
-            .zip(&closure_locals)
-            .filter(|(_, local)| reads.iter().any(|k| crate::naming::safe_local(k) == **local))
-            .map(|(n, _)| n.clone())
-            .collect();
         let record_ivar = closure_raw
             .iter()
             .find(|s| ivar_local(&ivar_locals, s.as_str()) == record)
@@ -3057,7 +3048,7 @@ pub(crate) fn partial_call_contracts(
         drop_closure_names(&mut extras, &closure_locals);
         out.insert(
             spelled,
-            PartialCallContract { method, record, record_ivar, closure, shared_locals, extras, keyword_extras: false, declared: Vec::new() },
+            PartialCallContract { method, record, record_ivar, closure, extras, keyword_extras: false, declared: Vec::new() },
         );
     }
     out
@@ -3429,9 +3420,9 @@ pub(super) fn partial_extras_map(
         let key = stems.key(&camelize_path(&snake_case(dir)), base);
         let arg_name = effective_record_arg(view, &collection_locals, &known_models, &stems);
         let closure_raw: Vec<Symbol> = closures.get(&key).cloned().unwrap_or_default();
-        let ivar_locals =
-            view_ivar_locals(view, &closure_raw, record_apart_from_ivar(view, &key, &arg_name, &ivar_records));
         let keys = keys_map.get(&key).map(Vec::as_slice);
+        let ivar_locals =
+            view_ivar_locals(view, &closure_raw, &locals_apart_from_ivars(view, &key, &arg_name, &ivar_records, keys));
         let (_rewritten, mut extras) = rewritten_extras(view, &ivar_locals, &arg_name, keys, request_context.contains(view.name.as_str()));
         // locals-key params — mirrors the def site's append exactly.
         let closure: Vec<String> =
@@ -4533,11 +4524,12 @@ pub(crate) fn ivar_local(locals: &IvarLocals, ivar: &str) -> String {
 /// The rename map for `view`: its render-tree closure (the ivars its
 /// parameters carry) plus every ivar its own body reads or writes.
 ///
-/// `record` is a partial's record param when it does not stand for the
-/// ivar named like it (`record_apart_from_ivar`). That ivar then reads
-/// as a local of its own (`post_` beside the record `post`), which the
-/// partial takes as a closure param like any other.
-fn view_ivar_locals(view: &View, closure: &[Symbol], record: Option<&str>) -> IvarLocals {
+/// `apart` names a partial's locals that a same-named ivar must not read
+/// as (`locals_apart_from_ivars`): its record param when that does not
+/// stand for the ivar, and the locals its body reads by name. Such an
+/// ivar reads as a local of its own (`post_` beside the record `post`),
+/// which the partial takes as a closure param like any other.
+fn view_ivar_locals(view: &View, closure: &[Symbol], apart: &[String]) -> IvarLocals {
     fn collect<'a>(e: &'a Expr, out: &mut Vec<&'a str>) {
         match &*e.node {
             ExprNode::Ivar { name }
@@ -4550,29 +4542,74 @@ fn view_ivar_locals(view: &View, closure: &[Symbol], record: Option<&str>) -> Iv
     let mut names: Vec<&str> = closure.iter().map(|s| s.as_str()).collect();
     collect(&view.body, &mut names);
     let mut locals = ivar_local_names(names);
-    if let Some(record) = record {
-        let taken: crate::det::HashSet<String> = locals.values().cloned().collect();
-        if let Some(local) = locals.values_mut().find(|l| l.as_str() == record) {
+    let mut taken: crate::det::HashSet<String> =
+        locals.values().cloned().chain(apart.iter().map(|n| crate::naming::safe_local(n))).collect();
+    for name in apart {
+        let name = crate::naming::safe_local(name);
+        if let Some(local) = locals.values_mut().find(|l| **l == name) {
             local.push('_');
             while taken.contains(local.as_str()) {
                 local.push('_');
             }
+            taken.insert(local.clone());
         }
     }
     locals
 }
 
-/// The record param of `view` that its same-named ivar must not read as
-/// (`view_ivar_locals`): a convention partial's, unless that param
-/// stands for the ivar (`ivar_record_partials`).
-fn record_apart_from_ivar<'a>(
+/// The locals of `view` that their same-named ivars must not read as
+/// (`view_ivar_locals`): a convention partial's record param, unless it
+/// stands for the ivar (`ivar_record_partials`), and every local the
+/// partial reads by name (`partial_local_names`). Rails keeps `@tag` the
+/// caller's ivar while `tag` is what the render hands, so the two are
+/// two params. `keys` are the `locals:` keys its renders pass.
+fn locals_apart_from_ivars(
     view: &View,
     key: &ViewKey,
-    record: &'a str,
+    record: &str,
     ivar_records: &crate::det::HashSet<ViewKey>,
-) -> Option<&'a str> {
+    keys: Option<&[String]>,
+) -> Vec<String> {
     let is_partial = split_view_name(view.name.as_str()).1.starts_with('_');
-    (is_partial && view.strict_locals.is_none() && !ivar_records.contains(key)).then_some(record)
+    if !is_partial || view.strict_locals.is_some() {
+        return Vec::new();
+    }
+    let mut apart = partial_local_names(view, record, keys.unwrap_or_default());
+    if !ivar_records.contains(key) && !apart.iter().any(|n| n == record) {
+        apart.push(record.to_string());
+    }
+    apart
+}
+
+/// The locals `view`'s body reads by name: a `local_assigns[:tag]`, a
+/// `defined?(tag)`, a reserved-word local, and a bare `tag` that is its
+/// `record` or a key some render hands it (`keys`).
+fn partial_local_names(view: &View, record: &str, keys: &[String]) -> Vec<String> {
+    fn walk(e: &Expr, record: &str, keys: &[String], out: &mut Vec<String>) {
+        let name = match &*e.node {
+            ExprNode::Var { name, .. } if crate::naming::is_reserved_local(name.as_str()) => {
+                Some(name.as_str().to_string())
+            }
+            ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+                let m = method.as_str();
+                (m == record || keys.iter().any(|k| k == m)).then(|| m.to_string())
+            }
+            ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "defined?" && args.len() == 1 => {
+                match &*args[0].node {
+                    ExprNode::Var { name, .. } => Some(name.as_str().to_string()),
+                    _ => None,
+                }
+            }
+            _ => local_assigns_key(e),
+        };
+        if let Some(n) = name.filter(|n| !out.contains(n)) {
+            out.push(n);
+        }
+        e.node.for_each_child(&mut |c| walk(c, record, keys, out));
+    }
+    let mut out = Vec::new();
+    walk(&view.body, record, keys, &mut out);
+    out
 }
 
 /// Rewrite every `@ivar` read (and Ivar-LValue assign) under `expr`
@@ -6043,6 +6080,12 @@ impl ViewCtx {
     /// The local this view's `@ivar` reads as (see `ivar_local_names`).
     pub(super) fn ivar_local(&self, ivar: &str) -> String {
         ivar_local(&self.ivar_locals, ivar)
+    }
+
+    /// The ivar `local` reads, when it is spelled apart from it
+    /// (`author_` for `@author`, see `view_ivar_locals`).
+    pub(super) fn renamed_ivar(&self, local: &str) -> Option<&str> {
+        self.ivar_locals.iter().find(|(ivar, l)| l.as_str() == local && ivar.as_str() != local).map(|(ivar, _)| ivar.as_str())
     }
 
     pub(super) fn is_local(&self, n: &str) -> bool {
