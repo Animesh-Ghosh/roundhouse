@@ -245,7 +245,7 @@ permalink: /progress/
     {%- if tr.runtime.size > 0 %}
     <section class="family" aria-labelledby="fam-runtime">
       <h3 class="family-title" id="fam-runtime">Runtime</h3>
-      <p class="family-conditions">{{ tr.conditions | escape }}. Performance doesn’t establish behavioural parity.</p>
+      <p class="family-conditions">{% if tr.conditions %}{{ tr.conditions | escape }}. {% endif %}Performance doesn’t establish behavioural parity.</p>
       <div class="family-grid runtime">
         {%- for m in tr.runtime %}{% include trend-cell.html m=m %}{% endfor %}
       </div>

@@ -22,7 +22,9 @@
     {%- for r in m.pair %}<div class="pair-row"><span class="pair-name">{{ r.name | escape }}</span><span class="pair-val">{{ r.text | escape }}</span><span class="pair-bar {{ r.cls | escape }}" style="--w: {{ r.pct | escape }}%"></span></div>{% endfor %}
   </div>
   {%- endif %}
+  {%- if m.count == 1 %}
   <p class="single-note">First measurement · {{ m.first | escape }}. Change over time needs another comparable run.</p>
+  {%- endif %}
   {%- elsif m.ranked %}
   <ol class="ranked">
     {%- for r in m.ranked %}<li><span class="pair-name">{{ r.name | escape }}</span><span class="pair-val">{{ r.text | escape }} <span class="muted">{{ r.runs | escape }}</span></span><span class="pair-bar" style="--w: {{ r.pct | escape }}%"></span></li>{% endfor %}

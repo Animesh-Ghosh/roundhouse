@@ -319,7 +319,7 @@ module RoundhouseProgress
     {
       "id" => id, "label" => label, "definition" => definition, "better" => better, "cue" => CUES[better], "value" => value, "sub" => sub,
       "value_num" => value&.split(" ", 2)&.first, "value_unit" => value&.split(" ", 2)&.dig(1),
-      "delta" => delta || nil, "count" => stamps.size, "first" => first, "legend" => legend, "facts" => facts,
+      "delta" => delta || nil, "count" => stamps.size, "first" => first || (stamps.min && short_date(stamps.min)), "legend" => legend, "facts" => facts,
       "pair" => pair, "href" => href || "#trend-#{id}",
       "spark" => spark(series, ref: ref), "series" => series.map { |x| x.slice("name", "cls") },
       "chart" => stamps.size > 1 ? both(series, title: label, desc: definition, fmt: fmt, ref: ref, ref_label: ref_label, w: w) : nil,
@@ -442,7 +442,9 @@ module RoundhouseProgress
       end
       mine, rails, native = pick.("ruby"), pick.("rails"), pick.("spinel")
       next if mine.empty? # no generated-Ruby value for this measure: leave it out, not the rest
-      now, base = mine.last, rails.last
+      # Rails and Spinel from the run that gives the stated value, or no comparison: "in this run" must hold.
+      now = mine.last
+      base, nat = rails.find { |p| p["at"] == now["at"] }, native.find { |p| p["at"] == now["at"] }
       prev = mine[-2]
       comparable = prev && prev["key"] == now["key"]
       # A change counts only beyond the spread of the two runs' repeats (throughput), or 2% otherwise.
@@ -458,7 +460,7 @@ module RoundhouseProgress
                        { "name" => "Rails", "short" => "Rails", "cls" => "s-ref", "points" => rails }],
               value: long.(now["y"]), sub: base && "Rails #{short_fmt.(base["y"])} · #{against}",
               delta: comparable ? delta(now["y"], prev["y"], better: better, since: "the run of #{short_date(prev["at"])}", fmt: pct, noise: noise) : nil,
-              facts: native.last ? [["Spinel, native", "#{long.(native.last["y"])}#{" · #{ratio(native.last["y"].fdiv(base["y"]))} Rails" if base && i.zero?}"]] : nil,
+              facts: nat ? [["Spinel, native", "#{long.(nat["y"])}#{" · #{ratio(nat["y"].fdiv(base["y"]))} Rails" if base && i.zero?}"]] : nil,
               first: short_date(blocks.first["observed_at"]),
               pair: base && [["Roundhouse, generated Ruby", long.(now["y"]), now["y"], "s-a"], ["Rails", long.(base["y"]), base["y"], "s-ref"]].then { |rows| top = rows.map { |r| r[2] }.max.to_f; rows.map { |n, t, v, c| { "name" => n, "text" => t, "pct" => (100.0 * v / top).round(1), "cls" => c } } },
               columns: ["Run", "Roundhouse (#{unit})", "Spinel (#{unit})", "Rails (#{unit})"],
