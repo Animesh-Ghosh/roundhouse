@@ -62,6 +62,19 @@ end
     render plain: Widget.count.to_s
   end
 
+  def permit_rows
+    render json: { rows: params.require(:list).map { |item| item.permit(:name, :price) } }
+  end
+
+  def expect_rows
+    rows = params.require(:list).map { it.expect(:name); it.permit(:name, :tags => []) }
+    render json: { rows: rows }
+  end
+
+  def element_reads
+    render json: { rows: params.require(:list).map { |item| [item[:name], item["name"], item.key?(:name)] } }
+  end
+
   def show
     render json: { name: Widget.find(params[:id]).name }
   end
@@ -103,6 +116,9 @@ end
   get "/widgets/admins", to: "widgets#admins"
   get "/widgets/names", to: "widgets#names"
   get "/widgets/extra", to: "widgets#extra"
+  post "/widgets/permit_rows", to: "widgets#permit_rows"
+  post "/widgets/expect_rows", to: "widgets#expect_rows"
+  post "/widgets/element_reads", to: "widgets#element_reads"
   get "/widgets/counts", to: "widgets#counts"
   post "/widgets/wrap", to: "widgets#wrap"
   resources :widgets, only: %i[show]
@@ -154,6 +170,20 @@ fn api_parity_round3_fixes_run_on_spinel() {
 
     let wrap = server.request("POST", "/widgets/wrap", &[("Content-Type", "application/json")], "{}");
     assert_eq!((wrap.status, wrap.body.as_str()), (422, r#"{"error":"widget missing"}"#), "cause:\n{}", server.log());
+
+    // #1989: each element of `params.require(:list)` is params (Rails 8.1.4).
+    let json_ct = [("Content-Type", "application/json")];
+    let rows = r#"{"list":[{"name":"a","price":3,"admin":true,"tags":["x"]},{"name":"b"}]}"#;
+    let permit = server.request("POST", "/widgets/permit_rows", &json_ct, rows);
+    assert_eq!((permit.status, permit.body.as_str()), (200, r#"{"rows":[{"name":"a","price":3},{"name":"b"}]}"#), "element permit:\n{}", server.log());
+    let expected = server.request("POST", "/widgets/expect_rows", &json_ct, rows);
+    assert_eq!((expected.status, expected.body.as_str()), (200, r#"{"rows":[{"name":"a","tags":["x"]},{"name":"b"}]}"#), "element expect:\n{}", server.log());
+    let missing = server.request("POST", "/widgets/expect_rows", &json_ct, r#"{"list":[{"name":"a"},{"price":3}]}"#);
+    assert_eq!(missing.status, 400, "element expect, missing:\n{}", server.log());
+    let nested = server.request("POST", "/widgets/permit_rows", &json_ct, r#"{"list":[{"name":{"deep":1}}]}"#);
+    assert_eq!((nested.status, nested.body.as_str()), (200, r#"{"rows":[{}]}"#), "nested value:\n{}", server.log());
+    let reads = server.request("POST", "/widgets/element_reads", &json_ct, rows);
+    assert_eq!((reads.status, reads.body.as_str()), (200, r#"{"rows":[["a","a",true],["b","b",true]]}"#), "element reads:\n{}", server.log());
 
     let up = server.get("/up.json");
     assert!(
