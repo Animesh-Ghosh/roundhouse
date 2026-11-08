@@ -82,6 +82,10 @@ end
     order(:id).pluck(Arel.sql("widgets.id, *"))
   end
 
+  def self.own_star_over_join
+    joins(:shop).order("widgets.id").pluck(Arel.sql("widgets.*"))
+  end
+
   def self.star_over_join
     joins(:shop).order("widgets.id").pluck(Arel.sql("*"))
   end
@@ -163,6 +167,8 @@ got = Member.star_only
 raise "star: #{got.inspect}" unless got == [[1, "a", [1, 2]]]
 got = Member.own_star
 raise "own star: #{got.inspect}" unless got == [[1, "a", [1, 2]]]
+got = Widget.own_star_over_join
+raise "own star over a join: #{got.inspect}" unless got == [[1, 1, nil, 5]]
 raised = false
 begin
   Widget.id_and_star

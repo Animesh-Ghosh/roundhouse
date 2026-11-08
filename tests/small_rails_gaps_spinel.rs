@@ -122,6 +122,10 @@ const WIDGET: &str = r#"class Widget < ApplicationRecord
     order(:id).pluck(Arel.sql("widgets.id, *"))
   end
 
+  def self.own_star_over_join
+    joins(:shop).order("widgets.id").pluck(Arel.sql("widgets.*"))
+  end
+
   def self.star_over_join
     joins(:shop).order("widgets.id").pluck(Arel.sql("*"))
   end
@@ -378,6 +382,8 @@ def pluck_star_section
   raise "star: #{got.inspect}" unless got == [[1, "a", [1, 2]]]
   got = Member.own_star
   raise "own star: #{got.inspect}" unless got == [[1, "a", [1, 2]]]
+  row = Widget.own_star_over_join[0]
+  raise "own star over a join: #{row.inspect}" unless row.length == 7 && row[0] == 1 && row[4] == 5
   raised = false
   begin
     Widget.id_and_star
