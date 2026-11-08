@@ -51,6 +51,9 @@ mod view_unless_no_else;
 #[path = "support/nilable_string_view.rs"]
 #[allow(dead_code)]
 mod nilable_string_view;
+#[path = "support/go_nil_narrowed.rs"]
+#[allow(dead_code)]
+mod go_nil_narrowed;
 #[path = "support/go_nil_literal_left.rs"]
 #[allow(dead_code)]
 mod go_nil_literal_left;
@@ -775,6 +778,31 @@ fn go_nil_literal_left_nil_renders() {
 #[ignore]
 fn go_nil_literal_left_renders() {
     assert_content_tag_test_passes(go_nil_literal_left::strict_app());
+}
+
+/// A nullable column compared after a nil check, on either side, renders as
+/// Rails 8.1.4 does (`go_nil_narrowed::VIEW`).
+#[test]
+#[ignore]
+fn go_nil_narrowed_renders() {
+    assert_content_tag_test_passes(go_nil_narrowed::strict_app());
+}
+
+/// The nil check and the comparison in a controller and a model method,
+/// where a local's reader narrows, render as Rails 8.1.4 does.
+#[test]
+#[ignore]
+fn go_nil_narrowed_code_renders() {
+    assert_content_tag_test_passes(go_nil_narrowed::strict_code_app());
+}
+
+/// Two nullable columns compare as Rails 8.1.4 does: nil equals only nil.
+#[test]
+#[ignore]
+fn go_nil_column_pairs_render() {
+    for app in go_nil_narrowed::strict_pair_apps() {
+        assert_content_tag_test_passes(app);
+    }
 }
 
 /// `join` runs a receiver with an effect once, as Rails 8.1.4 does

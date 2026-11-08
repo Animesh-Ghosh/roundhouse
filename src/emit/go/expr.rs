@@ -1540,6 +1540,19 @@ pub(super) fn emit_send(
                 let lhs_v = if int_lhs && float_rhs { format!("float64({lhs_v})") } else { lhs_v };
                 return format!("{lhs_v} {op} {}", args_s[0]);
             }
+            // Two nullable string columns compare by content, and nil equals
+            // only nil. Read from the columns, not the analyzer's types: a nil
+            // check narrows a local's reader to String, and its Go field stays
+            // a pointer.
+            if matches!(op, "==" | "!=")
+                && nullable_read_go_ty(r).as_deref() == Some("*string")
+                && nullable_read_go_ty(&args[0]).as_deref() == Some("*string")
+            {
+                let rhs = &args_s[0];
+                let equal = "(_rh_lhs == nil && _rh_rhs == nil) || (_rh_lhs != nil && _rh_rhs != nil && *_rh_lhs == *_rh_rhs)";
+                let compare = if op == "==" { equal.to_string() } else { format!("!({equal})") };
+                return format!("func() bool {{ _rh_lhs := {lhs}; _rh_rhs := {rhs}; return {compare} }}()");
+            }
             // A nullable string column against a String: nil equals no
             // String, as in Ruby, and a present value compares by content.
             if matches!(op, "==" | "!=")
