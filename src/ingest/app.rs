@@ -2219,7 +2219,6 @@ end
     if !route_roots.is_empty() {
         let block_wrappers = mapper_extension_block_methods(&app, vfs, dir, &engine_dirs);
         super::routes::set_gem_dsl(super::gem_routes::mapper_methods(&app));
-        super::devise_routes::set_model_modules(super::gem_hooks::devise_modules(&app));
         // The constants the route files read, folded from their owners
         // as a model body's are, for `constraints:` values. A route
         // names a controller's constant as often as a model's, so its

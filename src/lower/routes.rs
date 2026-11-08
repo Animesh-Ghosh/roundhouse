@@ -1219,16 +1219,6 @@ fn qualify_controller(module_prefix: &str, controller: &ClassId) -> ClassId {
     if controller.0.as_str() == crate::ingest::routes::REDIRECT_CONTROLLER {
         return controller.clone();
     }
-    // `devise_for`'s default (no `controllers:` override) is a
-    // placeholder, not a qualified class: Devise substitutes the
-    // enclosing scope's module for its own `"devise"` default
-    // (`Devise::Mapping#default_controllers`) rather than nesting under
-    // it, which the generic concatenation below would do.
-    if let Some(resolved) =
-        crate::ingest::devise_routes::resolve_default_controller(module_prefix, controller.0.as_str())
-    {
-        return ClassId(Symbol::from(resolved));
-    }
     // `get "token"` in `namespace :reportify` has no controller of its own;
     // Rails takes the scope's module (`Admin::Reportify::` →
     // `Admin::ReportifyController`).

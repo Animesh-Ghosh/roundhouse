@@ -20953,6 +20953,8 @@ mod solid_queue_surface;
 mod controller_surface;
 #[path = "emit_and_run/rack_attack.rs"]
 mod rack_attack;
+#[path = "emit_and_run/devise.rs"]
+mod devise;
 #[path = "support/addressable_gem.rs"]
 mod addressable_gem;
 #[path = "emit_and_run/addressable.rs"]
