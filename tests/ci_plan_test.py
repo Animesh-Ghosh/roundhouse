@@ -200,6 +200,7 @@ class Routing(unittest.TestCase):
         for path in ("src/ingest/public_file_server_config.rs", "src/ingest/json_response_config.rs"):
             with self.subTest(path=path):
                 plan = ci.select([path])
+                self.assertIn("spinel-build", plan["jobs"])
                 self.assertIn("spinel-framework", plan["jobs"])
                 self.assertIn("render_json_encoder_spinel", plan["spinel_tests"])
 

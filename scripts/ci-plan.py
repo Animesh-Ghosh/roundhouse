@@ -840,6 +840,9 @@ def select(
     reasons = []
     for path in paths:
         if path in {"src/ingest/public_file_server_config.rs", "src/ingest/json_response_config.rs"}:
+            reasons.append(f"{path}: spinel-build and the native JSON response contract")
+            spinel = True
+            jobs_selected.update(CORE)
             spinel_tests.add("render_json_encoder_spinel")
         if path in {"runtime/ruby/action_controller/base.rb", "runtime/ruby/action_controller/base.rbs"}:
             targets.update(EXTRA_COMPARE_TARGETS)
