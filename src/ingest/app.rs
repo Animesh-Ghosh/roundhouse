@@ -3193,6 +3193,7 @@ end
     drop(sources);
     carry_included_block_includes_into_controllers(&mut app);
     refuse_unread_concern_filters(&app)?;
+    drop_modelled_included_hooks(&mut app);
     splice_concerns_into_controllers(&mut app);
     // After the splice: an action a concern provides is not implicit.
     synthesize_template_only_actions(&mut app);
@@ -5099,6 +5100,8 @@ fn record_concern_filters(
             app.concern_filter_refusals.entry(module).or_default().push((file, message));
         }
     }
+    app.concern_hook_modules.extend(scan.hook_modules.into_iter().filter(|id| keep(id)));
+    app.modelled_included_hooks.extend(scan.modelled_hooks);
 }
 
 /// Library modules no declaration of which makes them a Concern: no
@@ -5119,9 +5122,12 @@ fn plain_mixins(
         .filter(|lc| lc.is_module)
         .map(|lc| &lc.name)
         .filter(|name| {
+            // A hook runs on plain modules too, so only an `included do`
+            // block proves a Concern.
+            let hook = app.concern_hook_modules.contains(*name);
             !concerns.contains(*name)
-                && !app.concern_filters.contains_key(*name)
-                && !app.concern_filter_refusals.contains_key(*name)
+                && (hook || !app.concern_filters.contains_key(*name))
+                && (hook || !app.concern_filter_refusals.contains_key(*name))
         })
         .cloned()
         .collect()
@@ -5132,7 +5138,7 @@ fn plain_mixins(
 /// controller's actions running without the filter, with no error at
 /// run time. Survey mode lists the gap instead.
 fn refuse_unread_concern_filters(app: &App) -> super::IngestResult<()> {
-    if app.concern_filter_refusals.is_empty() {
+    if app.concern_filter_refusals.is_empty() && app.concern_hook_modules.is_empty() {
         return Ok(());
     }
     let surfaces = controller_concern_surfaces(app);
@@ -5150,8 +5156,61 @@ fn refuse_unread_concern_filters(app: &App) -> super::IngestResult<()> {
                 })?;
             }
         }
+        // Ruby calls `included` on every `include`, so Rails registers the
+        // hook's filter again, which moves it to the end of the chain.
+        for module in &surface.repeated_includes {
+            if app.concern_hook_modules.contains(module) && app.concern_filters.contains_key(module) {
+                super::survey::continue_or_fail(super::IngestError::Unsupported {
+                    file: controller.name.0.as_str().to_string(),
+                    message: format!(
+                        "controller concern `{}` with a `self.included` filter is included more than once, which moves the filter in Rails and is not modelled",
+                        module.0.as_str()
+                    ),
+                })?;
+            }
+        }
     }
     Ok(())
+}
+
+/// A modelled hook has nothing left to do at load, and the emitted
+/// controller has no class-level `before_action` for it to call.
+fn drop_modelled_included_hooks(app: &mut App) {
+    let hooks = std::mem::take(&mut app.modelled_included_hooks);
+    for lc in &mut app.library_classes {
+        lc.methods.retain(|m| !hooks.contains(&m.name_span));
+    }
+}
+
+/// Modules Ruby's `include` runs on one controller more than once. A
+/// dependency of a concern that is already included is not revisited:
+/// `Concern#append_features` returns early for it.
+fn repeated_includes(
+    include_groups: &[Vec<crate::ident::ClassId>],
+    edges: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+) -> Vec<crate::ident::ClassId> {
+    fn visit(
+        module: &crate::ident::ClassId,
+        edges: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+        seen: &mut std::collections::BTreeSet<crate::ident::ClassId>,
+        repeated: &mut Vec<crate::ident::ClassId>,
+    ) {
+        if !seen.insert(module.clone()) {
+            if !repeated.contains(module) {
+                repeated.push(module.clone());
+            }
+            return;
+        }
+        for dependency in edges.get(module).into_iter().flatten() {
+            visit(dependency, edges, seen, repeated);
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut repeated = Vec::new();
+    for module in include_groups.iter().flatten() {
+        visit(module, edges, &mut seen, &mut repeated);
+    }
+    repeated
 }
 
 /// The include edges filter registration follows. A plain module's are
@@ -5162,7 +5221,16 @@ fn filter_dependency_edges(
     app: &App,
     module_includes: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
 ) -> HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> {
-    module_includes.iter().filter(|(m, _)| !app.plain_mixins.contains(*m)).map(|(m, inc)| (m.clone(), inc.clone())).collect()
+    let is_plain = |m: &crate::ident::ClassId| app.plain_mixins.contains(m);
+    module_includes
+        .iter()
+        .filter(|(m, _)| !is_plain(m))
+        .map(|(m, includes)| {
+            // A concern defers only other concerns to its includer. A plain
+            // module it includes ran its hook then, with the concern as `base`.
+            (m.clone(), includes.iter().filter(|inc| !is_plain(inc)).cloned().collect())
+        })
+        .collect()
 }
 
 /// The order a controller's concern filters REGISTER in — the order
@@ -5230,6 +5298,8 @@ pub(super) struct ControllerConcernSurface {
     /// The modules whose `included` blocks run on this controller: `includes`
     /// without what is reached only through a plain module.
     pub filter_includes: Vec<crate::ident::ClassId>,
+    /// The modules Ruby's `include` runs more than once on this controller.
+    pub repeated_includes: Vec<crate::ident::ClassId>,
 }
 
 pub(super) struct ControllerConcernSurfaces {
@@ -5283,6 +5353,7 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
         }
         controllers.insert((*name).clone(), ControllerConcernSurface {
             filter_includes: filter_registration_order(&include_groups, &filter_edges),
+            repeated_includes: repeated_includes(&include_groups, &filter_edges),
             includes: filter_registration_order(&include_groups, &module_includes),
             inherited_includes: filter_registration_order(&inherited_groups, &module_includes),
             direct_includes,
