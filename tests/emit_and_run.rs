@@ -21770,12 +21770,33 @@ fn nilable_string_view_renders_as_rails() {
         .assert_passes();
 }
 
+/// #1937: `==` and `!=` on a nullable string column evaluate each
+/// operand once, left then right, as Rails 8.1.4 does
+/// (`nilable_string_view::EFFECT_VIEW`, title present).
+#[test]
+fn nilable_string_view_effect_renders_as_rails() {
+    nilable_string_view::effect_app(content_tag_options::app_rendering(nilable_string_view::EFFECT_VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(nilable_string_view::EFFECT_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
 /// #1937: with the column nil, `==` and `!=` render as Rails 8.1.4
 /// does (`nilable_string_view::NIL_VIEW`).
 #[test]
 fn nilable_string_view_nil_renders_as_rails() {
     nilable_string_view::nil_app(content_tag_options::app_rendering(nilable_string_view::NIL_VIEW, &[]))
         .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(nilable_string_view::NIL_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1937: the same operands with a nil title: the right operand still
+/// runs, as in Rails 8.1.4 (`nilable_string_view::EFFECT_VIEW`).
+#[test]
+fn nilable_string_view_nil_effect_renders_as_rails() {
+    nilable_string_view::nil_effect_app(content_tag_options::app_rendering(nilable_string_view::EFFECT_VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(nilable_string_view::NIL_EFFECT_RENDERS))
         .run_test("test/controllers/probes_controller_test.rb")
         .assert_passes();
 }
@@ -21811,6 +21832,17 @@ fn nilable_string_view_renders_as_rails_on_spinel() {
         .assert_passes();
 }
 
+/// #1937: `==` and `!=` on a nullable string column evaluate each
+/// operand once, left then right, as Rails 8.1.4 does
+/// (`nilable_string_view::EFFECT_VIEW`, title present).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn nilable_string_view_effect_renders_as_rails_on_spinel() {
+    nilable_string_view::effect_app(content_tag_options::app_rendering(nilable_string_view::EFFECT_VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(nilable_string_view::EFFECT_RENDERS))
+        .assert_passes();
+}
+
 /// #1937: with the column nil, `==` and `!=` render as Rails 8.1.4
 /// does (`nilable_string_view::NIL_VIEW`).
 #[test]
@@ -21818,5 +21850,15 @@ fn nilable_string_view_renders_as_rails_on_spinel() {
 fn nilable_string_view_nil_renders_as_rails_on_spinel() {
     nilable_string_view::nil_app(content_tag_options::app_rendering(nilable_string_view::NIL_VIEW, &[]))
         .run_spinel(&helper_escape_at_output::render_script(nilable_string_view::NIL_RENDERS))
+        .assert_passes();
+}
+
+/// #1937: the same operands with a nil title: the right operand still
+/// runs, as in Rails 8.1.4 (`nilable_string_view::EFFECT_VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn nilable_string_view_nil_effect_renders_as_rails_on_spinel() {
+    nilable_string_view::nil_effect_app(content_tag_options::app_rendering(nilable_string_view::EFFECT_VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(nilable_string_view::NIL_EFFECT_RENDERS))
         .assert_passes();
 }

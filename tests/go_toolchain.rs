@@ -663,10 +663,27 @@ fn nilable_string_view_renders() {
     assert_content_tag_test_passes(nilable_string_view::strict_app());
 }
 
+/// #1937: `==` and `!=` on a nullable string column evaluate each
+/// operand once, left then right, as Rails 8.1.4 does
+/// (`nilable_string_view::EFFECT_VIEW`, title present).
+#[test]
+#[ignore]
+fn nilable_string_view_effect_renders() {
+    assert_content_tag_test_passes(nilable_string_view::strict_effect_app());
+}
+
 /// #1937: with the column nil, `==` and `!=` render as Rails 8.1.4
 /// does (`nilable_string_view::NIL_VIEW`).
 #[test]
 #[ignore]
 fn nilable_string_view_nil_renders() {
     assert_content_tag_test_passes(nilable_string_view::strict_nil_app());
+}
+
+/// #1937: the same operands with a nil title: the right operand still
+/// runs, as in Rails 8.1.4 (`nilable_string_view::EFFECT_VIEW`).
+#[test]
+#[ignore]
+fn nilable_string_view_nil_effect_renders() {
+    assert_content_tag_test_passes(nilable_string_view::strict_nil_effect_app());
 }

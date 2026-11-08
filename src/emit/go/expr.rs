@@ -1519,6 +1519,15 @@ pub(super) fn emit_send(
                 && matches!(args[0].ty.as_ref(), Some(Ty::Str))
             {
                 let rhs = &args_s[0];
+                // Each operand runs once, left then right, and a nil left
+                // side doesn't skip the right one: Ruby evaluates the
+                // argument before calling `==` on nil. Two statements,
+                // since Go doesn't order a variable read against a call
+                // within one expression.
+                if !(is_plain_column_read(r) && is_plain_operand(&args[0])) {
+                    let compare = if op == "==" { "_rh_lhs != nil && *_rh_lhs == _rh_rhs" } else { "_rh_lhs == nil || *_rh_lhs != _rh_rhs" };
+                    return format!("func() bool {{ _rh_lhs := {lhs}; _rh_rhs := {rhs}; return {compare} }}()");
+                }
                 return if op == "==" {
                     format!("({lhs} != nil && *{lhs} == {rhs})")
                 } else {
@@ -4474,6 +4483,21 @@ fn nullable_read_go_ty(e: &Expr) -> Option<String> {
         }
         _ => None,
     })
+}
+
+/// A column read off the model itself or off a local or instance
+/// variable: reading it again gives the same value and runs nothing.
+fn is_plain_column_read(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Ivar { .. } => true,
+        ExprNode::Send { recv: Some(inner), .. } => matches!(&*inner.node, ExprNode::Ivar { .. } | ExprNode::Var { .. } | ExprNode::SelfRef),
+        _ => false,
+    }
+}
+
+/// An operand that runs nothing when read, so skipping it can't be seen.
+fn is_plain_operand(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { .. } | ExprNode::Ivar { .. } | ExprNode::Var { .. })
 }
 
 /// `*recv` for a nullable string column a String method reads: the
