@@ -5698,6 +5698,11 @@ fn read_hook_statement(
             return body.iter().all(|inner| read_hook_statement(inner, param, true, file, filters));
         }
     }
+    // Outside an eval block only `base.<macro>` reaches the includer: a bare
+    // call in the hook runs on the module itself.
+    if !in_eval && !receiver_is_local(call.receiver(), param) {
+        return false;
+    }
     let receiver = (!in_eval).then_some(param);
     match super::controller::parse_filter_call_on(stmt, file, receiver) {
         Ok(Some(read)) => {

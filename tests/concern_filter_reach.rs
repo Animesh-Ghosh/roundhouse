@@ -118,6 +118,7 @@ fn refused(module_body: &str) -> String {
 #[test]
 fn hook_shapes_the_compiler_cannot_read_refuse_the_compile() {
     for body in [
+        "before_action :check",
         "base.send(:before_action, :check)",
         "base.public_send(:before_action, :check)",
         "base.__send__(:before_action, :check)",
