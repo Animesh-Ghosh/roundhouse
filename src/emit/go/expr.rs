@@ -1196,7 +1196,14 @@ pub(super) fn emit_send(
                 };
                 let body_s = emit_block_body(&body_ctx, body);
                 // No block parameter binds nothing: Go's bare `for range`.
-                let range_clause = if range_vars.is_empty() { format!("range {recv_s}") } else { format!("{range_vars} := range {recv_s}") };
+                // A receiver that runs something is bound once: the loop and
+                // the returned value are the same evaluation, as in Ruby.
+                let (bind_recv, iterated) = if is_plain_operand(recv_e) {
+                    (String::new(), recv_s.clone())
+                } else {
+                    (format!("\t_rh_recv := {recv_s}\n"), "_rh_recv".to_string())
+                };
+                let range_clause = if range_vars.is_empty() { format!("range {iterated}") } else { format!("{range_vars} := range {iterated}") };
                 // 2-param `each` iterates a Hash. Go map iteration order is
                 // undefined per-run, but several runtime-Ruby surfaces
                 // render observable output from it — notably `render_attrs`,
@@ -1210,8 +1217,7 @@ pub(super) fn emit_send(
                 // attrs in a BTreeMap and is attribute-order-insensitive, so
                 // byte-parity is unaffected. Only string-keyed maps take this
                 // path (the common case); other key types keep the unordered
-                // range. Binding `_m` also avoids the double-eval of a
-                // non-trivial `recv_s` the unordered form has.
+                // range. `_m` binds the receiver once.
                 if params.len() == 2 {
                     let (k_ty, _v_ty) = hash_kv_go_tys(recv_e.ty.as_ref());
                     if k_ty == "string" {
@@ -1235,10 +1241,10 @@ pub(super) fn emit_send(
                 }
                 return format!(
                     "func() interface{{}} {{\n\
-                     \tfor {range_clause} {{\n\
+                     {bind_recv}\tfor {range_clause} {{\n\
                      {body_s}\n\
                      \t}}\n\
-                     \treturn {recv_s}\n\
+                     \treturn {iterated}\n\
                      }}()",
                 );
             }
@@ -1948,10 +1954,22 @@ pub(super) fn emit_send(
             if recv_go_ty == "[]string" {
                 return format!("strings.Join({recv_s}, {sep})");
             }
+            // Ruby's `join` reads a nil element as "", and `%v` prints
+            // `<nil>`. Only an interface element can be nil here. It can
+            // also hold a nullable column's pointer, nil or not, which
+            // `%v` would print as an address: read those first.
+            let stringify = if matches!(recv_go_ty.as_str(), "[]interface{}" | "[]any") {
+                let read_pointer = ["*string", "*int64", "*float64", "*bool"]
+                    .map(|ty| format!("case {ty}: if _e == nil {{ _v = nil }} else {{ _v = *_e }}"))
+                    .join("; ");
+                format!("switch _e := _v.(type) {{ {read_pointer} }}; if _v == nil {{ _out = append(_out, \"\") }} else {{ _out = append(_out, fmt.Sprintf(\"%v\", _v)) }}")
+            } else {
+                "_out = append(_out, fmt.Sprintf(\"%v\", _v))".to_string()
+            };
             return format!(
                 "strings.Join(func() []string {{\n\
                  \t_out := make([]string, 0, len({recv_s}))\n\
-                 \tfor _, _v := range {recv_s} {{ _out = append(_out, fmt.Sprintf(\"%v\", _v)) }}\n\
+                 \tfor _, _v := range {recv_s} {{ {stringify} }}\n\
                  \treturn _out\n\
                  }}(), {sep})",
             );

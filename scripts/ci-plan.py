@@ -119,6 +119,7 @@ SPINEL_TESTS = [
     "after_initialize_bare_new_spinel",
     "find_or_create_bang_records",
     "before_action_return_spinel",
+    "concern_filter_reach_spinel",
     "partial_flash_from_caller_spinel",
     "plain_class_optional_keywords_spinel",
     "conditional_expression_parens",
@@ -521,6 +522,7 @@ def native_coverage(path):
     if path in {
         "src/analyze/registry/stdlib.rs", "src/analyze/registry/library.rs", "src/project.rs",
         "tests/openssl_registrations.rs", "tests/support/openssl_registrations.rb",
+        "tests/support/cipher_registrations.rb", "runtime/spinel/message_digest.rb",
     }:
         suites.add("openssl_registrations")
     if path == "src/analyze/mod.rs":
@@ -838,6 +840,11 @@ def select(
     wasm = site = spinel = False
     reasons = []
     for path in paths:
+        if path in {"src/ingest/public_file_server_config.rs", "src/ingest/json_response_config.rs"}:
+            reasons.append(f"{path}: spinel-build and the native JSON response contract")
+            spinel = True
+            jobs_selected.update(CORE)
+            spinel_tests.add("render_json_encoder_spinel")
         if path in {"runtime/ruby/action_controller/base.rb", "runtime/ruby/action_controller/base.rbs"}:
             targets.update(EXTRA_COMPARE_TARGETS)
             spinel_tests.add("render_json_encoder_spinel")
