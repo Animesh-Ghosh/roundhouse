@@ -90,6 +90,7 @@ SPINEL_TESTS = [
     "object_blank",
     "spinel_web_push_crypto",
     "openssl_random",
+    "openssl_registrations",
     "spinel_db_lease",
     *PARAM_BIND_TESTS,
     "spinel_stmt_cache_lru",
@@ -515,6 +516,11 @@ def native_coverage(path):
         or path == "tests/support/full_forwarding.rs"
     ) and not interpreter_only
     suites = set()
+    if path in {
+        "src/analyze/registry/stdlib.rs", "src/analyze/registry/library.rs", "src/project.rs",
+        "tests/openssl_registrations.rs", "tests/support/openssl_registrations.rb",
+    }:
+        suites.add("openssl_registrations")
     if path == "src/analyze/mod.rs":
         suites.add("class_object_return_rbs")
     if path in {"src/analyze/mod.rs", "src/analyze/body/mod.rs"}:

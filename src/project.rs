@@ -8749,6 +8749,9 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "StringScanner" | "Zlib::GzipWriter" | "Zlib::Deflate" | "Zlib::GzipReader" | "Zlib::Error"
         | "Zlib::BEST_COMPRESSION" | "Zlib::MAX_WBITS" | "Zlib::FINISH"
         | "OpenSSL::Digest::SHA1" | "OpenSSL::Digest::SHA256"
+        | "OpenSSL::Digest::SHA384" | "OpenSSL::Digest::SHA512" | "OpenSSL" | "OpenSSL::KDF"
+        | "OpenSSL::PKey" | "OpenSSL::PKey::PKey" | "OpenSSL::PKey::EC" | "OpenSSL::PKey::EC::Group"
+        | "OpenSSL::PKey::PKeyError" | "OpenSSL::PKey::ECError" | "OpenSSL::Digest::DigestError" | "OpenSSL::KDF::KDFError"
         // runtime/spinel/integration_session.rb and the ruby tree's twin.
         | "ActionDispatch::Integration::Session" | "ActionDispatch::TestResponse"
         // runtime/spinel/solid_queue.rb.
