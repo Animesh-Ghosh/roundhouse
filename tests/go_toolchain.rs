@@ -51,6 +51,9 @@ mod view_unless_no_else;
 #[path = "support/nilable_string_view.rs"]
 #[allow(dead_code)]
 mod nilable_string_view;
+#[path = "support/go_nil_literal_left.rs"]
+#[allow(dead_code)]
+mod go_nil_literal_left;
 #[path = "support/each_receiver_once.rs"]
 #[allow(dead_code)]
 mod each_receiver_once;
@@ -729,4 +732,20 @@ fn nilable_string_view_nil_effect_renders() {
 #[ignore]
 fn each_receiver_once_renders() {
     assert_content_tag_test_passes(each_receiver_once::strict_app());
+}
+
+/// #1977: a String on the left of a nil column renders as Rails 8.1.4
+/// does (`go_nil_literal_left::VIEW`).
+#[test]
+#[ignore]
+fn go_nil_literal_left_nil_renders() {
+    assert_content_tag_test_passes(go_nil_literal_left::strict_nil_app());
+}
+
+/// #1977: a String on the left of a present column renders as Rails
+/// 8.1.4 does (`go_nil_literal_left::VIEW`).
+#[test]
+#[ignore]
+fn go_nil_literal_left_renders() {
+    assert_content_tag_test_passes(go_nil_literal_left::strict_app());
 }

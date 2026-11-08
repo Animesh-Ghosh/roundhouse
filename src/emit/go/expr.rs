@@ -1562,6 +1562,23 @@ pub(super) fn emit_send(
                     format!("({lhs} == nil || *{lhs} != {rhs})")
                 };
             }
+            // The same comparison with the column on the right. The left
+            // side still runs first.
+            if matches!(op, "==" | "!=")
+                && nullable_read_go_ty(&args[0]).as_deref() == Some("*string")
+                && matches!(r.ty.as_ref(), Some(Ty::Str))
+            {
+                let rhs = &args_s[0];
+                if !(is_plain_operand(r) && is_plain_column_read(&args[0])) {
+                    let compare = if op == "==" { "_rh_rhs != nil && _rh_lhs == *_rh_rhs" } else { "_rh_rhs == nil || _rh_lhs != *_rh_rhs" };
+                    return format!("func() bool {{ _rh_lhs := {lhs}; _rh_rhs := {rhs}; return {compare} }}()");
+                }
+                return if op == "==" {
+                    format!("({rhs} != nil && {lhs} == *{rhs})")
+                } else {
+                    format!("({rhs} == nil || {lhs} != *{rhs})")
+                };
+            }
             return format!("{lhs} {} {}", op, args_s[0]);
         }
     }
