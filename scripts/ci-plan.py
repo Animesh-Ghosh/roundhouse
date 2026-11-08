@@ -147,6 +147,7 @@ SPINEL_TESTS = [
     "params_tap_require_spinel",
     "association_extension_unscope_spinel",
     "pluck_sql_literal_spinel",
+    "enum_computed_mapping_spinel",
 ]
 # Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
 # driver loads beside it.
