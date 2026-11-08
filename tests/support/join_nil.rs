@@ -33,3 +33,22 @@ pub fn strict_app() -> Overlay {
 pub fn strict_go_app() -> Overlay {
     app(super::content_tag_options::app_rendering(GO_VIEW, GO_RENDERS))
 }
+
+/// A nullable String column beside an Integer: the array's elements are
+/// `interface{}` on Go. Rails 8.1.4 renders `MIXED_NIL_RENDERS` with a
+/// nil title and `MIXED_RENDERS` with the title "t".
+pub const MIXED_VIEW: &str = "L0:<%= [1, @article.title].join(\",\") %>|\n";
+
+pub const MIXED_NIL_RENDERS: &[&str] = &["L0:1,|"];
+
+pub const MIXED_RENDERS: &[&str] = &["L0:1,t|"];
+
+/// Go's probe app with a nil title.
+pub fn strict_mixed_nil_app() -> Overlay {
+    app(super::content_tag_options::app_rendering(MIXED_VIEW, MIXED_NIL_RENDERS))
+}
+
+/// Go's probe app with the title "t".
+pub fn strict_mixed_app() -> Overlay {
+    super::nested_route_helper_record::app(super::content_tag_options::app_rendering(MIXED_VIEW, MIXED_RENDERS), false)
+}

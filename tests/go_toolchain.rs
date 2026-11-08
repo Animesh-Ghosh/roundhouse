@@ -741,3 +741,19 @@ fn each_receiver_once_renders() {
 fn join_nil_renders() {
     assert_content_tag_test_passes(join_nil::strict_go_app());
 }
+
+/// #1949: a nil column beside an Integer joins as an empty string, as
+/// Rails 8.1.4 does (`join_nil::MIXED_VIEW`).
+#[test]
+#[ignore]
+fn join_nil_mixed_nil_renders() {
+    assert_content_tag_test_passes(join_nil::strict_mixed_nil_app());
+}
+
+/// #1949: a present column beside an Integer joins as its text, as
+/// Rails 8.1.4 does (`join_nil::MIXED_VIEW`).
+#[test]
+#[ignore]
+fn join_nil_mixed_renders() {
+    assert_content_tag_test_passes(join_nil::strict_mixed_app());
+}
