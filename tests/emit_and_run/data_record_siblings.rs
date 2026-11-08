@@ -1,3 +1,5 @@
+#[path = "../support/prerequisite.rs"]
+mod prerequisite;
 use super::data_record_siblings_contract as contract;
 
 #[test]
@@ -57,7 +59,7 @@ RecordOracle.initialize!
 "#, source = contract::SOURCE, assertions = contract::ASSERTIONS);
     let output = std::process::Command::new("ruby").args(["-e", &script]).output().expect("Rails oracle");
     if output.status.code() == Some(77) {
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        prerequisite::missing(String::from_utf8_lossy(&output.stderr).trim());
         return;
     }
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));

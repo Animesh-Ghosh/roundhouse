@@ -585,8 +585,9 @@ jobs:
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
           gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt rest-client elastic-apm
-          # The Rails the fixture locks (see generate-fixture).
-          gem install --no-document activerecord -v 8.1.4
+          # The Rails the fixture locks (see generate-fixture), whole: the native Rails controls need
+          # actionpack, actionview, actioncable and railties too, and skip without them.
+          gem install --no-document rails -v 8.1.4
           gem install --no-document sequel -v 5.99.0
           # solid_queue's record models, at the fixture's locked version (tests/support/solid_queue_worker.rs).
           gem install --no-document --ignore-dependencies solid_queue -v "$(sed -n 's/^    solid_queue (\(.*\))$/\1/p' fixtures/real-blog/Gemfile.lock)"
@@ -602,13 +603,38 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/unit-tests
       - name: Validate coverage and run this test partition
+        env:
+          # A test that skips passes, and nextest keeps a passing test's output to itself:
+          # tests/support/prerequisite.rs records each skip here instead.
+          ROUNDHOUSE_SKIP_LOG: ${{ runner.temp }}/unit-resources/skipped.tsv
         run: |
+          mkdir -p "$(dirname "$ROUNDHOUSE_SKIP_LOG")"
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-resources/tests" -- \
             python3 scripts/ci-unit-tests.py run \
               --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
               --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
               --shard-index ${{ strategy.job-index }} --shard-count ${{ strategy.job-total }} \
               --report "$RUNNER_TEMP/unit-resources/tests/shard.json"
+      # Not a failure yet: this job installs no spinel, and some controls want gems it does not install,
+      # so those tests skip. The summary names them; ROUNDHOUSE_REQUIRE_PREREQUISITES fails them once provided.
+      - name: Report tests that skipped for a missing prerequisite
+        if: always()
+        env:
+          SKIPS: ${{ runner.temp }}/unit-resources/skipped.tsv
+        run: |
+          if [ ! -s "$SKIPS" ]; then
+            echo "No test in this partition skipped for a missing prerequisite." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          count=$(wc -l < "$SKIPS")
+          echo "::warning::$count tests in this partition passed without running their check: a prerequisite was missing"
+          {
+            echo "### $count tests skipped for a missing prerequisite"
+            echo
+            echo "| Test | Missing |"
+            echo "|---|---|"
+            sort "$SKIPS" | sed 's/|/\\|/g; s/^\([^\t]*\)\t\(.*\)$/| `\1` | \2 |/'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload unit test results
         if: always()
         uses: actions/upload-artifact@v7

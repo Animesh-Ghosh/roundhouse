@@ -1147,9 +1147,8 @@ pub(super) fn restore_extras_facades(files: &mut [(String, String)], app: &App) 
 /// have.
 ///
 /// A name the locals do not bind falls back to the enclosing method's
-/// own PARAMETER of that name before it falls back to nil. Same policy
-/// as the controller-side rewrite ("a same-named local wins"), and here
-/// it is what keeps the call type-correct: the partial's record
+/// own PARAMETER of that name before it falls back to nil. Here it is
+/// what keeps the call type-correct: the partial's record
 /// parameter is typed as its record (`unrenderable(Message message,
 /// …)`), so a nil there is a seed contradiction that stops a strict
 /// build. The divergence it buys is bounded and in the safe direction —
@@ -1296,12 +1295,8 @@ fn rewrite_library_partial_render(
     for n in &contract.closure {
         // Not the helper's same-named param: the partial's ivar is the rendering template's, which `rewrite_helper_ivars` reaches.
         let ivar = in_helper.then(|| Expr::new(span, ExprNode::Ivar { name: Symbol::from(n.as_str()) }));
-        // Nor a local of its name: Rails hands `post: other` to the partial's `post`, never its `@post`. Only a param the local shares (`shared_locals`) takes it.
-        let local = || locals_lookup(n).filter(|_| *n != contract.record);
-        let value = match contract.shared_locals.contains(n) {
-            true => local().or(ivar),
-            false => ivar.or_else(local),
-        };
+        // Nor a local of its name: Rails hands `post: other` to the partial's `post`, never its `@post`.
+        let value = ivar.or_else(|| locals_lookup(n).filter(|_| *n != contract.record));
         view_args.push(value.or_else(|| param_lookup(n)).unwrap_or_else(nil));
     }
     view_args.extend(contract.extras_args(
@@ -5424,58 +5419,56 @@ fn rewrite_helper_calls(
     }
 }
 
-/// Ruby-emit-path pass: wrap each action's html render in the layout
-/// call — `render(Views::X.y(...))` → `render(Views::Layouts.application(
-/// Views::X.y(...), @<ivar>…, @flash…))`. Lives here (not the shared
-/// controller lowering) because the wrap shape and the CRuby dispatch
-/// contract move together: the overlay main.rb ships `controller.body`
-/// verbatim, while other targets' dispatchers still wrap body-only.
-/// The controller render seam is where a layout's ivar reads (@user,
-/// @title) are statically in scope — the generic dispatch had no way to
-/// pass them. Skipped renders: jbuilder json (`*_json` view call or a
-/// `content_type:` kwarg), non-view renders (`render html:`/`plain:` —
-/// Rails skips the layout for those too), and an already-wrapped
-/// Layouts call (idempotence). No-op when the app has no
-/// layouts/application view.
+/// Ruby-emit-path pass: wrap each action's html render in its layout —
+/// `render(Views::X.y(...))` → `render(Views::Layouts.admin(
+/// Views::X.y(...), @<ivar>…, @flash…))`, the layout
+/// `controller_layout` picks for the controller and method the render
+/// is in. A render in a method that runs under controllers or actions
+/// with different layouts (a filter in `ApplicationController`, an
+/// action a subclass inherits) picks among them per request, as Rails
+/// does. Lives here (not the shared controller lowering) because the
+/// wrap shape and the CRuby dispatch contract move together: the
+/// overlay main.rb ships `controller.body` verbatim, while other
+/// targets' dispatchers still wrap body-only. The controller render
+/// seam is where a layout's ivar reads (@user, @title) are statically
+/// in scope — the generic dispatch had no way to pass them. Skipped
+/// renders: jbuilder json (`*_json` view call or a `content_type:`
+/// kwarg), non-view renders (`render html:`/`plain:` with no `layout:`
+/// — Rails skips the layout for those too), an already-wrapped Layouts
+/// call (idempotence), and a render whose layout `controller_layout`
+/// cannot pick, which ingest reported.
 pub(crate) fn apply_layout_lowering(lcs: &mut [LibraryClass], app: &App) {
-    // Cheap probe: no layouts/application view → nothing to wrap.
-    let probe = Expr::new(
-        crate::span::Span::synthetic(),
-        ExprNode::Lit { value: crate::expr::Literal::Nil },
-    );
+    let layouts = crate::controller_layout::Layouts::new(&app.controllers, &app.views);
     let closures = crate::lower::view_to_library::view_ivar_closures(&app.views, &app.controllers);
-    if crate::lower::view_to_library::layout_wrap_expr_with(app, &closures, probe).is_none() {
-        return;
-    }
     for lc in lcs.iter_mut() {
-        // `layout false` on the controller this class came from, scoped
-        // by the `only:`/`except:` the declaration carried. Resolved
-        // per METHOD because the scoping is per action: campfire's
-        // `MessagesController` writes `layout false, only: :index`, so
-        // `index` must render bare — it is a turbo-frame fragment
-        // loaded into a page that already has a layout, and wrapping it
-        // shipped a whole second `<html>` inside the first, 117 tags
-        // Rails does not send — while `show` and `edit` keep theirs.
-        let decl = app
-            .controllers
-            .iter()
-            .find(|c| c.name == lc.name)
-            .map(|c| c.layout.clone());
+        if !layouts.is_controller(lc.name.0.as_str()) {
+            continue;
+        }
+        // Resolved per METHOD: `layout false, only: :index` (campfire's
+        // `MessagesController`) leaves `index` bare — a turbo-frame
+        // fragment loaded into a page that already has a layout — while
+        // `show` and `edit` keep theirs.
         for m in &mut lc.methods {
-            if decl.as_ref().is_some_and(|d| d.suppresses(&m.name)) {
-                continue;
-            }
-            rewrite_layout_wrap(&mut m.body, app, &closures);
+            let site = LayoutSite { layouts: &layouts, class: lc.name.0.as_str(), method: m.name.as_str() };
+            rewrite_layout_wrap(&mut m.body, app, &closures, &site);
         }
     }
+}
+
+struct LayoutSite<'s, 'a> {
+    layouts: &'s crate::controller_layout::Layouts<'a>,
+    class: &'s str,
+    method: &'s str,
 }
 
 fn rewrite_layout_wrap(
     expr: &mut Expr,
     app: &App,
     closures: &crate::det::HashMap<crate::lower::view_to_library::ViewKey, Vec<crate::ident::Symbol>>,
+    site: &LayoutSite<'_, '_>,
 ) {
-    expr.node.for_each_child_mut(&mut |c| rewrite_layout_wrap(c, app, closures));
+    expr.node.for_each_child_mut(&mut |c| rewrite_layout_wrap(c, app, closures, site));
+    let span = expr.span;
     // Post-lowering action bodies carry `render` as a SelfRef-receiver
     // Send (`self.render(...)` shape); accept the bare form too.
     let ExprNode::Send { recv, method, args, .. } = &mut *expr.node else {
@@ -5513,27 +5506,6 @@ fn rewrite_layout_wrap(
     if args.is_empty() {
         return;
     }
-    // An explicit `layout: false` VETOES the wrap outright — the
-    // controller-side partial-render rewrite plants it (Rails renders
-    // partials without a layout), and a user's `render …, layout:
-    // false` means the same thing.
-    if layout_kwarg.as_ref().is_some_and(|v| {
-        matches!(&*v.node, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } })
-    }) {
-        return;
-    }
-    // An explicit `layout: "application"` / `layout: true` wraps a body
-    // render (non-Views literal html) the way Rails does. Other layout
-    // names are left unwrapped — honest residue, only `application`
-    // exists as an emitted layout.
-    let layout_requested = layout_kwarg.as_ref().is_some_and(|v| match &*v.node {
-        ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value == "application",
-        ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
-            value.as_str() == "application"
-        }
-        ExprNode::Lit { value: crate::expr::Literal::Bool { value } } => *value,
-        _ => false,
-    });
     // Trailing kwargs are fine (`status: :unprocessable_entity` renders
     // WITH layout in Rails) — except the jbuilder branch's
     // `content_type:`, which marks a non-html response.
@@ -5547,30 +5519,112 @@ fn rewrite_layout_wrap(
     if has_content_type {
         return;
     }
-    // An explicit `layout: "application"`/`true` wraps WHATEVER the
-    // body is — `render html: content.html_safe, layout:
-    // "application"` (lobsters /u serves a cached tree string) has a
-    // Send body that isn't a Views call, and the Views-shape test
-    // alone wrongly skipped it. Without an explicit request, only a
-    // non-layout non-json Views call wraps (the implicit html render).
-    let wrappable = layout_requested
-        || match &*args[0].node {
-            ExprNode::Send { recv: Some(r), method: vm, .. } => {
-                !vm.as_str().ends_with("_json")
-                    && matches!(&*r.node, ExprNode::Const { path }
-                        if path.len() == 2
-                            && path[0].as_str() == "Views"
-                            && path[1].as_str() != "Layouts")
-            }
-            _ => false,
-        };
+    // An explicit `layout:` wraps WHATEVER the body is — `render html:
+    // content.html_safe, layout: "application"` (lobsters /u serves a
+    // cached tree string) has a Send body that isn't a Views call. An
+    // explicit `layout: false` vetoes the wrap: the controller-side
+    // partial-render rewrite plants it (Rails renders partials without a
+    // layout). Without `layout:`, only a non-layout non-json Views call
+    // wraps (the implicit html render).
+    let views_call = match &*args[0].node {
+        ExprNode::Send { recv: Some(r), method: vm, .. } => {
+            !vm.as_str().ends_with("_json")
+                && matches!(&*r.node, ExprNode::Const { path }
+                    if path.len() >= 2
+                        && path[0].as_str() == "Views"
+                        && path[1].as_str() != "Layouts"
+                        && !path[1].as_str().starts_with("Layouts::"))
+        }
+        _ => false,
+    };
+    let wrappable = match &layout_kwarg {
+        Some(_) => !matches!(&*args[0].node, ExprNode::Hash { .. } | ExprNode::Lit { value: crate::expr::Literal::Sym { .. } }),
+        None => views_call,
+    };
     if !wrappable {
         return;
     }
+    let Ok(cases) = site.layouts.render_cases(site.class, site.method, layout_kwarg.as_ref()) else {
+        return;
+    };
     let inner = args[0].clone();
-    if let Some(wrapped) = crate::lower::view_to_library::layout_wrap_expr_with(app, closures, inner) {
-        args[0] = wrapped;
+    let wrap = |layout: &crate::controller_layout::Layout| match layout {
+        crate::controller_layout::Layout::Template(name) => {
+            crate::lower::view_to_library::layout_wrap_expr_with(app, closures, name.as_str(), inner.clone())
+        }
+        _ => Some(inner.clone()),
+    };
+    // One layout for every controller and action running the render, or
+    // the per-request choice Rails makes: the most common layout, and the
+    // others where `controller_path` (and `action_name`, under an
+    // `only:`/`except:`) says so.
+    let Some(fallback) = (0..cases.len()).max_by_key(|&i| (cases[i].runs.len(), std::cmp::Reverse(i))) else { return };
+    let Some(mut wrapped) = wrap(&cases[fallback].layout) else { return };
+    for (i, case) in cases.iter().enumerate().rev() {
+        if i == fallback {
+            continue;
+        }
+        let Some(then_branch) = wrap(&case.layout) else { return };
+        let cond = layout_case_condition(case, &cases, span);
+        wrapped = typed_layout_expr(span, ExprNode::If { cond, then_branch, else_branch: wrapped }, crate::ty::Ty::Str);
     }
+    args[0] = wrapped;
+}
+
+/// Whether the request is one of `case`'s runs: its controller's
+/// `controller_path`, and its `action_name` where the controller's
+/// actions differ in layout (an `only:`/`except:`, under which the
+/// dispatcher assigns `action_name`).
+fn layout_case_condition(
+    case: &crate::controller_layout::Case,
+    cases: &[crate::controller_layout::Case],
+    span: crate::span::Span,
+) -> Expr {
+    let lit = |s: &str| typed_layout_expr(span, ExprNode::Lit { value: crate::expr::Literal::Str { value: s.to_string() } }, crate::ty::Ty::Str);
+    let reader = |name: &str| {
+        typed_layout_expr(
+            span,
+            ExprNode::Send { recv: None, method: Symbol::from(name), args: Vec::new(), block: None, parenthesized: false },
+            crate::ty::Ty::Str,
+        )
+    };
+    let equals = |name: &str, value: &str| {
+        typed_layout_expr(
+            span,
+            ExprNode::Send { recv: Some(reader(name)), method: Symbol::from("=="), args: vec![lit(value)], block: None, parenthesized: false },
+            crate::ty::Ty::Bool,
+        )
+    };
+    let join = |op: crate::expr::BoolOpKind, left: Expr, right: Expr| {
+        typed_layout_expr(span, ExprNode::BoolOp { op, surface: Default::default(), left, right }, crate::ty::Ty::Bool)
+    };
+    let mut terms: Vec<Expr> = Vec::new();
+    let mut classes: Vec<&str> = Vec::new();
+    for (class, _) in &case.runs {
+        if !classes.contains(&class.as_str()) {
+            classes.push(class);
+        }
+    }
+    for class in classes {
+        let path = crate::controller_layout::controller_path(class);
+        let whole = !cases.iter().any(|other| !std::ptr::eq(other, case) && other.runs.iter().any(|(c, _)| c == class));
+        if whole {
+            terms.push(equals("controller_path", &path));
+            continue;
+        }
+        for (_, action) in case.runs.iter().filter(|(c, _)| c == class) {
+            terms.push(join(crate::expr::BoolOpKind::And, equals("controller_path", &path), equals("action_name", action)));
+        }
+    }
+    let mut terms = terms.into_iter();
+    let first = terms.next().unwrap_or_else(|| typed_layout_expr(span, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } }, crate::ty::Ty::Bool));
+    terms.fold(first, |acc, t| join(crate::expr::BoolOpKind::Or, acc, t))
+}
+
+fn typed_layout_expr(span: crate::span::Span, node: ExprNode, ty: crate::ty::Ty) -> Expr {
+    let mut e = Expr::new(span, node);
+    e.ty = Some(ty);
+    e
 }
 
 // `record.update!(k: v, ...)` kwargs inlining moved to the shared

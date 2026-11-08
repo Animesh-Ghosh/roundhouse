@@ -42,6 +42,25 @@ The generated trees are ignored by Git; a fresh clone has neither. Accessors in
 Missing Ruby, gems, or SDKs can cause a harness to skip or fail; read the
 executed test output rather than assuming exit zero means coverage.
 
+## Skips and early exits
+
+A test that skips passes, and Nextest does not show a passing test's
+output, so a skip printed with `eprintln!` never reaches a CI log. A test
+whose prerequisite (a gem for a native Rails control, Ruby on `PATH`, a
+native compiler) is missing calls `prerequisite::missing(what)` from
+[`tests/support/prerequisite.rs`](../../tests/support/prerequisite.rs) and
+returns. `ROUNDHOUSE_SKIP_LOG=<file>` appends each skip to that file; the
+CI unit job lists them in its summary. `ROUNDHOUSE_REQUIRE_PREREQUISITES=1`
+fails such a test instead, for a run that provides everything. PostgreSQL
+keeps its own pair, `ROUNDHOUSE_PG_TEST_URL` and `ROUNDHOUSE_PG_TEST_REQUIRED`.
+
+A `run_ruby` or `run_spinel*` script reports a failed check by raising, so
+exit status 0 alone would pass a script that stopped before its checks.
+The [emit-and-run harness](../../tests/support/emit_and_run.rs) adds a
+completion line after the script and counts the run a success only if that
+line was printed. Do not end a passing script with `exit`; let it reach
+its last line.
+
 ## Native probes
 
 A Spinel test that checks one construct rather than the app can compile the

@@ -13,8 +13,9 @@
 //!
 //! - moved back to the value it held before its last move (a 2-cycle):
 //!   the join of the two;
-//! - moved in [`STREAK`] consecutive rounds (a longer cycle, or a
-//!   recursive type that the size bound reshapes each round without it
+//! - moved in [`STREAK`] consecutive rounds, or [`MOVES_SLACK`] more
+//!   rounds than that in all (a longer cycle, or a recursive type that
+//!   the size bound reshapes each round, or every other round, without it
 //!   ever repeating): the join, with containers below [`WIDEN_DEPTH`]
 //!   cut to `untyped`. One still moving every round after that is cut
 //!   shallower, [`WIDEN_STEP`] levels each [`WIDEN_STEP`] rounds, down to
@@ -43,6 +44,11 @@ const WIDEN_DEPTH: usize = 4;
 /// Rounds, and levels, between tighter cuts of an entry that keeps moving.
 const WIDEN_STEP: usize = 2;
 
+/// Moves an entry may make in all, consecutive or not, before they count
+/// as a streak: one that grows a little every other round never moves
+/// [`STREAK`] rounds in a row.
+const MOVES_SLACK: usize = 2;
+
 /// How deep an entry that has moved `streak` rounds in a row is cut, if at all.
 fn widen_depth(streak: usize) -> Option<usize> {
     (streak >= STREAK)
@@ -58,6 +64,8 @@ struct Track<T> {
     /// The observation that last saw it move, and how many in a row did.
     last: usize,
     streak: usize,
+    /// Every move it has made.
+    moves: usize,
     /// The join it is pinned to, and the depth it is cut to if widened.
     pinned: Option<(T, Option<usize>)>,
 }
@@ -146,6 +154,7 @@ impl<K: Clone + Eq + std::hash::Hash, V: Joinable> Entries<K, V> {
                 before: old.clone(),
                 last: 0,
                 streak: 0,
+                moves: 0,
                 pinned: None,
             });
             track.streak = if track.last + 1 == seen {
@@ -154,8 +163,9 @@ impl<K: Clone + Eq + std::hash::Hash, V: Joinable> Entries<K, V> {
                 1
             };
             track.last = seen;
+            track.moves += 1;
             let back = &track.before == value;
-            let depth = widen_depth(track.streak);
+            let depth = widen_depth(track.streak.max(track.moves.saturating_sub(MOVES_SLACK)));
             let pinned_depth = track.pinned.as_ref().map(|(_, d)| *d);
             // Not pinned again at the depth it already has: only a 2-cycle
             // that is not yet pinned, or a tighter cut.
@@ -332,6 +342,47 @@ mod tests {
         let (held, entries) = rounds(&[Ty::Untyped, nilable(Ty::Int), Ty::Int, Ty::Int, Ty::Int]);
         assert_eq!(held, [nilable(Ty::Int), Ty::Int, Ty::Int, Ty::Int]);
         assert_eq!((entries.cycles, entries.widened), (0, 0));
+    }
+
+    // It grows one level every other round and holds in between, so it
+    // never moves twice in a row.
+    #[test]
+    fn an_entry_growing_every_other_round_is_widened_and_then_holds() {
+        let mut entries: Entries<ReturnKey, Ty> = Entries::default();
+        let mut held = Ty::Int;
+        let mut raw = Ty::Int;
+        let mut history = Vec::new();
+        for round in 0..24 {
+            if round % 2 == 0 {
+                raw = body::union_of(
+                    Ty::Str,
+                    Ty::Array {
+                        elem: std::sync::Arc::new(raw),
+                    },
+                );
+            }
+            let prev: HashMap<ReturnKey, Ty> = [(key("start"), held.clone())].into_iter().collect();
+            let next = if round % 2 == 0 {
+                body::union_of(held.clone(), raw.clone())
+            } else {
+                held.clone()
+            };
+            let mut now: HashMap<ReturnKey, Ty> = [(key("start"), next)].into_iter().collect();
+            entries.observe(&prev, &mut now);
+            held = now[&key("start")].clone();
+            history.push(held.clone());
+        }
+        assert!(entries.widened > 0);
+        let last = history.last().unwrap();
+        assert_eq!(
+            &history[history.len() - 3],
+            last,
+            "still moving: {history:#?}"
+        );
+        assert!(
+            depth(last) <= WIDEN_DEPTH,
+            "{last:?} nests deeper than the widening"
+        );
     }
 
     #[test]

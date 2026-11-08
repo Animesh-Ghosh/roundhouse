@@ -672,7 +672,8 @@ struct Ctx {
     key_marks: std::rc::Rc<std::cell::Cell<usize>>,
     /// The literal `json.merge!` statements (by address) an object
     /// proved sound: top-level in their object, every sibling's keys
-    /// known and none of them repeated (`mark_sound_merges`).
+    /// known and none of them repeated, except by a later pair the
+    /// merge writes in its place (`mark_sound_merges`).
     sound_merges: std::rc::Rc<std::cell::RefCell<crate::det::HashSet<usize>>>,
     /// Every jbuilder partial's parameters, for the calls this template
     /// makes to them.
@@ -1219,12 +1220,24 @@ fn emit_pairs(
     out: &mut Vec<Expr>,
     mut sep: Sep,
 ) -> Sep {
-    for (stmt, src) in classified.iter().zip(raw_stmts.iter()) {
-        // `json.merge!(record.attributes…)` proved sound: the pairs
-        // `extract!` writes for the same attributes.
+    // The pairs a merge has already rendered with its own keys, through
+    // this statement.
+    let mut rendered_through: Option<usize> = None;
+    for (i, (stmt, src)) in classified.iter().zip(raw_stmts.iter()).enumerate() {
+        if rendered_through.is_some_and(|last| i <= last) {
+            continue;
+        }
         if let JbStmt::Merge { value } = stmt {
-            if let Some((obj, attrs)) = attributes_merge(value, ctx) {
-                if ctx.sound_merges.borrow().contains(&(*src as *const Expr as usize)) {
+            if ctx.sound_merges.borrow().contains(&(*src as *const Expr as usize)) {
+                let overrides = merge_overrides(i, classified, ctx).unwrap_or_default();
+                if let Some(last) = overrides.values().copied().max() {
+                    sep = emit_merge_with_overrides(value, i, last, &overrides, classified, raw_stmts, ctx, out, sep);
+                    rendered_through = Some(last);
+                    continue;
+                }
+                // `json.merge!(record.attributes…)`: the pairs
+                // `extract!` writes for the same attributes.
+                if let Some((obj, attrs)) = attributes_merge(value, ctx) {
                     sep = emit_pairs(&[JbStmt::Extract { obj, attrs }], &[*src], ctx, out, sep);
                     continue;
                 }
@@ -1560,7 +1573,7 @@ fn emit_pairs(
                 out.push(unsupported_stmt(
                     src.span,
                     "jbuilder merge!",
-                    "only a Hash literal whose keys the object sets nowhere else, or a value typed Hash, is lowered",
+                    "only a Hash literal whose keys the object sets nowhere else (or only in a later pair, with plain pairs between), or a value typed Hash, is lowered",
                 ));
             }
             // A `json.<key>(…)` the classifier does not recognise. Writing
@@ -1625,11 +1638,7 @@ fn literal_merge_pairs(value: &Expr) -> Option<Vec<(String, &Expr)>> {
 fn emit_merge(value: &Expr, ctx: &Ctx, out: &mut Vec<Expr>, mut sep: Sep) -> Sep {
     if let Some(pairs) = literal_merge_pairs(value) {
         for (key, v) in pairs {
-            push_separator(out, ctx, sep);
-            out.push(io_append_lit(&ctx.accumulator, &format!("{}:", json_string_literal(&key))));
-            let encoded = json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(v, ctx)));
-            out.push(io_append_call(&ctx.accumulator, encoded));
-            sep = Sep::After;
+            sep = emit_literal_merge_pair(&key, v, ctx, out, sep);
         }
         return sep;
     }
@@ -1659,6 +1668,149 @@ fn emit_merge(value: &Expr, ctx: &Ctx, out: &mut Vec<Expr>, mut sep: Sep) -> Sep
     // The hash may be empty: the next pair asks the accumulator, unless
     // one is already known to be there.
     if sep == Sep::After { Sep::After } else { Sep::Unknown }
+}
+
+/// `json.merge!(hash)` with later pairs that replace some of its keys.
+///
+/// Jbuilder reads the merge, then evaluates each pair in source order,
+/// and the object answers the merge's key order with the pair's value:
+/// a key cannot be written until the pair that replaces it has run, and
+/// the statements before that pair must run ahead of it. So the merged
+/// keys ahead of the first replaced one are written as usual, the rest
+/// of the merge is rendered into a local of its own, as is each pair
+/// through the last replacing one in source order, and only then is
+/// everything appended in the object's order:
+///
+///   io << "\"name\":"
+///   io << JsonBuilder.encode_value(widget.name)
+///   __jb_io0 = String.new
+///   __jb_io0 << "\"kind\":"
+///   __jb_io0 << JsonBuilder.encode_value(widget.kind)
+///   __jb_io1 = String.new
+///   __jb_io1 << "\"label\":"
+///   __jb_io1 << JsonBuilder.encode_value(widget.label)
+///   __jb_io2 = String.new
+///   __jb_io2 << "\"price\":"
+///   __jb_io2 << JsonBuilder.encode_value(widget.list_price)
+///   io << ","
+///   io << __jb_io2
+///   io << ","
+///   io << __jb_io0
+///   io << ","
+///   io << __jb_io1
+///
+/// Each local holds rendered pairs, the same capture `json.cache!` takes,
+/// so every form a pair's value lowers to works unchanged.
+#[allow(clippy::too_many_arguments)]
+fn emit_merge_with_overrides(
+    value: &Expr,
+    i: usize,
+    last: usize,
+    overrides: &crate::det::HashMap<String, usize>,
+    classified: &[JbStmt<'_>],
+    raw_stmts: &[&Expr],
+    ctx: &Ctx,
+    out: &mut Vec<Expr>,
+    mut sep: Sep,
+) -> Sep {
+    let start = out.len();
+    let src = raw_stmts[i];
+    let own = merge_own_keys(value, ctx).unwrap_or_default();
+    // The keys given, as the merge writes them.
+    let merged = |keys: &[String], ctx: &Ctx, out: &mut Vec<Expr>, mut sep: Sep| -> Sep {
+        if let Some((obj, _)) = attributes_merge(value, ctx) {
+            let attrs = keys.iter().map(|k| Symbol::from(k.as_str())).collect();
+            return emit_pairs(&[JbStmt::Extract { obj, attrs }], &[src], ctx, out, sep);
+        }
+        let pairs = literal_merge_pairs(value).unwrap_or_default();
+        for key in keys {
+            if let Some((key, v)) = pairs.iter().find(|(k, _)| k == key) {
+                sep = emit_literal_merge_pair(key, v, ctx, out, sep);
+            }
+        }
+        sep
+    };
+    // Render into a fresh local: the text of its pairs, with no comma
+    // before the first, for `append` to place.
+    let capture = |out: &mut Vec<Expr>, render: &dyn Fn(&Ctx, &mut Vec<Expr>)| -> String {
+        let n = ctx.temps.get();
+        ctx.temps.set(n + 1);
+        let cap = format!("__jb_io{n}");
+        out.push(assign_accumulator_string_new(&cap));
+        render(&Ctx { accumulator: cap.clone(), ..ctx.clone() }, out);
+        cap
+    };
+    let append = |cap: &str, out: &mut Vec<Expr>, sep: Sep| -> Sep {
+        push_separator(out, ctx, sep);
+        let mut read = var_ref(Symbol::from(cap));
+        read.set_hint(Some(IrHint::StringBuilderResult));
+        out.push(io_append_call(&ctx.accumulator, read));
+        Sep::After
+    };
+
+    let first = own.iter().position(|k| overrides.contains_key(k)).unwrap_or(own.len());
+    if first > 0 {
+        sep = merged(&own[..first], ctx, out, sep);
+    }
+    // What is left of the merge is read before any pair runs.
+    enum Slot {
+        Captured(String),
+        Replaced(usize),
+    }
+    let mut slots: Vec<Slot> = Vec::new();
+    let mut run: Vec<String> = Vec::new();
+    let flush = |run: &mut Vec<String>, slots: &mut Vec<Slot>, out: &mut Vec<Expr>| {
+        if !run.is_empty() {
+            let keys = std::mem::take(run);
+            slots.push(Slot::Captured(capture(out, &|c, o| {
+                merged(&keys, c, o, Sep::First);
+            })));
+        }
+    };
+    for key in &own[first..] {
+        match overrides.get(key) {
+            Some(&j) => {
+                flush(&mut run, &mut slots, out);
+                slots.push(Slot::Replaced(j));
+            }
+            None => run.push(key.clone()),
+        }
+    }
+    flush(&mut run, &mut slots, out);
+    // Each pair through the last replacing one, in source order.
+    let captures: Vec<(usize, String)> = (i + 1..=last)
+        .map(|j| {
+            let cap = capture(out, &|c, o| {
+                emit_pairs(std::slice::from_ref(&classified[j]), &[raw_stmts[j]], c, o, Sep::First);
+            });
+            (j, cap)
+        })
+        .collect();
+    let of = |j: usize| captures.iter().find(|(at, _)| *at == j).map(|(_, cap)| cap.as_str()).unwrap_or("");
+    for slot in &slots {
+        sep = match slot {
+            Slot::Captured(cap) => append(cap, out, sep),
+            Slot::Replaced(j) => append(of(*j), out, sep),
+        };
+    }
+    for (j, cap) in &captures {
+        if !overrides.values().any(|at| at == j) {
+            sep = append(cap, out, sep);
+        }
+    }
+    for e in &mut out[start..] {
+        e.inherit_span(src.span);
+    }
+    sep
+}
+
+/// One pair of a literal `json.merge!`, as `json.<key> <value>` writes it.
+fn emit_literal_merge_pair(key: &str, value: &Expr, ctx: &Ctx, out: &mut Vec<Expr>, sep: Sep) -> Sep {
+    push_separator(out, ctx, sep);
+    out.push(io_append_lit(&ctx.accumulator, &format!("{}:", json_string_literal(key))));
+    let encoded = json_builder_encode(rewrite_h_escape(&rewrite_route_helpers(value, ctx)));
+    out.push(io_append_call(&ctx.accumulator, encoded));
+    Sep::After
 }
 
 /// `json.merge!(record.attributes)`, narrowed by any chain of
@@ -1761,34 +1913,92 @@ fn object_keys(stmt: &JbStmt<'_>, ctx: &Ctx) -> Option<Vec<String>> {
     }
 }
 
-/// Record which of an object's own (top-level) literal `json.merge!`
-/// statements are sound: their keys are distinct, every other statement
-/// of the object sets only known keys, and none of those is one of
-/// them. Jbuilder deep-merges a repeated String key and Rails answers
-/// 500 for a repeated Symbol one, so a repeat is never a second pair.
-fn mark_sound_merges(classified: &[JbStmt<'_>], raw_stmts: &[&Expr], ctx: &Ctx) {
-    for (i, stmt) in classified.iter().enumerate() {
-        let JbStmt::Merge { value } = stmt else { continue };
-        let own = match literal_merge_pairs(value) {
-            Some(pairs) => pairs.into_iter().map(|(k, _)| k).collect::<Vec<_>>(),
-            None => match attributes_merge(value, ctx) {
-                Some((_, attrs)) => attrs.iter().map(|a| a.as_str().to_string()).collect(),
-                None => continue,
-            },
-        };
-        let distinct: crate::det::HashSet<&String> = own.iter().collect();
-        if distinct.len() != own.len() {
+/// The keys a `json.merge!` writes, when they are statically known: a
+/// literal Hash's, or the columns of the template's record.
+fn merge_own_keys(value: &Expr, ctx: &Ctx) -> Option<Vec<String>> {
+    match literal_merge_pairs(value) {
+        Some(pairs) => Some(pairs.into_iter().map(|(k, _)| k).collect()),
+        None => attributes_merge(value, ctx).map(|(_, attrs)| attrs.iter().map(|a| a.as_str().to_string()).collect()),
+    }
+}
+
+/// Whether a merged value can go unevaluated: a later pair replaces it,
+/// so the lowering never writes it. Only a literal or a plain read,
+/// where Jbuilder's evaluating it first shows nothing.
+fn value_is_plain_read(value: &Expr) -> bool {
+    match &*value.node {
+        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => true,
+        ExprNode::Hash { entries, .. } => entries.iter().all(|(k, v)| value_is_plain_read(k) && value_is_plain_read(v)),
+        ExprNode::Array { elements, .. } => elements.iter().all(value_is_plain_read),
+        _ => false,
+    }
+}
+
+/// Whether `key` of this merge may be replaced by a later pair. An
+/// attribute is always a String key whose read shows nothing. In a
+/// literal, a String key with a plain value: a Symbol key stays beside
+/// the pair's String key in Jbuilder's Hash, and rendering that raises
+/// `JSON::GeneratorError` (duplicate key).
+fn merged_key_is_replaceable(value: &Expr, key: &str) -> bool {
+    let ExprNode::Hash { entries, .. } = &*value.node else { return true };
+    entries
+        .iter()
+        .find(|(k, _)| string_literal(k).as_deref() == Some(key))
+        .is_some_and(|(_, v)| value_is_plain_read(v))
+}
+
+/// Whether the pair at `j` can replace a key of the merge at `i`: it
+/// is a plain pair, and so is every statement between them, which is
+/// what `emit_merge_with_overrides` renders in order. A local, a partial,
+/// a block or a condition between them stays refused.
+fn pair_replaces_merged_key(i: usize, j: usize, classified: &[JbStmt<'_>]) -> bool {
+    classified[i + 1..=j].iter().all(|stmt| matches!(stmt, JbStmt::Pair { .. }))
+}
+
+/// When the merge at `i` is sound, the later pairs that replace one of
+/// its keys, as key to statement index. `None` when it is not sound: its
+/// keys are unknown or repeated, another statement's keys are unknown, or
+/// one of its keys is set by anything but a single later pair that can be
+/// written at the merged key.
+///
+/// Jbuilder's attributes are a Hash, so `json.<key>` over a merged
+/// String key assigns it: the value is the pair's and the position is
+/// the merge's. A key set before the merge is deep-merged, or raises for
+/// a Symbol key, so it is never a second pair.
+fn merge_overrides(i: usize, classified: &[JbStmt<'_>], ctx: &Ctx) -> Option<crate::det::HashMap<String, usize>> {
+    let JbStmt::Merge { value } = &classified[i] else { return None };
+    let own = merge_own_keys(value, ctx)?;
+    let distinct: crate::det::HashSet<&String> = own.iter().collect();
+    if distinct.len() != own.len() {
+        return None;
+    }
+    let mut overrides = crate::det::HashMap::default();
+    for (j, stmt) in classified.iter().enumerate() {
+        if j == i {
             continue;
         }
-        let mut others: Vec<String> = Vec::new();
-        let known = classified.iter().enumerate().filter(|(j, _)| *j != i).all(|(_, c)| match object_keys(c, ctx) {
-            Some(keys) => {
-                others.extend(keys);
-                true
+        for key in object_keys(stmt, ctx)? {
+            if !distinct.contains(&key) {
+                continue;
             }
-            None => false,
-        });
-        if known && !others.iter().any(|k| distinct.contains(k)) {
+            if j < i
+                || overrides.contains_key(&key)
+                || !merged_key_is_replaceable(value, &key)
+                || !pair_replaces_merged_key(i, j, classified)
+            {
+                return None;
+            }
+            overrides.insert(key, j);
+        }
+    }
+    Some(overrides)
+}
+
+/// Record which of an object's own (top-level) literal `json.merge!`
+/// statements are sound (`merge_overrides`).
+fn mark_sound_merges(classified: &[JbStmt<'_>], raw_stmts: &[&Expr], ctx: &Ctx) {
+    for i in 0..classified.len() {
+        if merge_overrides(i, classified, ctx).is_some() {
             ctx.sound_merges.borrow_mut().insert(raw_stmts[i] as *const Expr as usize);
         }
     }

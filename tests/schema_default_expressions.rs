@@ -1,3 +1,5 @@
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 #[path = "support/scratch.rs"]
@@ -122,7 +124,11 @@ puts "oracle Ruby=#{{RUBY_VERSION}} Rails=#{{Rails.version}} defaults=8.1 SQLite
     let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("quoted defaults match Rails") || stdout.contains("skip:"), "{stdout}");
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert!(stdout.contains("quoted defaults match Rails"), "{stdout}");
     println!("{stdout}");
 }
 
@@ -268,7 +274,11 @@ puts "oracle Ruby=#{{RUBY_VERSION}} Rails=#{{Rails.version}} defaults=8.1 SQLite
     let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("classified scalar defaults match Rails") || stdout.contains("skip:"), "{stdout}");
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert!(stdout.contains("classified scalar defaults match Rails"), "{stdout}");
     println!("{stdout}");
 }
 
@@ -408,7 +418,11 @@ puts "oracle Ruby=#{{RUBY_VERSION}} Rails=#{{Rails.version}} defaults=8.1 SQLite
     let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("per-row SQLite default and reader passed") || stdout.contains("skip:"), "{stdout}");
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert!(stdout.contains("per-row SQLite default and reader passed"), "{stdout}");
     println!("{stdout}");
 }
 
@@ -502,7 +516,11 @@ puts "Roda SQL timestamp default passed"
     let out = emit_and_run::ruby().args(["-e", script, &migration.content]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Roda SQL timestamp default passed") || stdout.contains("skip:"), "{stdout}");
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert!(stdout.contains("Roda SQL timestamp default passed"), "{stdout}");
 }
 
 #[test]
@@ -585,7 +603,11 @@ end
     let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains(EXPECTED) || stdout.contains("skip:"), "{stdout}");
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert!(stdout.contains(EXPECTED), "{stdout}");
 }
 
 /// `check --continue` keeps the column of a refused default, so its reader

@@ -99,7 +99,7 @@ use rubydex::model::ids::DeclarationId;
 use crate::adapter::{DatabaseAdapter, SqliteAdapter};
 use crate::App;
 use crate::dialect::{
-    Action, Controller, ControllerBodyItem, Filter, FilterKind, LayoutDecl, LibraryClassOrigin,
+    Action, Controller, ControllerBodyItem, Filter, FilterKind, LibraryClassOrigin,
     MethodDef, MethodReceiver, Model, ModelBodyItem, RenderTarget,
 };
 use crate::effect::EffectSet;
@@ -2716,7 +2716,6 @@ impl Analyzer {
             /// chain's per-hop effects.
             action_effects: HashMap<Symbol, EffectSet>,
             class_constants: body::ConstScope,
-            layout: LayoutDecl,
         }
         let mut meta_by_name: HashMap<ClassId, ControllerMeta> = HashMap::default();
         let mut action_meta_cache: HashMap<
@@ -3168,7 +3167,6 @@ impl Analyzer {
             // is empty here and patched from the converged trees.
             let action_effects: HashMap<Symbol, EffectSet> = HashMap::default();
 
-            let layout = controller.layout.clone();
             (
                 controller.name.clone(),
                 ControllerMeta {
@@ -3178,7 +3176,6 @@ impl Analyzer {
                     action_bodies,
                     action_effects,
                     class_constants,
-                    layout,
                 },
                 cache,
             )
@@ -3199,16 +3196,42 @@ impl Analyzer {
 
         // Controller→layout-view ivar channel: every action that
         // renders also flows its ivars into whatever layout wraps it
-        // (resolved via the parent-chain walk below). Ivar reads in
-        // the layout (e.g. `@current_user.name` in
-        // `layouts/application.html.erb`) then type cleanly against
-        // the union of all contributing actions' assignments.
-        //
-        // Convention: an action's effective layout is the nearest
-        // ancestor's `layout` declaration. If every ancestor (and
-        // self) is `Inherit`, the layout name defaults to
-        // `application` per Rails convention. `LayoutDecl::None`
-        // (an explicit `layout false`) suppresses the contribution.
+        // (`controller_layout`, per action). Ivar reads in the layout
+        // (e.g. `@current_user.name` in `layouts/application.html.erb`)
+        // then type cleanly against the union of all contributing
+        // actions' assignments. A method that is not an action feeds
+        // every layout its class's actions render in.
+        let (action_layouts, class_layouts) = {
+            let layouts = crate::controller_layout::Layouts::new(&app.controllers, &app.views);
+            let mut by_action: HashMap<(ClassId, Symbol), Vec<Symbol>> = HashMap::default();
+            let mut by_class: HashMap<ClassId, Vec<Symbol>> = HashMap::default();
+            for c in &app.controllers {
+                let class = c.name.0.as_str();
+                if by_class.contains_key(&c.name) {
+                    continue;
+                }
+                by_class.insert(c.name.clone(), layouts.templates_of_class(class));
+                let mut cursor = Some(c);
+                let mut seen: BTreeSet<Symbol> = BTreeSet::new();
+                for _ in 0..64 {
+                    let Some(k) = cursor else { break };
+                    for a in k.actions() {
+                        if seen.insert(a.name.clone()) && layouts.is_action(class, a.name.as_str()) {
+                            by_action.insert((c.name.clone(), a.name.clone()), layouts.templates_of_action(class, a.name.as_str()));
+                        }
+                    }
+                    cursor = k.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| o.name == *p));
+                }
+            }
+            (by_action, by_class)
+        };
+        let layouts_for = |class: &ClassId, method: &Symbol| -> Vec<Symbol> {
+            action_layouts
+                .get(&(class.clone(), method.clone()))
+                .or_else(|| class_layouts.get(class))
+                .cloned()
+                .unwrap_or_default()
+        };
         let mut layout_ivars_by_view: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::default();
         // Per layout: the rendering actions that feed it, and how many of them assign each ivar.
         let mut layout_presence: HashMap<Symbol, (usize, HashMap<Symbol, usize>)> = HashMap::default();
@@ -3637,30 +3660,6 @@ impl Analyzer {
                 }
             }
 
-            // Resolve this controller's effective layout view name by
-            // walking the inheritance chain. First explicit decl wins;
-            // an explicit `LayoutDecl::None` suppresses the layout
-            // contribution entirely. If nothing is declared anywhere
-            // up the chain, Rails convention falls back to
-            // `layouts/application`.
-            let effective_layout: Option<Symbol> = {
-                let mut decl = &meta.layout;
-                let mut iter = ancestors.iter();
-                while matches!(decl, LayoutDecl::Inherit) {
-                    match iter.next() {
-                        Some((_, a)) => decl = &a.layout,
-                        None => break,
-                    }
-                }
-                match decl {
-                    LayoutDecl::Name { name } => {
-                        Some(Symbol::from(format!("layouts/{}", name.as_str())))
-                    }
-                    LayoutDecl::None { .. } => None,
-                    LayoutDecl::Inherit => Some(Symbol::from("layouts/application")),
-                }
-            };
-
             // Persist what this walk just resolved — the chained filter
             // list with provenance and the effective layout — instead of
             // discarding it: `ide::traceroute` and gap attribution
@@ -3723,7 +3722,7 @@ impl Analyzer {
                     ctrl_name.clone(),
                     crate::app::ControllerResolution {
                         filter_chain,
-                        layout: effective_layout.clone(),
+                        layouts: class_layouts.get(&ctrl_name).cloned().unwrap_or_default(),
                     },
                 ));
             }
@@ -3799,12 +3798,12 @@ impl Analyzer {
                         }
                     }
                 }
-                if let Some(layout_name) = &effective_layout {
+                for layout_name in layouts_for(&ctrl_name, &action.name) {
                     events.push(Event::Feeder(layout_name.clone(), ctrl_name.clone()));
                     if view_name_for_action(&ctrl_name, action).is_some() {
                         events.push(Event::Presence(layout_name.clone(), ivars.keys().cloned().collect()));
                     }
-                    events.push(Event::View(Channel::Layout, layout_name.clone(),
+                    events.push(Event::View(Channel::Layout, layout_name,
                         ivars.iter().map(|(k, v)| (k.clone(), v.clone())).collect()));
                 }
                 // Content-partial seeding: when this action assigns a
@@ -3929,9 +3928,9 @@ impl Analyzer {
                         }
                         events.push(Event::Feeder(view_name.clone(), ctrl_name.clone()));
                         // Not left out of the layout: the inherited page renders through the child's layout as its own actions do.
-                        if let Some(layout_name) = &effective_layout {
+                        for layout_name in layouts_for(&ctrl_name, name) {
                             events.push(Event::Presence(layout_name.clone(), ivars.keys().cloned().collect()));
-                            events.push(Event::View(Channel::Layout, layout_name.clone(),
+                            events.push(Event::View(Channel::Layout, layout_name,
                                 ivars.iter().map(|(k, v)| (k.clone(), v.clone())).collect()));
                         }
                         events.push(Event::View(Channel::Action, view_name,
@@ -4607,18 +4606,19 @@ impl Analyzer {
                         let Some(res) = controller_resolutions.get(feeder) else {
                             continue;
                         };
-                        let Some(layout_name) = &res.layout else { continue };
-                        let layout_map = layout_ivars_by_view.entry(layout_name.clone()).or_default();
-                        for (k, v) in &assigned {
-                            let noise = |t: &Ty| t.is_unknown();
-                            let merged = match layout_map.remove(k) {
-                                Some(prev) if noise(&prev) => v.clone(),
-                                Some(prev) if noise(v) => prev,
-                                Some(prev) if prev == *v => prev,
-                                Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
-                                None => v.clone(),
-                            };
-                            layout_map.insert(k.clone(), merged);
+                        for layout_name in &res.layouts {
+                            let layout_map = layout_ivars_by_view.entry(layout_name.clone()).or_default();
+                            for (k, v) in &assigned {
+                                let noise = |t: &Ty| t.is_unknown();
+                                let merged = match layout_map.remove(k) {
+                                    Some(prev) if noise(&prev) => v.clone(),
+                                    Some(prev) if noise(v) => prev,
+                                    Some(prev) if prev == *v => prev,
+                                    Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                                    None => v.clone(),
+                                };
+                                layout_map.insert(k.clone(), merged);
+                            }
                         }
                     }
                 }
@@ -11680,7 +11680,7 @@ mod concern_method_snapshot_tests {
             parent: None,
             parent_span: Span::synthetic(),
             body: includes.iter().map(|n| mixin_item("include", n)).collect(),
-            layout: LayoutDecl::Inherit,
+            layout: crate::dialect::LayoutDecl::Inherit,
             sibling_classes: vec![],
         }
     }

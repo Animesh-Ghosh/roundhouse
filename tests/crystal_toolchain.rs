@@ -51,9 +51,15 @@ mod record_if_condition;
 #[path = "support/link_to_template_local.rs"]
 #[allow(dead_code)]
 mod link_to_template_local;
+#[path = "support/each_no_param.rs"]
+#[allow(dead_code)]
+mod each_no_param;
 #[path = "support/view_unless_no_else.rs"]
 #[allow(dead_code)]
 mod view_unless_no_else;
+#[path = "support/nilable_string_view.rs"]
+#[allow(dead_code)]
+mod nilable_string_view;
 #[path = "support/link_to_if_escape.rs"]
 #[allow(dead_code)]
 mod link_to_if_escape;
@@ -564,12 +570,92 @@ fn link_to_template_local_renders() {
     }
 }
 
+/// #1910: a block with no parameter renders as Rails 8.1.4 does
+/// (`each_no_param::VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_renders() {
+    let (app, renders) = (each_no_param::strict_app(), each_no_param::RENDERS.to_vec());
+    let (ok, stdout, stderr) = render_probe(app);
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in &renders {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
+    }
+}
+
+/// An empty `map` block maps each element to nil, as Rails 8.1.4
+/// does (`each_no_param::EMPTY_MAP_VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_empty_map_renders() {
+    let (app, renders) = (each_no_param::strict_empty_map_app(), each_no_param::EMPTY_MAP_RENDERS.to_vec());
+    let (ok, stdout, stderr) = render_probe(app);
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in &renders {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
+    }
+}
+
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
 /// does (`view_unless_no_else::VIEW`).
 #[test]
 #[ignore]
 fn view_unless_no_else_renders() {
     let (app, renders) = (view_unless_no_else::strict_app(), view_unless_no_else::RENDERS.to_vec());
+    let (ok, stdout, stderr) = render_probe(app);
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in &renders {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
+    }
+}
+
+/// #1937: a view reading a nullable string column with `==`, `!=`,
+/// `empty?` and `length` renders as Rails 8.1.4 does
+/// (`nilable_string_view::VIEW`).
+#[test]
+#[ignore]
+fn nilable_string_view_renders() {
+    let (app, renders) = (nilable_string_view::strict_app(), nilable_string_view::RENDERS.to_vec());
+    let (ok, stdout, stderr) = render_probe(app);
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in &renders {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
+    }
+}
+
+/// #1937: `==` and `!=` on a nullable string column evaluate each
+/// operand once, left then right, as Rails 8.1.4 does
+/// (`nilable_string_view::EFFECT_VIEW`, title present).
+#[test]
+#[ignore]
+fn nilable_string_view_effect_renders() {
+    let (app, renders) = (nilable_string_view::strict_effect_app(), nilable_string_view::EFFECT_RENDERS.to_vec());
+    let (ok, stdout, stderr) = render_probe(app);
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in &renders {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
+    }
+}
+
+/// #1937: with the column nil, `==` and `!=` render as Rails 8.1.4
+/// does (`nilable_string_view::NIL_VIEW`).
+#[test]
+#[ignore]
+fn nilable_string_view_nil_renders() {
+    let (app, renders) = (nilable_string_view::strict_nil_app(), nilable_string_view::NIL_RENDERS.to_vec());
+    let (ok, stdout, stderr) = render_probe(app);
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in &renders {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
+    }
+}
+
+/// #1937: the same operands with a nil title: the right operand still
+/// runs, as in Rails 8.1.4 (`nilable_string_view::EFFECT_VIEW`).
+#[test]
+#[ignore]
+fn nilable_string_view_nil_effect_renders() {
+    let (app, renders) = (nilable_string_view::strict_nil_effect_app(), nilable_string_view::NIL_EFFECT_RENDERS.to_vec());
     let (ok, stdout, stderr) = render_probe(app);
     assert!(ok, "{stdout}\n{stderr}");
     for want in &renders {

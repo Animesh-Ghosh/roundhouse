@@ -1143,7 +1143,11 @@ pub(super) fn emit_send(
     // drop it, matching Go's "discarded return is fine" semantics.
     if method == "each" && args.is_empty() {
         if let (Some(recv_e), Some(block_e)) = (recv, block) {
-            if let ExprNode::Lambda { params, body, .. } = &*block_e.node {
+            if let ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } = &*block_e.node {
+                // No parameter of any kind: `|*args|`, `|a = 1|`, `|k:|` and
+                // `|&b|` leave `params` empty too, and their body reads a
+                // name a bare `for range` wouldn't bind.
+                let no_params = params.is_empty() && rest_param.is_none() && extra_params.is_empty() && block_param.is_none();
                 let raw_recv_s = emit_expr(ctx, recv_e);
                 // If recv resolves to `interface{}` (Untyped/Var/
                 // Bottom from go_ty_stub), Go can't range over it
@@ -1163,13 +1167,17 @@ pub(super) fn emit_send(
                 };
                 // Loop vars: 1 param → array iter (drop the index
                 // with `_`); 2 params → hash iter (key + value);
-                // 0 params (rare — `arr.each { puts "hi" }`) → both
-                // sides bound to `_`. >2 params is unmappable; emit
-                // a TODO so the gap is loudly visible.
+                // 0 params (`arr.each { puts "hi" }`) → a bare
+                // `for range`, which binds nothing (`_, _ :=` declares no
+                // new variable, which Go rejects). >2 params is
+                // unmappable; emit a TODO so the gap is loudly visible.
                 // IIFE introduces fresh Go scope.
                 let body_ctx = ctx.enter_scope();
                 let range_vars = match params.len() {
-                    0 => "_, _".to_string(),
+                    0 if no_params => String::new(),
+                    0 => {
+                        return crate::emit::diagnostics::report_unsupported(block_e.span, "go2", method, "a block with only a rest, optional, keyword or block parameter");
+                    }
                     1 => {
                         let name = params[0].as_str();
                         body_ctx.declare_param(name);
@@ -1187,6 +1195,8 @@ pub(super) fn emit_send(
                     }
                 };
                 let body_s = emit_block_body(&body_ctx, body);
+                // No block parameter binds nothing: Go's bare `for range`.
+                let range_clause = if range_vars.is_empty() { format!("range {recv_s}") } else { format!("{range_vars} := range {recv_s}") };
                 // 2-param `each` iterates a Hash. Go map iteration order is
                 // undefined per-run, but several runtime-Ruby surfaces
                 // render observable output from it — notably `render_attrs`,
@@ -1225,7 +1235,7 @@ pub(super) fn emit_send(
                 }
                 return format!(
                     "func() interface{{}} {{\n\
-                     \tfor {range_vars} := range {recv_s} {{\n\
+                     \tfor {range_clause} {{\n\
                      {body_s}\n\
                      \t}}\n\
                      \treturn {recv_s}\n\
@@ -1245,12 +1255,19 @@ pub(super) fn emit_send(
     // 8d9f06d but for the IIFE result instead of an Array literal.
     if method == "map" && args.is_empty() {
         if let (Some(recv_e), Some(block_e)) = (recv, block) {
-            if let ExprNode::Lambda { params, body, .. } = &*block_e.node {
+            if let ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } = &*block_e.node {
+                // No parameter of any kind: `|*args|`, `|a = 1|`, `|k:|` and
+                // `|&b|` leave `params` empty too, and their body reads a
+                // name a bare `for range` wouldn't bind.
+                let no_params = params.is_empty() && rest_param.is_none() && extra_params.is_empty() && block_param.is_none();
                 let recv_s = emit_expr(ctx, recv_e);
                 // IIFE introduces fresh Go scope.
                 let body_ctx = ctx.enter_scope();
                 let range_vars = match params.len() {
-                    0 => "_, _".to_string(),
+                    0 if no_params => String::new(),
+                    0 => {
+                        return crate::emit::diagnostics::report_unsupported(block_e.span, "go2", method, "a block with only a rest, optional, keyword or block parameter");
+                    }
                     1 => {
                         let name = params[0].as_str();
                         body_ctx.declare_param(name);
@@ -1267,7 +1284,12 @@ pub(super) fn emit_send(
                         return crate::emit::diagnostics::report_unsupported(block_e.span, "go2", "map", "a block with more than two parameters");
                     }
                 };
+                // An empty block reads none of its parameters, and Go
+                // rejects a variable declared and not used.
+                let range_vars = if matches!(&*body.node, ExprNode::Seq { exprs } if exprs.is_empty()) { String::new() } else { range_vars };
                 let body_s = emit_map_block_body(&body_ctx, body);
+                // No block parameter binds nothing: Go's bare `for range`.
+                let range_clause = if range_vars.is_empty() { format!("range {recv_s}") } else { format!("{range_vars} := range {recv_s}") };
                 let elem_ty = match result_ty {
                     Some(Ty::Array { elem }) => {
                         let rendered = super::ty::go_ty_stub(Some(elem));
@@ -1282,7 +1304,7 @@ pub(super) fn emit_send(
                 return format!(
                     "func() []{elem_ty} {{\n\
                      \tout := []{elem_ty}{{}}\n\
-                     \tfor {range_vars} := range {recv_s} {{\n\
+                     \tfor {range_clause} {{\n\
                      {body_s}\n\
                      \t}}\n\
                      \treturn out\n\
@@ -1512,6 +1534,28 @@ pub(super) fn emit_send(
                 let lhs_v = if int_lhs && float_rhs { format!("float64({lhs_v})") } else { lhs_v };
                 return format!("{lhs_v} {op} {}", args_s[0]);
             }
+            // A nullable string column against a String: nil equals no
+            // String, as in Ruby, and a present value compares by content.
+            if matches!(op, "==" | "!=")
+                && nullable_read_go_ty(r).as_deref() == Some("*string")
+                && matches!(args[0].ty.as_ref(), Some(Ty::Str))
+            {
+                let rhs = &args_s[0];
+                // Each operand runs once, left then right, and a nil left
+                // side doesn't skip the right one: Ruby evaluates the
+                // argument before calling `==` on nil. Two statements,
+                // since Go doesn't order a variable read against a call
+                // within one expression.
+                if !(is_plain_column_read(r) && is_plain_operand(&args[0])) {
+                    let compare = if op == "==" { "_rh_lhs != nil && *_rh_lhs == _rh_rhs" } else { "_rh_lhs == nil || *_rh_lhs != _rh_rhs" };
+                    return format!("func() bool {{ _rh_lhs := {lhs}; _rh_rhs := {rhs}; return {compare} }}()");
+                }
+                return if op == "==" {
+                    format!("({lhs} != nil && *{lhs} == {rhs})")
+                } else {
+                    format!("({lhs} == nil || *{lhs} != {rhs})")
+                };
+            }
             return format!("{lhs} {} {}", op, args_s[0]);
         }
     }
@@ -1520,7 +1564,7 @@ pub(super) fn emit_send(
     // `len(recv) == 0`. Same scope as `length` — collection-shaped.
     if method == "empty?" && args.is_empty() {
         if let Some(r) = recv.filter(|r| !is_own_method(ctx, r, method)) {
-            return format!("len({}) == 0", emit_expr(ctx, r));
+            return format!("len({}) == 0", deref_nullable_string(r, emit_expr(ctx, r)));
         }
     }
     // An element that is never nil or false makes `any?` / `none?` a question of size
@@ -1614,7 +1658,7 @@ pub(super) fn emit_send(
     // value type, so no Ty plumbing needed at this site.
     if (method == "length" || method == "size") && args.is_empty() {
         if let Some(r) = recv {
-            let recv_s = emit_expr(ctx, r);
+            let recv_s = deref_nullable_string(r, emit_expr(ctx, r));
             return format!("int64(len({recv_s}))");
         }
     }
@@ -3712,6 +3756,9 @@ pub(super) fn emit_stmt(ctx: &EmitCtx, e: &Expr) -> String {
 /// the IIFE, one for the `for` loop.
 pub(super) fn emit_map_block_body(ctx: &EmitCtx, e: &Expr) -> String {
     let (stmts, tail) = match &*e.node {
+        // An empty block maps each element to nil: `append(out, )` would
+        // add nothing.
+        ExprNode::Seq { exprs } if exprs.is_empty() => (Vec::new(), "nil".to_string()),
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
             let last = exprs.len() - 1;
             let stmts: Vec<String> = exprs[..last]
@@ -4448,6 +4495,44 @@ fn nullable_field_go_ty(e: &Expr) -> Option<String> {
     match &*e.node {
         ExprNode::Ivar { name } => nullable_column_go_ty(name.as_str()),
         _ => None,
+    }
+}
+
+/// The Go pointer type of a nullable column this expression reads: the
+/// model's own field (`@title`) or another record's reader
+/// (`article.title` in a view).
+fn nullable_read_go_ty(e: &Expr) -> Option<String> {
+    nullable_field_go_ty(e).or_else(|| match &*e.node {
+        ExprNode::Send { recv: Some(inner), method, args, block: None, .. } if args.is_empty() => {
+            recv_column_go_ty(inner, method.as_str())
+        }
+        _ => None,
+    })
+}
+
+/// A column read off the model itself or off a local or instance
+/// variable: reading it again gives the same value and runs nothing.
+fn is_plain_column_read(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Ivar { .. } => true,
+        ExprNode::Send { recv: Some(inner), .. } => matches!(&*inner.node, ExprNode::Ivar { .. } | ExprNode::Var { .. } | ExprNode::SelfRef),
+        _ => false,
+    }
+}
+
+/// An operand that runs nothing when read, so skipping it can't be seen.
+fn is_plain_operand(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { .. } | ExprNode::Ivar { .. } | ExprNode::Var { .. })
+}
+
+/// `*recv` for a nullable string column a String method reads: the
+/// method runs on the value, and a nil column panics, where Ruby
+/// raises `NoMethodError` on nil.
+fn deref_nullable_string(e: &Expr, e_s: String) -> String {
+    if nullable_read_go_ty(e).as_deref() == Some("*string") {
+        format!("*{e_s}")
+    } else {
+        e_s
     }
 }
 

@@ -1,3 +1,5 @@
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -122,7 +124,11 @@ puts "oracle Ruby=#{{RUBY_VERSION}} Rails=#{{Rails.version}} defaults=8.1 SQLite
     let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("SQLite JSON CHECK rejects") || stdout.contains("skip:"), "{stdout}");
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert!(stdout.contains("SQLite JSON CHECK rejects"), "{stdout}");
     println!("{stdout}");
 }
 
@@ -285,7 +291,11 @@ end
     let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains(EXPECTED) || stdout.contains("skip:"), "{stdout}");
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert!(stdout.contains(EXPECTED), "{stdout}");
 }
 
 #[test]
@@ -367,7 +377,11 @@ end
     let out = emit_and_run::ruby().args(["-e", &script, &migration.content]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains(EXPECTED) || stdout.contains("skip:"), "{stdout}");
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert!(stdout.contains(EXPECTED), "{stdout}");
 }
 
 #[test]
@@ -444,7 +458,11 @@ puts 'partial expression index passed'
     let out = emit_and_run::ruby().args(["-e", script, &migration.content]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("partial expression index passed") || stdout.contains("skip:"), "{stdout}");
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert!(stdout.contains("partial expression index passed"), "{stdout}");
 }
 
 #[test]
@@ -541,7 +559,11 @@ puts 'Rails skips expression conflicts'
     let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Rails skips expression conflicts") || stdout.contains("skip:"), "{stdout}");
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert!(stdout.contains("Rails skips expression conflicts"), "{stdout}");
 }
 
 #[test]
@@ -842,5 +864,9 @@ raise 'expression conflict retained a prefix' unless failed && Member.count == 0
     let out = emit_and_run::ruby().args(["-e", &script]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("rejected batches leave no prefix") || stdout.contains("skip:"), "{stdout}");
+    if stdout.contains("skip:") {
+        prerequisite::missing(stdout.trim());
+        return;
+    }
+    assert!(stdout.contains("rejected batches leave no prefix"), "{stdout}");
 }

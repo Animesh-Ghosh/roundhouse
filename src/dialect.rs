@@ -1520,11 +1520,9 @@ pub struct Controller {
     /// emitter iterates in order so `private` markers land at the right
     /// position and unknown class-body calls round-trip verbatim.
     pub body: Vec<ControllerBodyItem>,
-    /// Layout declaration from `layout :foo` / `layout "foo"` /
-    /// `layout false`. Absent → `Inherit` (walk parent chain; final
-    /// fallback is `layouts/application` per Rails convention).
-    /// Used by analyze to seed ivar types into layout views from the
-    /// union of actions that render through this controller.
+    /// The class body's last `layout` call, if any. What an action
+    /// renders in is `crate::controller_layout`'s to say; analyze seeds
+    /// each layout view's ivar types from the actions that render in it.
     #[serde(default, skip_serializing_if = "LayoutDecl::is_inherit")]
     pub layout: LayoutDecl,
     /// Empty-bodied top-level classes declared alongside the controller
@@ -1551,45 +1549,59 @@ pub struct SiblingClass {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LayoutDecl {
-    /// No `layout` declaration. Effective layout comes from the parent
-    /// chain or convention default (`layouts/application`).
+    /// No `layout` declaration: the class keeps its parent's, as Rails'
+    /// `_layout` class attribute is inherited.
     #[default]
     Inherit,
-    /// `layout :foo` or `layout "foo"`. Resolves to `layouts/<name>`.
-    Name { name: Symbol },
-    /// `layout false` / `layout nil` — render bare, no layout.
-    ///
-    /// SCOPED like a filter. `layout false, only: :index` is ordinary
-    /// Rails and campfire's `MessagesController` writes exactly it:
-    /// the messages index is a turbo-frame fragment lazily loaded INTO
-    /// a page that already has a layout, so wrapping it ships a second
-    /// `<html>` inside the first. Applying the decl to the whole
-    /// controller would be as wrong in the other direction — `show`
-    /// and `edit` are full pages. Empty vectors mean the whole
-    /// controller, which is the unscoped `layout false`.
-    None {
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        only: Vec<Symbol>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        except: Vec<Symbol>,
-    },
+    /// A `layout` call. A later one replaces an earlier one, scope and all.
+    Declared(LayoutCall),
 }
 
-impl LayoutDecl {
-    /// Does this declaration suppress the layout for `action`?
-    ///
-    /// Unscoped `layout false` covers every action; `only:`/`except:`
-    /// narrow it the way the same options narrow a filter.
-    pub fn suppresses(&self, action: &Symbol) -> bool {
-        match self {
-            LayoutDecl::None { only, except } => {
-                if !only.is_empty() {
-                    return only.contains(action);
-                }
-                !except.contains(action)
-            }
-            _ => false,
+/// One `layout x, only: …, except: …` call, which
+/// `crate::controller_layout` resolves as Rails' `_write_layout_method`
+/// does.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LayoutCall {
+    pub value: LayoutValue,
+    /// `only:` / `except:`, scoped like a filter's. Outside them an
+    /// action takes the default lookup, not no layout: campfire's
+    /// `layout false, only: :index` leaves `show` its layout.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<Symbol>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub except: Vec<Symbol>,
+    /// Whether `only:` was given: Rails' `only: []` matches no action,
+    /// where no `only:` leaves every action to `except:`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_present: bool,
+    #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+    pub span: Span,
+}
+
+/// The argument of a `layout` call.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LayoutValue {
+    /// `layout "foo"`: the template `layouts/foo`.
+    Name { name: Symbol },
+    /// `layout :foo`: Rails calls the method `foo` on each render.
+    Method { name: Symbol },
+    /// `layout false`: no layout.
+    None,
+    /// `layout nil`: the default lookup, `layouts/<controller_path>`
+    /// and then the parent's layout.
+    Default,
+    /// A Proc or any other computed value.
+    Computed,
+}
+
+impl LayoutCall {
+    /// Whether the call applies to `action` (Rails' `_conditional_layout?`).
+    pub fn applies_to(&self, action: &str) -> bool {
+        if self.only_present || !self.only.is_empty() {
+            return self.only.iter().any(|a| a.as_str() == action);
         }
+        !self.except.iter().any(|a| a.as_str() == action)
     }
 }
 

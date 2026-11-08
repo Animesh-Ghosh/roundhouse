@@ -2,6 +2,8 @@
 //! settings run at boot, and its Railtie's `app.middleware.use(Rack::Attack)`
 //! puts it on the stack where Rails does, inside RequestId and before the routes.
 
+#[path = "../support/prerequisite.rs"]
+mod prerequisite;
 use roundhouse::build_target::BuildTarget;
 
 use super::emit_and_run;
@@ -127,7 +129,7 @@ fn the_spinel_tree_stacks_the_railtie_middleware() {
 fn the_spinel_rack_request_port_finds_the_client_rack_finds() {
     let rack = std::process::Command::new("ruby").args(["-rrack", "-e", "1"]).status();
     if !rack.is_ok_and(|s| s.success()) {
-        eprintln!("skipping: ruby with the rack gem not available");
+        prerequisite::missing("ruby with the rack gem not available");
         return;
     }
     let envs = r#"[
