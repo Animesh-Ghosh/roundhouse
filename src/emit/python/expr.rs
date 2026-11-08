@@ -913,7 +913,11 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         {
             let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
             match params.as_slice() {
-                [p] => format!("[{} for {} in {}]", emit_expr(body), p, emit_expr(recv)),
+                // A comprehension takes one expression: a body of several
+                // statements is refused below, not written into it.
+                [p] if !matches!(&*body.node, ExprNode::Seq { exprs } if exprs.len() > 1) => {
+                    format!("[{} for {} in {}]", emit_expr(body), p, emit_expr(recv))
+                }
                 _ => crate::emit::diagnostics::report_unsupported(e.span, "python", "map-block", ""),
             }
         }

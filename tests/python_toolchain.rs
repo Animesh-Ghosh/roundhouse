@@ -43,6 +43,9 @@ mod link_to_template_local;
 #[path = "support/view_unless_no_else.rs"]
 #[allow(dead_code)]
 mod view_unless_no_else;
+#[path = "support/python_map_statements.rs"]
+#[allow(dead_code)]
+mod python_map_statements;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -357,6 +360,15 @@ fn link_to_template_local_renders() {
 }
 
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
+/// #1939: a `map` block whose body is several statements is refused,
+/// not written into a comprehension that isn't Python
+/// (`python_map_statements::VIEW`).
+#[test]
+fn python_map_statements_are_refused() {
+    let (_emitted, errors) = python_map_statements::strict_app().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.iter().any(|e| e.contains("map-block not supported (python)")), "{errors:?}");
+}
+
 /// does (`view_unless_no_else::VIEW`).
 #[test]
 #[ignore]
