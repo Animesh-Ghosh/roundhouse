@@ -1978,10 +1978,22 @@ pub(super) fn emit_send(
             if recv_go_ty == "[]string" {
                 return format!("strings.Join({recv_s}, {sep})");
             }
+            // Ruby's `join` reads a nil element as "", and `%v` prints
+            // `<nil>`. Only an interface element can be nil here. It can
+            // also hold a nullable column's pointer, nil or not, which
+            // `%v` would print as an address: read those first.
+            let stringify = if matches!(recv_go_ty.as_str(), "[]interface{}" | "[]any") {
+                let read_pointer = ["*string", "*int64", "*float64", "*bool"]
+                    .map(|ty| format!("case {ty}: if _e == nil {{ _v = nil }} else {{ _v = *_e }}"))
+                    .join("; ");
+                format!("switch _e := _v.(type) {{ {read_pointer} }}; if _v == nil {{ _out = append(_out, \"\") }} else {{ _out = append(_out, fmt.Sprintf(\"%v\", _v)) }}")
+            } else {
+                "_out = append(_out, fmt.Sprintf(\"%v\", _v))".to_string()
+            };
             return format!(
                 "strings.Join(func() []string {{\n{bind_recv}\
                  \t_out := make([]string, 0, len({recv_s}))\n\
-                 \tfor _, _v := range {recv_s} {{ _out = append(_out, fmt.Sprintf(\"%v\", _v)) }}\n\
+                 \tfor _, _v := range {recv_s} {{ {stringify} }}\n\
                  \treturn _out\n\
                  }}(), {sep})",
                 recv_s = joined,
