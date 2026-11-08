@@ -637,6 +637,11 @@ pub struct App {
     /// of the emitted module: nothing is left for them to do at load.
     #[serde(default, skip_serializing_if = "crate::det::HashSet::is_empty")]
     pub modelled_included_hooks: crate::det::HashSet<crate::span::Span>,
+    /// The hooks among those with a filter no guard stands in front of:
+    /// on a class that is not a controller it raises or calls that
+    /// class's own macro, even where `respond_to?` would say no.
+    #[serde(default, skip_serializing_if = "crate::det::HashSet::is_empty")]
+    pub unguarded_included_hooks: crate::det::HashSet<crate::span::Span>,
     /// graphql-ruby object types (`ingest::graphql_ruby`), for the
     /// analyzer only; their synthesized methods leave at lowering.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1344,6 +1349,7 @@ impl App {
             plain_mixins: Default::default(),
             concern_hook_modules: Default::default(),
             modelled_included_hooks: Default::default(),
+            unguarded_included_hooks: Default::default(),
             graphql_types: Vec::new(),
             graphql_signatures: Vec::new(),
             concern_spliced_actions: HashMap::default(),

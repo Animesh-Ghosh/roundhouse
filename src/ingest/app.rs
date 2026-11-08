@@ -5102,6 +5102,7 @@ fn record_concern_filters(
     }
     app.concern_hook_modules.extend(scan.hook_modules.into_iter().filter(|id| keep(id)));
     app.modelled_included_hooks.extend(scan.modelled_hooks);
+    app.unguarded_included_hooks.extend(scan.unguarded_hooks);
 }
 
 /// Library modules no declaration of which makes them a Concern: no
@@ -5142,6 +5143,7 @@ fn refuse_unread_concern_filters(app: &App) -> super::IngestResult<()> {
         return Ok(());
     }
     let surfaces = controller_concern_surfaces(app);
+    refuse_modelled_hooks_off_controllers(app, &surfaces)?;
     let mut reported = crate::det::HashSet::default();
     for controller in &app.controllers {
         let Some(surface) = surfaces.controllers.get(&controller.name) else { continue };
@@ -5171,6 +5173,89 @@ fn refuse_unread_concern_filters(app: &App) -> super::IngestResult<()> {
         }
     }
     Ok(())
+}
+
+/// A modelled hook leaves the emitted module and only a controller's
+/// filter chain replays it, while Ruby runs it on every includer. A
+/// guarded hook stays out of the way of a class that does not answer the
+/// macro, which is what the guard is for; an unguarded one raises or
+/// calls that class's own macro, whichever it has.
+fn refuse_modelled_hooks_off_controllers(
+    app: &App,
+    surfaces: &ControllerConcernSurfaces,
+) -> super::IngestResult<()> {
+    let modelled_hook = |hooks: &crate::det::HashSet<crate::span::Span>| -> crate::det::HashSet<crate::ident::ClassId> {
+        app.library_classes
+            .iter()
+            .filter(|lc| lc.methods.iter().any(|m| hooks.contains(&m.name_span)))
+            .map(|lc| lc.name.clone())
+            .collect()
+    };
+    let modelled = modelled_hook(&app.modelled_included_hooks);
+    if modelled.is_empty() {
+        return Ok(());
+    }
+    let unguarded = modelled_hook(&app.unguarded_included_hooks);
+    let edges = filter_dependency_edges(app, &surfaces.module_includes);
+    let classes = app.library_classes.iter().map(|lc| (&lc.name, lc.is_module, lc.includes.clone()));
+    let models = app.models.iter().map(|m| (&m.name, false, crate::analyze::model_includes(m)));
+    for (name, is_module, includes) in classes.chain(models) {
+        if surfaces.controllers.contains_key(name) {
+            continue;
+        }
+        for module in filter_registration_order(&[includes], &edges) {
+            if !modelled.contains(&module) {
+                continue;
+            }
+            if (!is_module && unguarded.contains(&module)) || answers_callback_macro(app, name) {
+                super::survey::continue_or_fail(super::IngestError::Unsupported {
+                    file: name.0.as_str().to_string(),
+                    message: format!(
+                        "`{}` registers a filter from its `self.included` hook, and `{}` includes it but is not a controller, so the hook's effect there is not modelled",
+                        module.0.as_str(),
+                        name.0.as_str()
+                    ),
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether a class, its parents included, answers a controller callback
+/// macro: a controller, a mailer, or a class-side definition of its own
+/// (`class_methods` blocks are copied there by ingest). A macro that only
+/// arrives through `extend` is not seen; a guarded hook answers false for it.
+fn answers_callback_macro(app: &App, name: &crate::ident::ClassId) -> bool {
+    let macro_on = |methods: &[&crate::dialect::MethodDef]| {
+        methods.iter().any(|m| {
+            m.receiver == crate::dialect::MethodReceiver::Class
+                && super::library_class::is_controller_callback_macro(m.name.as_str())
+        })
+    };
+    let mut cur = Some(name.clone());
+    let mut seen = crate::det::HashSet::default();
+    while let Some(class) = cur {
+        if !seen.insert(class.clone()) {
+            break;
+        }
+        if matches!(
+            class.0.as_str(),
+            "ActionMailer::Base" | "ActionController::Base" | "ActionController::API" | "ActionController::Metal" | "AbstractController::Base"
+        ) || app.controllers.iter().any(|c| c.name == class)
+        {
+            return true;
+        }
+        let parts: Vec<_> = app.library_classes.iter().filter(|lc| lc.name == class).collect();
+        let methods: Vec<_> = parts.iter().flat_map(|lc| lc.methods.iter()).collect();
+        let model = app.models.iter().find(|m| m.name == class);
+        let model_methods: Vec<_> = model.into_iter().flat_map(|m| m.methods()).collect();
+        if macro_on(&methods) || macro_on(&model_methods) {
+            return true;
+        }
+        cur = parts.iter().find_map(|lc| lc.parent.clone()).or_else(|| model.and_then(|m| m.parent.clone()));
+    }
+    false
 }
 
 /// A modelled hook has nothing left to do at load, and the emitted

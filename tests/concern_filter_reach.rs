@@ -276,3 +276,97 @@ fn a_super_that_only_reaches_active_support_concern_is_read() {
         assert!(gated.methods.iter().all(|m| m.name.as_str() != "included"), "{body}: {:?}", gated.methods);
     }
 }
+
+const GUARDED: &str = "base.before_action :check if base.respond_to?(:before_action)";
+
+const MACRO: &str = "  def self.before_action(name)\n    (@registered ||= []) << name\n  end\n";
+
+fn plain_includer_tree(hook_body: &str, extra: &[(&str, String)]) -> HashMap<PathBuf, Vec<u8>> {
+    let mut tree = hook_tree(&hook(hook_body), CONTROLLER);
+    for (path, source) in extra {
+        tree.insert(PathBuf::from(path), source.clone().into_bytes());
+    }
+    tree
+}
+
+fn hook_refusal(tree: HashMap<PathBuf, Vec<u8>>) -> String {
+    ingest_app_from_tree(tree).err().expect("expected a refusal").to_string()
+}
+
+/// A modelled hook leaves the emitted module, and only a controller's
+/// filter chain replays it. Rails 8.1.4 runs the hook on any other
+/// includer: an unguarded `base.before_action` raises or calls that
+/// class's macro, and a mailer's `before_action` is real.
+#[test]
+fn a_hook_included_by_a_non_controller_refuses_the_compile() {
+    let job = |body: &str| format!("class Job\n{body}  include Gated\nend\n");
+    let cases: Vec<(&str, Vec<(&str, String)>)> = vec![
+        // Unguarded, on a class with or without its own macro.
+        ("base.before_action :check", vec![("lib/job.rb", job(""))]),
+        ("base.before_action :check", vec![("lib/job.rb", job(MACRO))]),
+        // Guarded, where the class answers the macro: its own, inherited,
+        // or a mailer's.
+        (GUARDED, vec![("lib/job.rb", job(MACRO))]),
+        (
+            GUARDED,
+            vec![
+                ("lib/runner.rb", format!("class Runner\n{MACRO}end\n")),
+                ("lib/job.rb", "class Job < Runner\n  include Gated\nend\n".to_string()),
+            ],
+        ),
+        (
+            GUARDED,
+            vec![
+                ("app/mailers/application_mailer.rb", "class ApplicationMailer < ActionMailer::Base\nend\n".to_string()),
+                ("app/mailers/note_mailer.rb", "class NoteMailer < ApplicationMailer\n  include Gated\n\n  def hello\n    mail(to: \"a@example.com\", subject: \"x\", body: \"y\")\n  end\nend\n".to_string()),
+            ],
+        ),
+    ];
+    for (hook_body, extra) in cases {
+        let error = hook_refusal(plain_includer_tree(hook_body, &extra));
+        assert!(error.contains("not a controller"), "{hook_body} {extra:?}: {error}");
+    }
+}
+
+#[test]
+fn a_model_that_includes_a_hook_refuses_the_compile() {
+    let mut tree = plain_includer_tree(
+        GUARDED,
+        &[
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\nend\n".to_string()),
+            ("app/models/article.rb", format!("class Article < ApplicationRecord\n{MACRO}  include Gated\nend\n")),
+        ],
+    );
+    tree.insert(
+        PathBuf::from("db/schema.rb"),
+        b"ActiveRecord::Schema.define do\n  create_table \"articles\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n".to_vec(),
+    );
+    let error = hook_refusal(tree);
+    assert!(error.contains("`Article`") && error.contains("not a controller"), "{error}");
+}
+
+/// The hook runs on whoever a Concern defers to, and a concern's includer
+/// is that class.
+#[test]
+fn a_hook_reached_through_a_concern_on_a_non_controller_refuses_the_compile() {
+    let mut tree = plain_includer_tree(
+        GUARDED,
+        &[
+            ("app/controllers/concerns/wrapper.rb", "module Wrapper\n  extend ActiveSupport::Concern\n  include Gated\nend\n".to_string()),
+            ("lib/job.rb", format!("class Job\n{MACRO}  include Wrapper\nend\n")),
+        ],
+    );
+    let gated = "app/controllers/concerns/gated.rb";
+    let source = String::from_utf8(tree[&PathBuf::from(gated)].clone()).expect("utf8");
+    tree.insert(PathBuf::from(gated), source.replacen("module Gated\n", "module Gated\n  extend ActiveSupport::Concern\n", 1).into_bytes());
+    let error = hook_refusal(tree);
+    assert!(error.contains("not a controller"), "{error}");
+}
+
+/// The guard is why a hook module can be shared: on a class that does not
+/// answer the macro the hook does nothing, and Rails loads it.
+#[test]
+fn a_guarded_hook_on_a_class_without_the_macro_is_not_a_refusal() {
+    let tree = plain_includer_tree(GUARDED, &[("lib/job.rb", "class Job\n  include Gated\nend\n".to_string())]);
+    ingest_app_from_tree(tree).expect("the guard is false on Job");
+}
