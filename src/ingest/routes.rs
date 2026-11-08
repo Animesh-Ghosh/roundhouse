@@ -468,6 +468,7 @@ fn runtime_cable_mount(call: &ruby_prism::CallNode<'_>) -> bool {
 /// is not served. Located at the regex literal when it can be found.
 fn refused_route_diagnostics(entries: &[RouteSpec], source: &[u8], file: &str) -> Vec<Diagnostic> {
     let mut seen = HashSet::default();
+    let mut seen_guards = HashSet::default();
     let mut defaults_seen = HashSet::default();
     let mut out = Vec::new();
     for route in crate::lower::routes::flatten_route_entries(entries) {
@@ -482,6 +483,20 @@ fn refused_route_diagnostics(entries: &[RouteSpec], source: &[u8], file: &str) -
             }
         }
         let Some((param, rx)) = &route.refused else { continue };
+        // At the constraint, once: every route it guards is refused for it.
+        if param == crate::lower::routes::GUARD_REFUSAL {
+            if let Some(guard) = route.guards.first()
+                && seen_guards.insert(guard.span)
+            {
+                out.push(Diagnostic::unsupported(
+                    guard.span,
+                    None,
+                    "request constraint",
+                    "the routes it guards are not dispatched: the router matches by verb and path alone, so it would answer every request the constraint refuses; their URL helpers are still generated",
+                ));
+            }
+            continue;
+        }
         let verb = format!("{:?}", route.method).to_uppercase();
         if !seen.insert((verb.clone(), route.path.clone())) {
             continue;
@@ -1405,8 +1420,8 @@ fn ingest_route_stmts<'pr>(
                         // DOWN into every route the block flattens to
                         // (transitively, through nested scopes/resources).
                         // A lambda/object arg (`constraints(SomeGuard.new)`)
-                        // yields no hash here, so it changes nothing — that
-                        // request-based shape stays unenforced, as before.
+                        // yields no hash here; `block_request_guard` wraps
+                        // the block's routes in a `RouteSpec::Guarded`.
                         // Non-literal / modified regex values refuse via
                         // the shared reader (same fail-closed policy as
                         // the `constraints:` kwarg on a route/resource).
@@ -1416,10 +1431,13 @@ fn ingest_route_stmts<'pr>(
                         if method == "constraints" {
                             match call.arguments() {
                                 None => entries.extend(inner),
-                                Some(args) => match block_constraints_hash(&args, file) {
-                                    Ok(block_constraints) => {
+                                Some(args) => match block_constraints_hash(&args, file).and_then(|c| block_request_guard(&args, file).map(|g| (c, g))) {
+                                    Ok((block_constraints, guard)) => {
                                         merge_outer_constraints(&mut inner, &block_constraints);
-                                        entries.extend(inner);
+                                        match guard {
+                                            Some(guard) => entries.push(RouteSpec::Guarded { guard, entries: inner }),
+                                            None => entries.extend(inner),
+                                        }
                                     }
                                     Err(err) if super::survey::is_active() => {
                                         super::survey::record(&err);
@@ -1819,7 +1837,7 @@ fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, S
                 }
                 merge_outer_constraints(nested, outer);
             }
-            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => {
+            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } | RouteSpec::Guarded { entries, .. } => {
                 merge_outer_constraints(entries, outer);
             }
             RouteSpec::Root { .. } | RouteSpec::RackMount { .. } => {}
@@ -1913,9 +1931,9 @@ fn read_param_regex_constraints<'a>(
             // `constraints host: Rails.configuration.app_host_constraint,
             // protocol: "https://" do … end`: Rails matches a key that
             // names no path segment against the request's own method of
-            // that name. A request constraint, as a guard object is: the
-            // block's routes are kept and the request is not checked
-            // (`constraints(SomeGuard.new)` stays unenforced the same way).
+            // that name. The block's routes are kept and the request is
+            // not checked (a guard object or lambda is a
+            // `RouteSpec::Guarded` instead, whose routes are refused).
             None if REQUEST_CONSTRAINT_KEYS.contains(&param.as_str()) => {}
             None => {
                 return Err(IngestError::Unsupported {
@@ -1941,9 +1959,19 @@ const REQUEST_CONSTRAINT_KEYS: &[&str] = &["host", "protocol", "subdomain", "dom
 /// (`constraints(slug: /.../)`, an implicit keyword hash) and an
 /// explicit Hash literal (`constraints({slug: /.../})`). A non-hash
 /// arg — the request-based `constraints(SomeGuard.new)` shape — yields
-/// an empty map, which is exactly "change nothing": that shape stays
-/// unenforced, as before (#727). Hash entries ride the shared
-/// fail-closed reader.
+/// an empty map; `block_request_guard` reads it instead (#727). Hash
+/// entries ride the shared fail-closed reader.
+/// `constraints(->(req) { … }) do … end`, `constraints(SomeGuard.new) do … end`: the argument that is not a Hash.
+fn block_request_guard(args: &ruby_prism::ArgumentsNode<'_>, file: &str) -> IngestResult<Option<crate::expr::Expr>> {
+    for arg in args.arguments().iter() {
+        if arg.as_keyword_hash_node().is_some() || arg.as_hash_node().is_some() {
+            continue;
+        }
+        return super::expr::ingest_expr(&arg, file).map(Some);
+    }
+    Ok(None)
+}
+
 fn block_constraints_hash(
     args: &ruby_prism::ArgumentsNode<'_>,
     file: &str,
@@ -2420,6 +2448,38 @@ pub(super) fn set_gem_dsl(names: HashSet<String>) {
 
 /// Recognize a route DSL call; unknown calls return an unsupported-DSL error.
 fn ingest_route_call(
+    call: &ruby_prism::CallNode<'_>,
+    method: &str,
+    file: &str,
+    parent: Option<&str>,
+    cx: &Ctx<'_>,
+) -> IngestResult<Option<RouteSpec>> {
+    let guard = if matches!(method, "resources" | "resource") || http_method_from(method).is_some() { request_guard(call, file)? } else { None };
+    let spec = ingest_unguarded_route_call(call, method, file, parent, cx)?;
+    Ok(match (spec, guard) {
+        (Some(spec), Some(guard)) => Some(RouteSpec::Guarded { guard, entries: vec![spec] }),
+        (spec, _) => spec,
+    })
+}
+
+/// A route's `constraints:` that is not a Hash of segment requirements: a lambda, a proc or an object
+/// answering `matches?`, which Rails asks with the request (`constraints: ->(req) { req.format == :json }`).
+fn request_guard(call: &ruby_prism::CallNode<'_>, file: &str) -> IngestResult<Option<crate::expr::Expr>> {
+    let Some(args) = call.arguments() else { return Ok(None) };
+    for arg in args.arguments().iter() {
+        let Some(kh) = arg.as_keyword_hash_node() else { continue };
+        for element in kh.elements().iter() {
+            let Some(pair) = element.as_assoc_node() else { continue };
+            if symbol_value(&pair.key()).as_deref() != Some("constraints") || pair.value().as_hash_node().is_some() {
+                continue;
+            }
+            return super::expr::ingest_expr(&pair.value(), file).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn ingest_unguarded_route_call(
     call: &ruby_prism::CallNode<'_>,
     method: &str,
     file: &str,

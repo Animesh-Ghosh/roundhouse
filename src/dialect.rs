@@ -2308,6 +2308,9 @@ pub enum RouteSpec {
     /// Routes a gem's routing method draws under a scope it sets for itself (devise's
     /// `with_devise_exclusive_scope`): they take none of the enclosing scopes' path, module or name.
     Exclusive { entries: Vec<RouteSpec> },
+    /// Routes a request constraint guards (`constraints: ->(req) { … }`, `constraints(SomeGuard.new) do … end`):
+    /// a request it refuses goes on to the routes after them, as Rails' router does.
+    Guarded { guard: crate::expr::Expr, entries: Vec<RouteSpec> },
 }
 
 /// One `get "/path", to: "c#a"` entry. Kept as a standalone struct so

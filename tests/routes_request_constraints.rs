@@ -8,9 +8,9 @@
 //! value that is no literal, so the survey dropped the whole block and its
 //! routes answered 404.
 //!
-//! The request is not checked, as a guard object's is not
-//! (`constraints(SomeGuard.new)`); a segment constraint still refuses a
-//! value that is no literal.
+//! The request is not checked; a segment constraint still refuses a value
+//! that is no literal. A guard object or lambda (`constraints(SomeGuard.new)`)
+//! refuses its routes instead (`route_request_guards.rs`).
 
 use roundhouse::App;
 use roundhouse::ingest::ingest_routes;
