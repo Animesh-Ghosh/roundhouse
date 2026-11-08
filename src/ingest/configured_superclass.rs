@@ -852,6 +852,8 @@ impl<'a> Eval<'a> {
                 // Not half its routes, nor the `@scope` it changed on the way: what it drew is the call's or none of it.
                 let drawn = self.drawn.last().map_or(0, Vec::len);
                 let ivars = self.router.ivars.clone();
+                // Nor when it wrote them: a restored value keeps the uncertainty it had.
+                let written: Vec<_> = self.written.iter().filter(|((h, _), _)| matches!(h, Holder::Router)).map(|(k, t)| (k.clone(), *t)).collect();
                 return match self.invoke(&def, scope, this, given, blk) {
                     Ok(v) => Ok(v),
                     Err(err) => {
@@ -859,6 +861,8 @@ impl<'a> Eval<'a> {
                             last.truncate(drawn);
                         }
                         self.router.ivars = ivars;
+                        self.written.retain(|(h, _), _| !matches!(h, Holder::Router));
+                        self.written.extend(written);
                         self.omitted.push(format!("{why} ({err})"));
                         Ok(Val::Nil)
                     }
