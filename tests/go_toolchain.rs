@@ -54,6 +54,9 @@ mod nilable_string_view;
 #[path = "support/each_receiver_once.rs"]
 #[allow(dead_code)]
 mod each_receiver_once;
+#[path = "support/join_nil.rs"]
+#[allow(dead_code)]
+mod join_nil;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -729,4 +732,28 @@ fn nilable_string_view_nil_effect_renders() {
 #[ignore]
 fn each_receiver_once_renders() {
     assert_content_tag_test_passes(each_receiver_once::strict_app());
+}
+
+/// #1949: `join` reads a nil element as an empty string, as Rails 8.1.4
+/// does (`join_nil::GO_VIEW`).
+#[test]
+#[ignore]
+fn join_nil_renders() {
+    assert_content_tag_test_passes(join_nil::strict_go_app());
+}
+
+/// #1949: a nil column beside an Integer joins as an empty string, as
+/// Rails 8.1.4 does (`join_nil::MIXED_VIEW`).
+#[test]
+#[ignore]
+fn join_nil_mixed_nil_renders() {
+    assert_content_tag_test_passes(join_nil::strict_mixed_nil_app());
+}
+
+/// #1949: a present column beside an Integer joins as its text, as
+/// Rails 8.1.4 does (`join_nil::MIXED_VIEW`).
+#[test]
+#[ignore]
+fn join_nil_mixed_renders() {
+    assert_content_tag_test_passes(join_nil::strict_mixed_app());
 }
