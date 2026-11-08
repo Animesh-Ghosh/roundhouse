@@ -77,8 +77,10 @@ JRUBY_BIND_INPUTS = {
 }
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
+    "spinel_chunked_body",
     "spinel_stream_error",
     "did_you_mean",
+    "net_http_exceptions",
     "validation_prepend",
     "spinel_faye_websocket",
     "spinel_websocket_lifecycle",
@@ -89,6 +91,7 @@ SPINEL_TESTS = [
     "object_blank",
     "spinel_web_push_crypto",
     "openssl_random",
+    "openssl_registrations",
     "spinel_db_lease",
     *PARAM_BIND_TESTS,
     "spinel_stmt_cache_lru",
@@ -112,6 +115,7 @@ SPINEL_TESTS = [
     "spinel_mini_profiler",
     "spinel_active_support_instrumentation",
     "around_block_filter_spinel",
+    "included_hook_constructor_spinel",
     "after_initialize_bare_new_spinel",
     "find_or_create_bang_records",
     "before_action_return_spinel",
@@ -515,6 +519,11 @@ def native_coverage(path):
         or path == "tests/support/full_forwarding.rs"
     ) and not interpreter_only
     suites = set()
+    if path in {
+        "src/analyze/registry/stdlib.rs", "src/analyze/registry/library.rs", "src/project.rs",
+        "tests/openssl_registrations.rs", "tests/support/openssl_registrations.rb",
+    }:
+        suites.add("openssl_registrations")
     if path == "src/analyze/mod.rs":
         suites.add("class_object_return_rbs")
     if path in {"src/analyze/mod.rs", "src/analyze/body/mod.rs"}:
@@ -558,6 +567,12 @@ def native_coverage(path):
         "tests/stdlib_gem_fates.rs",
     } or path.startswith("tests/did_you_mean/"):
         suites.add("did_you_mean")
+    if path in {
+        "src/analyze/registry/stdlib.rs", "src/project.rs",
+        "tests/net_http_exceptions.rs", "tests/net_http_patch.rs",
+        "tests/emit_and_run/net_http_patch.rs",
+    }:
+        suites.add("net_http_exceptions")
     if path in {"tests/spinel_net_http_transport.rb", "tests/spinel_net_http_stream.rb", "tests/spinel_net_http_raise.rb"}:
         suites.add("spinel_net_http_start")
     if path.startswith("tests/spinel_stream_error") or path in {
@@ -566,6 +581,16 @@ def native_coverage(path):
         "runtime/spinel/tep/server_scheduled.rb", "runtime/spinel/tep/streamer.rb",
     }:
         suites.add("spinel_stream_error")
+    if path.startswith("tests/spinel_chunked_body") or path in {
+        "tests/spinel_toolchain/chunked_body.rs",
+        "tests/support/server_check_io.rb",
+        "tests/tep_server_harness.rb", "runtime/spinel/tep/chunked_body.rb",
+        "runtime/spinel/tep/request.rb", "runtime/spinel/tep/parser.rb",
+        "runtime/spinel/tep/net.rb", "runtime/spinel/tep/tep.rb",
+        "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
+        "runtime/spinel/tep/server_scheduled.rb",
+    }:
+        suites.add("spinel_chunked_body")
     if path.startswith("tests/spinel_faye_websocket/") or path == "runtime/spinel/faye_websocket.rb":
         suites.add("spinel_faye_websocket")
     if path.startswith(("tests/spinel_websocket_lifecycle", "runtime/spinel/tep/websocket")) or path in {

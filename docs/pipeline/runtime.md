@@ -1473,13 +1473,15 @@ Two residues, both smaller than they look:
   touch each run inside `Model.transaction`, an exception from their
   callbacks rolls the whole write back, and a ROLLBACK drops the held
   commit callbacks.
-* **The update hook is unguarded.** Rails registers its touch with
-  `if: :saved_changes?` and skips the parent when the child's save
-  changed nothing. This runtime's `save` issues an unconditional
-  UPDATE, so there is no no-op save for the guard to catch and the
-  condition would never be false. A save that writes the same bytes
-  therefore moves the parent's `updated_at` where Rails leaves it —
-  which busts a cache entry early rather than serving a stale one.
+* **The update hook asks `_wrote_on_update?`.** Rails registers its
+  touch with `if: :saved_changes?` and skips the parent when the
+  child's save changed nothing. On the Ruby family a save with nothing
+  pending writes nothing, and `_wrote_on_update?` answers from
+  `saved_changes`, so the parent is left alone as in Rails. A strict
+  target's `save` writes the whole row every time and answers true, so
+  there a save that writes the same bytes still moves the parent's
+  `updated_at` — which busts a cache entry early rather than serving a
+  stale one.
 
 Rails also SKIPS the create and destroy registrations when the
 association carries a `counter_cache:` (the counter update touches on
@@ -1809,6 +1811,23 @@ and a record deleted in between raises
 `ActiveJob::DeserializationError`, which `discard_on` drops. The codecs
 come from the job's `perform_later` call sites, and
 `tests/active_job_payload.rs` holds the format to Rails' own output.
+On the Ruby family (ruby, jruby, spinel), a `perform` with named
+keywords (`def perform(car, count:, label: "x")`) gets wrappers with
+the same parameter list, and its keywords go
+into one trailing Hash marked `_aj_ruby2_keywords`, as ActiveJob writes
+them, and come back by name. An optional keyword whose value equals
+its literal default is left out, as Rails leaves out a keyword the
+caller omits, and reads back as that default; with every keyword left
+out there is no Hash at all, as Rails writes none, and a missing key
+or Hash reads as the default (`keyword_given?`). Two known differences
+from Rails: the keys are written in `perform`'s order, not the call
+site's, and a caller that passes the default explicitly gets no key
+where Rails would write one; `perform` receives the same values either
+way. A `**` splat at a call site keeps the job's Proc (an error under
+`:sidekiq`). A `perform` with a `**rest` keyword, a block, `...`, or a
+keyword default that isn't a literal (which only `perform` can
+evaluate, at run time) gets no wrapper, and each call to its
+`perform_later` or `perform_now` is an error.
 
 **What is still missing.**
 
@@ -3093,17 +3112,20 @@ Three gaps remain, all on spinel's side:
 - **`Rails.application.env_config` holds what is set and is consulted
   for nothing**: a forgery failure always renders the 422 that
   `action_dispatch.show_exceptions = :rescuable` asks for.
-- **`save` writes the whole row; only `touch` writes what changed.**
-  Rails' partial writes UPDATE the changed columns; this runtime's
-  `_adapter_update` writes every column the record loaded. A bare
-  `touch` (and so `belongs_to … touch: true`) UPDATEs `updated_at`
-  alone (`_adapter_touch`), which is what keeps campfire's
-  trigger-maintained `rooms.messages_count` correct when a message
-  touches its room. A `save`/`update` of a record loaded before a
-  trigger moved one of its columns still writes the stale value back. The
-  same goes for two jobs the Sidekiq worker runs at once on one
-  record: the later `save` writes back every column it loaded, so the
-  earlier job's change is lost where Rails would keep it.
+- **`save` writes what changed on ruby, jruby and spinel; the other
+  targets write the whole row.** On the ruby-family targets,
+  `_adapter_update` UPDATEs only the columns with a pending change, as
+  Rails' partial writes do, and a save with nothing pending runs no
+  UPDATE and leaves `updated_at` alone. `update_columns` and
+  `update_column` write only the columns they name. So two jobs the
+  Sidekiq worker runs at once on one record each keep their change when
+  they change different columns, and a column a database trigger moved
+  (campfire's `rooms.messages_count`) is written back only when the
+  record changed it too. A record with no Dirty baseline (one the
+  runtime didn't load or save) writes every column. The strict targets
+  track no pending changes, so their `_adapter_update` still writes every
+  column the record loaded; a bare `touch` UPDATEs `updated_at` alone
+  (`_adapter_touch`) everywhere.
 
 ### `HashWithIndifferentAccess` is a String-keyed Hash; a call converts its keys at the site
 

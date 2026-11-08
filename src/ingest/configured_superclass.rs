@@ -448,7 +448,25 @@ impl<'a> Eval<'a> {
             // Not one a gem hook gave: what it says is not known stops the evaluation where a statement passed over would leave a guess.
             Err(why) if !matches!(&*e.node, ExprNode::Return { .. }) && !why.starts_with(STOP) => {
                 let (owner, side) = self.tag_of(&frame.this);
-                let Some(writes) = self.may_write_with(e, &owner, side, &mut HashSet::default(), &frame.locals) else {
+                let devise: HashSet<Symbol> = frame.locals.iter().filter(|(_, v)| matches!(v, Val::Class(c) if c == "Devise")).map(|(k, _)| k.clone()).collect();
+                let writer = |setter: &str| -> Option<Result<String, ()>> {
+                    let (def, _) = self.lookup_in("Devise", setter, MethodReceiver::Class, &mut HashSet::default())?;
+                    let [param] = def.params.as_slice() else { return Some(Err(())) };
+                    let body = match &*def.body.node {
+                        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+                        _ => &def.body,
+                    };
+                    match &*body.node {
+                        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+                            if name.as_str().starts_with("@@") && matches!(&*value.node, ExprNode::Var { name: v, .. } if *v == param.name) =>
+                        {
+                            Some(Ok(name.as_str().to_string()))
+                        }
+                        _ => Some(Err(())),
+                    }
+                };
+                let confined = super::gem_hooks::confined_writes(&self.known, self.calls.last().map(|c| (c.0.as_str(), c.1.as_str())), e, &devise, &writer);
+                let Some(writes) = confined.or_else(|| self.may_write_with(e, &owner, side, &mut HashSet::default(), &frame.locals)) else {
                     return Err(format!("{why}, in a statement whose writes are not known"));
                 };
                 for tag in &writes {
@@ -519,7 +537,8 @@ impl<'a> Eval<'a> {
         let Some(h) = Self::holder(this) else { return Ok(()) };
         let last_unsure = self.unsure.get(&h).into_iter().flatten().filter(|(p, _)| glob(p, &name)).map(|(_, t)| *t).max();
         let written = self.written.get(&(h, name.clone())).copied().unwrap_or(0);
-        if last_unsure.is_some_and(|u| u > written) { Err(format!("`@{name}` may have been written by a statement passed over")) } else { Ok(()) }
+        let shown = if name.starts_with("@@") { name.clone() } else { format!("@{name}") };
+        if last_unsure.is_some_and(|u| u > written) { Err(format!("`{shown}` may have been written by a statement passed over")) } else { Ok(()) }
     }
 
     /// Ruby's lookup order: the class, the modules it includes (last first), then its superclass's.
@@ -1635,6 +1654,8 @@ impl<'a> Eval<'a> {
 
     fn cvar_get(&mut self, scope: Option<&str>, name: &str) -> Res<Val> {
         let home = self.cvar_home(scope, name).ok_or_else(|| format!("`{name}` is not set"))?;
+        // Not only ivars: a statement passed over may have set the class variable (devise's `config.omniauth` writes `@@omniauth_configs`).
+        self.note_read(&Val::Class(home.clone()), name.to_string())?;
         if let Some(v) = self.cvars.get(&(home.clone(), name.to_string())) {
             return Ok(v.clone());
         }
@@ -1656,6 +1677,8 @@ impl<'a> Eval<'a> {
 
     fn cvar_set(&mut self, scope: Option<&str>, name: &str, v: Val) {
         let home = self.cvar_home(scope, name).or_else(|| scope.map(str::to_string)).unwrap_or_default();
+        self.tick += 1;
+        self.written.insert((Holder::Class(home.clone()), name.to_string()), self.tick);
         self.cvars.insert((home, name.to_string()), v);
     }
 
@@ -1977,6 +2000,10 @@ impl<'a> Eval<'a> {
             ExprNode::Assign { target: LValue::Ivar { name }, .. } | ExprNode::OpAssign { target: LValue::Ivar { name }, .. } => {
                 out.insert((owner.to_string(), side, name.as_str().to_string()));
             }
+            // A class variable is the class's, whichever side writes it.
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. } | ExprNode::OpAssign { target: LValue::Var { name, .. }, .. } if name.as_str().starts_with("@@") => {
+                out.insert((owner.to_string(), true, name.as_str().to_string()));
+            }
             // `@scopes << :read`, `URL_HELPERS[key].concat(value)`: the object the ivar or constant holds changes, which a read of it sees; a program's own method is followed instead.
             ExprNode::Send { recv: Some(r), method, .. }
                 if !self.classes.iter().any(|c| c.methods.iter().any(|m| &m.name == method))
@@ -2075,6 +2102,10 @@ impl<'a> Eval<'a> {
                         _ => method.as_str().to_string(),
                     };
                     calls.push((named, recv.clone(), dynamic));
+                }
+                // `each(&method(:apply))` calls `apply` as it runs, though no Send names it.
+                if let ExprNode::MethodRef { recv, name } = &*x.node {
+                    calls.push((name.as_str().to_string(), recv.clone(), false));
                 }
             });
             for (name, recv, dynamic) in calls {
@@ -2244,6 +2275,7 @@ fn only_defs(code: &str) -> bool {
 fn changed_root(r: &Expr, owner: &str, side: bool) -> Option<Tag> {
     match &*r.node {
         ExprNode::Ivar { name } => Some((owner.to_string(), side, name.as_str().to_string())),
+        ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => Some((owner.to_string(), true, name.as_str().to_string())),
         ExprNode::Const { path } => Some((CONSTANT_OWNER.to_string(), false, path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"))),
         ExprNode::Send { recv: Some(inner), method, .. } if method.as_str() == "[]" => changed_root(inner, owner, side),
         _ => None,

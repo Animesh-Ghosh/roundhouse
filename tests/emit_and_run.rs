@@ -116,6 +116,8 @@ mod discard;
 mod callback_abort;
 #[path = "emit_and_run/dirty_clear_restore.rs"]
 mod dirty_clear_restore;
+#[path = "emit_and_run/partial_writes.rs"]
+mod partial_writes;
 #[path = "emit_and_run/will_save_change_to_attribute.rs"]
 mod will_save_change_to_attribute;
 #[path = "emit_and_run/pundit_source.rs"]
@@ -477,6 +479,8 @@ mod config_require_relative;
 mod defined_const_fold;
 #[path = "emit_and_run/job_payload.rs"]
 mod job_payload;
+#[path = "emit_and_run/job_keywords.rs"]
+mod job_keywords;
 #[path = "emit_and_run/sidekiq_push.rs"]
 mod sidekiq_adapter;
 #[path = "emit_and_run/sidekiq_retry_on.rs"]
@@ -21396,6 +21400,9 @@ mod record_if_condition;
 #[path = "support/link_to_template_local.rs"]
 #[allow(dead_code)]
 mod link_to_template_local;
+#[path = "support/each_no_param.rs"]
+#[allow(dead_code)]
+mod each_no_param;
 #[path = "support/view_unless_no_else.rs"]
 #[allow(dead_code)]
 mod view_unless_no_else;
@@ -21756,6 +21763,26 @@ fn link_to_template_local_renders_as_rails() {
         .assert_passes();
 }
 
+/// #1910: a block with no parameter renders as Rails 8.1.4 does
+/// (`each_no_param::VIEW`).
+#[test]
+fn each_no_param_renders_as_rails() {
+    each_no_param::app(content_tag_options::app_rendering(each_no_param::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(each_no_param::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// An empty `map` block maps each element to nil, as Rails 8.1.4
+/// does (`each_no_param::EMPTY_MAP_VIEW`).
+#[test]
+fn each_no_param_empty_map_renders_as_rails() {
+    each_no_param::app(content_tag_options::app_rendering(each_no_param::EMPTY_MAP_VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(each_no_param::EMPTY_MAP_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
 /// does (`view_unless_no_else::VIEW`).
 #[test]
@@ -21815,6 +21842,16 @@ fn nilable_string_view_nil_effect_renders_as_rails() {
 fn link_to_template_local_renders_as_rails_on_spinel() {
     link_to_template_local::app(content_tag_options::app_rendering(link_to_template_local::VIEW, &[]))
         .run_spinel(&helper_escape_at_output::render_script(link_to_template_local::RENDERS))
+        .assert_passes();
+}
+
+/// #1910: a block with no parameter renders as Rails 8.1.4 does
+/// (`each_no_param::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn each_no_param_renders_as_rails_on_spinel() {
+    each_no_param::app(content_tag_options::app_rendering(each_no_param::VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(each_no_param::RENDERS))
         .assert_passes();
 }
 

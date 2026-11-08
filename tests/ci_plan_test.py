@@ -62,6 +62,20 @@ def git_repository():
             os.chdir(previous)
 
 
+class EncryptsRefusalCoverage(unittest.TestCase):
+    def test_model_encryption_refusal_runs_in_the_unit_floor(self):
+        # These are CLI emission checks; they do not require native compilation.
+        for path in [
+            "tests/model_encrypts_refusal.rs",
+            "src/lower/model_to_library/mod.rs",
+            "src/analyze/diagnostics.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("unit", plan["jobs"])
+                self.assertIn("build-roundhouse", plan["jobs"])
+
+
 class PublicationBoundary(unittest.TestCase):
     def test_scheduled_full_on_canonical_main_may_publish(self):
         for event in ("schedule", "workflow_dispatch"):
@@ -140,6 +154,26 @@ class Routing(unittest.TestCase):
                 plan = ci.select([path])
                 self.assertIn("spinel-framework", plan["jobs"])
                 self.assertIn("class_object_return_rbs", plan["spinel_tests"])
+
+    def test_chunked_body_sources_select_both_native_lanes(self):
+        for path in [
+            "runtime/spinel/tep/chunked_body.rb", "runtime/spinel/tep/request.rb",
+            "runtime/spinel/tep/parser.rb", "runtime/spinel/tep/net.rb", "runtime/spinel/tep/tep.rb",
+            "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
+            "runtime/spinel/tep/server_scheduled.rb", "tests/tep_server_harness.rb",
+            "tests/spinel_chunked_body.rs", "tests/spinel_chunked_body.rb",
+            "tests/spinel_chunked_body_native.rb", "tests/spinel_chunked_body_native_check.rb",
+            "tests/spinel_chunked_body_app_check.rb",
+            "tests/spinel_chunked_body_io.rb",
+            "tests/spinel_toolchain/chunked_body.rs",
+            "tests/spinel_chunked_body_puma.rb", "tests/spinel_chunked_body_work.rb",
+            "tests/support/server_check_io.rb",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("spinel-framework", plan["jobs"])
+                self.assertIn("spinel-toolchain", plan["jobs"])
+                self.assertIn("spinel_chunked_body", plan["spinel_tests"])
 
     def test_stream_error_sources_select_the_native_suite(self):
         for path in [
@@ -380,6 +414,15 @@ class Routing(unittest.TestCase):
         self.assertNotIn("build-wasm", plan["jobs"])
         self.assertIn("generated_columns_spinel", plan["spinel_tests"])
 
+    def test_openssl_registration_inputs_select_native_contract(self):
+        for path in [
+            "src/analyze/registry/stdlib.rs", "src/analyze/registry/library.rs", "src/project.rs",
+            "tests/openssl_registrations.rs", "tests/support/openssl_registrations.rb",
+        ]:
+            with self.subTest(path=path):
+                self.assertIn("openssl_registrations", ci.select([path])["spinel_tests"])
+        self.assertIn("openssl_registrations", ci.select([], full=True)["spinel_tests"])
+
     def test_did_you_mean_inputs_select_the_native_contract(self):
         for path in [
             "src/ingest/settled_conditionals.rs",
@@ -396,6 +439,16 @@ class Routing(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIn("did_you_mean", ci.select([path])["spinel_tests"])
         self.assertIn("did_you_mean", ci.select([], full=True)["spinel_tests"])
+
+    def test_net_http_exception_inputs_select_native_contract(self):
+        for path in [
+            "src/analyze/registry/stdlib.rs", "src/project.rs",
+            "tests/net_http_exceptions.rs", "tests/net_http_patch.rs",
+            "tests/emit_and_run/net_http_patch.rs",
+        ]:
+            with self.subTest(path=path):
+                self.assertIn("net_http_exceptions", ci.select([path])["spinel_tests"])
+        self.assertIn("net_http_exceptions", ci.select([], full=True)["spinel_tests"])
 
     def test_campfire_latest_is_not_planned(self):
         # Dropped: tip drift against once-campfire main is not a standing job.
