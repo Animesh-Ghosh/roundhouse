@@ -45,6 +45,9 @@ mod link_to_template_local;
 #[path = "support/view_unless_no_else.rs"]
 #[allow(dead_code)]
 mod view_unless_no_else;
+#[path = "support/nilable_string_view.rs"]
+#[allow(dead_code)]
+mod nilable_string_view;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -649,4 +652,21 @@ fn link_to_template_local_renders() {
 #[ignore]
 fn view_unless_no_else_renders() {
     assert_content_tag_test_passes(view_unless_no_else::strict_app());
+}
+
+/// #1937: a view reading a nullable string column with `==`, `!=`,
+/// `empty?` and `length` renders as Rails 8.1.4 does
+/// (`nilable_string_view::VIEW`).
+#[test]
+#[ignore]
+fn nilable_string_view_renders() {
+    assert_content_tag_test_passes(nilable_string_view::strict_app());
+}
+
+/// #1937: with the column nil, `==` and `!=` render as Rails 8.1.4
+/// does (`nilable_string_view::NIL_VIEW`).
+#[test]
+#[ignore]
+fn nilable_string_view_nil_renders() {
+    assert_content_tag_test_passes(nilable_string_view::strict_nil_app());
 }
