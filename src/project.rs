@@ -8786,7 +8786,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Monitor" | "ConditionVariable" | "Thread::ConditionVariable"
         | "UNIXServer" | "UNIXSocket" | "Open3" | "Find"
         // weakref: Ruby's own on the ruby family, `packages/weakref` on
-        // spinel. observer: Ruby's own on the ruby family; spinel's
+        // spinel, which holds its referent strongly (no weak references, so
+        // nothing a WeakRef points at is ever collected there). observer: Ruby's own on the ruby family; spinel's
         // `packages/observer` does not build in a Rails-sized tree yet, so
         // `SPINEL_LACKS` keeps the require out and the spinel branch above
         // reports the module.

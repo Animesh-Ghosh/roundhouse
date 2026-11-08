@@ -1491,7 +1491,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // true, false or nil. The referent's other methods are not modeled on
     // the reference: CRuby forwards them through method_missing, spinel's
     // package does not, so an app that runs on both reads the object with
-    // `__getobj__` and calls that.
+    // `__getobj__` and calls that. Spinel hands out no weak references:
+    // its package keeps the referent alive as long as the WeakRef, and
+    // `weakref_alive?` is always true there, so a WeakRef-keyed cache that
+    // frees memory on the ruby family never frees it on spinel.
     let weak_ref = class("WeakRef");
     register_stdlib_class(classes, "WeakRef", &[("new", weak_ref)], &[
         ("weakref_alive?", Ty::Union { variants: vec![Ty::Bool, Ty::Str, Ty::Nil].into() }),
