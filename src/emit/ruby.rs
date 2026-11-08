@@ -494,7 +494,7 @@ pub fn emit_lowered_schema_pair(app: &App) -> Vec<EmittedFile> {
 /// `main.rb`. The body itself (the data) flows through the
 /// universal walker.
 pub fn emit_lowered_routes(app: &App) -> EmittedFile {
-    let funcs = crate::lower::lower_routes_to_dispatch_functions(app);
+    let funcs = crate::lower::routes_to_library::lower_routes_to_guarded_dispatch_functions(app);
     let mut emitted = library::emit_module_file(
         &funcs,
         app,
@@ -1032,7 +1032,7 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
     // routes.rb gets a require-relative header prepended (see
     // emit_lowered_routes); emit the .rb via that path, then derive
     // the .rbs sidecar from the same funcs without the header.
-    let route_funcs = crate::lower::lower_routes_to_dispatch_functions(app);
+    let route_funcs = crate::lower::routes_to_library::lower_routes_to_guarded_dispatch_functions(app);
     files.push(emit_lowered_routes(app));
     files.extend(rbs_only_from_funcs(
         &route_funcs,

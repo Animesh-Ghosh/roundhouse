@@ -4,10 +4,11 @@
 //! `constraints host: Rails.configuration.app_host_constraint,
 //! protocol: "https://" do … end`. `host:` and `protocol:` name no path
 //! segment: Rails asks the request (`request.host`, `request.protocol`),
-//! even for a literal value (`subdomain: "api"`). The router does not, so
-//! the routes are refused like a guard object's (`route_request_guards.rs`):
-//! serving them answered requests for any host. A segment constraint
-//! still refuses a value that is no literal.
+//! even for a literal value (`subdomain: "api"`). The Ruby-family router
+//! asks it as it asks a guard object (`route_request_guards.rs`); a router
+//! that matches by verb and path alone refuses the routes, since serving
+//! them answered requests for any host. A segment constraint still
+//! refuses a value that is no literal.
 
 use roundhouse::App;
 use roundhouse::ingest::ingest_routes;
@@ -30,8 +31,10 @@ fn app(source: &str) -> App {
     app
 }
 
+/// The constraints a target whose router matches by verb and path alone refuses; the Ruby family asks them.
 fn refusals(app: &App) -> usize {
-    app.routes.diagnostics.iter().filter(|d| d.message.contains("request constraint")).count()
+    assert!(roundhouse::lower::route_guards::route_guard_gaps_for_target(app, roundhouse::project::BuildTarget::Ruby).is_empty());
+    roundhouse::lower::route_guards::route_guard_gaps_for_target(app, roundhouse::project::BuildTarget::Rust).len()
 }
 
 #[test]

@@ -3541,6 +3541,9 @@ fn target_files_inner(
     for d in crate::lower::relation_residue::default_scope_gaps_for_target(app, target) {
         emit::diagnostics::push(d);
     }
+    for d in crate::lower::route_guards::route_guard_gaps_for_target(app, target) {
+        emit::diagnostics::push(d);
+    }
     for d in crate::lower::model_to_library::select_aliases::select_alias_gaps_for_target(app, target) {
         emit::diagnostics::push(d);
     }

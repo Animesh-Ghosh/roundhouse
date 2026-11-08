@@ -631,6 +631,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         if more.is_empty() || auto.len() >= 32 {
             app.auto_source_gems = auto.into_iter().filter(|g| app.gem_lock.as_ref().is_some_and(|l| l.source.contains(g))).collect();
             super::recurring_commands::apply(&mut app, vfs, dir)?;
+            add_route_guards(&mut app);
             return Ok(app);
         }
         // Not the superseded pass's parse errors and survey gaps as well: the next pass reports them again.
@@ -638,6 +639,16 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         super::prism::rewind(marks.1);
         auto.extend(more);
     }
+}
+
+/// The request constraints the Ruby-family router asks, as `RoundhouseRouteGuards` methods typed against the request.
+fn add_route_guards(app: &mut App) {
+    let Some((class, rbs)) = crate::lower::route_guards::guard_class(&app.routes.entries) else { return };
+    let signatures = crate::rbs::parse_app_signatures(&rbs).expect("route guard signatures parse");
+    for (owner, methods) in signatures {
+        app.rbs_signatures.entry(owner).or_default().extend(methods);
+    }
+    app.library_classes.push(class);
 }
 
 fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[String]) -> IngestResult<App> {

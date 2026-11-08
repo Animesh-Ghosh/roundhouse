@@ -343,6 +343,23 @@ pub fn flatten_routes(app: &App) -> Vec<FlatRoute> {
     out
 }
 
+/// `flatten_routes` for a router that asks request constraints (the Ruby family): a route refused only
+/// for constraints `route_guards` can write stays, with the `guard_<n>` indices of each, outermost first.
+pub fn flatten_routes_asking_guards(app: &App) -> Vec<(FlatRoute, Vec<usize>)> {
+    flatten_route_entries(&app.routes.entries)
+        .into_iter()
+        .filter_map(|r| {
+            let refused_for_guards = r.refused.as_ref().is_some_and(|(param, _)| param == GUARD_REFUSAL);
+            if r.refused.is_some() && !refused_for_guards {
+                return None;
+            }
+            let indices: Option<Vec<usize>> =
+                r.guards.iter().map(|g| crate::lower::route_guards::guard_index(&app.routes.entries, g)).collect();
+            indices.map(|indices| (FlatRoute { refused: None, ..r }, indices))
+        })
+        .collect()
+}
+
 /// Every flattened route, refused ones included — for URL-helper
 /// generation, which builds a path and never matches one.
 pub fn flatten_routes_for_helpers(app: &App) -> Vec<FlatRoute> {

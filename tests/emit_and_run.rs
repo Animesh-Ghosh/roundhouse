@@ -186,6 +186,8 @@ mod file_mtime_time;
 mod class_attribute;
 #[path = "emit_and_run/gem_routes.rs"]
 mod gem_routes;
+#[path = "emit_and_run/route_request_guards.rs"]
+mod route_request_guards;
 #[path = "support/option_dsl.rs"]
 mod option_dsl;
 #[path = "emit_and_run/option_dsl.rs"]

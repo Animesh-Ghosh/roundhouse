@@ -1,15 +1,19 @@
 //! A request constraint, a lambda or an object Rails asks with the
 //! request (`constraints: ->(req) { req.format == :json }`,
-//! `constraints(SomeGuard.new) do … end`), guards its routes. The router
-//! matches by verb and path alone, so it cannot check one: the routes it
-//! guards are left out of the dispatch table and the constraint is an
-//! error where it is written, and a request reaches the routes after
-//! them. Serving them anyway answered every request the constraint
-//! refuses, which left a later route on the same path unreachable (#727).
+//! `constraints(SomeGuard.new) do … end`), guards its routes. The
+//! Ruby-family router asks it once the path matches
+//! (`RoundhouseRouteGuards`), and a request it refuses reaches the routes
+//! after it. A target whose router matches by verb and path alone refuses
+//! the routes instead, with an error where the constraint is written:
+//! serving them answered every request the constraint refuses, which left
+//! a later route on the same path unreachable (#727). A constraint no
+//! router can ask is refused at ingest.
 
 use roundhouse::App;
 use roundhouse::ingest::ingest_routes;
-use roundhouse::lower::routes::{flatten_routes, flatten_routes_for_helpers};
+use roundhouse::lower::route_guards::{guard_class, route_guard_gaps_for_target};
+use roundhouse::lower::routes::{flatten_routes, flatten_routes_asking_guards, flatten_routes_for_helpers};
+use roundhouse::project::BuildTarget;
 
 fn app(source: &str) -> App {
     let mut app = App::default();
@@ -18,21 +22,31 @@ fn app(source: &str) -> App {
     app
 }
 
+fn strict_refusals(app: &App, target: BuildTarget) -> usize {
+    route_guard_gaps_for_target(app, target).iter().filter(|d| d.severity == roundhouse::diagnostic::Severity::Error).count()
+}
+
 #[test]
-fn a_lambda_constraint_leaves_its_route_out_and_the_next_one_answers() {
+fn a_lambda_constraint_is_asked_by_the_ruby_family_and_refused_elsewhere() {
     let app = app(
         r#"get "/invite/:code", to: "widgets#show", constraints: ->(req) { req.format == :json }
 get "/invite/:code", to: "gadgets#new""#,
     );
-    let dispatched: Vec<(String, String)> = flatten_routes(&app).iter().map(|r| (r.path.clone(), r.controller.0.as_str().to_string())).collect();
-    assert_eq!(dispatched, [("/invite/:code".to_string(), "GadgetsController".to_string())], "{dispatched:?}");
-    let errors: Vec<_> = app.routes.diagnostics.iter().filter(|d| d.message.contains("request constraint")).collect();
-    assert_eq!(errors.len(), 1, "{:#?}", app.routes.diagnostics);
-    assert_eq!(errors[0].severity, roundhouse::diagnostic::Severity::Error);
+    let asked: Vec<(String, Vec<usize>)> =
+        flatten_routes_asking_guards(&app).into_iter().map(|(r, guards)| (r.controller.0.as_str().to_string(), guards)).collect();
+    assert_eq!(asked, [("WidgetsController".to_string(), vec![0]), ("GadgetsController".to_string(), vec![])], "{asked:?}");
+    let (class, rbs) = guard_class(&app.routes.entries).expect("a guard method");
+    assert_eq!(class.methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["guard_0"]);
+    assert!(rbs.contains("def self.guard_0: (ActionDispatch::Request req) -> bool"), "{rbs}");
+    assert!(!app.routes.diagnostics.iter().any(|d| d.message.contains("request constraint")), "{:#?}", app.routes.diagnostics);
+    let dispatched: Vec<String> = flatten_routes(&app).iter().map(|r| r.controller.0.as_str().to_string()).collect();
+    assert_eq!(dispatched, ["GadgetsController"], "{dispatched:?}");
+    assert_eq!(strict_refusals(&app, BuildTarget::Rust), 1);
+    assert_eq!(strict_refusals(&app, BuildTarget::Spinel), 0);
 }
 
 #[test]
-fn a_guard_object_block_refuses_every_route_inside_and_keeps_their_helpers() {
+fn a_guard_object_block_is_asked_with_matches_and_keeps_its_helpers() {
     let app = app(
         r#"constraints(AdminGuard.new) do
   get "/reports", to: "reports#index", as: :reports
@@ -40,13 +54,13 @@ fn a_guard_object_block_refuses_every_route_inside_and_keeps_their_helpers() {
 end
 get "/ping", to: "pings#show""#,
     );
-    let flat = flatten_routes(&app);
-    let dispatched: Vec<&str> = flat.iter().map(|r| r.path.as_str()).collect();
-    assert_eq!(dispatched, ["/ping"], "{dispatched:?}");
+    let asked: Vec<(String, Vec<usize>)> = flatten_routes_asking_guards(&app).into_iter().map(|(r, guards)| (r.path, guards)).collect();
+    assert_eq!(asked, [("/reports".to_string(), vec![0]), ("/audits".to_string(), vec![0]), ("/ping".to_string(), vec![])], "{asked:?}");
+    let (class, _) = guard_class(&app.routes.entries).expect("a guard method");
+    assert_eq!(roundhouse::emit::ruby::emit_expr(&class.methods[0].body), "AdminGuard.new.matches?(request)");
     let helpers: Vec<String> = flatten_routes_for_helpers(&app).iter().map(|r| r.as_name.clone()).collect();
     assert!(helpers.iter().any(|h| h == "reports") && helpers.iter().any(|h| h == "audits"), "{helpers:?}");
-    let errors = app.routes.diagnostics.iter().filter(|d| d.message.contains("request constraint")).count();
-    assert_eq!(errors, 1, "one error at the constraint: {:#?}", app.routes.diagnostics);
+    assert_eq!(strict_refusals(&app, BuildTarget::Crystal), 1, "one error at the constraint");
 }
 
 /// A constraint whose expression does not ingest (`->(req, &block) { … }`) is refused where it is
