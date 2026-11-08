@@ -239,18 +239,22 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
             }
             files
         })
-        .fold(Vec::<EmittedFile>::new(), |mut out, file| {
+        .fold((Vec::<EmittedFile>::new(), HashMap::<PathBuf, usize>::default()), |(mut out, mut at), file| {
             // Not left to the tree's last-wins dedupe: a module opened in two files (rolify's `Rolify`) would lose one opening's methods.
-            match out.iter_mut().find(|f| f.path == file.path) {
-                Some(existing) if existing.content == file.content => {}
-                Some(existing) => {
-                    existing.content.push('\n');
-                    existing.content.push_str(&file.content);
+            match at.get(&file.path) {
+                Some(&i) if out[i].content == file.content => {}
+                Some(&i) => {
+                    out[i].content.push('\n');
+                    out[i].content.push_str(&file.content);
                 }
-                None => out.push(file),
+                None => {
+                    at.insert(file.path.clone(), out.len());
+                    out.push(file);
+                }
             }
-            out
+            (out, at)
         })
+        .0
 }
 
 /// A class opened in several gem files (graphql-client's `Client`, in
