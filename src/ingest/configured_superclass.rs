@@ -449,7 +449,23 @@ impl<'a> Eval<'a> {
             Err(why) if !matches!(&*e.node, ExprNode::Return { .. }) && !why.starts_with(STOP) => {
                 let (owner, side) = self.tag_of(&frame.this);
                 let devise: HashSet<Symbol> = frame.locals.iter().filter(|(_, v)| matches!(v, Val::Class(c) if c == "Devise")).map(|(k, _)| k.clone()).collect();
-                let confined = super::gem_hooks::confined_writes(&self.known, self.calls.last().map(|c| (c.0.as_str(), c.1.as_str())), e, &devise);
+                let writer = |setter: &str| -> Option<Result<String, ()>> {
+                    let (def, _) = self.lookup_in("Devise", setter, MethodReceiver::Class, &mut HashSet::default())?;
+                    let [param] = def.params.as_slice() else { return Some(Err(())) };
+                    let body = match &*def.body.node {
+                        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+                        _ => &def.body,
+                    };
+                    match &*body.node {
+                        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+                            if name.as_str().starts_with("@@") && matches!(&*value.node, ExprNode::Var { name: v, .. } if *v == param.name) =>
+                        {
+                            Some(Ok(name.as_str().to_string()))
+                        }
+                        _ => Some(Err(())),
+                    }
+                };
+                let confined = super::gem_hooks::confined_writes(&self.known, self.calls.last().map(|c| (c.0.as_str(), c.1.as_str())), e, &devise, &writer);
                 let Some(writes) = confined.or_else(|| self.may_write_with(e, &owner, side, &mut HashSet::default(), &frame.locals)) else {
                     return Err(format!("{why}, in a statement whose writes are not known"));
                 };

@@ -154,9 +154,17 @@ pub(super) fn registers_for_later(statement: &Expr) -> bool {
 }
 
 /// What a statement passed over in a gem's method may write, when the gem's own contract bounds it tighter than its calls do.
-/// `devise` are the locals that hold `Devise` itself where the statement runs.
-pub(super) fn confined_writes(known: &HashSet<String>, caller: Option<(&str, &str)>, statement: &Expr, devise: &HashSet<crate::ident::Symbol>) -> Option<HashSet<(String, bool, String)>> {
-    // `Devise.setup do |config| … end` (`yield self`): what it runs configures Devise. An app's `if ENV[…]` around a setting leaves that setting unsure, `config.omniauth` the `@@omniauth_configs` it keeps.
+/// `devise` are the locals that hold `Devise` itself where the statement runs; `writer` answers for a setter
+/// Devise defines: `Ok` with the class variable it writes and nothing else (`def self.prefix=(v) @@prefix = v end`), `Err` for any other.
+/// `None` leaves the statement to the general analysis.
+pub(super) fn confined_writes(
+    known: &HashSet<String>,
+    caller: Option<(&str, &str)>,
+    statement: &Expr,
+    devise: &HashSet<crate::ident::Symbol>,
+    writer: &dyn Fn(&str) -> Option<Result<String, ()>>,
+) -> Option<HashSet<(String, bool, String)>> {
+    // `Devise.setup do |config| … end` (`yield self`): what it runs configures Devise. An app's `if ENV[…]` around a setting leaves that setting unsure.
     let is_devise = |p: &[crate::ident::Symbol]| p.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Devise"]);
     let mut devise = devise.clone();
     // The call itself fails only by its block's last statement: each earlier one ran, or was passed over with what it names.
@@ -177,30 +185,83 @@ pub(super) fn confined_writes(known: &HashSet<String>, caller: Option<(&str, &st
     if !known.contains("Devise") || !(caller == Some(("Devise", "setup")) || setup_call) {
         return None;
     }
-    let mut out: HashSet<(String, bool, String)> = HashSet::default();
-    fn walk(e: &Expr, devise: &HashSet<crate::ident::Symbol>, is_devise: &dyn Fn(&[crate::ident::Symbol]) -> bool, out: &mut HashSet<(String, bool, String)>) {
-        let on_devise = |r: &Expr| match &*r.node {
-            ExprNode::Var { name, .. } => devise.contains(name),
-            ExprNode::Const { path } => is_devise(path),
-            _ => false,
-        };
-        match &*e.node {
-            ExprNode::Send { recv: Some(r), method, .. } if on_devise(r) => {
-                let setting = match method.as_str() {
-                    "omniauth" => "omniauth_configs".to_string(),
-                    "warden" => "warden_config_blocks".to_string(),
-                    m if m.ends_with('=') => m.trim_end_matches('=').to_string(),
-                    _ => "*".to_string(),
-                };
-                out.insert(("Devise".to_string(), true, if setting == "*" { setting } else { format!("@@{setting}") }));
-            }
-            ExprNode::Assign { target: LValue::Attr { recv, name }, .. } | ExprNode::OpAssign { target: LValue::Attr { recv, name }, .. } if on_devise(recv) => {
-                out.insert(("Devise".to_string(), true, format!("@@{}", name.as_str())));
-            }
-            _ => {}
-        }
-        e.node.for_each_child(&mut |c| walk(c, devise, is_devise, out));
+    struct Walk<'a> {
+        devise: &'a HashSet<crate::ident::Symbol>,
+        known: &'a HashSet<String>,
+        writer: &'a dyn Fn(&str) -> Option<Result<String, ()>>,
+        out: HashSet<(String, bool, String)>,
+        general: bool,
+        /// Locals the statement itself assigns, from what bounds it (`cas_options = {}`): calls on them reach nothing of the app's.
+        fresh: HashSet<crate::ident::Symbol>,
     }
-    walk(written, &devise, &is_devise, &mut out);
-    Some(out)
+    impl Walk<'_> {
+        fn is_devise_recv(&self, r: &Expr) -> bool {
+            match &*r.node {
+                ExprNode::Var { name, .. } => self.devise.contains(name),
+                ExprNode::Const { path } => path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Devise"]),
+                _ => false,
+            }
+        }
+        fn setting(&mut self, name: &str) {
+            let tag = match name {
+                "omniauth" => "@@omniauth_configs".to_string(),
+                "warden" => "@@warden_config_blocks".to_string(),
+                // Not by its name where Devise defines the setter: one of its own may keep another (`mailer=` writes `@@mailer_ref`). One defined
+                // nowhere read here is a `mattr_accessor` of a gem or an initializer not read (mastodon's `ldap_*`, devise_pam's `pam_*`), as Devise's settings are.
+                m if m.ends_with('=') => match (self.writer)(m) {
+                    Some(Ok(cvar)) => cvar,
+                    Some(Err(())) => "*".into(),
+                    None => format!("@@{}", m.trim_end_matches('=')),
+                },
+                _ => "*".into(),
+            };
+            self.out.insert(("Devise".to_string(), true, tag));
+        }
+        fn visit(&mut self, e: &Expr) {
+            match &*e.node {
+                // Not run as the statement runs: a lambda handed to a setting (`setup: ->(env) { … }`), or the block `config.warden` keeps.
+                ExprNode::Lambda { .. } => return,
+                ExprNode::Send { recv: None, method, block: Some(_), args, .. } if args.is_empty() && matches!(method.as_str(), "lambda" | "proc") => return,
+                ExprNode::Send { recv: Some(r), method, args, block, .. } if self.is_devise_recv(r) => {
+                    self.setting(method.as_str());
+                    for a in args {
+                        self.visit(a);
+                    }
+                    if let Some(b) = block {
+                        self.visit(b);
+                    }
+                    return;
+                }
+                ExprNode::Assign { target: LValue::Attr { recv, name }, value } | ExprNode::OpAssign { target: LValue::Attr { recv, name }, value, .. } if self.is_devise_recv(recv) => {
+                    self.setting(&format!("{}=", name.as_str()));
+                    self.visit(value);
+                    return;
+                }
+                // Not a form whose writes the settings named bound: `config` handed on or aliased, a write to anything else, a call of the app's.
+                ExprNode::Var { name, .. } if self.devise.contains(name) => self.general = true,
+                ExprNode::MultiAssign { .. } => self.general = true,
+                ExprNode::Assign { target: LValue::Var { name, .. }, value } if !name.as_str().starts_with("@@") && !name.as_str().starts_with('$') => {
+                    self.visit(value);
+                    self.fresh.insert(name.clone());
+                    return;
+                }
+                ExprNode::Assign { target: LValue::Index { recv, .. }, .. } | ExprNode::OpAssign { target: LValue::Index { recv, .. }, .. }
+                    if matches!(&*recv.node, ExprNode::Var { name, .. } if self.fresh.contains(name)) => {}
+                ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } if !matches!(target, LValue::Var { name, .. } if !name.as_str().starts_with("@@") && !name.as_str().starts_with('$')) => self.general = true,
+                ExprNode::Send { recv: None, method, .. } if !matches!(method.as_str(), "lambda" | "proc" | "raise" | "require" | "require_relative" | "format" | "sprintf") => self.general = true,
+                ExprNode::Send { recv: Some(r), .. } if matches!(&*r.node, ExprNode::Var { name, .. } if self.fresh.contains(name)) => {}
+                ExprNode::Send { recv: Some(r), .. } => match &*r.node {
+                    // A framework's (`Rails.configuration.x`, `ENV`), whose methods write none of the program's.
+                    ExprNode::Const { path } if !self.known.contains(&path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::")) => {}
+                    ExprNode::Send { .. } | ExprNode::Const { .. } | ExprNode::Lit { .. } | ExprNode::StringInterp { .. } | ExprNode::Array { .. } | ExprNode::Hash { .. } => {}
+                    _ => self.general = true,
+                },
+                _ => {}
+            }
+            e.node.for_each_child(&mut |c| self.visit(c));
+        }
+    }
+    let mut walk = Walk { devise: &devise, known, writer, out: HashSet::default(), general: false, fresh: HashSet::default() };
+    walk.visit(written);
+    (!walk.general).then_some(walk.out)
 }
