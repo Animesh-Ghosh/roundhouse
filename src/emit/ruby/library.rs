@@ -11427,7 +11427,14 @@ fn apply_enum_raw_input_lowering(lcs: &mut [LibraryClass], app: &App) {
         return;
     }
     for model in &app.models {
-        let columns: Vec<Symbol> = model.enums.keys().filter(|c| demanded.contains(*c)).cloned().collect();
+        // By model: another model's generated reader doesn't replace this one's own.
+        let columns: Vec<Symbol> = model
+            .enums
+            .keys()
+            .filter(|c| demanded.contains(*c))
+            .filter(|c| !crate::analyze::source_instance_method(app, &model.name, &format!("{c}_before_type_cast")))
+            .cloned()
+            .collect();
         if columns.is_empty() {
             continue;
         }

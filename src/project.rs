@@ -9053,7 +9053,24 @@ fn report_config_for(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, false, target.as_str()));
 }
 
+/// A generated enum `<column>_before_type_cast` needs the value as
+/// assigned. Roda too: it copies these calls without the ruby emit's reader.
+fn report_enum_before_type_cast(app: &App, target: BuildTarget) {
+    if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura) {
+        return;
+    }
+    for read in crate::analyze::generated_reads(app).into_iter().filter(|read| !read.span.is_synthetic()) {
+        emit::diagnostics::report_unsupported(
+            read.span,
+            target.as_str(),
+            "enum_before_type_cast",
+            format!("#{} needs the value as assigned, which only the ruby family and spinel keep; a stored-value reader is not equivalent", read.method),
+        );
+    }
+}
+
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
+    report_enum_before_type_cast(app, target);
     if puma_boot_hooks(app) && !matches!(target, BuildTarget::Blog | BuildTarget::Futamura | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
         let method = app.library_classes.iter().find(|c| c.name.0.as_str() == crate::ingest::puma_boot::CLASS).unwrap().methods.iter()
             .find(|method| method.name.as_str() == crate::ingest::puma_boot::BOOTED).unwrap();
@@ -9506,20 +9523,6 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 target,
                 "json_writer",
                 format!("the compiled `render json:` encoder (`#{method}`) is verified on the ruby family, spinel, Rust, TypeScript, Python, Crystal, C#, Kotlin, Swift, Elixir and Go only"),
-            );
-        }
-        if let crate::expr::ExprNode::Send { method, .. } = &*expr.node
-            && target != "spinel"
-            && target != "jruby"
-            && !expr.span.is_synthetic()
-            && let Some(column) = method.as_str().strip_suffix("_before_type_cast")
-            && crate::analyze::raw_input_columns(app).contains(&crate::ident::Symbol::from(column))
-        {
-            emit::diagnostics::report_unsupported(
-                expr.span,
-                target,
-                "enum_before_type_cast",
-                format!("#{method} needs the value as assigned, which only the ruby family and spinel keep; a stored-value reader is not equivalent"),
             );
         }
         if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node

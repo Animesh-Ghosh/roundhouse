@@ -4,50 +4,99 @@
 //! Spinel keep the assigned value for these columns only; the other
 //! targets refuse the reader at the project boundary.
 
-use crate::dialect::MethodReceiver;
+use crate::ident::ClassId;
+use crate::span::Span;
+use crate::ty::Ty;
 use crate::{App, Expr, ExprNode, Symbol};
 use std::collections::BTreeSet;
 
-/// Enum columns whose generated reader the app calls. By name: label
-/// rewriting runs before receivers are typed. A column is left out when
-/// every model declaring it defines the reader itself.
+/// One call of a generated `<column>_before_type_cast`.
+pub(crate) struct GeneratedRead {
+    pub(crate) span: Span,
+    pub(crate) method: Symbol,
+    pub(crate) column: Symbol,
+}
+
+/// Enum columns whose generated reader the app calls.
 pub(crate) fn raw_input_columns(app: &App) -> BTreeSet<Symbol> {
-    if app.models.iter().all(|model| model.enums.is_empty()) {
-        return BTreeSet::new();
+    generated_reads(app).into_iter().map(|read| read.column).collect()
+}
+
+/// Whether this call reaches a generated reader. A receiver or enclosing
+/// model that's known answers for itself. Otherwise (label rewriting runs
+/// before receivers are typed, and a concern's bare call has no one model)
+/// it's generated when any model declaring the column doesn't define it.
+fn reaches_generated(app: &App, owner: Option<&ClassId>, recv: Option<&Expr>, method: &str, column: &Symbol) -> bool {
+    let receiver = match recv.map(|r| (&*r.node, r.ty.as_ref())) {
+        None | Some((ExprNode::SelfRef, _)) => owner,
+        Some((_, Some(Ty::Class { id, .. }))) => Some(id),
+        Some(_) => None,
+    };
+    let generated_on = |model: &crate::dialect::Model| {
+        model.enums.contains_key(column) && !crate::analyze::source_instance_method(app, &model.name, method)
+    };
+    match receiver.and_then(|id| app.models.iter().find(|m| &m.name == id)) {
+        Some(model) => generated_on(model),
+        None => app.models.iter().any(generated_on),
     }
-    fn walk(expr: &Expr, app: &App, out: &mut BTreeSet<Symbol>) {
-        if let ExprNode::Send { method, .. } = &*expr.node
+}
+
+/// Every call of a generated reader, in any body the app's emit carries.
+pub(crate) fn generated_reads(app: &App) -> Vec<GeneratedRead> {
+    if app.models.iter().all(|model| model.enums.is_empty()) {
+        return Vec::new();
+    }
+    fn walk(expr: &Expr, owner: Option<&ClassId>, app: &App, out: &mut Vec<GeneratedRead>) {
+        if let ExprNode::Send { recv, method, .. } = &*expr.node
             && let Some(column) = method.as_str().strip_suffix("_before_type_cast")
         {
             let column = Symbol::from(column);
-            let generated = app.models.iter().any(|m| {
-                m.enums.contains_key(&column) && !crate::analyze::source_instance_method(app, &m.name, method.as_str())
-            });
-            if generated {
-                out.insert(column);
+            if reaches_generated(app, owner, recv.as_ref(), method.as_str(), &column)
+                && !out.iter().any(|read| !expr.span.is_synthetic() && read.span == expr.span)
+            {
+                out.push(GeneratedRead { span: expr.span, method: method.clone(), column });
             }
         }
-        expr.node.for_each_child(&mut |child| walk(child, app, out));
+        expr.node.for_each_child(&mut |child| walk(child, owner, app, out));
     }
-    let mut out = BTreeSet::new();
-    crate::lower::for_each_hook_body_ref(app, &mut |body| walk(body, app, &mut out));
+    let mut out = Vec::new();
+    crate::lower::for_each_owned_hook_body_ref(app, &mut |owner, body| walk(body, owner, app, &mut out));
     for model in &app.models {
-        for method in model.methods().filter(|m| m.receiver == MethodReceiver::Instance) {
-            walk(&method.body, app, &mut out);
+        for method in model.methods() {
+            walk(&method.body, Some(&model.name), app, &mut out);
         }
     }
     for view in &app.views {
-        walk(&view.body, app, &mut out);
+        walk(&view.body, None, app, &mut out);
     }
     for class in &app.library_classes {
         for method in &class.methods {
-            walk(&method.body, app, &mut out);
+            walk(&method.body, Some(&class.name), app, &mut out);
         }
     }
     for module in &app.test_modules {
-        for test in &module.tests {
-            walk(&test.body, app, &mut out);
+        if let Some(setup) = &module.setup {
+            walk(setup, None, app, &mut out);
         }
+        for body in module.tests.iter().map(|t| &t.body).chain(module.helpers.iter().map(|h| &h.body)) {
+            walk(body, None, app, &mut out);
+        }
+        for class in &module.inner_classes {
+            for method in &class.methods {
+                walk(&method.body, Some(&class.name), app, &mut out);
+            }
+        }
+    }
+    for fixture in &app.fixtures {
+        for expr in &fixture.preamble {
+            walk(expr, None, app, &mut out);
+        }
+    }
+    for helper in &app.routes.direct_helpers {
+        walk(&helper.body, None, app, &mut out);
+    }
+    if let Some(seeds) = &app.seeds {
+        walk(seeds, None, app, &mut out);
     }
     out
 }

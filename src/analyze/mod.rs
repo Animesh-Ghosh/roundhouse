@@ -26,7 +26,7 @@
 mod alba;
 pub(crate) mod assoc_pluck;
 mod enum_raw_input;
-pub(crate) use enum_raw_input::raw_input_columns;
+pub(crate) use enum_raw_input::{generated_reads, raw_input_columns};
 mod body;
 pub(crate) use body::some_operands_take_it;
 mod class_configuration;

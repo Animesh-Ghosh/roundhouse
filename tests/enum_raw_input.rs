@@ -119,6 +119,93 @@ fn an_enum_default_reads_as_its_label() {
         .assert_passes();
 }
 
+fn state_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("db/schema.rb", "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\"")
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  enum :state, { draft: 0, published: 1 }\n")
+}
+
+const READ: &str = "Article.new(state: :published).state_before_type_cast";
+
+/// Apps whose only read of the generated reader is in one kind of body.
+fn apps_reading_it_in_one_body() -> Vec<(&'static str, emit_and_run::Overlay)> {
+    let test = |body: String| format!("require \"test_helper\"\n\nclass ArticleProbeTest < ActiveSupport::TestCase\n{body}end\n");
+    vec![
+        ("test helper", state_app().write("test/models/article_probe_test.rb",
+            &test(format!("  def raw\n    {READ}\n  end\n\n  test \"reads\" do\n    assert_equal :published, raw\n  end\n")))),
+        ("test setup", state_app().write("test/models/article_probe_test.rb",
+            &test(format!("  setup do\n    @raw = {READ}\n  end\n\n  test \"reads\" do\n    assert_equal :published, @raw\n  end\n")))),
+        ("fixture preamble", state_app().write("test/fixtures/articles.yml",
+            &format!("<% RAW_STATE = {READ} %>\none:\n  title: t\n  body: a body long enough\n"))),
+        ("direct helper", state_app().edit("config/routes.rb", "  root \"articles#index\"\n",
+            &format!("  root \"articles#index\"\n  direct(:raw_state) {{ \"/\" + {READ}.to_s }}\n"))),
+    ]
+}
+
+/// However the reader is reached, the ruby target has it.
+#[test]
+fn a_read_in_any_body_gets_the_reader() {
+    for (body, app) in apps_reading_it_in_one_body() {
+        let (emitted, _) = app.emit(roundhouse::project::BuildTarget::Ruby);
+        let model = std::fs::read_to_string(emitted.join("app/models/article.rb")).expect("the emitted model");
+        assert!(model.contains("def state_before_type_cast"), "{body}: no reader in\n{model}");
+    }
+}
+
+#[test]
+fn a_read_in_any_body_is_refused_on_strict_targets() {
+    for (body, app) in apps_reading_it_in_one_body() {
+        let (_, errors) = app.emit(roundhouse::project::BuildTarget::Go);
+        assert!(errors.iter().any(|e| e.contains("enum_before_type_cast not supported (go)")), "{body}: {errors:?}");
+    }
+}
+
+/// One model defines the reader and another's is generated: Article and
+/// Comment share an enum column.
+fn two_models_app() -> emit_and_run::Overlay {
+    state_app()
+        .edit("db/schema.rb", "create_table \"comments\", force: :cascade do |t|",
+            "create_table \"comments\", force: :cascade do |t|\n    t.integer \"state\"")
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def raw_state\n    state_before_type_cast\n  end\n\n")
+        .edit("app/models/comment.rb", "class Comment < ApplicationRecord\n",
+            "class Comment < ApplicationRecord\n  enum :state, { draft: 0, published: 1 }\n\n  def state_before_type_cast\n    \"custom\"\n  end\n\n  def raw_state\n    state_before_type_cast\n  end\n\n")
+}
+
+#[test]
+fn another_models_generated_reader_leaves_a_source_reader_alone() {
+    two_models_app()
+        .run_ruby("raise Comment.new(state: :published).raw_state.inspect unless Comment.new(state: :published).raw_state == 'custom'\nraise 'state' unless Comment.new(state: :published).state == 'published'\nraise Article.new(state: :published).raw_state.inspect unless Article.new(state: :published).raw_state == :published")
+        .assert_passes();
+}
+
+#[test]
+fn strict_targets_refuse_only_the_generated_reader() {
+    let (_, errors) = two_models_app().emit(roundhouse::project::BuildTarget::Go);
+    let refused: Vec<&String> = errors.iter().filter(|e| e.contains("enum_before_type_cast")).collect();
+    // One call in each model; only Article's reader is generated.
+    assert_eq!(refused.len(), 1, "{errors:?}");
+}
+
+#[test]
+fn roda_refuses_the_generated_reader() {
+    let (_, errors) = raw_state_app().emit(roundhouse::project::BuildTarget::Roda);
+    assert!(errors.iter().any(|e| e.contains("enum_before_type_cast not supported (roda)")), "{errors:?}");
+}
+
+#[test]
+fn roda_keeps_a_source_reader() {
+    let (_, errors) = emit_and_run::real_blog()
+        .edit("db/schema.rb", "create_table \"articles\", force: :cascade do |t|",
+            "create_table \"articles\", force: :cascade do |t|\n    t.integer \"state\"")
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  enum :state, { draft: 0, published: 1 }\n\n  def state_before_type_cast\n    \"custom\"\n  end\n\n  def raw_state\n    state_before_type_cast\n  end\n\n")
+        .emit(roundhouse::project::BuildTarget::Roda);
+    assert!(!errors.iter().any(|e| e.contains("enum_before_type_cast")), "{errors:?}");
+}
+
 #[test]
 fn strict_targets_refuse_enum_before_type_cast() {
     let (_, errors) = raw_state_app().emit(roundhouse::project::BuildTarget::Go);
