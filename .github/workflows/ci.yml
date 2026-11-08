@@ -953,7 +953,8 @@ jobs:
     runs-on: ubuntu-latest
     # 30m: upstream's shards take 11-14m, but a fork's runners take about
     # 1.7x that (a 20m bound cut a passing shard 2 there, fork run
-    # 38923600903). Still short of papering over a hung suite.
+    # 38923600903). Still short of papering over a hung suite. The script
+    # stops its suites at 27m, so this bound only catches a slow setup.
     timeout-minutes: 30
 
     continue-on-error: ${{ needs.plan.outputs.spinel-advisory == 'true' }}
@@ -1014,8 +1015,9 @@ jobs:
           CI_SPINEL_TIMINGS: ${{ needs.plan.outputs.spinel-timings }}
           CI_SPINEL_TIMINGS_OUT: ${{ runner.temp }}/spinel-timings/framework-${{ matrix.shard }}.jsonl
         run: scripts/ci-spinel-framework.sh
+      # Not !cancelled(): a job past its limit reads as cancelled, and its finished suites' seconds still count.
       - name: Upload recorded test seconds
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v7
         with:
           name: spinel-timings-framework-${{ matrix.shard }}

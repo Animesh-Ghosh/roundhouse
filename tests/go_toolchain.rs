@@ -36,12 +36,18 @@ mod nested_route_helper_record;
 #[path = "support/ivar_named_local.rs"]
 #[allow(dead_code)]
 mod ivar_named_local;
+#[path = "support/record_if_condition.rs"]
+#[allow(dead_code)]
+mod record_if_condition;
 #[path = "support/link_to_template_local.rs"]
 #[allow(dead_code)]
 mod link_to_template_local;
 #[path = "support/each_no_param.rs"]
 #[allow(dead_code)]
 mod each_no_param;
+#[path = "support/view_unless_no_else.rs"]
+#[allow(dead_code)]
+mod view_unless_no_else;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -615,6 +621,22 @@ fn ivar_named_local_renders() {
     assert_content_tag_test_passes(ivar_named_local::strict_app());
 }
 
+/// #1909: a record as an `if` condition renders as Rails 8.1.4 does
+/// (`record_if_condition::VIEW`).
+#[test]
+#[ignore]
+fn record_if_condition_renders() {
+    assert_content_tag_test_passes(record_if_condition::strict_app());
+}
+
+/// #1909: an assignment as the `if` condition, the record read in the
+/// branch, renders as Rails 8.1.4 does (`record_if_condition::ASSIGN_VIEW`).
+#[test]
+#[ignore]
+fn record_if_assignment_renders() {
+    assert_content_tag_test_passes(record_if_condition::strict_assign_app());
+}
+
 /// #1898: a record in a local the template assigns, handed to
 /// `link_to`'s url helper, renders as Rails 8.1.4 does
 /// (`link_to_template_local::VIEW`).
@@ -630,4 +652,12 @@ fn link_to_template_local_renders() {
 #[ignore]
 fn each_no_param_renders() {
     assert_content_tag_test_passes(each_no_param::strict_app());
+}
+
+/// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
+/// does (`view_unless_no_else::VIEW`).
+#[test]
+#[ignore]
+fn view_unless_no_else_renders() {
+    assert_content_tag_test_passes(view_unless_no_else::strict_app());
 }

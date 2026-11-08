@@ -2362,7 +2362,15 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
             ExprNode::Defined { operand }
                 if target == BuildTarget::Spinel && !load_time
                     && matches!(&*operand.node, ExprNode::Const { .. }) => None,
+            // `defined?(@x)` in a method: Spinel answers whether the object's ivar was ever set, nil included, as CRuby does.
+            ExprNode::Defined { operand }
+                if target == BuildTarget::Spinel && !load_time
+                    && matches!(&*operand.node, ExprNode::Ivar { .. }) => None,
             ExprNode::Defined { .. } => Some("runtime defined? query"),
+            // A `define_method` block's `&block`, kept by ingest: only the Ruby emitter (Spinel's and Roda's too) binds it.
+            ExprNode::Lambda { block_param: Some(_), .. } if !matches!(target, BuildTarget::Spinel | BuildTarget::Roda) => {
+                Some("block parameter of a block")
+            }
             // The Ruby emitter (Spinel's and Roda's too) renders the whole
             // signature; the other emitters read only the required names
             // and would drop the rest, which the body still reads.
@@ -3395,6 +3403,15 @@ fn target_files_inner(
         }
         None => app,
     };
+    if !target.supports_generated_column_insert_returning() && target != BuildTarget::Blog {
+        for table in app.schema.tables.values() {
+            for column in &table.columns {
+                if column.computed_default().is_some_and(|sql| !["CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME"].contains(&sql.to_ascii_uppercase().as_str())) {
+                    return Err(format!("{} target does not support SQL-function default persistence for `{}.{}`", target.as_str(), table.name, column.name));
+                }
+            }
+        }
+    }
     if target == BuildTarget::Roda {
         if let Some((table, column)) = app.schema.tables.values().find_map(|table| {
             table

@@ -101,6 +101,7 @@ SPINEL_TESTS = [
     "spinel_db_contract",
     "generated_columns_spinel",
     "schema_constraints",
+    "schema_default_expressions",
     "postgres_json_types_spinel",
     "array_column_storage_spinel",
     "pessimistic_locking",
@@ -591,6 +592,14 @@ def native_coverage(path):
         "src/lower/model_to_library/mod.rs",
     } or path.startswith("tests/support/schema_constraints_"):
         suites.add("schema_constraints")
+    if path in {
+        "tests/schema_default_expressions.rs", "src/schema.rs", "src/schema/generated.rs",
+        "src/ingest/schema.rs", "src/emit/shared/schema_sql.rs", "src/emit/roda.rs",
+        "src/lower/arel/ir.rs", "src/lower/arel/visitor.rs", "src/lower/model_to_library/mod.rs",
+        "src/lower/model_to_library/adapter_emit/mod.rs",
+        "src/lower/model_to_library/schema.rs", "src/session.rs", "src/project.rs",
+    } or path.startswith("tests/support/schema_defaults_"):
+        suites.add("schema_default_expressions")
     if path in JSON_TYPES_SPINEL_INPUTS:
         suites.add("postgres_json_types_spinel")
     if path in APP_REOPENS_INPUTS:
@@ -808,6 +817,16 @@ def select(
             spinel_tests.add("render_json_encoder_spinel")
             reasons.append(f"{path}: shared controller runtime on every extra language")
 
+        if path in {
+            "src/analyze/data.rs",
+            "src/ingest/library_class.rs",
+            "tests/data_factory_constants.rs",
+            "tests/emit_and_run/data_record_siblings.rs",
+            "tests/support/data_record_siblings.rs",
+        }:
+            reasons.append(f"{path}: unit and spinel-toolchain (file-level Data records)")
+            spinel = True
+            jobs_selected.update(CORE)
         if path in {"tests/emit_and_run/class_body_calls.rs", "tests/support/class_body_calls.rs"}:
             reasons.append(f"{path}: unit (emit_and_run), spinel-toolchain (ordinary class-body calls)")
             spinel = True
@@ -1054,17 +1073,21 @@ def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS, timings=
     return sorted(mine)
 
 
-def record_timing(kind, name, seconds, ok):
+def record_timing(kind, name, seconds, ok, timed_out=False):
     if out := os.environ.get("CI_SPINEL_TIMINGS_OUT"):
         Path(out).parent.mkdir(parents=True, exist_ok=True)
+        record = {"kind": kind, "name": name, "seconds": max(round(seconds), 1), "ok": ok}
+        if timed_out:
+            record["timed_out"] = True
         with open(out, "a") as f:
-            f.write(json.dumps({"kind": kind, "name": name, "seconds": max(round(seconds), 1), "ok": ok}) + "\n")
+            f.write(json.dumps(record) + "\n")
 
 
 def run_timed(kind, name, command, charged=0):
     start = time.monotonic()
     status = subprocess.run(command).returncode
-    record_timing(kind, name, time.monotonic() - start + charged, status == 0)
+    # 124 is timeout(1) stopping the command: its seconds are still worth recording.
+    record_timing(kind, name, time.monotonic() - start + charged, status == 0, status == 124)
     return status
 
 
@@ -1097,15 +1120,21 @@ def run_tests(kind, tests, parallel, command):
 
 
 def merge_timings(previous, records, weight=0.5):
-    """Each passing test's seconds averaged into its last value; failures keep the last value."""
+    """Each passing test's seconds averaged into its last value; failures keep the last value.
+
+    A stopped test's seconds are a floor: they can raise its value, never lower it, so the slowest runs still count.
+    """
     merged = {kind: dict(previous.get(kind, {})) for kind in SPINEL_TIMING_KINDS}
     for record in records:
         kind, name, seconds = record.get("kind"), record.get("name"), record.get("seconds")
         if not isinstance(kind, str) or kind not in merged or not isinstance(name, str):
             continue
-        if record.get("ok") is not True or not positive_seconds(seconds):
+        timed_out = record.get("timed_out") is True
+        if (record.get("ok") is not True and not timed_out) or not positive_seconds(seconds):
             continue
         last = merged[kind].get(name)
+        if timed_out and last and seconds <= last:
+            continue
         merged[kind][name] = round(last + (seconds - last) * weight) if last else round(seconds)
     return merged
 
@@ -1398,7 +1427,8 @@ def main():
             print(test)
         return False
     if args.command == "timed":
-        return run_timed(args.kind, args.name, command) != 0
+        # The command's own status: the framework loop tells timeout(1)'s 124 from a failure.
+        return run_timed(args.kind, args.name, command)
     if args.command == "run-tests":
         tests = [line.strip() for line in sys.stdin if line.strip()]
         return run_tests(args.kind, tests, args.parallel, command)

@@ -46,6 +46,10 @@ mod rack_mounts;
 mod time_change_usec_contract;
 #[path = "spinel_toolchain/time_change_usec.rs"]
 mod time_change_usec;
+#[path = "support/option_dsl.rs"]
+mod option_dsl;
+#[path = "spinel_toolchain/option_dsl.rs"]
+mod option_dsl_native;
 #[path = "support/string_truncate.rs"]
 mod string_truncate;
 #[path = "spinel_toolchain/string_truncate.rs"]
@@ -78,6 +82,10 @@ fn ordinary_class_body_calls_run_natively() {
 mod dry_initializer;
 #[path = "support/data_factory.rs"]
 mod data_factory;
+#[path = "support/data_record_siblings.rs"]
+mod data_record_siblings_contract;
+#[path = "spinel_toolchain/data_record_siblings.rs"]
+mod data_record_siblings;
 #[path = "support/relation_fork.rs"]
 mod relation_fork_contract;
 #[path = "spinel_toolchain/relation_fork.rs"]

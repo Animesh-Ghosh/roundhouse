@@ -355,7 +355,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             // else: ... }`. Invert before emit so we don't produce
             // an invalid bare-nil then-block.
             if is_nil_lit(then_branch) && !is_nil_lit(else_branch) {
-                let cond_s = emit_expr(ctx, cond);
+                let cond_s = emit_cond(ctx, cond);
                 let else_s = emit_block_body(&ctx.enter_scope(), else_branch);
                 return format!("if !({cond_s}) {{\n{else_s}\n}}");
             }
@@ -373,7 +373,7 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
                     };
                     (init, cond.to_string(), child)
                 }
-                None => (String::new(), emit_expr(ctx, cond), ctx.enter_scope()),
+                None => (String::new(), emit_cond(ctx, cond), ctx.enter_scope()),
             };
             let then_s = emit_block_body(&then_ctx, then_branch);
             // `return X if cond` lowers to If { else: Lit::Nil } —
@@ -2844,6 +2844,25 @@ pub(super) struct IsAInit {
     pub asserted_ident: &'static str,
 }
 
+/// An `if` condition. A record (a class Go holds by pointer) answers
+/// Ruby's truthiness, which for an object is "not nil"; Go wants a
+/// bool, so the condition is `!= nil`. Anything else emits as written.
+///
+/// An assignment as the condition (`if (rec = @article)`) is a statement
+/// in Go: it becomes the `if`'s init, and the test reads the local.
+fn emit_cond(ctx: &EmitCtx, cond: &Expr) -> String {
+    let cond_s = emit_expr(ctx, cond);
+    match cond.ty.as_ref().map(Ty::peel_nilable) {
+        Some(Ty::Class { id, .. }) if id.0.as_str() != "Time" => match &*cond.node {
+            ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, .. } => {
+                format!("{cond_s}; {} != nil", super::library::sanitize(name.as_str()))
+            }
+            _ => format!("{cond_s} != nil"),
+        },
+        _ => cond_s,
+    }
+}
+
 /// Build the `IsAInit` for an `is_a?` predicate that has a mapped
 /// Go assertion type. Returns `None` if either the shape or the
 /// class isn't supported, so callers can fall through to the
@@ -4113,7 +4132,7 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
                     };
                     (init, cond.to_string(), child)
                 }
-                None => (String::new(), emit_expr(ctx, cond), ctx.enter_scope()),
+                None => (String::new(), emit_cond(ctx, cond), ctx.enter_scope()),
             };
             indent(out, depth);
             out.push_str(&format!("if {init}{cond_s} {{\n"));

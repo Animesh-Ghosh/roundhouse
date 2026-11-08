@@ -403,6 +403,8 @@ fn parse_column_def(
         col_type,
         nullable,
         default,
+        default_expression: None,
+        legacy_default_persistence: false,
         primary_key: top_level_words(modifiers).windows(2)
             .any(|words| words[0].1 == "PRIMARY" && words[1].1 == "KEY"),
         generated,

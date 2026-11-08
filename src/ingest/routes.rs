@@ -1719,6 +1719,10 @@ fn retag_scope(entries: &mut Vec<RouteSpec>, scope: ResourceScope) {
 /// time the outer block merges here, any param the inner block set is
 /// already present on the child's `constraints` map and `or_insert`
 /// leaves it alone.
+pub(super) fn apply_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, String>) {
+    merge_outer_constraints(entries, outer)
+}
+
 fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, String>) {
     if outer.is_empty() {
         return;
@@ -1736,13 +1740,21 @@ fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, S
                 }
                 merge_outer_constraints(nested, outer);
             }
-            RouteSpec::Scope { entries, .. } => {
+            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => {
                 merge_outer_constraints(entries, outer);
             }
             RouteSpec::Root { .. } | RouteSpec::RackMount { .. } => {}
+            RouteSpec::Deferred { constraints, .. } => {
+                for (k, v) in outer {
+                    constraints.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
         }
     }
 }
+
+/// The call `ingest::gem_routes` writes around routes drawn under a scope the method set for itself.
+pub(super) const EXCLUSIVE_SCOPE: &str = "__roundhouse_exclusive_scope";
 
 std::thread_local! {
     /// The constants the app's route files read, folded from their owners
@@ -2318,6 +2330,15 @@ fn redirect_expression_is_string_in(
     }
 }
 
+thread_local! {
+    static GEM_DSL: RefCell<HashSet<String>> = RefCell::new(HashSet::default());
+}
+
+/// The routing methods gems add to the mapper (`ingest::gem_routes`), read in place for later.
+pub(super) fn set_gem_dsl(names: HashSet<String>) {
+    GEM_DSL.with(|g| *g.borrow_mut() = names);
+}
+
 /// Recognize a route DSL call; unknown calls return an unsupported-DSL error.
 fn ingest_route_call(
     call: &ruby_prism::CallNode<'_>,
@@ -2449,6 +2470,10 @@ fn ingest_route_call(
         // `ingest::devise_routes`. Controllers override via
         // `controllers:`. Does not model Warden or OmniAuth callbacks.
         "devise_for" => super::devise_routes::ingest_devise_for(call, file),
+        // Written only by `ingest::gem_routes`: the routes a gem's method drew under a scope it set for itself.
+        EXCLUSIVE_SCOPE if call.receiver().is_none() && GEM_DSL.with(|g| !g.borrow().is_empty()) => {
+            Ok(Some(RouteSpec::Exclusive { entries: block_entries(call, file, None, cx)? }))
+        }
         // A block-taking method the app added to the mapper
         // (`routing_method :x do … end`): a scope over the enclosing
         // mapper that changes no path.
@@ -2461,6 +2486,16 @@ fn ingest_route_call(
             suppress_helpers: false, mount: false, within: ResourceScope::Nested,
             entries: block_entries(call, file, parent, cx)?,
         })),
+        // A gem's own routing method: kept where it stands, drawn once its body can run.
+        _ if call.receiver().is_none() && GEM_DSL.with(|g| g.borrow().contains(method)) => {
+            let call_expr = super::expr::ingest_expr(&call.as_node(), file)?;
+            let span = Span {
+                file: super::sources::file_id(file),
+                start: call.location().start_offset() as u32,
+                end: call.location().end_offset() as u32,
+            };
+            Ok(Some(RouteSpec::Deferred { call: call_expr, span, constraints: IndexMap::new() }))
+        }
         // Unknown DSL — `concern`, `use_doorkeeper`, and Devise's
         // route-authentication guards (`authenticate` / `authenticated` /
         // `unauthenticated`), among others, land here. Strict ingest fails
@@ -3666,11 +3701,15 @@ fn ingest_explicit_route(
     // A symbol verb with `path:` keeps the symbol as its action and name
     // (`post :render_x, path: "x"` is `render_x`) and takes the option as
     // its URL segment; a string verb ignores the option, as Rails does.
+    // Not `as:` a canonical action's symbol: Rails names the route by it as it names a bare symbol verb, so on a member or collection it adds nothing (devise's `post :create, path: "sign_in"` is `user_session`).
     if let (true, Some(segment), Some(symbol)) = (action_symbol, path_kwarg, path.clone()) {
         action_kwarg = action_kwarg.or_else(|| Some(symbol.replace('-', "_")));
-        as_name = as_name.or_else(|| Some(Symbol::from(symbol.replace('-', "_").as_str())));
         path = Some(format!("/{}", segment.trim_start_matches('/')));
-        action_symbol = false;
+        let targeted = to.is_some() || redirect_target.is_some() || to_is_unsupported.is_some();
+        if targeted || action_kwarg.as_deref() != Some(symbol.replace('-', "_").as_str()) || !matches!(symbol.as_str(), "index" | "create" | "new" | "show" | "update" | "destroy") {
+            as_name = as_name.or_else(|| Some(Symbol::from(symbol.replace('-', "_").as_str())));
+            action_symbol = false;
+        }
     }
 
     // `scope controller: :x do get :y end` — the scope's controller is the
@@ -4002,6 +4041,7 @@ fn ingest_resources_route(
     // and into this node's own `constraints` field below, once the
     // block body has been ingested.
     let mut constraints: IndexMap<Symbol, String> = IndexMap::new();
+    let mut path_names: IndexMap<Symbol, String> = IndexMap::new();
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -4125,6 +4165,23 @@ fn ingest_resources_route(
                         )?);
                     }
                 }
+                // `path_names: { new: "sign_up" }` renames the `new` and `edit` segments. Rails also names a block's own action by it (`get :cancel`), which is read only where the name is the action's own.
+                "path_names" => {
+                    let Some(h) = value.as_hash_node() else {
+                        return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names:` is not a literal Hash") });
+                    };
+                    for element in h.elements().iter() {
+                        let pair = element.as_assoc_node().and_then(|a| Some((symbol_or_string_value(&a.key())?, symbol_or_string_value(&a.value())?)));
+                        let Some((action, named)) = pair else {
+                            return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names:` entry is not a literal name") });
+                        };
+                        if matches!(action.as_str(), "new" | "edit") {
+                            path_names.insert(Symbol::from(action.as_str()), named.trim_matches('/').to_string());
+                        } else if named != action {
+                            return Err(IngestError::Unsupported { file: file.into(), message: format!("resources :{name_str} `path_names: {{ {action}: {named:?} }}` renames a block action") });
+                        }
+                    }
+                }
                 // `shallow:` lands when a fixture demands it.
                 _ => {}
             }
@@ -4184,6 +4241,7 @@ fn ingest_resources_route(
         param,
         path,
         constraints,
+        path_names,
     };
     Ok(match module {
         Some(module) => RouteSpec::Scope {

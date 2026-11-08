@@ -55,6 +55,14 @@ sets `ROUNDHOUSE_SPINEL_SLIM=0` and compiles the same tests inside `boot`.
 Keep `run_spinel` for tests whose subject is the app, its models or its HTTP
 surface.
 
+The `spinel-framework` lane runs `spinel` at `-O0`: these suites judge
+behavior, and `cc` at `-O2` was over a third of their CPU. `spin build`,
+`spinel-smoke`, `spinel-compare` and the Campfire lanes keep `-O2`. Locally,
+`CI_SPINEL_OPT=` keeps the default for
+[`scripts/ci-spinel-framework.sh`](../../scripts/ci-spinel-framework.sh), and
+`CI_SPINEL_FRAMEWORK_BUDGET` sets the seconds after which it stops a shard's
+suites and names them.
+
 ## Native controls
 
 A test that claims emitted behavior matches Rails runs the same program under

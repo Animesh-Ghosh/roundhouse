@@ -70,6 +70,9 @@ fn analyze_and_lower_with_target(app: &mut App, target: crate::build_target::Bui
 /// columns as the Array Rails reads types them so
 /// (`lower::array_columns`); every other target sees the ingested app.
 pub fn analyze_and_lower_for(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    for column in app.schema.tables.values_mut().flat_map(|table| &mut table.columns) {
+        column.legacy_default_persistence = !target.supports_generated_column_insert_returning();
+    }
     if matches!(target, crate::build_target::BuildTarget::Ruby | crate::build_target::BuildTarget::Jruby | crate::build_target::BuildTarget::Spinel) {
         app.native_library_keywords = true;
         app.pins_unresolved_params = true;
