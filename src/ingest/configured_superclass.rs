@@ -655,10 +655,8 @@ impl<'a> Eval<'a> {
                     }
                 }
                 // Only a constant it resolves: one it cannot may still be a gem's that is loaded without being read here.
-                ExprNode::Const { path } => match self.constant(path, frame.scope.as_deref()) {
-                    Ok(v) if !matches!(v, Val::Unknown) => Val::Str("constant".into()),
-                    _ => return Err("a `defined?` of a constant it does not resolve".into()),
-                },
+                ExprNode::Const { path } if self.resolves_constant(path, frame.scope.as_deref()) => Val::Str("constant".into()),
+                ExprNode::Const { .. } => return Err("a `defined?` of a constant it does not resolve".into()),
                 _ => return Err("a `defined?` of other than an instance variable".into()),
             },
             ExprNode::Ivar { name } => {
@@ -701,10 +699,8 @@ impl<'a> Eval<'a> {
                     }
                 }
                 // Only a constant it resolves: one it cannot may still be a gem's that is loaded without being read here.
-                ExprNode::Const { path } => match self.constant(path, frame.scope.as_deref()) {
-                    Ok(v) if !matches!(v, Val::Unknown) => Val::Str("constant".into()),
-                    _ => return Err("a `defined?` of a constant it does not resolve".into()),
-                },
+                ExprNode::Const { path } if self.resolves_constant(path, frame.scope.as_deref()) => Val::Str("constant".into()),
+                ExprNode::Const { .. } => return Err("a `defined?` of a constant it does not resolve".into()),
                 _ => return Err("a `defined?` of other than an instance variable".into()),
             },
             ExprNode::Assign { target, value } => {
@@ -1927,6 +1923,20 @@ impl<'a> Eval<'a> {
     }
 
     /// A constant: a class this program defines, a constant one of them assigns, or a name it does not define.
+    /// Whether `path` names a class the program defines or a constant one holds; `constant` answers any other name as a class of that name.
+    fn resolves_constant(&mut self, path: &[Symbol], scope: Option<&str>) -> bool {
+        let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
+        let rooted = if path.first().is_some_and(|s| s.as_str().is_empty()) { format!("::{written}") } else { written.clone() };
+        if self.resolve(&rooted, scope).is_some() {
+            return true;
+        }
+        match self.constant(path, scope) {
+            Ok(Val::Class(c)) => c != written,
+            Ok(Val::Unknown) | Err(_) => false,
+            Ok(_) => true,
+        }
+    }
+
     fn constant(&mut self, path: &[Symbol], scope: Option<&str>) -> Res<Val> {
         let written = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::");
         let written = if path.first().is_some_and(|s| s.as_str().is_empty()) { format!("::{written}") } else { written };
