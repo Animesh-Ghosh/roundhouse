@@ -80,6 +80,13 @@ pub(super) fn devise_modules(app: &App) -> HashMap<String, Vec<String>> {
     out
 }
 
+/// A method of a gem's on the mapper whose routes, when it cannot run, are left out and reported, the rest of the call's still drawn.
+pub(super) fn omits_on_failure(known: &HashSet<String>, owner: &str, name: &str) -> Option<&'static str> {
+    // devise's OmniAuth callbacks: one route per provider `Devise.omniauth_configs` holds, which an app often sets from ENV at boot (mastodon's CAS, SAML and OIDC).
+    (known.contains("Devise") && owner == "ActionDispatch::Routing::Mapper" && name == "devise_omniauth_callback")
+        .then_some("devise_for: the OmniAuth callback routes are not drawn: they are one per provider the app configures, which is not known here")
+}
+
 /// What a class outside the library classes (a model) answers that a gem's macro gave it.
 /// `all` is `Devise::ALL` as the evaluation holds it, the order `devise` keeps its modules in.
 /// `config` reads a setting of the gem's (`Devise.unlock_strategy`).
