@@ -302,26 +302,25 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // through `rewrite_predicates`: `.blank?` / `.present?` become
         // `(recv || "").empty?`, and `.any?` / `.none?` / `.empty?`
         // become collection `empty?`.
+        //
+        // A branch that is a nil literal stays nil: an `if` with no
+        // `else` has one, and so does an `unless` with no `else`, as its
+        // `then` branch. Walked, it would be an append of nothing, which
+        // the Go, TypeScript, Crystal and Python buffers don't take.
         ExprNode::If { cond, then_branch, else_branch } => {
-            let then_seq = walk_body(then_branch, ctx);
-            let then_body = if then_seq.len() == 1 {
-                then_seq.into_iter().next().unwrap()
-            } else {
-                seq(then_seq)
-            };
-            let else_body = if matches!(
-                &*else_branch.node,
-                ExprNode::Lit { value: Literal::Nil }
-            ) {
-                nil_lit()
-            } else {
-                let s = walk_body(else_branch, ctx);
+            let walk_branch = |branch: &Expr| {
+                if matches!(&*branch.node, ExprNode::Lit { value: Literal::Nil }) {
+                    return nil_lit();
+                }
+                let s = walk_body(branch, ctx);
                 if s.len() == 1 {
                     s.into_iter().next().unwrap()
                 } else {
                     seq(s)
                 }
             };
+            let then_body = walk_branch(then_branch);
+            let else_body = walk_branch(else_branch);
             vec![Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
