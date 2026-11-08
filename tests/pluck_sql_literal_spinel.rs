@@ -12,9 +12,26 @@ fn app() -> emit_and_run::Overlay {
     emit_and_run::empty_app()
         .write(
             "db/schema.rb",
-            "ActiveRecord::Schema.define do\n  create_table \"shops\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"widgets\", force: :cascade do |t|\n    t.integer \"shop_id\"\n    t.string \"name\"\n    t.integer \"price\"\n  end\nend\n",
+            "ActiveRecord::Schema.define do\n  create_table \"members\", force: :cascade do |t|\n    t.string \"name\"\n    t.bigint \"tag_ids\", array: true\n  end\n  create_table \"shops\", force: :cascade do |t|\n    t.string \"name\"\n  end\n  create_table \"widgets\", force: :cascade do |t|\n    t.integer \"shop_id\"\n    t.string \"name\"\n    t.integer \"price\"\n  end\nend\n",
         )
         .write("config/routes.rb", "Rails.application.routes.draw do\nend\n")
+        .write(
+            "app/models/member.rb",
+            r#"class Member < ApplicationRecord
+  def self.mixed
+    order(:id).pluck(:tag_ids, Arel.sql("1"))
+  end
+
+  def self.mixed_star
+    order(:id).pluck(:tag_ids, Arel.sql("*"))
+  end
+
+  def self.literal_named
+    order(:id).pluck(Arel.sql("tag_ids"))
+  end
+end
+"#,
+        )
         .write("app/models/shop.rb", "class Shop < ApplicationRecord\n  has_many :widgets\nend\n")
         .write("app/models/application_record.rb", APPLICATION_RECORD)
         .write(
@@ -99,4 +116,21 @@ puts "pluck join passed"
 #[ignore = "requires the Spinel toolchain"]
 fn columns_sharing_a_name_refuse_and_aliases_keep_every_column() {
     app().run_spinel_with_db(JOIN_SCRIPT).assert_passes();
+}
+
+const ARRAY_SCRIPT: &str = r#"
+Member.create!(name: "a", tag_ids: [1, 2])
+got = Member.mixed
+raise "mixed: #{got.inspect}" unless got == [[[1, 2], 1]]
+got = Member.mixed_star
+raise "star: #{got.inspect}" unless got == [[[1, 2], 1, "a", [1, 2]]]
+got = Member.literal_named
+raise "literal: #{got.inspect}" unless got == [[1, 2]]
+puts "pluck array columns passed"
+"#;
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn stored_array_columns_decode_in_a_mixed_projection() {
+    app().run_spinel_with_db(ARRAY_SCRIPT).assert_passes();
 }

@@ -2598,8 +2598,13 @@ module ActiveRecord
     # value: Rails answers both (`a.id, b.id`), and this raises rather than
     # return a row with a column missing. A row wider than the projections
     # is fine, since `*` can widen it.
+    #
+    # Each value decodes as `pluck` decodes it, in result order: a plain
+    # column through the alias it was given, anything else by its result
+    # column name, as Rails casts a fragment's columns.
     def pluck_sql(cols)
       projections = []
+      plain = {}
       expected = 0
       cols.each_with_index do |col, index|
         if col.is_a?(Arel::Nodes::SqlLiteral)
@@ -2608,6 +2613,7 @@ module ActiveRecord
           expected += sql_projection_width(sql)
         else
           projections << "#{pluck_column_sql(col)} AS v#{index}"
+          plain["v#{index}"] = col.to_s
           expected += 1
         end
       end
@@ -2619,7 +2625,11 @@ module ActiveRecord
         @select_sql = prior
       end
       rows.map do |row|
-        values = row.values
+        values = []
+        row.each do |name, value|
+          column = plain.key?(name) ? plain[name] : name
+          values << @model.decode_plucked(column, value)
+        end
         if values.length < expected
           raise ArgumentError, "pluck expected #{expected} columns but the row has #{values.length}: result columns share a name, give them distinct names with AS"
         end
