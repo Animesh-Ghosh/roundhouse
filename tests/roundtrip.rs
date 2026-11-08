@@ -282,3 +282,123 @@ fn literals_round_trip() {
         assert_eq!(lit, back);
     }
 }
+
+// Produced by App::new + ingest_routes on main 8aa7512f6, before scope
+// defaults gained spans. Keep the whole schema-v1 envelope as a reader fixture.
+const LEGACY_SCOPE_DEFAULTS: &str = include_str!("support/route_scope_defaults_v1.json");
+
+fn scope_defaults(app: &App) -> &IndexMap<Symbol, (String, Span)> {
+    let roundhouse::dialect::RouteSpec::Scope { defaults, .. } = &app.routes.entries[0] else {
+        panic!("expected scope")
+    };
+    defaults
+}
+
+#[test]
+fn legacy_scope_defaults_load_with_unknown_spans() {
+    let app: App = serde_json::from_str(LEGACY_SCOPE_DEFAULTS).expect("schema-v1 App loads");
+    assert_eq!(app.schema_version, 1);
+    assert_eq!(
+        scope_defaults(&app)
+            .keys()
+            .map(Symbol::as_str)
+            .collect::<Vec<_>>(),
+        ["user_id", "format"]
+    );
+    assert_eq!(
+        scope_defaults(&app)[&Symbol::from("user_id")],
+        ("me".into(), sp())
+    );
+    assert_eq!(
+        scope_defaults(&app)[&Symbol::from("format")],
+        ("json".into(), sp())
+    );
+    let roundhouse::dialect::RouteSpec::Scope { entries, .. } = &app.routes.entries[0] else {
+        unreachable!()
+    };
+    let roundhouse::dialect::RouteSpec::Scope { defaults, .. } = &entries[1] else {
+        panic!("nested scope")
+    };
+    assert_eq!(defaults[&Symbol::from("locale")], ("en".into(), sp()));
+    let json = serde_json::to_string(&app).unwrap();
+    assert_eq!(serde_json::from_str::<App>(&json).unwrap(), app);
+}
+
+#[test]
+fn scope_defaults_keep_current_spans_and_accept_mixed_shapes() {
+    let span = Span {
+        file: roundhouse::span::FileId(3),
+        start: 17,
+        end: 21,
+    };
+    for mixed in [false, true] {
+        let mut json: serde_json::Value = serde_json::from_str(LEGACY_SCOPE_DEFAULTS).unwrap();
+        json["routes"]["entries"][0]["entries"][1]["defaults"]["locale"] =
+            serde_json::json!(["en", span]);
+        let defaults = &mut json["routes"]["entries"][0]["defaults"];
+        defaults["user_id"] = serde_json::json!(["me", span]);
+        if !mixed {
+            defaults["format"] = serde_json::json!(["json", span]);
+        }
+        let app: App = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            scope_defaults(&app)[&Symbol::from("user_id")],
+            ("me".into(), span)
+        );
+        assert_eq!(
+            scope_defaults(&app)[&Symbol::from("format")],
+            ("json".into(), if mixed { sp() } else { span })
+        );
+        let encoded = serde_json::to_value(&app).unwrap();
+        assert_eq!(
+            encoded["routes"]["entries"][0]["defaults"]["user_id"],
+            serde_json::json!(["me", span])
+        );
+        assert_eq!(serde_json::from_value::<App>(encoded).unwrap(), app);
+    }
+}
+
+#[test]
+fn scope_defaults_still_allow_absent_and_empty_maps() {
+    for absent in [false, true] {
+        let mut json: serde_json::Value = serde_json::from_str(LEGACY_SCOPE_DEFAULTS).unwrap();
+        json["routes"]["entries"][0]["entries"][1]["defaults"]["locale"] =
+            serde_json::json!(["en", sp()]);
+        let scope = json["routes"]["entries"][0].as_object_mut().unwrap();
+        scope.insert("defaults".into(), serde_json::json!({}));
+        if absent {
+            scope.remove("defaults");
+        }
+        let app: App = serde_json::from_value(json).unwrap();
+        assert!(scope_defaults(&app).is_empty());
+        assert!(
+            serde_json::to_value(app).unwrap()["routes"]["entries"][0]
+                .get("defaults")
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn scope_defaults_reject_malformed_values() {
+    for bad in [
+        serde_json::json!(null),
+        serde_json::json!(42),
+        serde_json::json!({}),
+        serde_json::json!(["me"]),
+        serde_json::json!(["me", null]),
+        serde_json::json!(["me", {"file": 1, "start": 2}]),
+        serde_json::json!([42, {"file": 1, "start": 2, "end": 4}]),
+        serde_json::json!(["me", {"file": 1, "start": 2, "end": 4}, "extra"]),
+    ] {
+        let mut json: serde_json::Value = serde_json::from_str(LEGACY_SCOPE_DEFAULTS).unwrap();
+        json["routes"]["entries"][0]["entries"][1]["defaults"]["locale"] =
+            serde_json::json!(["en", sp()]);
+        json["routes"]["entries"][0]["defaults"]["format"] = serde_json::json!(["json", sp()]);
+        json["routes"]["entries"][0]["defaults"]["user_id"] = bad.clone();
+        assert!(
+            serde_json::from_value::<App>(json).is_err(),
+            "invalid default: {bad}"
+        );
+    }
+}

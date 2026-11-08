@@ -84,7 +84,7 @@ pub struct FlatRoute {
     /// this rides the flat route rather than staying a request-shaping
     /// detail: campfire calls `user_profile_url` with no argument at
     /// all, and the helper's own signature is what has to allow it.
-    pub param_defaults: Vec<(String, String)>,
+    pub param_defaults: Vec<(String, (String, crate::span::Span))>, // every enclosing default, with its source
     pub int_params: Vec<String>,
     /// Non-digit `constraints:` regexes, as `(param, regex_source)` for
     /// the params this route captures. The regex-free runtime router
@@ -368,7 +368,7 @@ struct Ctx {
     helpers_enabled: bool,
     /// Segment defaults from enclosing `scope defaults: { … }` entries,
     /// innermost last so a nested scope can override an outer one.
-    param_defaults: Vec<(String, String)>,
+    param_defaults: Vec<(String, (String, crate::span::Span))>,
     /// Enclosing `resources`/`resource` blocks, OUTERMOST FIRST.
     ///
     /// A stack rather than one pair because Rails accumulates every
@@ -455,7 +455,7 @@ impl Ctx {
             .iter()
             .rev()
             .find(|(n, _)| n == "format")
-            .map(|(_, v)| Symbol::from(v.as_str()))
+            .map(|(_, (v, _))| Symbol::from(v.as_str()))
     }
 
     /// `account_bot_` — every enclosing level's singular, in order.
@@ -780,7 +780,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     format: forced_format.clone().or_else(|| ctx.default_format()),
                     required_params,
                     required_path: if i == 0 { required_path.clone() } else { None },
-                    param_defaults: defaults_for(ctx, &params),
+                    param_defaults: ctx.param_defaults.clone(),
                     path_params: params,
                     int_params,
                     constraints,
@@ -836,7 +836,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 action: Symbol::from(action_name),
                 as_name: if ctx.helpers_enabled { helper } else { String::new() },
                 required_params: path_params.len(),
-                param_defaults: defaults_for(ctx, &path_params),
+                param_defaults: ctx.param_defaults.clone(),
                 path_params,
                 named: ctx.helpers_enabled,
                 helpers_enabled: ctx.helpers_enabled,
@@ -1091,7 +1091,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                             as_name: if ctx.helpers_enabled { as_name.clone() } else { String::new() },
                             required_params,
                             required_path: if i == 0 { required_path.clone() } else { None },
-                            param_defaults: defaults_for(ctx, &vparams),
+                            param_defaults: ctx.param_defaults.clone(),
                             path_params: vparams.clone(),
                             named: named && *primary && i == 0,
                             helpers_enabled: ctx.helpers_enabled,
@@ -1186,17 +1186,6 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             }
         }
     }
-}
-
-/// The scope defaults that apply to THIS route's params. A default for
-/// a segment the route does not carry is irrelevant here (Rails would
-/// put it in the query string; the helper signature is unaffected).
-fn defaults_for(ctx: &Ctx, params: &[String]) -> Vec<(String, String)> {
-    ctx.param_defaults
-        .iter()
-        .filter(|(n, _)| params.iter().any(|p| p == n))
-        .cloned()
-        .collect()
 }
 
 /// Prepend the accumulated namespace path. Both sides are `/`-rooted

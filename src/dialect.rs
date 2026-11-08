@@ -2104,6 +2104,26 @@ pub const FORMAT_REQUIREMENT: &str = "(.:format)";
 /// accepted. Not a regex source; the route lowering knows it by name.
 pub const FORMAT_NONE: &str = "";
 
+// Schema-v1 scope defaults were strings before their source spans were kept.
+fn deserialize_scope_defaults<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<IndexMap<Symbol, (String, Span)>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum DefaultValue {
+        Spanned((String, Span)),
+        Legacy(String),
+    }
+    let defaults = IndexMap::<Symbol, DefaultValue>::deserialize(deserializer)?;
+    Ok(defaults.into_iter().map(|(key, value)| {
+        let value = match value {
+            DefaultValue::Spanned(value) => value,
+            DefaultValue::Legacy(value) => (value, Span::synthetic()),
+        };
+        (key, value)
+    }).collect())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouteSpec {
@@ -2230,8 +2250,8 @@ pub enum RouteSpec {
         /// under this scope is `/users/:user_id/profile`, and Rails'
         /// `user_profile_path` takes NO argument because the default
         /// supplies the segment.
-        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-        defaults: IndexMap<Symbol, String>,
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty", deserialize_with = "deserialize_scope_defaults")]
+        defaults: IndexMap<Symbol, (String, Span)>,
         /// `nested do … end` — Rails' explicit form of the nesting a
         /// `resources` block applies to a child `resources`/verb call
         /// automatically. `scope` is NOT one of the calls that gets it,
