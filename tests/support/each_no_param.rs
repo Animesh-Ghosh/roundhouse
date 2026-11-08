@@ -61,3 +61,14 @@ pub const EMPTY_MAP_RENDERS: &[&str] = &["L0:2|", "L1:2|", "L2:|"];
 pub fn strict_empty_map_app() -> Overlay {
     app(super::content_tag_options::app_rendering(EMPTY_MAP_VIEW, EMPTY_MAP_RENDERS))
 }
+
+/// A no-parameter `each` over a strict-locals partial's local, which
+/// Rust's `each` bridge borrows with `iter_mut()`, so the local must be
+/// declared `mut`. Rails 8.1.4 renders `"L0:x|L0:x|"`.
+pub const PARTIAL_LOCAL_RENDERS: &[&str] = &["L0:x|L0:x|"];
+
+/// The strict targets' probe app for the partial local.
+pub fn strict_partial_local_app() -> Overlay {
+    app(super::content_tag_options::app_rendering("<%= render partial: \"probes/listing\", locals: { items: [1, 2] } %>\n", PARTIAL_LOCAL_RENDERS))
+        .write("app/views/probes/_listing.html.erb", "<%# locals: (items:) -%>\n<% items.each do %>L0:x|<% end %>\n")
+}
