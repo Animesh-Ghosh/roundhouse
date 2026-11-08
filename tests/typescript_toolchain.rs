@@ -54,6 +54,9 @@ mod record_if_condition;
 #[path = "support/link_to_template_local.rs"]
 #[allow(dead_code)]
 mod link_to_template_local;
+#[path = "support/each_no_param.rs"]
+#[allow(dead_code)]
+mod each_no_param;
 #[path = "support/view_unless_no_else.rs"]
 #[allow(dead_code)]
 mod view_unless_no_else;
@@ -867,6 +870,42 @@ fn record_if_condition_renders() {
 #[ignore]
 fn link_to_template_local_renders() {
     let (emitted, errors) = link_to_template_local::strict_app().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let install = Command::new("npm").args(["install", "--silent", "--no-audit", "--no-fund"]).current_dir(&*emitted).output().expect("run npm install");
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    let output = Command::new("./node_modules/.bin/tsx")
+        .args(["--test", "test/probes_controller.test.ts"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run tsx --test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("pass 1"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// #1910: a block with no parameter renders as Rails 8.1.4 does
+/// (`each_no_param::VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_renders() {
+    let (emitted, errors) = each_no_param::strict_app().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let install = Command::new("npm").args(["install", "--silent", "--no-audit", "--no-fund"]).current_dir(&*emitted).output().expect("run npm install");
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    let output = Command::new("./node_modules/.bin/tsx")
+        .args(["--test", "test/probes_controller.test.ts"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run tsx --test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("pass 1"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// An empty `map` block maps each element to nil, as Rails 8.1.4
+/// does (`each_no_param::EMPTY_MAP_VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_empty_map_renders() {
+    let (emitted, errors) = each_no_param::strict_empty_map_app().emit(roundhouse::project::BuildTarget::Typescript);
     assert!(errors.is_empty(), "{errors:?}");
     let install = Command::new("npm").args(["install", "--silent", "--no-audit", "--no-fund"]).current_dir(&*emitted).output().expect("run npm install");
     assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));

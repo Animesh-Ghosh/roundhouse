@@ -40,6 +40,9 @@ mod record_if_condition;
 #[path = "support/link_to_template_local.rs"]
 #[allow(dead_code)]
 mod link_to_template_local;
+#[path = "support/each_no_param.rs"]
+#[allow(dead_code)]
+mod each_no_param;
 #[path = "support/view_unless_no_else.rs"]
 #[allow(dead_code)]
 mod view_unless_no_else;
@@ -359,7 +362,66 @@ fn link_to_template_local_renders() {
     assert!(output.status.success() && stderr.contains("Ran 1 test"), "{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
 }
 
+/// #1910: a block with no parameter renders as Rails 8.1.4 does
+/// (`each_no_param::VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_renders() {
+    let (emitted, errors) = each_no_param::strict_app().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("tests/test_probes_controller.py");
+    let source = std::fs::read_to_string(&test).expect("test_probes_controller.py");
+    std::fs::write(&test, source.replace(".include_p(", ".__contains__(")).expect("write probe");
+    let output = Command::new("python3")
+        .args(["-m", "unittest", "tests.test_probes_controller"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run python unittest");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success() && stderr.contains("Ran 1 test"), "{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
+}
+
+/// An empty `map` block maps each element to nil, as Rails 8.1.4
+/// does (`each_no_param::EMPTY_MAP_VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_empty_map_renders() {
+    let (emitted, errors) = each_no_param::strict_empty_map_app().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("tests/test_probes_controller.py");
+    let source = std::fs::read_to_string(&test).expect("test_probes_controller.py");
+    std::fs::write(&test, source.replace(".include_p(", ".__contains__(")).expect("write probe");
+    let output = Command::new("python3")
+        .args(["-m", "unittest", "tests.test_probes_controller"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run python unittest");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success() && stderr.contains("Ran 1 test"), "{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
+}
+
+/// #1910: a `map` block with no parameter whose body is more than one
+/// statement is refused, as before, rather than emitted into a
+/// comprehension, which takes only an expression
+/// (`each_no_param::MAP_STATEMENTS_VIEW`).
+#[test]
+fn each_no_param_map_statements_are_refused() {
+    let (_emitted, errors) = each_no_param::strict_map_statements_app().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.iter().any(|e| e.contains("map-block not supported (python)")), "{errors:?}");
+}
+
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
+/// #1910: a block whose only parameter is a rest (`|*args|`) is refused,
+/// as before, not emitted as a loop or comprehension over `_`
+/// (`each_no_param::REST_VIEW`).
+#[test]
+fn each_no_param_rest_blocks_are_refused() {
+    let (_emitted, errors) = each_no_param::strict_rest_app().emit(roundhouse::project::BuildTarget::Python);
+    for kind in ["each-block", "map-block"] {
+        assert!(errors.iter().any(|e| e.contains(&format!("{kind} not supported (python)"))), "{kind}: {errors:?}");
+    }
+}
+
 /// does (`view_unless_no_else::VIEW`).
 #[test]
 #[ignore]

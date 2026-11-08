@@ -47,6 +47,9 @@ mod record_if_condition;
 #[path = "support/link_to_template_local.rs"]
 #[allow(dead_code)]
 mod link_to_template_local;
+#[path = "support/each_no_param.rs"]
+#[allow(dead_code)]
+mod each_no_param;
 #[path = "support/view_unless_no_else.rs"]
 #[allow(dead_code)]
 mod view_unless_no_else;
@@ -863,7 +866,89 @@ fn link_to_template_local_renders() {
     assert!(output.status.success() && stdout.contains("content_tag_renders ... ok"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
 
+/// #1910: a block with no parameter renders as Rails 8.1.4 does
+/// (`each_no_param::VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_renders() {
+    let (emitted, errors) = each_no_param::strict_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("src/tests/probes_controller_test.rs");
+    let mut source = std::fs::read_to_string(&test).expect("probes_controller_test.rs");
+    source.push_str("\nfn assert_includes(body: String, want: &str) {\n    assert!(body.contains(want), \"missing {want} in {body}\");\n}\n");
+    std::fs::write(&test, source).expect("write probe");
+    let output = Command::new("cargo")
+        .args(["test", "content_tag_renders"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("content_tag_renders ... ok"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// A no-parameter block over a partial's local builds and renders
+/// as Rails 8.1.4 does (`each_no_param::strict_partial_local_app`).
+#[test]
+#[ignore]
+fn each_no_param_partial_local_renders() {
+    let (emitted, errors) = each_no_param::strict_partial_local_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("src/tests/probes_controller_test.rs");
+    let mut source = std::fs::read_to_string(&test).expect("probes_controller_test.rs");
+    source.push_str("\nfn assert_includes(body: String, want: &str) {\n    assert!(body.contains(want), \"missing {want} in {body}\");\n}\n");
+    std::fs::write(&test, source).expect("write probe");
+    let output = Command::new("cargo")
+        .args(["test", "content_tag_renders"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("content_tag_renders ... ok"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// An empty `map` block maps each element to nil, as Rails 8.1.4
+/// does (`each_no_param::EMPTY_MAP_VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_empty_map_renders() {
+    let (emitted, errors) = each_no_param::strict_empty_map_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("src/tests/probes_controller_test.rs");
+    let mut source = std::fs::read_to_string(&test).expect("probes_controller_test.rs");
+    source.push_str("\nfn assert_includes(body: String, want: &str) {\n    assert!(body.contains(want), \"missing {want} in {body}\");\n}\n");
+    std::fs::write(&test, source).expect("write probe");
+    let output = Command::new("cargo")
+        .args(["test", "content_tag_renders"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("content_tag_renders ... ok"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
+/// #1910: a block whose only parameter is a rest (`|*args|`) doesn't
+/// take the `_` closure a block with no parameter takes, so the rest
+/// isn't left unbound (`each_no_param::REST_VIEW`).
+#[test]
+fn each_no_param_rest_blocks_keep_their_parameter() {
+    let (emitted, _errors) = each_no_param::strict_rest_app().emit(roundhouse::project::BuildTarget::Rust);
+    let mut view = String::new();
+    let mut stack = vec![emitted.join("src")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read emitted dir").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.to_string_lossy().contains("probes") && path.extension().is_some_and(|x| x == "rs") {
+                view.push_str(&std::fs::read_to_string(&path).expect("read view"));
+            }
+        }
+    }
+    assert!(view.contains("args"), "no probes view found");
+    assert!(!view.contains("|_|"), "{view}");
+}
+
 /// does (`view_unless_no_else::VIEW`).
 #[test]
 #[ignore]
