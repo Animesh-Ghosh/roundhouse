@@ -2056,9 +2056,13 @@ module ActiveRecord
     # A write that runs no callbacks (`update_column`, `update_columns`,
     # `touch_written`) moves the Dirty baseline too, so a ROLLBACK has to
     # put it back, or the rolled-back value would read as saved and the
-    # next partial save would skip it. Inside a transaction the record is
-    # enlisted for that alone (kind 4): the COMMIT runs no callback for
-    # it. Outside one there is nothing to roll back.
+    # next partial save would skip it. Inside an Active Record transaction
+    # the record is enlisted for that alone (kind 4): the COMMIT runs no
+    # callback for it. The guard sees only Active Record transactions. A
+    # `raw_connection.transaction` is the driver's own and Active Record
+    # does not see it, so a rollback there leaves the baseline where Rails
+    # leaves it: Rails' `update_columns` clears the change and never
+    # enlists the record.
     def _enlist_direct_write
       return nil if Db._txn_depth == 0
       unless @__rollback_saved

@@ -41,8 +41,10 @@ check("both changes kept", [r.title, r.body], ["title from x", "body from y is l
 r.update_columns(updated_at: "2001-02-03 04:05:06")
 stamp = Article.find(a.id).updated_at
 q = Article.find(a.id)
+Article.find(a.id).update_columns(body: "body changed behind q, long enough")
 q.save!
 check("a save with nothing pending leaves updated_at", Article.find(a.id).updated_at, stamp)
+check("and writes no column", Article.find(a.id).body, "body changed behind q, long enough")
 
 z = Article.find(a.id)
 z.title = "pending title"
