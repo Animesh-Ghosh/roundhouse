@@ -404,6 +404,7 @@ class Routing(unittest.TestCase):
         for path in [
             "src/analyze/registry/stdlib.rs", "src/analyze/registry/library.rs", "src/project.rs",
             "tests/openssl_registrations.rs", "tests/support/openssl_registrations.rb",
+            "tests/support/cipher_registrations.rb", "runtime/spinel/message_digest.rb",
         ]:
             with self.subTest(path=path):
                 self.assertIn("openssl_registrations", ci.select([path])["spinel_tests"])

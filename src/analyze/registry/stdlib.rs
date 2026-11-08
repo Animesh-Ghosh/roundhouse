@@ -1020,6 +1020,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("OpenSSL::PKey::ECError", "OpenSSL::PKey::PKeyError"),
         ("OpenSSL::Digest::DigestError", "OpenSSL::OpenSSLError"),
         ("OpenSSL::KDF::KDFError", "OpenSSL::OpenSSLError"),
+        ("OpenSSL::Cipher::CipherError", "OpenSSL::OpenSSLError"),
+        ("OpenSSL::Cipher::AuthTagError", "OpenSSL::Cipher::CipherError"),
     ] {
         let surface = if matches!(exc, "OpenSSL::PKey::PKeyError" | "OpenSSL::PKey::ECError") { gradual_errors.as_slice() } else { &[] };
         register_stdlib_class(classes, exc, &[], surface);
@@ -1409,6 +1411,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "OpenSSL::HMAC", &[("digest", Ty::Str), ("hexdigest", Ty::Str)], &[]);
     register_stdlib_class(classes, "OpenSSL", &[("fixed_length_secure_compare", Ty::Bool), ("secure_compare", Ty::Bool)], &[]);
     register_stdlib_class(classes, "OpenSSL::KDF", &[("hkdf", Ty::Str)], &[]);
+    // Spinel's GCM surface; constructors and mode switches preserve the receiving subclass.
+    register_stdlib_class(classes, "OpenSSL::Cipher", &[("new", Ty::SelfInstance)], &[
+        ("encrypt", Ty::SelfInstance), ("decrypt", Ty::SelfInstance),
+        ("update", Ty::Str), ("final", Ty::Str), ("auth_tag", Ty::Str),
+        ("random_key", Ty::Str), ("random_iv", Ty::Str),
+        ("key=", Ty::Str), ("iv=", Ty::Str), ("auth_tag=", Ty::Str), ("auth_data=", Ty::Str),
+    ]);
     register_stdlib_class(classes, "OpenSSL::PKey", &[("read", Ty::Untyped), ("new_raw_private_key", class("OpenSSL::PKey::PKey"))], &[]);
     register_stdlib_class(classes, "OpenSSL::PKey::PKey", &[], &[("sign", Ty::Str)]);
     register_stdlib_class(classes, "OpenSSL::PKey::EC", &[("generate", Ty::Untyped)], &[

@@ -8752,6 +8752,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "OpenSSL::Digest::SHA384" | "OpenSSL::Digest::SHA512" | "OpenSSL" | "OpenSSL::KDF"
         | "OpenSSL::PKey" | "OpenSSL::PKey::PKey" | "OpenSSL::PKey::EC" | "OpenSSL::PKey::EC::Group"
         | "OpenSSL::PKey::PKeyError" | "OpenSSL::PKey::ECError" | "OpenSSL::Digest::DigestError" | "OpenSSL::KDF::KDFError"
+        | "OpenSSL::Cipher" | "OpenSSL::Cipher::CipherError" | "OpenSSL::Cipher::AuthTagError"
         // runtime/spinel/integration_session.rb and the ruby tree's twin.
         | "ActionDispatch::Integration::Session" | "ActionDispatch::TestResponse"
         // runtime/spinel/solid_queue.rb.
@@ -9164,6 +9165,32 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         }
     }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
+        if target == "spinel"
+            && let crate::expr::ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node
+            && let Some(args) = (match method.as_str() {
+                "new" => Some(args.as_slice()),
+                "send" | "public_send" | "__send__" if args.first().and_then(|a| match &*a.node {
+                    crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.as_str()),
+                    crate::expr::ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(value.as_str()),
+                    _ => None,
+                }) == Some("new") => Some(&args[1..]),
+                _ => None,
+            })
+            && recv.decisions & crate::expr::CLASS_OBJECT_VALUE != 0
+            && recv.ty.as_ref().is_some_and(|ty| {
+                let cipher = std::cell::Cell::new(false);
+                ty.map_class_ids(&|id| { cipher.set(cipher.get() || (id.0.as_str() == "OpenSSL::Cipher"
+                    && !["new", method.as_str()].iter().any(|m| crate::analyze::source_class_method(app, id, m))
+                    && !app.library_classes.iter().any(|c| c.name == *id && c.methods.iter().any(|m|
+                        m.name.as_str() == "initialize" && m.receiver == crate::dialect::MethodReceiver::Instance)))); id.clone() });
+                cipher.get()
+            })
+            && !(args.len() == 1 && matches!(&*args[0].node, crate::expr::ExprNode::Lit {
+                value: crate::expr::Literal::Str { value } } if matches!(value.as_str(), "aes-128-gcm" | "aes-256-gcm")))
+        {
+            emit::diagnostics::report_unsupported(expr.span, target, "OpenSSL::Cipher.new",
+                "OpenSSL::Cipher.new requires a literal aes-128-gcm or aes-256-gcm on spinel");
+        }
         if target != "jruby" {
             report_not_nil(expr, app, target);
         }
