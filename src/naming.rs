@@ -484,6 +484,11 @@ fn inflect(word: &str, rules: &[(&str, &str)], from_singular: bool) -> String {
     word.to_string()
 }
 
+/// `String#pluralize`: the word's case is kept ("User" → "Users"), as Rails' rules replace only the suffix.
+pub fn pluralize(word: &str) -> String {
+    inflect(word, PLURAL_RULES, true)
+}
+
 pub fn pluralize_snake(class_name: &str) -> String {
     inflect(&snake_case(class_name), PLURAL_RULES, true)
 }

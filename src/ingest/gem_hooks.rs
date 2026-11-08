@@ -132,6 +132,17 @@ pub(super) fn omits_on_failure(known: &HashSet<String>, owner: &str, name: &str)
         .then_some("devise_for: the OmniAuth callback routes are not drawn: they are one per provider the app configures, which is not known here")
 }
 
+/// A statement of a gem's routing method whose routes, when it cannot run, are left out and reported, the rest of the call's still drawn.
+pub(super) fn omits_statement_on_failure(known: &HashSet<String>, statement: &Expr) -> Option<&'static str> {
+    // devise_token_auth's OmniAuth routes: one of them redirects through a block that builds its URL per request, which no route table holds.
+    let ExprNode::If { cond, .. } = &*statement.node else { return None };
+    if !known.contains("DeviseTokenAuth") {
+        return None;
+    }
+    (crate::emit::ruby::emit_expr(cond).starts_with("defined?(::OmniAuth)") && crate::emit::ruby::emit_expr(statement).contains("DeviseTokenAuth.omniauth_prefix"))
+        .then_some("mount_devise_token_auth_for: the OmniAuth routes are not drawn: one redirects through a block that builds its URL per request")
+}
+
 /// What a class outside the library classes (a model) answers that a gem's macro gave it.
 /// `all` is `Devise::ALL` as the evaluation holds it, the order `devise` keeps its modules in.
 /// `config` reads a setting of the gem's (`Devise.unlock_strategy`).

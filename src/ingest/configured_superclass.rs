@@ -429,6 +429,13 @@ impl<'a> Eval<'a> {
                 self.statement(statement, &mut top.clone())?;
             } else if let deferred = without_deferred_bodies(statement)
                 && names_constant(&deferred, root)
+                && let ExprNode::If { cond, .. } = &*deferred.node
+                && defines_under(cond, root)
+            {
+                // Not refused for naming it under a guard (devise_token_auth's `if defined?(Devise::Models::…)`): the arm it takes runs, and one it cannot tell passes over with its writes unsure.
+                self.statement(&deferred, &mut top.clone())?;
+            } else if let deferred = without_deferred_bodies(statement)
+                && names_constant(&deferred, root)
                 && self.may_write(&deferred, "*", false, &mut HashSet::default()).is_none_or(|w| !w.is_empty())
             {
                 return Err(format!("an initializer reaches `{root}` other than through a call on it, and may write what the answer reads"));
@@ -441,6 +448,28 @@ impl<'a> Eval<'a> {
     fn statement(&mut self, e: &Expr, frame: &mut Frame) -> Res<Option<Val>> {
         if super::gem_hooks::skips(&self.known, self.calls.last().map(|c| (c.0.as_str(), c.1.as_str())), e) {
             return Ok(None);
+        }
+        if self.router.drawing
+            && let Some(why) = super::gem_hooks::omits_statement_on_failure(&self.known, e)
+        {
+            // As a method `omits_on_failure` names: what it drew, and the mapper state it changed, are the statement's or none of it.
+            let drawn = self.drawn.last().map_or(0, Vec::len);
+            let ivars = self.router.ivars.clone();
+            let written: Vec<_> = self.written.iter().filter(|((h, _), _)| matches!(h, Holder::Router)).map(|(k, t)| (k.clone(), *t)).collect();
+            return match self.eval(e, frame) {
+                Ok(Flow::Return(v)) => Ok(Some(v)),
+                Ok(Flow::Value(_)) => Ok(None),
+                Err(err) => {
+                    if let Some(last) = self.drawn.last_mut() {
+                        last.truncate(drawn);
+                    }
+                    self.router.ivars = ivars;
+                    self.written.retain(|(h, _), _| !matches!(h, Holder::Router));
+                    self.written.extend(written);
+                    self.omitted.push(format!("{why} ({err})"));
+                    Ok(None)
+                }
+            };
         }
         match self.eval(e, frame) {
             Ok(Flow::Return(v)) => Ok(Some(v)),
@@ -602,6 +631,13 @@ impl<'a> Eval<'a> {
                         return Ok(Flow::Return(v));
                     }
                 }
+                // Not by its value when the block ends in one `omits_statement_on_failure` names: what it leaves out is left out there too.
+                if self.router.drawing && super::gem_hooks::omits_statement_on_failure(&self.known, last).is_some() {
+                    return Ok(match self.statement(last, frame)? {
+                        Some(v) => Flow::Return(v),
+                        None => Flow::Value(Val::Nil),
+                    });
+                }
                 return self.eval(last, frame);
             }
             ExprNode::Return { value } => return Ok(Flow::Return(self.value(value, frame)?)),
@@ -618,6 +654,11 @@ impl<'a> Eval<'a> {
                         None => Val::Nil,
                     }
                 }
+                // Only a constant it resolves: one it cannot may still be a gem's that is loaded without being read here.
+                ExprNode::Const { path } => match self.constant(path, frame.scope.as_deref()) {
+                    Ok(v) if !matches!(v, Val::Unknown) => Val::Str("constant".into()),
+                    _ => return Err("a `defined?` of a constant it does not resolve".into()),
+                },
                 _ => return Err("a `defined?` of other than an instance variable".into()),
             },
             ExprNode::Ivar { name } => {
@@ -659,6 +700,11 @@ impl<'a> Eval<'a> {
                         None => Val::Nil,
                     }
                 }
+                // Only a constant it resolves: one it cannot may still be a gem's that is loaded without being read here.
+                ExprNode::Const { path } => match self.constant(path, frame.scope.as_deref()) {
+                    Ok(v) if !matches!(v, Val::Unknown) => Val::Str("constant".into()),
+                    _ => return Err("a `defined?` of a constant it does not resolve".into()),
+                },
                 _ => return Err("a `defined?` of other than an instance variable".into()),
             },
             ExprNode::Assign { target, value } => {
@@ -1167,6 +1213,10 @@ impl<'a> Eval<'a> {
                 self.evaled.entry(c.clone()).or_default().extend(defined);
                 Ok(Val::Nil)
             }
+            // Not a replacement holding a backslash: Ruby reads `\1` and `\&` there as back-references even for a string pattern.
+            ("gsub" | "sub", Val::Str(t), [Val::Str(from), Val::Str(to)]) if blk.is_none() && !from.is_empty() && !to.contains('\\') => {
+                Ok(Val::Str(if method == "gsub" { t.replace(from.as_str(), to) } else { t.replacen(from.as_str(), to, 1) }))
+            }
             ("tr", Val::Str(t), [Val::Str(from), Val::Str(to)]) if from.chars().count() == to.chars().count() && !from.contains(['-', '^', '\\']) => {
                 let map: Vec<(char, char)> = from.chars().zip(to.chars()).collect();
                 Ok(Val::Str(t.chars().map(|c| map.iter().find(|(f, _)| *f == c).map(|(_, t)| *t).unwrap_or(c)).collect()))
@@ -1178,6 +1228,7 @@ impl<'a> Eval<'a> {
                 Val::Unknown | Val::Obj(_) | Val::Defaulted { .. } => return Err("`Array()` of a value it does not model".into()),
                 other => Val::Array(vec![other.clone()]),
             }),
+            ("+", Val::Array(items), [Val::Array(other)]) => Ok(Val::Array(items.iter().chain(other).cloned().collect())),
             ("&" | "-" | "|", Val::Array(items), [Val::Array(other)]) if items.iter().chain(other).all(compares) => {
                 let mut out: Vec<Val> = Vec::new();
                 let keep = |v: &Val, out: &Vec<Val>| !out.iter().any(|o| same(o, v));
@@ -1215,7 +1266,8 @@ impl<'a> Eval<'a> {
                 }
                 Ok(merger)
             }
-            ("pluralize", Val::Str(t), []) => Ok(Val::Str(crate::naming::pluralize_snake(t))),
+            ("pluralize", Val::Str(t), []) => Ok(Val::Str(crate::naming::pluralize(t))),
+            ("underscore", Val::Str(t), []) => Ok(Val::Str(crate::naming::underscore(t))),
             ("lambda" | "proc", _, []) if recv.is_none() => blk.ok_or_else(|| format!("`{method}` without a block")),
             ("new", Val::Class(name), _) if self.known.contains(name) => {
                 self.heap.push(Object { class: name.clone(), ivars: HashMap::default() });
@@ -1648,6 +1700,7 @@ impl<'a> Eval<'a> {
             self.cvars.contains_key(&(c.clone(), name.to_string()))
                 || self.classes.iter().filter(|d| d.name.0.as_str() == c).any(|d| {
                     d.class_ivar_initializers.iter().any(|i| matches!(&*i.node, ExprNode::Assign { target: LValue::Var { name: n, .. }, .. } if n.as_str() == name))
+                        || d.unknown_calls.iter().any(|c| self_write(c, name.trim_start_matches("@@")).is_some())
                 })
         })
     }
@@ -1667,8 +1720,29 @@ impl<'a> Eval<'a> {
             .find_map(|i| match &*i.node {
                 ExprNode::Assign { target: LValue::Var { name: n, .. }, value } if n.as_str() == name => Some(value.clone()),
                 _ => None,
-            })
-            .ok_or_else(|| format!("`{name}` is not set"))?;
+            });
+        // Not only `@@x = …`: the body can set it through its `mattr_accessor` writer (devise_token_auth's `self.omniauth_prefix = '/omniauth'`), the last such write standing.
+        let init = match init {
+            Some(init) => init,
+            None => {
+                let attr = name.trim_start_matches("@@");
+                let writes_cvar = self.lookup_in(&home, &format!("{attr}="), MethodReceiver::Class, &mut HashSet::default()).is_some_and(|(def, _)| {
+                    let body = match &*def.body.node {
+                        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+                        _ => &def.body,
+                    };
+                    matches!((def.params.as_slice(), &*body.node), ([param], ExprNode::Assign { target: LValue::Var { name: n, .. }, value })
+                        if n.as_str() == name && matches!(&*value.node, ExprNode::Var { name: v, .. } if *v == param.name))
+                });
+                self.classes
+                    .iter()
+                    .filter(|d| writes_cvar && d.name.0.as_str() == home)
+                    .flat_map(|d| d.unknown_calls.iter())
+                    .filter_map(|c| self_write(c, attr))
+                    .last()
+                    .ok_or_else(|| format!("`{name}` is not set"))?
+            }
+        };
         let mut frame = Frame { this: Val::Class(home.clone()), locals: HashMap::default(), block: None, scope: Some(home.clone()) };
         let v = self.value(&init, &mut frame)?;
         self.cvars.insert((home, name.to_string()), v.clone());
@@ -2094,8 +2168,10 @@ impl<'a> Eval<'a> {
             let mut calls: Vec<(String, Option<Expr>, bool)> = Vec::new();
             visit(&body, &mut |x| {
                 if let ExprNode::Send { recv, method, args, .. } = &*x.node {
+                    // Not `class_eval do … end`: its block is walked here as the call's own body, and a string is what would name methods only when it runs.
                     let dynamic = matches!(method.as_str(), "send" | "public_send" | "__send__" | "class_eval" | "define_method")
-                        && !matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { .. } }));
+                        && !matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { .. } }))
+                        && !(method.as_str() == "class_eval" && args.is_empty());
                     // `send(:autoload, …)` calls `autoload`, not every method named `send`.
                     let named = match (method.as_str(), args.first().map(|a| &*a.node)) {
                         ("send" | "public_send" | "__send__", Some(ExprNode::Lit { value: Literal::Sym { value } })) => value.as_str().to_string(),
@@ -2362,6 +2438,16 @@ fn compares(v: &Val) -> bool {
     }
 }
 
+/// The value a class body's `self.attr = value` writes, however the parser left it.
+fn self_write(e: &Expr, attr: &str) -> Option<Expr> {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Attr { recv, name }, value } if name.as_str() == attr && matches!(&*recv.node, ExprNode::SelfRef) => Some(value.clone()),
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+            if method.as_str().strip_suffix('=') == Some(attr) && args.len() == 1 && matches!(&*recv.node, ExprNode::SelfRef) => Some(args[0].clone()),
+        _ => None,
+    }
+}
+
 /// The constant a call chain starts from: `Doorkeeper` in `Doorkeeper.config.resolve_controller(:base)`.
 fn root_constant(e: &Expr) -> Option<String> {
     match &*e.node {
@@ -2500,6 +2586,16 @@ fn cvar_reader(def: &MethodDef) -> Option<String> {
 }
 
 /// Whether `e` names the constant `root` or one under it anywhere.
+/// `defined?(Root::…)`, as a gem guards a write to another's constant: not any condition, whose arms the replay would run every time.
+fn defines_under(cond: &Expr, root: &str) -> bool {
+    let operand = match &*cond.node {
+        ExprNode::Defined { operand } => operand,
+        ExprNode::Send { recv: None, method, args, block: None, .. } if method.as_str() == "defined?" && args.len() == 1 => &args[0],
+        _ => return false,
+    };
+    matches!(&*operand.node, ExprNode::Const { path } if path.iter().map(|s| s.as_str()).find(|s| !s.is_empty()) == Some(root))
+}
+
 fn names_constant(e: &Expr, root: &str) -> bool {
     let mut found = false;
     visit(e, &mut |x| {
