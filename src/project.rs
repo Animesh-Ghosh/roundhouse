@@ -8723,7 +8723,9 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         if matches!(name, "ActiveSupport::ConfigurationFile" | "ActiveSupport::OrderedOptions" | "Arel::Nodes::Ascending" | "Arel::Nodes::Descending" | "Arel::Nodes::Predicate") {
             return Some("ruby_family_runtime_constant");
         }
-        return if matches!(name, "JSON::GeneratorError" | "Net::HTTPBadResponse") {
+        // `Observable` is `require "observer"`, which `SPINEL_LACKS` keeps
+        // out of the spinel boot.rb.
+        return if matches!(name, "JSON::GeneratorError" | "Net::HTTPBadResponse" | "Observable") {
             Some("bundled_constant")
         } else {
             None
@@ -8782,7 +8784,13 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
         | "Enumerator::Product" | "Enumerator::Lazy" | "Enumerator::Chain"
         | "Monitor" | "ConditionVariable" | "Thread::ConditionVariable"
-        | "UNIXServer" | "UNIXSocket" | "Open3" | "Find")
+        | "UNIXServer" | "UNIXSocket" | "Open3" | "Find"
+        // weakref: Ruby's own on the ruby family, `packages/weakref` on
+        // spinel. observer: Ruby's own on the ruby family; spinel's
+        // `packages/observer` does not build in a Rails-sized tree yet, so
+        // `SPINEL_LACKS` keeps the require out and the spinel branch above
+        // reports the module.
+        | "WeakRef" | "WeakRef::RefError" | "Observable")
         // The rexml gem on the ruby family, spinel's `packages/rexml`.
         || name == "REXML"
         || name.starts_with("REXML::")
@@ -8918,6 +8926,11 @@ fn app_defines_class(app: &App, id: &crate::ident::ClassId) -> bool {
             module.inner_classes.iter().any(|class| class.name == *id)
         })
 }
+
+/// Stdlib mixins an app includes that only a runtime can supply: no
+/// strict emitter writes them, so an `include` of one is the module's
+/// absence wherever `unavailable_class_module_construct` says so.
+const UNMODELED_MIXINS: &[&str] = &["Observable"];
 
 /// Ledger a Const / superclass name that is unavailable on `target`
 /// (bundled library object or ruby-family runtime exception stub).
@@ -9729,6 +9742,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         if let Some(parent) = &class.parent {
             report_unavailable_class_value(app, target, parent.0.as_str(), class.parent_span);
         }
+        report_unmodeled_includes(app, target, class);
     }
     for module in &app.test_modules {
         for class in &module.inner_classes {
@@ -9740,7 +9754,22 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                     class.parent_span,
                 );
             }
+            report_unmodeled_includes(app, target, class);
         }
+    }
+}
+
+/// An `include` names a module value too, kept beside the class with its
+/// span rather than in a body. Only the mixins no emitter writes itself go
+/// through here: `Comparable` and `Enumerable` the strict emitters model,
+/// so their includes are not the module's absence.
+fn report_unmodeled_includes(app: &App, target: &str, class: &crate::dialect::LibraryClass) {
+    for (i, included) in class.includes.iter().enumerate() {
+        if !UNMODELED_MIXINS.contains(&included.0.as_str()) {
+            continue;
+        }
+        let span = class.include_spans.get(i).copied().unwrap_or_default();
+        report_unavailable_class_value(app, target, included.0.as_str(), span);
     }
 }
 

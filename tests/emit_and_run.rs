@@ -20643,6 +20643,8 @@ mod module_protocol_block_self;
 mod ipaddr_include;
 #[path = "emit_and_run/pp_require.rs"]
 mod pp_require;
+#[path = "emit_and_run/weakref_observable.rs"]
+mod weakref_observable;
 #[path = "emit_and_run/hash_subclass_include.rs"]
 mod hash_subclass_include;
 #[path = "emit_and_run/module_query_class_unions.rs"]
