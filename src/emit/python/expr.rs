@@ -917,8 +917,12 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
             match params.as_slice() {
                 [p] => format!("[{} for {} in {}]", emit_expr(body), p, emit_expr(recv)),
-                // A block with no parameter binds none, as `each` does.
-                [] => format!("[{} for _ in {}]", emit_expr(body), emit_expr(recv)),
+                // A block with no parameter binds none, as `each` does. A
+                // comprehension takes one expression, so a body of several
+                // statements stays refused below.
+                [] if !matches!(&*body.node, ExprNode::Seq { exprs } if exprs.len() > 1) => {
+                    format!("[{} for _ in {}]", emit_expr(body), emit_expr(recv))
+                }
                 _ => crate::emit::diagnostics::report_unsupported(e.span, "python", "map-block", ""),
             }
         }

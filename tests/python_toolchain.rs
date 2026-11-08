@@ -378,6 +378,16 @@ fn each_no_param_renders() {
     assert!(output.status.success() && stderr.contains("Ran 1 test"), "{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
 }
 
+/// #1910: a `map` block with no parameter whose body is more than one
+/// statement is refused, as before, rather than emitted into a
+/// comprehension, which takes only an expression
+/// (`each_no_param::MAP_STATEMENTS_VIEW`).
+#[test]
+fn each_no_param_map_statements_are_refused() {
+    let (_emitted, errors) = each_no_param::strict_map_statements_app().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.iter().any(|e| e.contains("map-block not supported (python)")), "{errors:?}");
+}
+
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
 /// does (`view_unless_no_else::VIEW`).
 #[test]

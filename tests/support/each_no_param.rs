@@ -23,3 +23,13 @@ pub fn app(base: Overlay) -> Overlay {
 pub fn strict_app() -> Overlay {
     app(super::content_tag_options::app_rendering(VIEW, RENDERS))
 }
+
+/// A block with no parameter whose body is two statements. Rails 8.1.4
+/// renders it `"L0:x,x|"`; Python's comprehension takes only an
+/// expression, so this shape is refused there, not emitted.
+pub const MAP_STATEMENTS_VIEW: &str = "L0:<%= [1, 2].map { x = \"x\"; x }.join(\",\") %>|\n";
+
+/// The strict targets' probe app for `MAP_STATEMENTS_VIEW`.
+pub fn strict_map_statements_app() -> Overlay {
+    app(super::content_tag_options::app_rendering(MAP_STATEMENTS_VIEW, &["L0:x,x|"]))
+}
