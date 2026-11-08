@@ -1008,11 +1008,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                         // carry `included do` declarations that belong
                         // to every includer: filters (controller-side)
                         // and model DSL (associations/scopes).
-                        if let Some(concern_filters) =
-                            unwrap_or_record(ingest_concern_filters(&source, &path_str))?
-                        {
-                            app.concern_filters.extend(concern_filters);
-                        }
+                        record_concern_filters(&mut app, ingest_concern_filters(&source, &path_str), |_| true);
                         let (concern_items, concern_enum_decls, concern_guarded) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
@@ -1324,8 +1320,10 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                             spans: aliases,
                         });
                     }
-                    // A Concern here runs its `included do` in a model that
-                    // includes it, as one under app/models/concerns does.
+                    // A Concern here runs its `included do` in whatever
+                    // includes it, as one under app/*/concerns does: a
+                    // controller gets its filters, a model its DSL.
+                    record_concern_filters(&mut app, ingest_concern_filters(&source, &path_str), |_| true);
                     let (concern_items, concern_enum_decls, concern_guarded) =
                         ingest_concern_model_items_with_constants(&source, &path_str, &enum_constants);
                     for (id, name) in ingest_concern_included_redefs(&source, &path_str) {
@@ -2133,14 +2131,10 @@ end
                     // `cache_controller/versioning.rb` opening, declares
                     // its `included do` filters as one in the concerns
                     // folder does (the branch below).
-                    if let Some(concern_filters) =
-                        unwrap_or_record(ingest_concern_filters(&source, &path_str))?
-                    {
-                        let prefix = format!("{}::", outer.0.as_str());
-                        app.concern_filters.extend(
-                            concern_filters.into_iter().filter(|(id, _)| id.0.as_str().starts_with(&prefix)),
-                        );
-                    }
+                    let prefix = format!("{}::", outer.0.as_str());
+                    record_concern_filters(&mut app, ingest_concern_filters(&source, &path_str), |id| {
+                        id.0.as_str().starts_with(&prefix)
+                    });
                 } else {
                     // Not a controller file: a module-only concern under
                     // app/controllers/concerns/, a mixin like
@@ -2154,11 +2148,7 @@ end
                         unwrap_or_record(ingest_library_classes(&source, &path_str))?
                     {
                         app.library_classes.extend(classes);
-                        if let Some(concern_filters) =
-                            unwrap_or_record(ingest_concern_filters(&source, &path_str))?
-                        {
-                            app.concern_filters.extend(concern_filters);
-                        }
+                        record_concern_filters(&mut app, ingest_concern_filters(&source, &path_str), |_| true);
                         let (concern_items, concern_enum_decls, concern_guarded) =
                             ingest_concern_model_items_with_constants(
                                 &source, &path_str, &enum_constants,
@@ -2964,6 +2954,7 @@ end
         concern_class_method_spans.extend(carriers);
         framework_shadow_scopes.extend(shadows);
     }
+    app.plain_mixins = plain_mixins(&app, &concern_class_method_spans);
     // Not a module's own `class << self` defs: Ruby defines those on the module, whatever ingest also copies onto includers.
     app.concern_class_side_spans = concern_class_method_spans
         .iter()
@@ -3201,6 +3192,7 @@ end
     app.source_index_required = !app.sources.is_empty();
     drop(sources);
     carry_included_block_includes_into_controllers(&mut app);
+    refuse_unread_concern_filters(&app)?;
     splice_concerns_into_controllers(&mut app);
     // After the splice: an action a concern provides is not implicit.
     synthesize_template_only_actions(&mut app);
@@ -4752,8 +4744,6 @@ fn splice_concerns_into_controllers(app: &mut App) {
         crate::ident::ClassId,
         crate::det::HashSet<crate::ident::Symbol>,
     > = HashMap::default();
-    let mut module_includes: HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> =
-        HashMap::default();
     // An `included do … delegate … end` runs in the includer: its forwarders are the controller's (`controller_delegates`).
     let module_delegates: HashMap<crate::ident::ClassId, Vec<crate::expr::Expr>> = app
         .concern_model_items
@@ -4784,8 +4774,11 @@ fn splice_concerns_into_controllers(app: &mut App) {
         );
         module_constants
             .insert(lc.name.clone(), lc.constants.iter().map(|(n, _)| n.clone()).collect());
-        module_includes.insert(lc.name.clone(), lc.includes.clone());
     }
+    let module_includes = resolved_module_includes(app);
+    let filter_edges = filter_dependency_edges(app, &module_includes);
+    let known_modules: crate::det::HashSet<String> =
+        library_class_names(app).into_iter().map(str::to_string).collect();
 
     // controller -> (spliced method -> the module it came from). Built
     // alongside the splice and stored on the App: the copy is typed
@@ -4807,7 +4800,14 @@ fn splice_concerns_into_controllers(app: &mut App) {
     let routed_here = routed_actions_with_descendants(app);
 
     for controller in &mut app.controllers {
-        let statements = crate::analyze::controller_include_statements(controller);
+        let known: crate::det::HashSet<&str> = known_modules.iter().map(String::as_str).collect();
+        let statements: Vec<(usize, Vec<crate::ident::ClassId>)> =
+            crate::analyze::controller_include_statements(controller)
+                .into_iter()
+                .map(|(at, group)| {
+                    (at, group.iter().map(|m| resolve_mixin(m, controller.name.0.as_str(), &known)).collect())
+                })
+                .collect();
         let include_groups: Vec<Vec<crate::ident::ClassId>> =
             statements.iter().map(|(_, group)| group.clone()).collect();
         let includes: Vec<crate::ident::ClassId> = include_groups.iter().flatten().cloned().collect();
@@ -4830,7 +4830,7 @@ fn splice_concerns_into_controllers(app: &mut App) {
         // registers it.
         let filter_order: Vec<(usize, crate::ident::ClassId)> = statements
             .iter()
-            .zip(filter_registration_by_statement(&include_groups, &module_includes))
+            .zip(filter_registration_by_statement(&include_groups, &filter_edges))
             .flat_map(|((at, _), modules)| modules.into_iter().map(move |module| (*at, module)))
             .collect();
         // Transitive closure, in include order.
@@ -5094,6 +5094,126 @@ fn routed_actions_with_descendants(
     out
 }
 
+/// One file's `included do` scan onto the app, for the modules `keep` takes.
+fn record_concern_filters(
+    app: &mut App,
+    scan: super::library_class::ConcernFilterScan,
+    keep: impl Fn(&crate::ident::ClassId) -> bool,
+) {
+    app.concern_filters.extend(scan.filters.into_iter().filter(|(id, _)| keep(id)));
+    for (module, file, message) in scan.refusals {
+        if keep(&module) {
+            app.concern_filter_refusals.entry(module).or_default().push((file, message));
+        }
+    }
+}
+
+/// Library modules no declaration of which makes them a Concern: no
+/// `extend ActiveSupport::Concern`, no other `extend` that might, and no
+/// `included do` block, which only a Concern can run. The scan behind
+/// `carriers` reads every source file, so a module absent from it has none.
+fn plain_mixins(
+    app: &App,
+    carriers: &[ConcernClassMethodSpans],
+) -> crate::det::HashSet<crate::ident::ClassId> {
+    let concerns: crate::det::HashSet<&crate::ident::ClassId> = carriers
+        .iter()
+        .filter(|c| !c.concern_extensions.is_empty() || c.has_other_extensions)
+        .map(|c| &c.owner)
+        .collect();
+    app.library_classes
+        .iter()
+        .filter(|lc| lc.is_module)
+        .map(|lc| &lc.name)
+        .filter(|name| {
+            !concerns.contains(*name)
+                && !app.concern_filters.contains_key(*name)
+                && !app.concern_filter_refusals.contains_key(*name)
+        })
+        .cloned()
+        .collect()
+}
+
+/// A concern filter ingest could not read refuses the compile once a
+/// controller registers that concern. Dropping it would leave the
+/// controller's actions running without the filter, with no error at
+/// run time. Survey mode lists the gap instead.
+fn refuse_unread_concern_filters(app: &App) -> super::IngestResult<()> {
+    if app.concern_filter_refusals.is_empty() {
+        return Ok(());
+    }
+    let surfaces = controller_concern_surfaces(app);
+    let mut reported = crate::det::HashSet::default();
+    for controller in &app.controllers {
+        let Some(surface) = surfaces.controllers.get(&controller.name) else { continue };
+        for module in &surface.includes {
+            if !reported.insert(module.clone()) {
+                continue;
+            }
+            for (file, message) in app.concern_filter_refusals.get(module).into_iter().flatten() {
+                super::survey::continue_or_fail(super::IngestError::Unsupported {
+                    file: file.clone(),
+                    message: message.clone(),
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The name a mixin written `written` inside `scope` refers to: Ruby looks
+/// it up from the innermost namespace outward. A name no library class
+/// answers to is returned as written.
+fn resolve_mixin(
+    written: &crate::ident::ClassId,
+    scope: &str,
+    known: &crate::det::HashSet<&str>,
+) -> crate::ident::ClassId {
+    let id = |name: String| crate::ident::ClassId(crate::ident::Symbol::from(name));
+    let name = written.0.as_str();
+    if let Some(top) = name.strip_prefix("::") {
+        return id(top.to_string());
+    }
+    let mut prefix = Some(scope);
+    while let Some(current) = prefix {
+        let candidate = format!("{current}::{name}");
+        if known.contains(candidate.as_str()) {
+            return id(candidate);
+        }
+        prefix = current.rsplit_once("::").map(|(outer, _)| outer);
+    }
+    written.clone()
+}
+
+fn library_class_names(app: &App) -> crate::det::HashSet<&str> {
+    app.library_classes.iter().map(|lc| lc.name.0.as_str()).collect()
+}
+
+/// Each library class's includes, reopenings merged, under the names
+/// they resolve to.
+fn resolved_module_includes(
+    app: &App,
+) -> HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> {
+    let known = library_class_names(app);
+    let mut out: HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> = HashMap::default();
+    for lc in &app.library_classes {
+        let includes = lc.includes.iter().map(|inc| resolve_mixin(inc, lc.name.0.as_str(), &known));
+        out.entry(lc.name.clone()).or_default().extend(includes);
+    }
+    out
+}
+
+/// The include edges filter registration follows. A plain module's are
+/// not among them: `include` on it already ran the `included` hooks of
+/// what it includes, on the module itself, and including the module
+/// later does not run them again.
+fn filter_dependency_edges(
+    app: &App,
+    resolved: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+) -> HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> {
+    resolved.iter().filter(|(m, _)| !app.plain_mixins.contains(*m)).map(|(m, inc)| (m.clone(), inc.clone())).collect()
+}
+
 /// The order a controller's concern filters REGISTER in — the order
 /// their `included` hooks fire — from its `include` statements as
 /// grouped in the source. Ruby's `Module#include` invokes
@@ -5175,6 +5295,9 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
     for controller in &app.controllers {
         parts.entry(&controller.name).or_default().push(controller);
     }
+    let resolved = resolved_module_includes(app);
+    let filter_edges = filter_dependency_edges(app, &resolved);
+    let known = library_class_names(app);
     let mut controllers = HashMap::default();
     for name in parts.keys() {
         let mut direct_includes = Vec::new();
@@ -5195,7 +5318,7 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
                             direct_includes.push(inc.clone());
                         }
                     }
-                    groups.push(group);
+                    groups.push(group.iter().map(|m| resolve_mixin(m, c.0.as_str(), &known)).collect());
                 }
             }
             // Ancestors register before descendants; each class's statements
@@ -5207,8 +5330,8 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
             cur = declarations.iter().find_map(|part| part.parent.as_ref());
         }
         controllers.insert((*name).clone(), ControllerConcernSurface {
-            includes: filter_registration_order(&include_groups, &module_includes),
-            inherited_includes: filter_registration_order(&inherited_groups, &module_includes),
+            includes: filter_registration_order(&include_groups, &filter_edges),
+            inherited_includes: filter_registration_order(&inherited_groups, &filter_edges),
             direct_includes,
         });
     }
