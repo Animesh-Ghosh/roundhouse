@@ -220,6 +220,8 @@ fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr], enclo
                             file: super::sources::path_of(span.file).unwrap_or_default(),
                             message: format!("unsupported routes DSL: `{method}` ({why})"),
                         });
+                        // Not only a survey line: outside a survey the routes are gone without it.
+                        gaps.push(crate::diagnostic::Diagnostic::unsupported(*span, None, method.as_str(), format!("`{method}`'s routes are not drawn: {why}")));
                         RouteSpec::Scope {
                             path: None,
                             module: None,
