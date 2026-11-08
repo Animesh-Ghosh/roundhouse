@@ -62,6 +62,13 @@ end
     render plain: Widget.count.to_s
   end
 
+  def raw_role
+    widget = Widget.new(name: "raw", role: :admin)
+    assigned = widget.role_before_type_cast.to_s
+    widget.save!
+    render plain: assigned + "|" + widget.role_before_type_cast.to_s
+  end
+
   def show
     render json: { name: Widget.find(params[:id]).name }
   end
@@ -102,6 +109,7 @@ end
   get "/widgets/seed", to: "widgets#seed"
   get "/widgets/admins", to: "widgets#admins"
   get "/widgets/names", to: "widgets#names"
+  get "/widgets/raw_role", to: "widgets#raw_role"
   get "/widgets/extra", to: "widgets#extra"
   get "/widgets/counts", to: "widgets#counts"
   post "/widgets/wrap", to: "widgets#wrap"
@@ -175,4 +183,7 @@ fn api_parity_round3_fixes_run_on_spinel() {
 
     let counts = server.get("/widgets/counts");
     assert_eq!((counts.status, counts.body.as_str()), (200, r#"{"counts":3}"#), "concern action:\n{}", server.log());
+    // #1986: what was assigned, then the stored value (Rails 8.1.4). Last: it saves a row.
+    let raw_role = server.get("/widgets/raw_role");
+    assert_eq!(raw_role.body, "admin|1", "raw role:\n{}", server.log());
 }

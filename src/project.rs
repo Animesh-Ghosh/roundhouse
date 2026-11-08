@@ -9508,6 +9508,20 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 format!("the compiled `render json:` encoder (`#{method}`) is verified on the ruby family, spinel, Rust, TypeScript, Python, Crystal, C#, Kotlin, Swift, Elixir and Go only"),
             );
         }
+        if let crate::expr::ExprNode::Send { method, .. } = &*expr.node
+            && target != "spinel"
+            && target != "jruby"
+            && !expr.span.is_synthetic()
+            && let Some(column) = method.as_str().strip_suffix("_before_type_cast")
+            && crate::analyze::raw_input_columns(app).contains(&crate::ident::Symbol::from(column))
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "enum_before_type_cast",
+                format!("#{method} needs the value as assigned, which only the ruby family and spinel keep; a stored-value reader is not equivalent"),
+            );
+        }
         if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
             && target != "spinel"
             && target != "jruby"

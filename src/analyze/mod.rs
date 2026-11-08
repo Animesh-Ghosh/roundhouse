@@ -26,6 +26,7 @@
 mod alba;
 pub(crate) mod assoc_pluck;
 mod enum_raw_input;
+pub(crate) use enum_raw_input::raw_input_columns;
 mod body;
 pub(crate) use body::some_operands_take_it;
 mod class_configuration;
@@ -540,7 +541,9 @@ impl Analyzer {
                 };
                 cls.instance_methods.insert(name.clone(), reader_ty);
                 if model.enums.contains_key(name) {
-                    cls.instance_methods.entry(Symbol::from(format!("{n}_before_type_cast"))).or_insert(ty.clone());
+                    // What was assigned, in any form the writer takes, or the stored value.
+                    let raw_ty = Ty::Union { variants: vec![ty.clone(), Ty::Str, Ty::Sym, Ty::Nil].into() };
+                    cls.instance_methods.entry(Symbol::from(format!("{n}_before_type_cast"))).or_insert(raw_ty);
                 }
                 let predicate = Symbol::from(format!("{n}?"));
                 cls.instance_methods.entry(predicate).or_insert(Ty::Bool);
