@@ -585,8 +585,9 @@ jobs:
       - name: Install gems used by emitted Ruby and Campfire harness tests
         run: |
           gem install --no-document rails-html-sanitizer sqlite3 bcrypt rack ruby-vips markly faraday faraday-multipart faraday-retry retryable jwt rest-client elastic-apm
-          # The Rails the fixture locks (see generate-fixture).
-          gem install --no-document activerecord -v 8.1.4
+          # The Rails the fixture locks (see generate-fixture), whole: the native Rails controls need
+          # actionpack, actionview, actioncable and railties too, and skip without them.
+          gem install --no-document rails -v 8.1.4
           gem install --no-document sequel -v 5.99.0
           # solid_queue's record models, at the fixture's locked version (tests/support/solid_queue_worker.rs).
           gem install --no-document --ignore-dependencies solid_queue -v "$(sed -n 's/^    solid_queue (\(.*\))$/\1/p' fixtures/real-blog/Gemfile.lock)"
@@ -614,8 +615,8 @@ jobs:
               --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
               --shard-index ${{ strategy.job-index }} --shard-count ${{ strategy.job-total }} \
               --report "$RUNNER_TEMP/unit-resources/tests/shard.json"
-      # Not a failure yet: this job installs neither actionpack nor spinel, so the controls that
-      # need them skip. The summary names them; ROUNDHOUSE_REQUIRE_PREREQUISITES fails them once provided.
+      # Not a failure yet: this job installs no spinel, and some controls want gems it does not install,
+      # so those tests skip. The summary names them; ROUNDHOUSE_REQUIRE_PREREQUISITES fails them once provided.
       - name: Report tests that skipped for a missing prerequisite
         if: always()
         env:
