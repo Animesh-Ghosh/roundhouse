@@ -5506,8 +5506,9 @@ pub fn ingest_concern_filters(source: &[u8], file: &str) -> ConcernFilterScan {
         // After every `included do`: Ruby calls the hook once
         // `append_features`, which runs the block, has returned.
         let mut hook_filters = Vec::new();
+        let super_is_inert = !singleton_ancestors_beyond_concern(flatten_statements(module.body().unwrap()));
         for stmt in flatten_statements(body) {
-            if read_filter_hook(&stmt, &id, file, &mut hook_filters, &mut out) {
+            if read_filter_hook(&stmt, &id, file, super_is_inert, &mut hook_filters, &mut out) {
                 continue;
             }
             let Some(call) = stmt.as_call_node() else { continue };
@@ -5599,6 +5600,7 @@ fn read_filter_hook(
     stmt: &Node<'_>,
     module: &ClassId,
     file: &str,
+    super_is_inert: bool,
     filters: &mut Vec<crate::dialect::Filter>,
     out: &mut ConcernFilterScan,
 ) -> bool {
@@ -5624,7 +5626,7 @@ fn read_filter_hook(
     let Some(def) = visibility::definition(stmt) else { return false };
     let Some(param) = hook_parameter(&def, false) else { return false };
     let Some(name) = hook_callback_macro(&def, &param) else { return false };
-    let read = (constant_id_str(&def.name()) == "included").then(|| hook_filters(&def, &param, file)).flatten();
+    let read = (constant_id_str(&def.name()) == "included").then(|| hook_filters(&def, &param, file, super_is_inert)).flatten();
     let Some(read) = read else {
         refuse_filter_hook(name, module, file, out);
         return true;
@@ -5667,35 +5669,38 @@ fn hook_filters(
     def: &ruby_prism::DefNode<'_>,
     param: &str,
     file: &str,
+    super_is_inert: bool,
 ) -> Option<Vec<crate::dialect::Filter>> {
     let mut filters = Vec::new();
     flatten_statements(def.body()?)
         .iter()
-        .all(|stmt| read_hook_statement(stmt, param, false, file, &mut filters))
+        .all(|stmt| read_hook_statement(stmt, param, false, file, super_is_inert, &mut filters))
         .then_some(filters)
 }
 
-/// One hook statement: `super`, `base.<macro>`, `base.class_eval { ... }`
-/// or `instance_eval`, each optionally under a guard Rails answers true
-/// on a controller. Inside the eval block the receiver of a macro is
+/// One hook statement: a `super` that reaches nothing the emitted
+/// controller would miss, `base.<macro>`, `base.class_eval { ... }` or
+/// `instance_eval`, each optionally under a guard Rails answers true on
+/// a controller. Inside the eval block the receiver of a macro is
 /// implicit, and `self` is `base`.
 fn read_hook_statement(
     stmt: &Node<'_>,
     param: &str,
     in_eval: bool,
     file: &str,
+    super_is_inert: bool,
     filters: &mut Vec<crate::dialect::Filter>,
 ) -> bool {
     if stmt.as_forwarding_super_node().is_some() || stmt.as_super_node().is_some() {
-        return true;
+        return !in_eval && super_is_inert && is_bare_forward(stmt, param);
     }
     if let Some(body) = decided_hook_guard_body(stmt, param, in_eval) {
-        return body.iter().all(|inner| read_hook_statement(inner, param, in_eval, file, filters));
+        return body.iter().all(|inner| read_hook_statement(inner, param, in_eval, file, super_is_inert, filters));
     }
     let Some(call) = stmt.as_call_node() else { return false };
     if !in_eval && receiver_is_local(call.receiver(), param) {
         if let Some(body) = hook_eval_body(&call) {
-            return body.iter().all(|inner| read_hook_statement(inner, param, true, file, filters));
+            return body.iter().all(|inner| read_hook_statement(inner, param, true, file, super_is_inert, filters));
         }
     }
     // Outside an eval block only `base.<macro>` reaches the includer: a bare
@@ -5718,6 +5723,51 @@ fn read_hook_statement(
         },
         _ => false,
     }
+}
+
+/// `super` or `super(base)`, with no block: what `ActiveSupport::Concern#included`
+/// hands on to `Module#included`, which does nothing. `super()` raises
+/// without a Concern, and a block is one the Concern keeps.
+fn is_bare_forward(stmt: &Node<'_>, param: &str) -> bool {
+    if let Some(forward) = stmt.as_forwarding_super_node() {
+        return forward.block().is_none();
+    }
+    let Some(explicit) = stmt.as_super_node() else { return false };
+    if explicit.block().is_some() {
+        return false;
+    }
+    let args: Vec<_> = explicit.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    matches!(args.as_slice(), [only] if only.as_local_variable_read_node().is_some_and(|read| constant_id_str(&read.name()) == param))
+}
+
+/// Whether a module's singleton class gets more than `ActiveSupport::Concern`:
+/// an `extend`, or an `include`/`prepend` in `class << self` or through
+/// `singleton_class`. `super` in its `included` reaches that method, and
+/// a hook dropped from the emitted module cannot run it.
+fn singleton_ancestors_beyond_concern(statements: Vec<Node<'_>>) -> bool {
+    statements.iter().any(|stmt| {
+        if let Some(singleton) = stmt.as_singleton_class_node() {
+            return singleton.expression().as_self_node().is_some()
+                && singleton.body().map(flatten_statements).unwrap_or_default().iter().any(|inner| {
+                    inner.as_call_node().is_some_and(|call| {
+                        call.receiver().is_none()
+                            && matches!(constant_id_str(&call.name()), "include" | "prepend" | "extend")
+                    })
+                });
+        }
+        let Some(call) = stmt.as_call_node() else { return false };
+        let on_singleton_class = call.receiver().and_then(|r| r.as_call_node()).is_some_and(|recv| {
+            constant_id_str(&recv.name()) == "singleton_class" && recv.arguments().is_none()
+        });
+        let on_module = call.receiver().is_none_or(|r| r.as_self_node().is_some());
+        on_singleton_class
+            || (on_module
+                && constant_id_str(&call.name()) == "extend"
+                && !call.arguments().is_some_and(|args| {
+                    let args: Vec<_> = args.arguments().iter().collect();
+                    matches!(args.as_slice(), [only] if constant_path_of(only).is_some_and(|p| p.join("::") == "ActiveSupport::Concern"))
+                }))
+    })
 }
 
 fn receiver_is_local(receiver: Option<Node<'_>>, local: &str) -> bool {

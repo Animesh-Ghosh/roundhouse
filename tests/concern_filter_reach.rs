@@ -218,3 +218,61 @@ fn a_plain_hook_behind_a_concern_is_not_a_refusal() {
     );
     ingest_app_from_tree(tree).expect("the hook ran on the concern, not the controller");
 }
+
+fn with_stamp(mut tree: HashMap<PathBuf, Vec<u8>>) -> HashMap<PathBuf, Vec<u8>> {
+    tree.insert(
+        PathBuf::from("app/controllers/concerns/stamp.rb"),
+        b"module Stamp\n  def included(base)\n    super\n    base.before_action :stamp_step\n  end\nend\n".to_vec(),
+    );
+    tree
+}
+
+/// `super` reaches whatever joined the module's singleton ancestors, and
+/// that method never runs once the emitted controller stops including the
+/// module. Rails 8.1.4 runs `Stamp#included` here and answers
+/// "stamp check".
+#[test]
+fn a_hook_whose_super_reaches_another_included_refuses_the_compile() {
+    let hook_with_super = hook("super\n    base.before_action :check");
+    for module_body in [
+        format!("  extend Stamp\n{hook_with_super}"),
+        format!("  extend ActiveSupport::Concern\n  extend Stamp\n{hook_with_super}"),
+        format!("  extend ActiveSupport::Concern, Stamp\n{hook_with_super}"),
+        format!("  class << self\n    include Stamp\n  end\n{hook_with_super}"),
+        format!("  singleton_class.include(Stamp)\n{hook_with_super}"),
+    ] {
+        let error = ingest_app_from_tree(with_stamp(hook_tree(&module_body, CONTROLLER)))
+            .err()
+            .unwrap_or_else(|| panic!("expected a refusal for {module_body:?}"))
+            .to_string();
+        assert!(error.contains("`self.included` hook"), "{module_body}: {error}");
+    }
+}
+
+/// `super` from inside `class_eval` raises TypeError in Ruby, and
+/// `super() { ... }` hands `ActiveSupport::Concern#included` a block to
+/// keep: neither is the bare forward these hooks are read for.
+#[test]
+fn a_super_that_is_not_a_bare_forward_refuses_the_compile() {
+    for body in [
+        "base.class_eval do\n      super\n      before_action :check\n    end",
+        "super() { before_action :other }\n    base.before_action :check",
+        "super() \n    base.before_action :check",
+    ] {
+        let module_body = format!("  extend ActiveSupport::Concern\n{}", hook(body));
+        let error = refused(&module_body);
+        assert!(error.contains("`self.included` hook"), "{body}: {error}");
+    }
+}
+
+/// `ActiveSupport::Concern#included` with a base just calls `Module#included`,
+/// so `super` through it does nothing the emitted controller misses.
+#[test]
+fn a_super_that_only_reaches_active_support_concern_is_read() {
+    for body in ["super\n    base.before_action :check", "super(base)\n    base.before_action :check"] {
+        let module_body = format!("  extend ActiveSupport::Concern\n{}", hook(body));
+        let app = ingest_app_from_tree(hook_tree(&module_body, CONTROLLER)).expect("modelled");
+        let gated = app.library_classes.iter().find(|c| c.name.0.as_str() == "Gated").expect("module");
+        assert!(gated.methods.iter().all(|m| m.name.as_str() != "included"), "{body}: {:?}", gated.methods);
+    }
+}
