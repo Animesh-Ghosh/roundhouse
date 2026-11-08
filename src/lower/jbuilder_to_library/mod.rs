@@ -1201,16 +1201,21 @@ fn drop_blank_object(mark: Symbol, ctx: &Ctx) -> Expr {
     )
 }
 
+/// The records a pair's value writes as `as_json` does: `Some(None)` for
+/// a reader whose class the row decides and no closed set names.
+fn pair_record(value: &Expr, ctx: &Ctx) -> Option<Option<RecordValue>> {
+    ctx.span_types
+        .get(&value.span)
+        .and_then(|t| ctx.record_shapes.of_ty(t))
+        .map(Some)
+        // An association reader the analyzer left untyped (a polymorphic
+        // one): its records as the reader on the owner's model answers them.
+        .or_else(|| association_read(value, ctx))
+}
+
 /// A pair's value appended to the accumulator.
 fn push_pair_value(value: &Expr, src: &Expr, ctx: &Ctx, out: &mut Vec<Expr>) {
-    // A record, or records: as `as_json` writes them.
-    if let Some(record) = ctx.span_types.get(&value.span).and_then(|t| ctx.record_shapes.of_ty(t)) {
-        let value = rewrite_h_escape(&rewrite_route_helpers(value, ctx));
-        out.extend(record_value_or_refusal(value, Some(&record), src.span, ctx));
-    } else if let Some(record) = association_read(value, ctx) {
-        // An association reader the analyzer left untyped
-        // (a polymorphic one): its records as the reader
-        // on the owner's model answers them.
+    if let Some(record) = pair_record(value, ctx) {
         let value = rewrite_h_escape(&rewrite_route_helpers(value, ctx));
         out.extend(record_value_or_refusal(value, record.as_ref(), src.span, ctx));
     } else {
@@ -1263,16 +1268,51 @@ fn conditional_array(body: &Expr) -> Option<(&Expr, Option<&Expr>, Option<&Expr>
     (then_array.is_some() || else_array.is_some()).then_some((cond, then_array, else_array))
 }
 
+/// `value`, read once, as an array that `array!` answers `[]` for when it
+/// is nil (Jbuilder's `array!`); `emit` writes the rest. The block and
+/// extract forms bind and guard their collection themselves.
+fn nil_collection_guard(value: &Expr, ctx: &Ctx, emit: impl FnOnce(Expr) -> Vec<Expr>) -> Vec<Expr> {
+    let prepared = rewrite_h_escape(&rewrite_route_helpers(value, ctx));
+    let mut out = Vec::new();
+    let read = match &*prepared.node {
+        ExprNode::Var { .. } | ExprNode::Ivar { .. } => prepared,
+        _ => {
+            let n = ctx.temps.get();
+            ctx.temps.set(n + 1);
+            let name = Symbol::from(format!("__val{n}"));
+            out.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign { target: LValue::Var { id: VarId(0), name: name.clone() }, value: prepared },
+            ));
+            let mut read = var_ref(name);
+            read.span = value.span;
+            read.ty = value.ty.clone();
+            read
+        }
+    };
+    out.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: send(Some(read.clone()), "nil?", Vec::new(), None, false),
+            then_branch: io_append_lit(&ctx.accumulator, "[]"),
+            else_branch: seq(emit(read)),
+        },
+    ));
+    out
+}
+
 /// What one array statement of a [`conditional_array`] appends.
 fn array_value_appends(stmt: &Expr, ctx: &Ctx) -> Vec<Expr> {
     if let Some(value) = plain_array_value(stmt) {
-        let mut out = Vec::new();
-        push_pair_value(value, stmt, ctx, &mut out);
-        return out;
+        let record = pair_record(value, ctx);
+        return nil_collection_guard(value, ctx, |read| match record {
+            Some(record) => record_value_or_refusal(read, record.as_ref(), stmt.span, ctx),
+            None => vec![io_append_call(&ctx.accumulator, json_builder_encode(read))],
+        });
     }
     match classify(stmt) {
         JbStmt::ArrayPartial { collection, partial_path, item_var } => {
-            emit_array_partial(collection, &partial_path, &item_var, ctx)
+            nil_collection_guard(collection, ctx, |read| emit_array_partial(&read, &partial_path, &item_var, ctx))
         }
         JbStmt::ArrayBlock { collection, item_var, body } => emit_array_block(collection, &item_var, body, ctx),
         JbStmt::ArrayExtract { collection, attrs } => emit_array_extract(collection, &attrs, ctx),
