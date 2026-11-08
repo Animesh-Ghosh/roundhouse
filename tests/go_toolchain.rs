@@ -39,6 +39,9 @@ mod ivar_named_local;
 #[path = "support/link_to_template_local.rs"]
 #[allow(dead_code)]
 mod link_to_template_local;
+#[path = "support/each_no_param.rs"]
+#[allow(dead_code)]
+mod each_no_param;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -619,4 +622,12 @@ fn ivar_named_local_renders() {
 #[ignore]
 fn link_to_template_local_renders() {
     assert_content_tag_test_passes(link_to_template_local::strict_app());
+}
+
+/// #1910: a block with no parameter renders as Rails 8.1.4 does
+/// (`each_no_param::VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_renders() {
+    assert_content_tag_test_passes(each_no_param::strict_app());
 }

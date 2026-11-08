@@ -1163,13 +1163,14 @@ pub(super) fn emit_send(
                 };
                 // Loop vars: 1 param → array iter (drop the index
                 // with `_`); 2 params → hash iter (key + value);
-                // 0 params (rare — `arr.each { puts "hi" }`) → both
-                // sides bound to `_`. >2 params is unmappable; emit
-                // a TODO so the gap is loudly visible.
+                // 0 params (`arr.each { puts "hi" }`) → a bare
+                // `for range`, which binds nothing (`_, _ :=` declares no
+                // new variable, which Go rejects). >2 params is
+                // unmappable; emit a TODO so the gap is loudly visible.
                 // IIFE introduces fresh Go scope.
                 let body_ctx = ctx.enter_scope();
                 let range_vars = match params.len() {
-                    0 => "_, _".to_string(),
+                    0 => String::new(),
                     1 => {
                         let name = params[0].as_str();
                         body_ctx.declare_param(name);
@@ -1187,6 +1188,8 @@ pub(super) fn emit_send(
                     }
                 };
                 let body_s = emit_block_body(&body_ctx, body);
+                // No block parameter binds nothing: Go's bare `for range`.
+                let range_clause = if range_vars.is_empty() { format!("range {recv_s}") } else { format!("{range_vars} := range {recv_s}") };
                 // 2-param `each` iterates a Hash. Go map iteration order is
                 // undefined per-run, but several runtime-Ruby surfaces
                 // render observable output from it — notably `render_attrs`,
@@ -1225,7 +1228,7 @@ pub(super) fn emit_send(
                 }
                 return format!(
                     "func() interface{{}} {{\n\
-                     \tfor {range_vars} := range {recv_s} {{\n\
+                     \tfor {range_clause} {{\n\
                      {body_s}\n\
                      \t}}\n\
                      \treturn {recv_s}\n\
@@ -1250,7 +1253,7 @@ pub(super) fn emit_send(
                 // IIFE introduces fresh Go scope.
                 let body_ctx = ctx.enter_scope();
                 let range_vars = match params.len() {
-                    0 => "_, _".to_string(),
+                    0 => String::new(),
                     1 => {
                         let name = params[0].as_str();
                         body_ctx.declare_param(name);
@@ -1268,6 +1271,8 @@ pub(super) fn emit_send(
                     }
                 };
                 let body_s = emit_map_block_body(&body_ctx, body);
+                // No block parameter binds nothing: Go's bare `for range`.
+                let range_clause = if range_vars.is_empty() { format!("range {recv_s}") } else { format!("{range_vars} := range {recv_s}") };
                 let elem_ty = match result_ty {
                     Some(Ty::Array { elem }) => {
                         let rendered = super::ty::go_ty_stub(Some(elem));
@@ -1282,7 +1287,7 @@ pub(super) fn emit_send(
                 return format!(
                     "func() []{elem_ty} {{\n\
                      \tout := []{elem_ty}{{}}\n\
-                     \tfor {range_vars} := range {recv_s} {{\n\
+                     \tfor {range_clause} {{\n\
                      {body_s}\n\
                      \t}}\n\
                      \treturn out\n\

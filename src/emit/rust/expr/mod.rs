@@ -995,8 +995,10 @@ fn emit_expr_inner(e: &Expr) -> String {
                         r.ty.as_ref().map(peel_nil),
                         Some(crate::ty::Ty::Array { .. })
                     );
-                    if is_array_after_peel && params.len() == 1 {
-                        let p = params[0].as_str();
+                    // A block with no parameter runs once per element
+                    // and binds none: the closure's parameter is `_`.
+                    if is_array_after_peel && params.len() <= 1 {
+                        let p = params.first().map_or("_", |s| s.as_str());
                         // `Option<Vec<T>>` recv (`Union<Nil, Array>`)
                         // takes the read-only `.iter().flatten()` chain
                         // below; the mutating no-clone path applies only
@@ -1104,9 +1106,11 @@ fn emit_expr_inner(e: &Expr) -> String {
                             _ => None,
                         });
                     if let Some((params, body)) = block_lambda {
-                        if params.len() == 1 {
+                        // A block with no parameter maps each element
+                        // to its value and binds none: `_`, as `each`.
+                        if params.len() <= 1 {
                             let recv_s = emit_expr(r);
-                            let p = params[0].as_str();
+                            let p = params.first().map_or("_", |s| s.as_str());
                             let body_s = emit_expr(body);
                             let closure = if body_s.contains('\n') {
                                 format!("|{p}| {{\n{}\n}}", indent(&body_s, 1))

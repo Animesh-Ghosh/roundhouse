@@ -48,6 +48,9 @@ mod ivar_named_local;
 #[path = "support/link_to_template_local.rs"]
 #[allow(dead_code)]
 mod link_to_template_local;
+#[path = "support/each_no_param.rs"]
+#[allow(dead_code)]
+mod each_no_param;
 #[path = "support/link_to_if_escape.rs"]
 #[allow(dead_code)]
 mod link_to_if_escape;
@@ -538,6 +541,19 @@ fn ivar_named_local_renders() {
 #[ignore]
 fn link_to_template_local_renders() {
     let (app, renders) = (link_to_template_local::strict_app(), link_to_template_local::RENDERS.to_vec());
+    let (ok, stdout, stderr) = render_probe(app);
+    assert!(ok, "{stdout}\n{stderr}");
+    for want in &renders {
+        assert!(stdout.contains(want), "expected {want:?} in\n{stdout}");
+    }
+}
+
+/// #1910: a block with no parameter renders as Rails 8.1.4 does
+/// (`each_no_param::VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_renders() {
+    let (app, renders) = (each_no_param::strict_app(), each_no_param::RENDERS.to_vec());
     let (ok, stdout, stderr) = render_probe(app);
     assert!(ok, "{stdout}\n{stderr}");
     for want in &renders {

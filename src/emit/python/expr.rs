@@ -755,7 +755,8 @@ fn emit_if_stmt(cond: &Expr, then_branch: &Expr, else_branch: &Expr, void: bool)
 
 /// Emit a `recv.each do |params| body end` call as a native Python `for`
 /// loop. A 2-param block over a Hash iterates `(k, v)` via `.items()`; a
-/// 1-param block over an Array iterates elements directly. Returns `None`
+/// 1-param block over an Array iterates elements directly, and a block
+/// with no parameter over an Array binds `_`. Returns `None`
 /// for shapes outside that (so the caller can degrade rather than emit a
 /// wrong loop) — the block body would otherwise be silently dropped.
 fn emit_for_each(recv: &Expr, params: &[String], body: &Expr) -> Option<String> {
@@ -767,6 +768,8 @@ fn emit_for_each(recv: &Expr, params: &[String], body: &Expr) -> Option<String> 
             (format!("{}, {}", params[0], params[1]), format!("{recv_s}.items()"))
         }
         (1, Some(Ty::Array { .. })) => (params[0].clone(), recv_s),
+        // A block with no parameter runs once per element and binds none.
+        (0, Some(Ty::Array { .. })) => ("_".to_string(), recv_s),
         _ => return None,
     };
     Some(format!("for {vars} in {iter}:\n{}", block_or_pass(body, true)))
@@ -914,6 +917,8 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             let ExprNode::Lambda { params, body, .. } = &*block.node else { unreachable!() };
             match params.as_slice() {
                 [p] => format!("[{} for {} in {}]", emit_expr(body), p, emit_expr(recv)),
+                // A block with no parameter binds none, as `each` does.
+                [] => format!("[{} for _ in {}]", emit_expr(body), emit_expr(recv)),
                 _ => crate::emit::diagnostics::report_unsupported(e.span, "python", "map-block", ""),
             }
         }
