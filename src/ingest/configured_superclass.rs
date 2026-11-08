@@ -2030,6 +2030,7 @@ impl<'a> Eval<'a> {
         });
         // `Devise.setup do |config| … end`, with `def self.setup; yield self; end`: the block's parameter is the receiver.
         let mut locals = locals.clone();
+        let mut yielded: Option<Symbol> = None;
         if let ExprNode::Send { recv: Some(r), method, block: Some(b), .. } = &*e.node
             && let ExprNode::Const { path } = &*r.node
             && let ExprNode::Lambda { params, .. } = &*b.node
@@ -2039,6 +2040,7 @@ impl<'a> Eval<'a> {
             && yields_self(&def.body)
         {
             locals.insert(param.clone(), Val::Class(class));
+            yielded = Some(param.clone());
         }
         // Not a name a block in the statement binds again (`each { |config| … }`): there it is the block's value.
         let mut bound: HashMap<Symbol, usize> = HashMap::default();
@@ -2049,13 +2051,6 @@ impl<'a> Eval<'a> {
                 }
             }
         });
-        let yielded = match &*e.node {
-            ExprNode::Send { block: Some(b), .. } => match &*b.node {
-                ExprNode::Lambda { params, .. } if params.len() == 1 => locals.get(&params[0]).is_some().then(|| params[0].clone()),
-                _ => None,
-            },
-            _ => None,
-        };
         locals.retain(|name, _| match bound.get(name) {
             None => true,
             Some(n) => yielded.as_ref() == Some(name) && *n == 1,
@@ -2485,3 +2480,40 @@ fn names_constant(e: &Expr, root: &str) -> bool {
     found
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn statement(source: &str) -> Expr {
+        let parsed = super::super::prism::parse_silent(source.as_bytes());
+        let node = parsed.node();
+        let program = node.as_program_node().expect("program");
+        let first = program.statements().body().iter().next().expect("a statement");
+        let (expr, _) = super::super::prism::scope(|| super::super::expr::ingest_expr(&first, "t.rb"));
+        expr.expect("ingest")
+    }
+
+    /// A block parameter that shadows a local the frame knows is the block's value, not the local's.
+    #[test]
+    fn a_block_parameter_shadowing_a_known_local_is_not_that_local() {
+        let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+            ("db/schema.rb", "ActiveRecord::Schema.define do\nend\n"),
+            ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\nend\n"),
+            ("lib/thing.rb", "class Thing\n  def update\n    @state = 1\n  end\nend\n"),
+            ("lib/other.rb", "class Other\n  def update\n    @other = 2\n  end\nend\n"),
+            ("config/routes.rb", "Rails.application.routes.draw do\nend\n"),
+        ]
+        .into_iter()
+        .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+        let app = crate::ingest::ingest_app_from_tree(tree).expect("ingest");
+        let mut eval = Eval::new(&app);
+        eval.heap.push(Object { class: "Thing".into(), ivars: HashMap::default() });
+        let mut locals: HashMap<Symbol, Val> = HashMap::default();
+        locals.insert(Symbol::from("config"), Val::Obj(0));
+        let shadowed = statement("items.each { |config| config.update }\n");
+        let writes = eval.may_write_with(&shadowed, "*", false, &mut HashSet::default(), &locals).expect("bounded");
+        assert!(writes.iter().any(|(owner, _, name)| owner == "Other" && name == "other"), "{writes:?}");
+    }
+}
