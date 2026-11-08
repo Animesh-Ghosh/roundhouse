@@ -21409,6 +21409,9 @@ mod view_unless_no_else;
 #[path = "support/nilable_string_view.rs"]
 #[allow(dead_code)]
 mod nilable_string_view;
+#[path = "support/join_nil.rs"]
+#[allow(dead_code)]
+mod join_nil;
 
 /// `simple_format` with `sanitize: false`: paragraphs, line breaks, html
 /// options and `wrapper_tag:`, as Rails 8.1.4 renders them.
@@ -21903,5 +21906,15 @@ fn nilable_string_view_nil_renders_as_rails_on_spinel() {
 fn nilable_string_view_nil_effect_renders_as_rails_on_spinel() {
     nilable_string_view::nil_effect_app(content_tag_options::app_rendering(nilable_string_view::EFFECT_VIEW, &[]))
         .run_spinel(&helper_escape_at_output::render_script(nilable_string_view::NIL_EFFECT_RENDERS))
+        .assert_passes();
+}
+
+/// #1949: `join` reads a nil element as an empty string, as Rails 8.1.4
+/// does (`join_nil::VIEW`).
+#[test]
+fn join_nil_renders_as_rails() {
+    join_nil::app(content_tag_options::app_rendering(join_nil::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(join_nil::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
         .assert_passes();
 }

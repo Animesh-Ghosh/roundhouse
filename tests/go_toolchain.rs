@@ -51,6 +51,9 @@ mod view_unless_no_else;
 #[path = "support/nilable_string_view.rs"]
 #[allow(dead_code)]
 mod nilable_string_view;
+#[path = "support/join_nil.rs"]
+#[allow(dead_code)]
+mod join_nil;
 #[path = "support/go_view_predicate.rs"]
 mod go_view_predicate;
 #[path = "support/go_test_literal_receiver.rs"]
@@ -718,4 +721,12 @@ fn nilable_string_view_nil_renders() {
 #[ignore]
 fn nilable_string_view_nil_effect_renders() {
     assert_content_tag_test_passes(nilable_string_view::strict_nil_effect_app());
+}
+
+/// #1949: `join` reads a nil element as an empty string, as Rails 8.1.4
+/// does (`join_nil::GO_VIEW`).
+#[test]
+#[ignore]
+fn join_nil_renders() {
+    assert_content_tag_test_passes(join_nil::strict_go_app());
 }

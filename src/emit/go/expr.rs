@@ -1948,10 +1948,17 @@ pub(super) fn emit_send(
             if recv_go_ty == "[]string" {
                 return format!("strings.Join({recv_s}, {sep})");
             }
+            // Ruby's `join` reads a nil element as "", and `%v` prints
+            // `<nil>`. Only an interface element can be nil here.
+            let stringify = if matches!(recv_go_ty.as_str(), "[]interface{}" | "[]any") {
+                "if _v == nil { _out = append(_out, \"\") } else { _out = append(_out, fmt.Sprintf(\"%v\", _v)) }"
+            } else {
+                "_out = append(_out, fmt.Sprintf(\"%v\", _v))"
+            };
             return format!(
                 "strings.Join(func() []string {{\n\
                  \t_out := make([]string, 0, len({recv_s}))\n\
-                 \tfor _, _v := range {recv_s} {{ _out = append(_out, fmt.Sprintf(\"%v\", _v)) }}\n\
+                 \tfor _, _v := range {recv_s} {{ {stringify} }}\n\
                  \treturn _out\n\
                  }}(), {sep})",
             );
