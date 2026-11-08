@@ -20641,6 +20641,10 @@ mod module_protocol_receivers;
 mod module_protocol_block_self;
 #[path = "emit_and_run/ipaddr_include.rs"]
 mod ipaddr_include;
+#[path = "emit_and_run/pp_require.rs"]
+mod pp_require;
+#[path = "emit_and_run/weakref_observable.rs"]
+mod weakref_observable;
 #[path = "emit_and_run/hash_subclass_include.rs"]
 mod hash_subclass_include;
 #[path = "emit_and_run/module_query_class_unions.rs"]
@@ -20996,6 +21000,8 @@ mod python_route_format;
 mod partial_local_shadows_helper;
 #[path = "emit_and_run/partial_reads_caller_ivar.rs"]
 mod partial_reads_caller_ivar;
+#[path = "emit_and_run/partial_ivar_and_local.rs"]
+mod partial_ivar_and_local;
 
 #[path = "emit_and_run/python_nested_modifier_if.rs"]
 mod python_nested_modifier_if;

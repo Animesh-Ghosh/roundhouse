@@ -81,7 +81,9 @@ pub(super) fn expand<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path
     let mut failed = false;
     if contains_deferred(&entries) {
         let initializers = super::configured_superclass::initializers_of(vfs, dir, gem_dirs);
-        failed = replace(&mut entries, app, &initializers, &Some((None, None, None)));
+        let mut gaps = Vec::new();
+        failed = replace(&mut entries, app, &initializers, &Some((None, None, None)), &mut gaps);
+        app.gem_route_gaps.extend(gaps);
     }
     app.routes.entries = entries;
     if !failed {
@@ -165,7 +167,7 @@ fn contains_deferred(entries: &[RouteSpec]) -> bool {
 /// Where a call stands, as Rails' `@scope` accumulates it: path, module and name; `None` inside a resource.
 type Enclosing = Option<(Option<String>, Option<String>, Option<String>)>;
 
-fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr], enclosing: &Enclosing) -> bool {
+fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr], enclosing: &Enclosing, gaps: &mut Vec<crate::diagnostic::Diagnostic>) -> bool {
     let mut failed = false;
     for entry in entries.iter_mut() {
         match entry {
@@ -180,14 +182,21 @@ fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr], enclo
                     };
                     (join(p, path, "/", true), join(m, module, "/", false), join(a, &as_prefix.as_ref().map(|s| s.as_str().to_string()), "_", false))
                 });
-                failed |= replace(entries, app, initializers, &inner)
+                failed |= replace(entries, app, initializers, &inner, gaps)
             }
-            RouteSpec::Exclusive { entries } => failed |= replace(entries, app, initializers, &Some((None, None, None))),
-            RouteSpec::Resources { nested, .. } => failed |= replace(nested, app, initializers, &None),
+            RouteSpec::Exclusive { entries } => failed |= replace(entries, app, initializers, &Some((None, None, None)), gaps),
+            RouteSpec::Resources { nested, .. } => failed |= replace(nested, app, initializers, &None, gaps),
             RouteSpec::Deferred { call, span, constraints } => {
                 let drawn = draw(app, call, initializers, enclosing.clone());
                 *entry = match drawn {
-                    Ok(mut inner) => {
+                    Ok((mut inner, omitted)) => {
+                        let method = match &*call.node {
+                            ExprNode::Send { method, .. } => method.as_str().to_string(),
+                            _ => "call".into(),
+                        };
+                        for why in omitted {
+                            gaps.push(crate::diagnostic::Diagnostic::unsupported(*span, None, method.as_str(), why));
+                        }
                         super::routes::apply_outer_constraints(&mut inner, constraints);
                         RouteSpec::Scope {
                             path: None,
@@ -231,7 +240,7 @@ fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr], enclo
     failed
 }
 
-fn draw(app: &App, call: &Expr, initializers: &[Expr], enclosing: Enclosing) -> Result<Vec<RouteSpec>, String> {
+fn draw(app: &App, call: &Expr, initializers: &[Expr], enclosing: Enclosing) -> Result<(Vec<RouteSpec>, Vec<String>), String> {
     let ExprNode::Send { method, .. } = &*call.node else { return Err("not a call".into()) };
     let (lc, def) = extensions(app).into_iter().find(|(_, m)| &m.name == method).ok_or("no method of a mapper extension")?;
     // The gems the method reaches: its module's, and each top-level constant the program defines that its body names (`Devise` from the reopened mapper).
@@ -257,9 +266,9 @@ fn draw(app: &App, call: &Expr, initializers: &[Expr], enclosing: Enclosing) -> 
             mixins.push(owner.name.0.as_str().to_string());
         }
     }
-    let drawn = super::configured_superclass::draw_routes(app, def, scope, call, initializers, &roots, mixins, enclosing)?;
+    let (drawn, omitted) = super::configured_superclass::draw_routes(app, def, scope, call, initializers, &roots, mixins, enclosing)?;
     let body: String = drawn.iter().map(|e| crate::emit::ruby::emit_expr(e) + "\n").collect();
     let source = format!("Rails.application.routes.draw do\n{body}end\n");
     let table = super::routes::ingest_routes(source.as_bytes(), "<gem routes>").map_err(|e| format!("the drawn routes do not read: {e:?}"))?;
-    Ok(table.entries)
+    Ok((table.entries, omitted))
 }
