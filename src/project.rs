@@ -1619,6 +1619,55 @@ fn report_block_render_partials(app: &App, target: BuildTarget) {
     }
 }
 
+/// Off the ruby family a target wraps every html response in
+/// `layouts/application` when the app has it, and in nothing when it
+/// does not; it has no layout per controller or action. A render that
+/// Rails wraps in another layout, or in none, for any controller and
+/// action running it is refused there. A render whose layout cannot be
+/// picked at all was reported by ingest.
+fn report_controller_layouts(app: &App, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura
+    ) {
+        return;
+    }
+    use crate::controller_layout::{Layout, Layouts};
+    let layouts = Layouts::new(&app.controllers, &app.views);
+    let application = crate::ident::Symbol::from("layouts/application");
+    let wrapped = app.views.iter().any(|v| v.format.as_str() == "html" && v.name == application);
+    let target_layout = if wrapped { Layout::Template(application) } else { Layout::None };
+    let mut seen: crate::det::HashSet<(crate::span::Span, String)> = crate::det::HashSet::default();
+    for site in layouts.sites(&app.controllers, &app.views) {
+        let Ok(cases) = layouts.render_cases(site.class, site.method, site.option) else { continue };
+        let Some(case) = cases.iter().find(|c| c.layout != target_layout) else { continue };
+        let (class, action) = &case.runs[0];
+        let under = if (class.as_str(), action.as_str()) == (site.class, site.method) {
+            String::new()
+        } else {
+            format!(" under `{class}#{action}`")
+        };
+        let detail = format!(
+            "`{}#{}` renders {}{under}, and this target wraps every page {}",
+            site.class,
+            site.method,
+            match &case.layout {
+                Layout::Template(name) => format!("in `{}`", name.as_str()),
+                _ => "without a layout".to_string(),
+            },
+            if wrapped { "in `layouts/application`" } else { "without one" }
+        );
+        if seen.insert((site.span, detail.clone())) {
+            emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                site.span,
+                Some(crate::ident::Symbol::from(target.as_str())),
+                "controller layout",
+                detail,
+            ));
+        }
+    }
+}
+
 /// `current_page?` reads the request a view renders for. The ruby
 /// family's views reach it (`ActionController::Current.request`); measured
 /// through each target's own test runner, TypeScript's (`request is not
@@ -3451,6 +3500,7 @@ fn target_files_inner(
     report_config_for(app, target);
     report_i18n_table_sites(app, target);
     report_controller_content_type_writers(app, target);
+    report_controller_layouts(app, target);
     // Snapshot the optional measurement override at the target boundary. The
     // lowerers receive a value; they never consult process-global environment.
     let param_binds = target.param_binds_enabled(
@@ -7739,11 +7789,12 @@ fn apply_puma_boot_hooks(files: &mut [(String, String)], app: &App, target: Requ
 /// tree's boot.rb leaves out; the ruby family loads them all. Spinel warns
 /// "is not available in Spinel" for `delegate`, `English`, `etc` and
 /// `io/nonblock`, and `--strict-require` makes that fatal. `ipaddr` stays
-/// on the port the tree carries (`runtime/ruby/ipaddr.rb`). `pp` and
-/// `observer` have packages this tree's shape still trips: a bare
-/// `require "pp"` is refused (PP's layout), and `require "observer"` leaves
-/// inference unsettled and fails the C compile once Observable is used.
-const SPINEL_LACKS: &[&str] = &["delegate", "English", "etc", "io/nonblock", "ipaddr", "observer", "pp"];
+/// on the port the tree carries (`runtime/ruby/ipaddr.rb`): Spinel's
+/// package keeps the address in one Integer, and an IPv6 address passes
+/// 2**64 without `--int-overflow=promote`. `observer` has a package this
+/// tree's shape still trips: `require "observer"` leaves inference
+/// unsettled and fails the C compile once Observable is used.
+const SPINEL_LACKS: &[&str] = &["delegate", "English", "etc", "io/nonblock", "ipaddr", "observer"];
 
 /// The app's own standard-library requires ([`App::app_requires`]) at
 /// the head of `boot.rb`, ahead of everything that file loads. Twice on
@@ -8664,15 +8715,15 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
 /// Ruby/Spinel bundled library objects (`bundled_constant`), and
 /// ruby-family runtime exception stubs (`ruby_family_runtime_constant`).
 fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'static str> {
-    // Spinel supplies the other bundled and ruby-family class values,
-    // but recognizes GeneratorError only as a literal rescue name, and
-    // its `packages/net` stops short of net/protocol's `HTTPBadResponse`.
+    // Spinel recognizes GeneratorError only as a literal rescue name.
     if target == "spinel" {
         // The Arel ordering and predicate nodes live on the CRuby overlay (`arel_predicates.rb`).
         if matches!(name, "ActiveSupport::ConfigurationFile" | "ActiveSupport::OrderedOptions" | "Arel::Nodes::Ascending" | "Arel::Nodes::Descending" | "Arel::Nodes::Predicate") {
             return Some("ruby_family_runtime_constant");
         }
-        return if matches!(name, "JSON::GeneratorError" | "Net::HTTPBadResponse") {
+        // `Observable` is `require "observer"`, which `SPINEL_LACKS` keeps
+        // out of the spinel boot.rb.
+        return if matches!(name, "JSON::GeneratorError" | "Observable") {
             Some("bundled_constant")
         } else {
             None
@@ -8692,10 +8743,17 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "SocketError"
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
         | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
+        | "Net::HTTPHeaderSyntaxError" | "Net::HTTPError" | "Net::HTTPRetriableError"
+        | "Net::HTTPClientException" | "Net::HTTPFatalError" | "Net::ProtocolError"
+        | "Net::ProtoFatalError" | "Net::ProtoServerError" | "Net::ProtoRetriableError"
+        | "Net::WriteTimeout" | "Net::HTTPInformation"
         // `packages/strscan` and `packages/zlib` on spinel; no strict runtime carries either.
         | "StringScanner" | "Zlib::GzipWriter" | "Zlib::Deflate" | "Zlib::GzipReader" | "Zlib::Error"
         | "Zlib::BEST_COMPRESSION" | "Zlib::MAX_WBITS" | "Zlib::FINISH"
         | "OpenSSL::Digest::SHA1" | "OpenSSL::Digest::SHA256"
+        | "OpenSSL::Digest::SHA384" | "OpenSSL::Digest::SHA512" | "OpenSSL" | "OpenSSL::KDF"
+        | "OpenSSL::PKey" | "OpenSSL::PKey::PKey" | "OpenSSL::PKey::EC" | "OpenSSL::PKey::EC::Group"
+        | "OpenSSL::PKey::PKeyError" | "OpenSSL::PKey::ECError" | "OpenSSL::Digest::DigestError" | "OpenSSL::KDF::KDFError"
         // runtime/spinel/integration_session.rb and the ruby tree's twin.
         | "ActionDispatch::Integration::Session" | "ActionDispatch::TestResponse"
         // runtime/spinel/solid_queue.rb.
@@ -8731,7 +8789,14 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "GC" | "OpenSSL::HMAC" | "CSV::MalformedCSVError"
         | "Enumerator::Product" | "Enumerator::Lazy" | "Enumerator::Chain"
         | "Monitor" | "ConditionVariable" | "Thread::ConditionVariable"
-        | "UNIXServer" | "UNIXSocket" | "Open3" | "Find")
+        | "UNIXServer" | "UNIXSocket" | "Open3" | "Find"
+        // weakref: Ruby's own on the ruby family, `packages/weakref` on
+        // spinel, which holds its referent strongly (no weak references, so
+        // nothing a WeakRef points at is ever collected there). observer: Ruby's own on the ruby family; spinel's
+        // `packages/observer` does not build in a Rails-sized tree yet, so
+        // `SPINEL_LACKS` keeps the require out and the spinel branch above
+        // reports the module.
+        | "WeakRef" | "WeakRef::RefError" | "Observable")
         // The rexml gem on the ruby family, spinel's `packages/rexml`.
         || name == "REXML"
         || name.starts_with("REXML::")
@@ -8867,6 +8932,11 @@ fn app_defines_class(app: &App, id: &crate::ident::ClassId) -> bool {
             module.inner_classes.iter().any(|class| class.name == *id)
         })
 }
+
+/// Stdlib mixins an app includes that only a runtime can supply: no
+/// strict emitter writes them, so an `include` of one is the module's
+/// absence wherever `unavailable_class_module_construct` says so.
+const UNMODELED_MIXINS: &[&str] = &["Observable"];
 
 /// Ledger a Const / superclass name that is unavailable on `target`
 /// (bundled library object or ruby-family runtime exception stub).
@@ -9678,6 +9748,7 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
         if let Some(parent) = &class.parent {
             report_unavailable_class_value(app, target, parent.0.as_str(), class.parent_span);
         }
+        report_unmodeled_includes(app, target, class);
     }
     for module in &app.test_modules {
         for class in &module.inner_classes {
@@ -9689,7 +9760,22 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                     class.parent_span,
                 );
             }
+            report_unmodeled_includes(app, target, class);
         }
+    }
+}
+
+/// An `include` names a module value too, kept beside the class with its
+/// span rather than in a body. Only the mixins no emitter writes itself go
+/// through here: `Comparable` and `Enumerable` the strict emitters model,
+/// so their includes are not the module's absence.
+fn report_unmodeled_includes(app: &App, target: &str, class: &crate::dialect::LibraryClass) {
+    for (i, included) in class.includes.iter().enumerate() {
+        if !UNMODELED_MIXINS.contains(&included.0.as_str()) {
+            continue;
+        }
+        let span = class.include_spans.get(i).copied().unwrap_or_default();
+        report_unavailable_class_value(app, target, included.0.as_str(), span);
     }
 }
 
@@ -13296,8 +13382,8 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # or tag, never a SHA. 0.3.0 adds the connect_timeout: and\n\
              # read_timeout: this push sets to 0.2.0's url:, AUTH, zadd and\n\
              # pipelined; 0.3.2 adds the script and evalsha the worker's\n\
-             # scheduler runs.\n\
-             redis = { git = \"https://github.com/roundhouse-rb/spinel-redis\", ref = \"v0.3.2\" }\n",
+             # scheduler runs, and 0.3.3 the multi its dead-set write runs in.\n\
+             redis = { git = \"https://github.com/roundhouse-rb/spinel-redis\", ref = \"v0.3.3\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));

@@ -7,6 +7,8 @@
 //! Rails 8.1.4 is the oracle (`rails_controls_agree`): an initialized app with
 //! `load_defaults 8.1`, activated through `RailsOracle`.
 
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -536,7 +538,7 @@ puts "Rails agrees"
     let output = Command::new("ruby").args(["-e", &script]).output().expect("Rails control");
     let stderr = String::from_utf8_lossy(&output.stderr);
     if output.status.code() == Some(77) {
-        eprintln!("{stderr}");
+        prerequisite::missing(stderr.trim());
         return;
     }
     assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("Rails agrees"), "{stderr}");

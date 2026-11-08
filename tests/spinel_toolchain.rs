@@ -156,6 +156,10 @@ mod action_controller_head;
 mod conditional_get_contract;
 #[path = "spinel_toolchain/conditional_get.rs"]
 mod conditional_get;
+#[path = "support/controller_layouts.rs"]
+mod controller_layouts_contract;
+#[path = "spinel_toolchain/controller_layouts.rs"]
+mod controller_layouts;
 #[path = "spinel_toolchain/response_headers.rs"]
 mod response_headers;
 #[path = "spinel_toolchain/action_dispatch_request_put.rs"]
@@ -166,6 +170,8 @@ mod strong_params;
 mod params_wrapper;
 #[path = "spinel_toolchain/json_request_values.rs"]
 mod json_request_values;
+#[path = "spinel_toolchain/chunked_body.rs"]
+mod chunked_body;
 #[path = "spinel_toolchain/multipart_file_parts.rs"]
 mod multipart_file_parts;
 #[path = "support/default_format_dispatch.rs"]

@@ -837,6 +837,36 @@ fn defines_methods_in_block(expr: &crate::expr::Expr) -> bool {
     matches!(&*expr.node, ExprNode::Send { block: Some(block), .. } if walk(block))
 }
 
+/// Interim subset of #1302's unclaimed-call errors: dropping encryption
+/// would make the generated writers and persistence store plaintext.
+pub(crate) fn encrypts_diagnostics(app: &crate::App) -> Vec<crate::diagnostic::Diagnostic> {
+    let mut out = Vec::new();
+    if app.extensions.attribute_macro("encrypts").is_some() {
+        return out;
+    }
+    let mut seen = HashSet::default();
+    for model in &app.models {
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            let ExprNode::Send { recv: None, method, .. } = &*expr.node else { continue };
+            if method.as_str() != "encrypts"
+                || expr.decisions & (crate::expr::REPLAYED_CLASS_BODY | crate::expr::INHERITED_VISIBILITY) != 0
+                || expr.diagnostic().is_some() || !seen.insert(expr.span)
+            {
+                continue;
+            }
+            out.push(crate::diagnostic::Diagnostic::unsupported(
+                expr.span, None, "encrypts",
+                format!(
+                    "`encrypts` in the body of `{}` is not modelled, so its effect would be dropped from the output",
+                    model.name.0.as_str()
+                ),
+            ));
+        }
+    }
+    out
+}
+
 fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
     use crate::diagnostic::{Diagnostic, Severity};
     use crate::expr::LValue;
@@ -1138,6 +1168,10 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
                     }
                 }
             }
+        }
+        // Reported once by the shared analysis diagnostic, on every target.
+        if name == "encrypts" {
+            continue;
         }
         let mut d = Diagnostic::unsupported(
             expr.span,
@@ -2729,6 +2763,11 @@ fn build_class_info_with_finder_inputs(
     insert_default(
         &mut info.instance_methods,
         "error_messages_for",
+        fn_sig(vec![(Symbol::from("attribute"), Ty::Str)], Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+    );
+    insert_default(
+        &mut info.instance_methods,
+        "error_full_messages_for",
         fn_sig(vec![(Symbol::from("attribute"), Ty::Str)], Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
     );
     insert_default(&mut info.instance_methods, "valid?", fn_sig(vec![], Ty::Bool));

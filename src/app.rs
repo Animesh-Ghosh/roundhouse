@@ -837,12 +837,11 @@ pub struct ControllerResolution {
     /// pick the subset they care about.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filter_chain: Vec<ResolvedFilter>,
-    /// Effective layout view name (`layouts/application`), resolved by
-    /// walking the inheritance chain; `None` records an explicit
-    /// `layout false`. Convention default applies, so this may name a
-    /// layout view the app doesn't ship — Rails would render bare.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub layout: Option<Symbol>,
+    /// The layout templates this controller's actions render in
+    /// (`layouts/application`), as `controller_layout` resolves them;
+    /// empty when none does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layouts: Vec<Symbol>,
 }
 
 /// One hop of a resolved filter chain: the declaration plus the

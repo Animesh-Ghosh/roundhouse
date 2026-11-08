@@ -116,6 +116,8 @@ mod discard;
 mod callback_abort;
 #[path = "emit_and_run/dirty_clear_restore.rs"]
 mod dirty_clear_restore;
+#[path = "emit_and_run/partial_writes.rs"]
+mod partial_writes;
 #[path = "emit_and_run/will_save_change_to_attribute.rs"]
 mod will_save_change_to_attribute;
 #[path = "emit_and_run/pundit_source.rs"]
@@ -477,6 +479,8 @@ mod config_require_relative;
 mod defined_const_fold;
 #[path = "emit_and_run/job_payload.rs"]
 mod job_payload;
+#[path = "emit_and_run/job_keywords.rs"]
+mod job_keywords;
 #[path = "emit_and_run/sidekiq_push.rs"]
 mod sidekiq_adapter;
 #[path = "emit_and_run/sidekiq_retry_on.rs"]
@@ -20641,6 +20645,10 @@ mod module_protocol_receivers;
 mod module_protocol_block_self;
 #[path = "emit_and_run/ipaddr_include.rs"]
 mod ipaddr_include;
+#[path = "emit_and_run/pp_require.rs"]
+mod pp_require;
+#[path = "emit_and_run/weakref_observable.rs"]
+mod weakref_observable;
 #[path = "emit_and_run/hash_subclass_include.rs"]
 mod hash_subclass_include;
 #[path = "emit_and_run/module_query_class_unions.rs"]
@@ -20996,6 +21004,8 @@ mod python_route_format;
 mod partial_local_shadows_helper;
 #[path = "emit_and_run/partial_reads_caller_ivar.rs"]
 mod partial_reads_caller_ivar;
+#[path = "emit_and_run/partial_ivar_and_local.rs"]
+mod partial_ivar_and_local;
 
 #[path = "emit_and_run/python_nested_modifier_if.rs"]
 mod python_nested_modifier_if;
@@ -21390,9 +21400,15 @@ mod record_if_condition;
 #[path = "support/link_to_template_local.rs"]
 #[allow(dead_code)]
 mod link_to_template_local;
+#[path = "support/each_no_param.rs"]
+#[allow(dead_code)]
+mod each_no_param;
 #[path = "support/view_unless_no_else.rs"]
 #[allow(dead_code)]
 mod view_unless_no_else;
+#[path = "support/nilable_string_view.rs"]
+#[allow(dead_code)]
+mod nilable_string_view;
 
 /// `simple_format` with `sanitize: false`: paragraphs, line breaks, html
 /// options and `wrapper_tag:`, as Rails 8.1.4 renders them.
@@ -21747,12 +21763,73 @@ fn link_to_template_local_renders_as_rails() {
         .assert_passes();
 }
 
+/// #1910: a block with no parameter renders as Rails 8.1.4 does
+/// (`each_no_param::VIEW`).
+#[test]
+fn each_no_param_renders_as_rails() {
+    each_no_param::app(content_tag_options::app_rendering(each_no_param::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(each_no_param::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// An empty `map` block maps each element to nil, as Rails 8.1.4
+/// does (`each_no_param::EMPTY_MAP_VIEW`).
+#[test]
+fn each_no_param_empty_map_renders_as_rails() {
+    each_no_param::app(content_tag_options::app_rendering(each_no_param::EMPTY_MAP_VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(each_no_param::EMPTY_MAP_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
 /// does (`view_unless_no_else::VIEW`).
 #[test]
 fn view_unless_no_else_renders_as_rails() {
     view_unless_no_else::app(content_tag_options::app_rendering(view_unless_no_else::VIEW, &[]))
         .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(view_unless_no_else::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1937: a view reading a nullable string column renders as Rails
+/// 8.1.4 does (`nilable_string_view::VIEW`).
+#[test]
+fn nilable_string_view_renders_as_rails() {
+    nilable_string_view::app(content_tag_options::app_rendering(nilable_string_view::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(nilable_string_view::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1937: `==` and `!=` on a nullable string column evaluate each
+/// operand once, left then right, as Rails 8.1.4 does
+/// (`nilable_string_view::EFFECT_VIEW`, title present).
+#[test]
+fn nilable_string_view_effect_renders_as_rails() {
+    nilable_string_view::effect_app(content_tag_options::app_rendering(nilable_string_view::EFFECT_VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(nilable_string_view::EFFECT_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1937: with the column nil, `==` and `!=` render as Rails 8.1.4
+/// does (`nilable_string_view::NIL_VIEW`).
+#[test]
+fn nilable_string_view_nil_renders_as_rails() {
+    nilable_string_view::nil_app(content_tag_options::app_rendering(nilable_string_view::NIL_VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(nilable_string_view::NIL_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1937: the same operands with a nil title: the right operand still
+/// runs, as in Rails 8.1.4 (`nilable_string_view::EFFECT_VIEW`).
+#[test]
+fn nilable_string_view_nil_effect_renders_as_rails() {
+    nilable_string_view::nil_effect_app(content_tag_options::app_rendering(nilable_string_view::EFFECT_VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(nilable_string_view::NIL_EFFECT_RENDERS))
         .run_test("test/controllers/probes_controller_test.rb")
         .assert_passes();
 }
@@ -21768,6 +21845,16 @@ fn link_to_template_local_renders_as_rails_on_spinel() {
         .assert_passes();
 }
 
+/// #1910: a block with no parameter renders as Rails 8.1.4 does
+/// (`each_no_param::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn each_no_param_renders_as_rails_on_spinel() {
+    each_no_param::app(content_tag_options::app_rendering(each_no_param::VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(each_no_param::RENDERS))
+        .assert_passes();
+}
+
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
 /// does (`view_unless_no_else::VIEW`).
 #[test]
@@ -21775,5 +21862,46 @@ fn link_to_template_local_renders_as_rails_on_spinel() {
 fn view_unless_no_else_renders_as_rails_on_spinel() {
     view_unless_no_else::app(content_tag_options::app_rendering(view_unless_no_else::VIEW, &[]))
         .run_spinel(&helper_escape_at_output::render_script(view_unless_no_else::RENDERS))
+        .assert_passes();
+}
+
+/// #1937: a view reading a nullable string column renders as Rails
+/// 8.1.4 does (`nilable_string_view::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn nilable_string_view_renders_as_rails_on_spinel() {
+    nilable_string_view::app(content_tag_options::app_rendering(nilable_string_view::VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(nilable_string_view::RENDERS))
+        .assert_passes();
+}
+
+/// #1937: `==` and `!=` on a nullable string column evaluate each
+/// operand once, left then right, as Rails 8.1.4 does
+/// (`nilable_string_view::EFFECT_VIEW`, title present).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn nilable_string_view_effect_renders_as_rails_on_spinel() {
+    nilable_string_view::effect_app(content_tag_options::app_rendering(nilable_string_view::EFFECT_VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(nilable_string_view::EFFECT_RENDERS))
+        .assert_passes();
+}
+
+/// #1937: with the column nil, `==` and `!=` render as Rails 8.1.4
+/// does (`nilable_string_view::NIL_VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn nilable_string_view_nil_renders_as_rails_on_spinel() {
+    nilable_string_view::nil_app(content_tag_options::app_rendering(nilable_string_view::NIL_VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(nilable_string_view::NIL_RENDERS))
+        .assert_passes();
+}
+
+/// #1937: the same operands with a nil title: the right operand still
+/// runs, as in Rails 8.1.4 (`nilable_string_view::EFFECT_VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn nilable_string_view_nil_effect_renders_as_rails_on_spinel() {
+    nilable_string_view::nil_effect_app(content_tag_options::app_rendering(nilable_string_view::EFFECT_VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(nilable_string_view::NIL_EFFECT_RENDERS))
         .assert_passes();
 }

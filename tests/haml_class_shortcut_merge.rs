@@ -3,6 +3,8 @@
 //! together through the runtime `haml_class` helper instead of dropping
 //! the shortcut. See `src/haml.rs`'s `element` and
 //! `runtime/ruby/action_view/view_helpers.rb`'s `haml_class`.
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -116,7 +118,7 @@ fn an_element_without_a_hash_class_key_is_unaffected() {
 fn spinel_renders_the_same_page() {
     let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
     if std::process::Command::new(&compiler).arg("--version").output().is_err() {
-        eprintln!("skipping: no `{compiler}` on PATH (set SPINEL=<path>) — spinel render not probed");
+        prerequisite::missing(&format!("no `{compiler}` on PATH (set SPINEL=<path>) — spinel render not probed"));
         return;
     }
     let script = format!(
