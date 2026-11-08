@@ -7,12 +7,11 @@
 //! `tests/jbuilder_nested_conditional_array.rs` and
 //! `tests/pluck_sql_literal.rs`.
 //!
-//! Needs a Spinel compiler, so `#[ignore]`d; CI's `spinel-framework` job
-//! runs it (`scripts/ci-plan.py`'s `SPINEL_TESTS`).
+//! Needs a Spinel compiler, so `#[ignore]`d. It runs inside
+//! `tests/array_column_storage_spinel.rs`, so it adds no `SPINEL_TESTS`
+//! entry and leaves CI's shard packing as it was.
 
-#[path = "support/emit_and_run.rs"]
-#[allow(dead_code)]
-mod emit_and_run;
+use super::emit_and_run;
 
 const SCHEMA: &str = r#"ActiveRecord::Schema.define do
   create_table "members", force: :cascade do |t|
