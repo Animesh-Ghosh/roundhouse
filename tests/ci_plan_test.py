@@ -426,6 +426,16 @@ class Routing(unittest.TestCase):
                 self.assertIn("did_you_mean", ci.select([path])["spinel_tests"])
         self.assertIn("did_you_mean", ci.select([], full=True)["spinel_tests"])
 
+    def test_net_http_exception_inputs_select_native_contract(self):
+        for path in [
+            "src/analyze/registry/stdlib.rs", "src/project.rs",
+            "tests/net_http_exceptions.rs", "tests/net_http_patch.rs",
+            "tests/emit_and_run/net_http_patch.rs",
+        ]:
+            with self.subTest(path=path):
+                self.assertIn("net_http_exceptions", ci.select([path])["spinel_tests"])
+        self.assertIn("net_http_exceptions", ci.select([], full=True)["spinel_tests"])
+
     def test_campfire_latest_is_not_planned(self):
         # Dropped: tip drift against once-campfire main is not a standing job.
         self.assertNotIn("campfire-latest", ci.SPINEL_LANE)

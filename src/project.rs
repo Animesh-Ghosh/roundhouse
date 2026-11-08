@@ -8715,9 +8715,7 @@ pub const RUBY_FAMILY_RUNTIME_CONSTANTS: &[&str] = &[
 /// Ruby/Spinel bundled library objects (`bundled_constant`), and
 /// ruby-family runtime exception stubs (`ruby_family_runtime_constant`).
 fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'static str> {
-    // Spinel supplies the other bundled and ruby-family class values,
-    // but recognizes GeneratorError only as a literal rescue name, and
-    // its `packages/net` stops short of net/protocol's `HTTPBadResponse`.
+    // Spinel recognizes GeneratorError only as a literal rescue name.
     if target == "spinel" {
         // The Arel ordering and predicate nodes live on the CRuby overlay (`arel_predicates.rb`).
         if matches!(name, "ActiveSupport::ConfigurationFile" | "ActiveSupport::OrderedOptions" | "Arel::Nodes::Ascending" | "Arel::Nodes::Descending" | "Arel::Nodes::Predicate") {
@@ -8725,7 +8723,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         }
         // `Observable` is `require "observer"`, which `SPINEL_LACKS` keeps
         // out of the spinel boot.rb.
-        return if matches!(name, "JSON::GeneratorError" | "Net::HTTPBadResponse" | "Observable") {
+        return if matches!(name, "JSON::GeneratorError" | "Observable") {
             Some("bundled_constant")
         } else {
             None
@@ -8745,6 +8743,10 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "SocketError"
         | "Net::HTTPRedirection" | "Net::HTTPOK" | "StringIO" | "OpenSSL::OpenSSLError"
         | "Net::HTTPSuccess" | "Net::HTTPBadResponse" | "Zlib::DataError" | "OpenSSL::Random"
+        | "Net::HTTPHeaderSyntaxError" | "Net::HTTPError" | "Net::HTTPRetriableError"
+        | "Net::HTTPClientException" | "Net::HTTPFatalError" | "Net::ProtocolError"
+        | "Net::ProtoFatalError" | "Net::ProtoServerError" | "Net::ProtoRetriableError"
+        | "Net::WriteTimeout" | "Net::HTTPInformation"
         // `packages/strscan` and `packages/zlib` on spinel; no strict runtime carries either.
         | "StringScanner" | "Zlib::GzipWriter" | "Zlib::Deflate" | "Zlib::GzipReader" | "Zlib::Error"
         | "Zlib::BEST_COMPRESSION" | "Zlib::MAX_WBITS" | "Zlib::FINISH"
