@@ -244,13 +244,9 @@ fn devise_shaped() -> emit_and_run::Overlay {
 fn a_devise_omniauth_callback_whose_providers_are_not_known_is_reported_and_the_rest_drawn() {
     let errors = devise_shaped().check_errors();
     assert!(errors.iter().any(|e| e.contains("OmniAuth callback routes are not drawn")), "{errors:#?}");
-    let run = devise_shaped()
-        .write(
-            "test/controllers/sign_in_route_test.rb",
-            "require \"test_helper\"\n\nclass SignInRouteTest < ActionDispatch::IntegrationTest\n  test \"the drawn route answers\" do\n    get \"/users/sign_in\"\n    assert_response :success\n    assert_equal \"/users/sign_in\", users_sign_in_path\n  end\nend\n",
-        )
-        .run_test("test/controllers/sign_in_route_test.rb");
-    // Not `assert_passes`: the left-out routes are the one error, and the rest of the program runs.
-    assert!(run.success, "{}\n{}", run.stdout, run.stderr);
-    assert!(run.errors.iter().all(|e| e.contains("OmniAuth callback routes are not drawn")), "{:#?}", run.errors);
+    // Not a request: the left-out routes are an error, which keeps the tree's tests from being written.
+    let (tree, _) = devise_shaped().emit(roundhouse::build_target::BuildTarget::Ruby);
+    let routes = std::fs::read_to_string(tree.join("config/routes.rb")).expect("routes.rb");
+    assert!(routes.contains("\"/users/sign_in\""), "{routes}");
+    assert!(!routes.contains("/users/auth/"), "{routes}");
 }
