@@ -2103,6 +2103,10 @@ impl<'a> Eval<'a> {
                     };
                     calls.push((named, recv.clone(), dynamic));
                 }
+                // `each(&method(:apply))` calls `apply` as it runs, though no Send names it.
+                if let ExprNode::MethodRef { recv, name } = &*x.node {
+                    calls.push((name.as_str().to_string(), recv.clone(), false));
+                }
             });
             for (name, recv, dynamic) in calls {
                 if dynamic {

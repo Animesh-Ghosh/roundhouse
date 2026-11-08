@@ -202,6 +202,15 @@ pub(super) fn confined_writes(
                 _ => false,
             }
         }
+        fn safe(&self, r: &Expr) -> bool {
+            match &*r.node {
+                ExprNode::Var { name, .. } => self.fresh.contains(name),
+                // A framework's (`Rails.configuration.x`, `ENV`), whose methods write none of the program's.
+                ExprNode::Const { path } => !self.known.contains(&path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::")),
+                ExprNode::Send { .. } | ExprNode::Lit { .. } | ExprNode::StringInterp { .. } | ExprNode::Array { .. } | ExprNode::Hash { .. } => true,
+                _ => false,
+            }
+        }
         fn setting(&mut self, name: &str) {
             let tag = match name {
                 "omniauth" => "@@omniauth_configs".to_string(),
@@ -242,20 +251,20 @@ pub(super) fn confined_writes(
                 ExprNode::MultiAssign { .. } => self.general = true,
                 ExprNode::Assign { target: LValue::Var { name, .. }, value } if !name.as_str().starts_with("@@") && !name.as_str().starts_with('$') => {
                     self.visit(value);
-                    self.fresh.insert(name.clone());
+                    // Not fresh when it holds what it was handed (`target = Devise`, `t = outer`): calls through it reach the app's.
+                    if self.safe(value) {
+                        self.fresh.insert(name.clone());
+                    } else {
+                        self.general = true;
+                    }
                     return;
                 }
                 ExprNode::Assign { target: LValue::Index { recv, .. }, .. } | ExprNode::OpAssign { target: LValue::Index { recv, .. }, .. }
                     if matches!(&*recv.node, ExprNode::Var { name, .. } if self.fresh.contains(name)) => {}
                 ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } if !matches!(target, LValue::Var { name, .. } if !name.as_str().starts_with("@@") && !name.as_str().starts_with('$')) => self.general = true,
                 ExprNode::Send { recv: None, method, .. } if !matches!(method.as_str(), "lambda" | "proc" | "raise" | "require" | "require_relative" | "format" | "sprintf") => self.general = true,
-                ExprNode::Send { recv: Some(r), .. } if matches!(&*r.node, ExprNode::Var { name, .. } if self.fresh.contains(name)) => {}
-                ExprNode::Send { recv: Some(r), .. } => match &*r.node {
-                    // A framework's (`Rails.configuration.x`, `ENV`), whose methods write none of the program's.
-                    ExprNode::Const { path } if !self.known.contains(&path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::")) => {}
-                    ExprNode::Send { .. } | ExprNode::Lit { .. } | ExprNode::StringInterp { .. } | ExprNode::Array { .. } | ExprNode::Hash { .. } => {}
-                    _ => self.general = true,
-                },
+                ExprNode::Send { recv: Some(r), .. } if !self.safe(r) => self.general = true,
+                ExprNode::MethodRef { .. } => self.general = true,
                 _ => {}
             }
             // A block attached to a call runs with it (`hosts.each { |h| config.host = h }`): its body is walked, not passed over as a value lambda is.

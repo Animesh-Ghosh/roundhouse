@@ -296,9 +296,11 @@ fn a_devise_setup_statement_passed_over_leaves_only_its_settings_unsure() {
     for initializer in [
         "Devise.setup do |config|\n  if ENV[\"CHIMES\"] == \"1\"\n    Chimes.apply(config)\n  end\nend\n",
         "Devise.setup do |config|\n  if ENV[\"CHIMES\"] == \"1\"\n    [\"chimes\"].each { |prefix| config.prefix = prefix }\n  end\nend\n",
+        "Devise.setup do |config|\n  if ENV[\"CHIMES\"] == \"1\"\n    target = Chimes\n    target.ring(\"chimes\")\n  end\nend\n",
+        "Devise.setup do |config|\n  if ENV[\"CHIMES\"] == \"1\"\n    [\"chimes\"].each(&Chimes.method(:ring))\n  end\nend\n",
     ] {
         let errors = devise_setup(initializer)
-            .write("app/models/chimes.rb", "module Chimes\n  def self.apply(config)\n    config.prefix = \"chimes\"\n  end\nend\n")
+            .write("app/models/chimes.rb", "module Chimes\n  def self.apply(config)\n    config.prefix = \"chimes\"\n  end\n\n  def self.ring(prefix)\n    Devise.prefix = prefix\n  end\nend\n")
             .check_errors();
         assert!(errors.iter().any(|e| e.contains("ring_routes_for")), "{initializer}\n{errors:#?}");
     }
