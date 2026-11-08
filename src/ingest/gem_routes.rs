@@ -158,7 +158,7 @@ fn rewrite(e: &mut Expr, is_install: &mut dyn FnMut(&Expr) -> bool) {
 fn contains_deferred(entries: &[RouteSpec]) -> bool {
     entries.iter().any(|e| match e {
         RouteSpec::Deferred { .. } => true,
-        RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => contains_deferred(entries),
+        RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } | RouteSpec::Guarded { entries, .. } => contains_deferred(entries),
         RouteSpec::Resources { nested, .. } => contains_deferred(nested),
         _ => false,
     })
@@ -185,6 +185,7 @@ fn replace(entries: &mut Vec<RouteSpec>, app: &App, initializers: &[Expr], enclo
                 failed |= replace(entries, app, initializers, &inner, gaps)
             }
             RouteSpec::Exclusive { entries } => failed |= replace(entries, app, initializers, &Some((None, None, None)), gaps),
+            RouteSpec::Guarded { entries, .. } => failed |= replace(entries, app, initializers, enclosing, gaps),
             RouteSpec::Resources { nested, .. } => failed |= replace(nested, app, initializers, &None, gaps),
             RouteSpec::Deferred { call, span, constraints } => {
                 let drawn = draw(app, call, initializers, enclosing.clone());

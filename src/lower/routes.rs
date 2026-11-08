@@ -121,6 +121,8 @@ pub struct FlatRoute {
     /// The root of an isolated engine at its mount: Rails generates its
     /// helper as the mount's script name joined with `/` (`/catalog/`).
     pub mount_root: bool,
+    /// The request constraints of every enclosing `RouteSpec::Guarded`, outermost first; the route matches only when all hold.
+    pub guards: Vec<crate::expr::Expr>,
 }
 
 /// The `defaults` key that carries `scope format: true` through a
@@ -130,6 +132,10 @@ pub const FORMAT_REQUIRED_KEY: &str = "format!";
 /// The `refused` parameter name of a route whose endpoint is Ruby code
 /// (`UNMODELED_ENDPOINT_CONTROLLER`); the value is the endpoint kind.
 pub const ENDPOINT_REFUSAL: &str = "endpoint";
+
+/// The `refused` parameter name of a route a request constraint guards (`RouteSpec::Guarded`): the
+/// router matches by verb and path alone, so serving it would answer every request the constraint refuses.
+pub const GUARD_REFUSAL: &str = "request constraint";
 
 /// Compile every non-digit-class requirement on one concrete route
 /// into the router's segment-pattern form, or refuse the WHOLE route
@@ -391,6 +397,8 @@ struct Ctx {
     inner_path: String,
     /// The path an isolated engine is mounted at, inside its scope.
     mount_path: Option<String>,
+    /// Enclosing request constraints, outermost first.
+    guards: Vec<crate::expr::Expr>,
 }
 
 /// One enclosing resource.
@@ -420,6 +428,10 @@ struct Nesting {
 }
 
 impl Ctx {
+    fn guard_refusal(&self) -> Option<(String, String)> {
+        (!self.guards.is_empty()).then(|| (GUARD_REFUSAL.to_string(), String::new()))
+    }
+
     /// A resource declared inside `member`/`collection` nests under that
     /// level's segment (`/customers/:id`) but is not named after it:
     /// fold the segment and the scope paths since into the URL prefix and
@@ -582,9 +594,16 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
         RouteSpec::RackMount { .. } => {}
         // Not drawn: ingest replaces every one with the routes its call draws.
         RouteSpec::Deferred { .. } => {}
+        RouteSpec::Guarded { guard, entries } => {
+            let mut inner = ctx.clone();
+            inner.guards.push(guard.clone());
+            for entry in entries {
+                collect_flat_routes(entry, out, &inner);
+            }
+        }
         // Not under the enclosing scopes: the method set its own path, module and name, as Rails' `@scope` swap does.
         RouteSpec::Exclusive { entries } => {
-            let root = Ctx { helpers_enabled: ctx.helpers_enabled, mount_path: ctx.mount_path.clone(), ..Ctx::default() };
+            let root = Ctx { helpers_enabled: ctx.helpers_enabled, mount_path: ctx.mount_path.clone(), guards: ctx.guards.clone(), ..Ctx::default() };
             for entry in entries {
                 collect_flat_routes(entry, out, &root);
             }
@@ -766,7 +785,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 {
                     Some((ENDPOINT_REFUSAL.to_string(), action.as_str().to_string()))
                 } else {
-                    refused
+                    refused.or_else(|| ctx.guard_refusal())
                 };
                 out.push(FlatRoute {
                     method: method.clone(),
@@ -788,6 +807,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     refused,
                     format_required: ctx.format_required(),
                     mount_root: false,
+                    guards: ctx.guards.clone(),
                 });
             }
         }
@@ -845,9 +865,10 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 int_params: vec![],
                 constraints: vec![],
                 seg_patterns: vec![],
-                refused: None,
+                refused: ctx.guard_refusal(),
                 format_required: false,
                 mount_root: ctx.mount_path.as_deref() == Some(ctx.ns_path.as_str()),
+                guards: ctx.guards.clone(),
             });
         }
         RouteSpec::Resources {
@@ -1099,9 +1120,10 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                             int_params: int_params.iter().filter(|n| vparams.contains(n)).cloned().collect(),
                             constraints: vconstraints.clone(),
                             seg_patterns: seg_patterns.clone(),
-                            refused: refused.clone(),
+                            refused: refused.clone().or_else(|| ctx.guard_refusal()),
                             format_required: ctx.format_required(),
                             mount_root: false,
+                            guards: ctx.guards.clone(),
                         });
                     }
                 }
