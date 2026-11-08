@@ -2596,8 +2596,7 @@ module ActiveRecord
     # `pluck` with an `Arel.sql` fragment among its columns. Rows are Hashes
     # keyed by column name, so result columns sharing a name arrive as one
     # value: Rails answers both (`a.id, b.id`), and this raises rather than
-    # return a row with a column missing. A row wider than the projections
-    # is fine, since `*` can widen it.
+    # return a row with a column missing.
     #
     # Each value decodes as `pluck` decodes it, in result order: a plain
     # column through the alias it was given, anything else by its result
@@ -2637,13 +2636,14 @@ module ActiveRecord
       end
     end
 
-    # How many result columns a projection list names: its top-level commas
-    # plus one. A comma inside parentheses, brackets or a quoted string
+    # How many result columns a projection list names, one top-level item
+    # at a time. A comma inside parentheses, brackets or a quoted string
     # separates nothing here.
     def sql_projection_width(sql)
-      width = 1
+      width = 0
       depth = 0
       quote = ""
+      start = 0
       i = 0
       while i < sql.length
         ch = sql[i]
@@ -2656,11 +2656,37 @@ module ActiveRecord
         elsif ch == ")" || ch == "]"
           depth -= 1
         elsif ch == "," && depth == 0
-          width += 1
+          width += sql_item_width(sql[start, i - start].to_s.strip)
+          start = i + 1
         end
         i += 1
       end
-      width
+      width + sql_item_width(sql[start, sql.length - start].to_s.strip)
+    end
+
+    # One projection item's columns. A `*` is this model's columns only
+    # when this table is all it can expand: over a join, or for another
+    # table, its width is not known here, so a collapsed duplicate behind
+    # it could not be seen and the projection is refused.
+    def sql_item_width(item)
+      return 1 unless item == "*" || item.end_with?(".*")
+      if item == "*"
+        if @joins.length > 0
+          raise ArgumentError, "pluck cannot count the columns of * over a join, so a column sharing a name could not be seen; list the columns"
+        end
+        return @model.schema_columns.length
+      end
+      table = sql_unquoted(item[0, item.length - 2].to_s)
+      return @model.schema_columns.length if table == sql_unquoted(@table)
+      raise ArgumentError, "pluck cannot count the columns of #{item}, so a column sharing a name could not be seen; list the columns"
+    end
+
+    # An identifier without its surrounding `"` or backtick quotes.
+    def sql_unquoted(name)
+      return name if name.length < 2
+      first = name[0]
+      return name unless first == "\"" || first == "`"
+      name[1, name.length - 2].to_s
     end
 
     # `pick(*cols)` — Rails' `limit(1).pluck(*cols).first`: a value or

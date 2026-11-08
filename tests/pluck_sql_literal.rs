@@ -32,6 +32,14 @@ fn app() -> emit_and_run::Overlay {
   def self.literal_named
     order(:id).pluck(Arel.sql("tag_ids"))
   end
+
+  def self.star_only
+    order(:id).pluck(Arel.sql("*"))
+  end
+
+  def self.own_star
+    order(:id).pluck(Arel.sql("members.*"))
+  end
 end
 "#,
         )
@@ -68,6 +76,18 @@ end
 
   def self.commas_in_expressions
     joins(:shop).order("widgets.id").pluck(Arel.sql("COALESCE(widgets.name, 'a,b'), 1"))
+  end
+
+  def self.id_and_star
+    order(:id).pluck(Arel.sql("widgets.id, *"))
+  end
+
+  def self.star_over_join
+    joins(:shop).order("widgets.id").pluck(Arel.sql("*"))
+  end
+
+  def self.other_table_star
+    joins(:shop).order("widgets.id").pluck(Arel.sql("shops.*"))
   end
 end
 "#,
@@ -133,4 +153,41 @@ puts "pluck array columns passed"
 #[test]
 fn stored_array_columns_decode_in_a_mixed_projection() {
     app().run_ruby(ARRAY_SCRIPT).assert_passes();
+}
+
+const STAR_SCRIPT: &str = r#"
+shop = Shop.create!(name: "s")
+Widget.create!(shop_id: shop.id, price: 5)
+Member.create!(name: "a", tag_ids: [1, 2])
+got = Member.star_only
+raise "star: #{got.inspect}" unless got == [[1, "a", [1, 2]]]
+got = Member.own_star
+raise "own star: #{got.inspect}" unless got == [[1, "a", [1, 2]]]
+raised = false
+begin
+  Widget.id_and_star
+rescue ArgumentError => e
+  raised = e.message.include?("share a name")
+end
+raise "a column collapsed behind * did not raise" unless raised
+raised = false
+begin
+  Widget.star_over_join
+rescue ArgumentError => e
+  raised = e.message.include?("over a join")
+end
+raise "* over a join did not raise" unless raised
+raised = false
+begin
+  Widget.other_table_star
+rescue ArgumentError => e
+  raised = e.message.include?("shops.*")
+end
+raise "another table's .* did not raise" unless raised
+puts "pluck star passed"
+"#;
+
+#[test]
+fn a_star_counts_as_the_model_columns_and_a_hidden_collapse_raises() {
+    app().run_ruby(STAR_SCRIPT).assert_passes();
 }
