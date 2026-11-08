@@ -1,4 +1,6 @@
 //! Callback registration order, compared with the same declarations on Rails.
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
 
@@ -55,7 +57,7 @@ ActiveRecord::Schema.verbose = false
         .output()
         .expect("Rails oracle");
     if output.status.code() == Some(77) {
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        prerequisite::missing(String::from_utf8_lossy(&output.stderr).trim());
     } else {
         assert!(
             output.status.success(),
@@ -988,7 +990,7 @@ raise record.errors.inspect unless record.errors[:name] == ["first", "length", "
         .output()
         .expect("Sequel control");
     if output.status.code() == Some(77) {
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        prerequisite::missing(String::from_utf8_lossy(&output.stderr).trim());
     } else {
         assert!(
             output.status.success(),
@@ -1058,7 +1060,7 @@ ActiveRecord::Schema.verbose = false
 {script}
 "#)]).output().expect("Rails 8.1 control");
     if output.status.code() == Some(77) {
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        prerequisite::missing(String::from_utf8_lossy(&output.stderr).trim());
         return None;
     }
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));

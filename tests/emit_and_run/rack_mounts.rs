@@ -1,5 +1,7 @@
 //! A mounted Rack app sees Rails' shifted environment and owns its response.
 
+#[path = "../support/prerequisite.rs"]
+mod prerequisite;
 #[path = "../support/scratch.rs"]
 mod scratch;
 use super::emit_and_run::{self, Overlay};
@@ -63,7 +65,7 @@ end
 "#);
     let output = Command::new("ruby").args(["-e", &native]).output().expect("Rails oracle");
     if output.status.code() == Some(77) {
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        prerequisite::missing(String::from_utf8_lossy(&output.stderr).trim());
         return None;
     }
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
