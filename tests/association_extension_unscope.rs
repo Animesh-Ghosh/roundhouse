@@ -6,7 +6,7 @@
 //! association, the owner's foreign key included, so `inactive` below
 //! answers the inactive widgets of every shop. `find` stays in the
 //! association. The Spinel side is
-//! `small_rails_gaps_spinel.rs`.
+//! `support/small_rails_gaps_app.rs`.
 
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]

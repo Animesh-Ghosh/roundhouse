@@ -6,7 +6,7 @@
 //! Rails 8.1.4: `Widget.states` is
 //! `{"draft" => 0, "live" => 1, "archived" => 2}`. `BASE << :x` raises
 //! `FrozenError`, so it is refused rather than folded.
-//! The Spinel side is `small_rails_gaps_spinel.rs`.
+//! The Spinel side is `support/small_rails_gaps_app.rs`.
 
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]

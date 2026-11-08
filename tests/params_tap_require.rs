@@ -4,7 +4,7 @@
 //!
 //! Rails 8.1.4: an absent or blank value raises `ParameterMissing`, a
 //! present one is returned. The Spinel side is
-//! `small_rails_gaps_spinel.rs`.
+//! `support/small_rails_gaps_app.rs`.
 
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
