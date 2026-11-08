@@ -926,7 +926,6 @@ fn each_no_param_empty_map_renders() {
     assert!(output.status.success() && stdout.contains("content_tag_renders ... ok"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
 
-/// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
 /// #1910: a block whose only parameter is a rest (`|*args|`) doesn't
 /// take the `_` closure a block with no parameter takes, so the rest
 /// isn't left unbound (`each_no_param::REST_VIEW`).
@@ -949,6 +948,7 @@ fn each_no_param_rest_blocks_keep_their_parameter() {
     assert!(!view.contains("|_|"), "{view}");
 }
 
+/// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
 /// does (`view_unless_no_else::VIEW`).
 #[test]
 #[ignore]
