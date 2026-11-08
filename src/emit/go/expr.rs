@@ -1512,6 +1512,28 @@ pub(super) fn emit_send(
                 let lhs_v = if int_lhs && float_rhs { format!("float64({lhs_v})") } else { lhs_v };
                 return format!("{lhs_v} {op} {}", args_s[0]);
             }
+            // A nullable string column against a String: nil equals no
+            // String, as in Ruby, and a present value compares by content.
+            if matches!(op, "==" | "!=")
+                && nullable_read_go_ty(r).as_deref() == Some("*string")
+                && matches!(args[0].ty.as_ref(), Some(Ty::Str))
+            {
+                let rhs = &args_s[0];
+                // Each operand runs once, left then right, and a nil left
+                // side doesn't skip the right one: Ruby evaluates the
+                // argument before calling `==` on nil. Two statements,
+                // since Go doesn't order a variable read against a call
+                // within one expression.
+                if !(is_plain_column_read(r) && is_plain_operand(&args[0])) {
+                    let compare = if op == "==" { "_rh_lhs != nil && *_rh_lhs == _rh_rhs" } else { "_rh_lhs == nil || *_rh_lhs != _rh_rhs" };
+                    return format!("func() bool {{ _rh_lhs := {lhs}; _rh_rhs := {rhs}; return {compare} }}()");
+                }
+                return if op == "==" {
+                    format!("({lhs} != nil && *{lhs} == {rhs})")
+                } else {
+                    format!("({lhs} == nil || *{lhs} != {rhs})")
+                };
+            }
             return format!("{lhs} {} {}", op, args_s[0]);
         }
     }
@@ -1520,7 +1542,7 @@ pub(super) fn emit_send(
     // `len(recv) == 0`. Same scope as `length` — collection-shaped.
     if method == "empty?" && args.is_empty() {
         if let Some(r) = recv.filter(|r| !is_own_method(ctx, r, method)) {
-            return format!("len({}) == 0", emit_expr(ctx, r));
+            return format!("len({}) == 0", deref_nullable_string(r, emit_expr(ctx, r)));
         }
     }
     // An element that is never nil or false makes `any?` / `none?` a question of size
@@ -1614,7 +1636,7 @@ pub(super) fn emit_send(
     // value type, so no Ty plumbing needed at this site.
     if (method == "length" || method == "size") && args.is_empty() {
         if let Some(r) = recv {
-            let recv_s = emit_expr(ctx, r);
+            let recv_s = deref_nullable_string(r, emit_expr(ctx, r));
             return format!("int64(len({recv_s}))");
         }
     }
@@ -4448,6 +4470,44 @@ fn nullable_field_go_ty(e: &Expr) -> Option<String> {
     match &*e.node {
         ExprNode::Ivar { name } => nullable_column_go_ty(name.as_str()),
         _ => None,
+    }
+}
+
+/// The Go pointer type of a nullable column this expression reads: the
+/// model's own field (`@title`) or another record's reader
+/// (`article.title` in a view).
+fn nullable_read_go_ty(e: &Expr) -> Option<String> {
+    nullable_field_go_ty(e).or_else(|| match &*e.node {
+        ExprNode::Send { recv: Some(inner), method, args, block: None, .. } if args.is_empty() => {
+            recv_column_go_ty(inner, method.as_str())
+        }
+        _ => None,
+    })
+}
+
+/// A column read off the model itself or off a local or instance
+/// variable: reading it again gives the same value and runs nothing.
+fn is_plain_column_read(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Ivar { .. } => true,
+        ExprNode::Send { recv: Some(inner), .. } => matches!(&*inner.node, ExprNode::Ivar { .. } | ExprNode::Var { .. } | ExprNode::SelfRef),
+        _ => false,
+    }
+}
+
+/// An operand that runs nothing when read, so skipping it can't be seen.
+fn is_plain_operand(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { .. } | ExprNode::Ivar { .. } | ExprNode::Var { .. })
+}
+
+/// `*recv` for a nullable string column a String method reads: the
+/// method runs on the value, and a nil column panics, where Ruby
+/// raises `NoMethodError` on nil.
+fn deref_nullable_string(e: &Expr, e_s: String) -> String {
+    if nullable_read_go_ty(e).as_deref() == Some("*string") {
+        format!("*{e_s}")
+    } else {
+        e_s
     }
 }
 
