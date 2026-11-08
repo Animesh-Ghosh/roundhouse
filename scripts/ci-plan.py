@@ -112,6 +112,7 @@ SPINEL_TESTS = [
     "spinel_mini_profiler",
     "spinel_active_support_instrumentation",
     "around_block_filter_spinel",
+    "included_hook_constructor_spinel",
     "after_initialize_bare_new_spinel",
     "find_or_create_bang_records",
     "before_action_return_spinel",
