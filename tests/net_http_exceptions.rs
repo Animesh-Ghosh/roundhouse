@@ -45,6 +45,29 @@ fn source() -> String {
 "#));
     }
     source.push_str(r#"
+  WRITE_TIMEOUT = ::Net::WriteTimeout
+  INFORMATIONAL = ::Net::HTTPInformation
+
+  def self.write_timeout_rescue
+    raise Net::WriteTimeout
+  rescue Net::ReadTimeout
+    false
+  rescue ::Net::WriteTimeout => error
+    error.is_a?(WRITE_TIMEOUT) && error.is_a?(Timeout::Error) && error.message.start_with?("Net::WriteTimeout")
+  end
+
+  def self.write_timeout_parent_rescue
+    klass = WRITE_TIMEOUT
+    raise klass
+  rescue Timeout::Error => error
+    klass == Net::WriteTimeout && error.is_a?(Net::WriteTimeout) && error.message.start_with?("Net::WriteTimeout")
+  end
+
+  def self.informational_response_class
+    klass = INFORMATIONAL
+    klass == Net::HTTPInformation && klass.superclass == Net::HTTPResponse && klass != Net::HTTPSuccess
+  end
+
   def self.raise_alias
     raise ERROR_0, "alias"
   rescue IOError, Net::HTTPBadResponse => error
@@ -68,6 +91,9 @@ fn assertions() -> String {
     }
     assertions.push_str("raise \"alias\" unless HttpExceptionBoundary.raise_alias\n\
         raise \"ancestor\" unless HttpExceptionBoundary.ancestor_rescue\n\
+        raise \"write timeout\" unless HttpExceptionBoundary.write_timeout_rescue\n\
+        raise \"write timeout parent\" unless HttpExceptionBoundary.write_timeout_parent_rescue\n\
+        raise \"informational response\" unless HttpExceptionBoundary.informational_response_class\n\
         puts \"Net HTTP exception values OK\"\n");
     assertions
 }
@@ -88,9 +114,21 @@ fn net_http_exception_values_execute_after_ruby_emission() {
 }
 
 #[test]
+fn net_http_exception_values_match_cruby() {
+    let output = Command::new("ruby").args(["-e", &(source() + &assertions())])
+        .output().expect("run CRuby oracle");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "Net HTTP exception values OK");
+}
+
+#[test]
 fn net_http_exception_values_remain_unavailable_on_crystal() {
     let (_, errors) = overlay().emit(BuildTarget::Crystal);
     for (name, _) in CLASSES {
+        assert!(errors.iter().any(|e| e.contains(&format!("{name} is not available as a class/module value on crystal"))),
+            "{name}: {errors:#?}");
+    }
+    for name in ["Net::WriteTimeout", "Net::HTTPInformation"] {
         assert!(errors.iter().any(|e| e.contains(&format!("{name} is not available as a class/module value on crystal"))),
             "{name}: {errors:#?}");
     }

@@ -8746,6 +8746,7 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         | "Net::HTTPHeaderSyntaxError" | "Net::HTTPError" | "Net::HTTPRetriableError"
         | "Net::HTTPClientException" | "Net::HTTPFatalError" | "Net::ProtocolError"
         | "Net::ProtoFatalError" | "Net::ProtoServerError" | "Net::ProtoRetriableError"
+        | "Net::WriteTimeout" | "Net::HTTPInformation"
         // `packages/strscan` and `packages/zlib` on spinel; no strict runtime carries either.
         | "StringScanner" | "Zlib::GzipWriter" | "Zlib::Deflate" | "Zlib::GzipReader" | "Zlib::Error"
         | "Zlib::BEST_COMPRESSION" | "Zlib::MAX_WBITS" | "Zlib::FINISH"

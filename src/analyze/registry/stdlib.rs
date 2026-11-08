@@ -1202,6 +1202,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // HTTP exceptions and their protocol bases are native class values.
     register_stdlib_class(classes, "Net::ProtocolError", &[], &exception_surface);
     for (exc, parent) in [
+        ("Net::WriteTimeout", "Timeout::Error"),
         ("Net::HTTPHeaderSyntaxError", "StandardError"),
         ("Net::HTTPError", "Net::ProtocolError"),
         ("Net::HTTPRetriableError", "Net::ProtoRetriableError"),
@@ -1261,7 +1262,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     }
     // `res.is_a?(Net::HTTPSuccess)` — lobsters' Github; spinel's
     // `packages/net` defines the same response family.
-    for response in ["Net::HTTPRedirection", "Net::HTTPOK", "Net::HTTPSuccess"] {
+    for response in ["Net::HTTPInformation", "Net::HTTPRedirection", "Net::HTTPOK", "Net::HTTPSuccess"] {
         register_stdlib_class(classes, response, &[], &[]);
     }
     // The implementation is bundled on Ruby/Spinel. Other targets
