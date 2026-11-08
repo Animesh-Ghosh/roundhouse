@@ -5,7 +5,7 @@
 
 use crate::App;
 use crate::det::{HashMap, HashSet};
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 
 use super::configured_superclass::Val;
 
@@ -151,4 +151,56 @@ pub(super) fn registers_for_later(statement: &Expr) -> bool {
             "after_set_user" | "after_authentication" | "after_fetch" | "after_failed_fetch" | "before_failure" | "before_logout" | "on_request"
                 | "prepend_after_set_user" | "prepend_after_authentication" | "prepend_after_fetch" | "prepend_before_failure" | "prepend_before_logout" | "prepend_on_request"
         )
+}
+
+/// What a statement passed over in a gem's method may write, when the gem's own contract bounds it tighter than its calls do.
+/// `devise` are the locals that hold `Devise` itself where the statement runs.
+pub(super) fn confined_writes(known: &HashSet<String>, caller: Option<(&str, &str)>, statement: &Expr, devise: &HashSet<crate::ident::Symbol>) -> Option<HashSet<(String, bool, String)>> {
+    // `Devise.setup do |config| … end` (`yield self`): what it runs configures Devise. An app's `if ENV[…]` around a setting leaves that setting unsure, `config.omniauth` the `@@omniauth_configs` it keeps.
+    let is_devise = |p: &[crate::ident::Symbol]| p.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Devise"]);
+    let mut devise = devise.clone();
+    // The call itself fails only by its block's last statement: each earlier one ran, or was passed over with what it names.
+    let mut written = statement;
+    let setup_call = match &*statement.node {
+        ExprNode::Send { recv: Some(r), method, block: Some(b), .. } if method.as_str() == "setup" && matches!(&*r.node, ExprNode::Const { path } if is_devise(path)) => {
+            if let ExprNode::Lambda { params, body, .. } = &*b.node {
+                devise.extend(params.iter().cloned());
+                written = match &*body.node {
+                    ExprNode::Seq { exprs } => exprs.last().unwrap_or(body),
+                    _ => body,
+                };
+            }
+            true
+        }
+        _ => false,
+    };
+    if !known.contains("Devise") || !(caller == Some(("Devise", "setup")) || setup_call) {
+        return None;
+    }
+    let mut out: HashSet<(String, bool, String)> = HashSet::default();
+    fn walk(e: &Expr, devise: &HashSet<crate::ident::Symbol>, is_devise: &dyn Fn(&[crate::ident::Symbol]) -> bool, out: &mut HashSet<(String, bool, String)>) {
+        let on_devise = |r: &Expr| match &*r.node {
+            ExprNode::Var { name, .. } => devise.contains(name),
+            ExprNode::Const { path } => is_devise(path),
+            _ => false,
+        };
+        match &*e.node {
+            ExprNode::Send { recv: Some(r), method, .. } if on_devise(r) => {
+                let setting = match method.as_str() {
+                    "omniauth" => "omniauth_configs".to_string(),
+                    "warden" => "warden_config_blocks".to_string(),
+                    m if m.ends_with('=') => m.trim_end_matches('=').to_string(),
+                    _ => "*".to_string(),
+                };
+                out.insert(("Devise".to_string(), true, if setting == "*" { setting } else { format!("@@{setting}") }));
+            }
+            ExprNode::Assign { target: LValue::Attr { recv, name }, .. } | ExprNode::OpAssign { target: LValue::Attr { recv, name }, .. } if on_devise(recv) => {
+                out.insert(("Devise".to_string(), true, format!("@@{}", name.as_str())));
+            }
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| walk(c, devise, is_devise, out));
+    }
+    walk(written, &devise, &is_devise, &mut out);
+    Some(out)
 }

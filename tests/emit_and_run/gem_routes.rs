@@ -250,3 +250,45 @@ fn a_devise_omniauth_callback_whose_providers_are_not_known_is_reported_and_the_
     assert!(routes.contains("\"/users/sign_in\""), "{routes}");
     assert!(!routes.contains("/users/auth/"), "{routes}");
 }
+
+const DEVISE_SETUP: &str = r##"module Devise
+  mattr_accessor :prefix
+  @@prefix = "bells"
+  mattr_accessor :loud
+  @@loud = false
+
+  def self.setup
+    yield self
+  end
+end
+
+module ActionDispatch::Routing
+  class Mapper
+    def ring_routes_for(resource)
+      get "#{Devise.prefix}/#{resource}", to: "articles#index", as: "ring"
+    end
+  end
+end
+"##;
+
+fn devise_setup(initializer: &str) -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .edit("Gemfile.lock", "GEM\n", "PATH\n  remote: vendor/gems/devise_setup\n  specs:\n    devise_setup (1.0.0)\n\nGEM\n")
+        .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  devise_setup!\n")
+        .write("vendor/gems/devise_setup/lib/devise_setup.rb", DEVISE_SETUP)
+        .write("config/initializers/devise.rb", initializer)
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  ring_routes_for :users\n")
+}
+
+/// A setting `Devise.setup` sets under a condition not known here leaves that setting unsure, and
+/// only that one: a route that reads another stands, one that reads it is refused.
+#[test]
+fn a_devise_setup_statement_passed_over_leaves_only_its_settings_unsure() {
+    let (tree, _) = devise_setup("Devise.setup do |config|\n  config.prefix = \"chimes\"\n  if ENV[\"LOUD\"] == \"1\"\n    config.loud = true\n  end\nend\n")
+        .emit(roundhouse::build_target::BuildTarget::Ruby);
+    let routes = std::fs::read_to_string(tree.join("config/routes.rb")).expect("routes.rb");
+    assert!(routes.contains("\"/chimes/users\""), "{routes}");
+
+    let errors = devise_setup("Devise.setup do |config|\n  if ENV[\"CHIMES\"] == \"1\"\n    config.prefix = \"chimes\"\n  end\nend\n").check_errors();
+    assert!(errors.iter().any(|e| e.contains("ring_routes_for")), "{errors:#?}");
+}
