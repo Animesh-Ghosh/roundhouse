@@ -1963,6 +1963,13 @@ pub(super) fn emit_send(
         if let Some(r) = recv {
             let recv_s = emit_expr(ctx, r);
             let recv_go_ty = super::ty::go_ty_stub(r.ty.as_ref());
+            // The loop below reads the receiver twice, and a receiver that
+            // runs something runs once.
+            let (bind_recv, joined) = if is_plain_operand(r) {
+                (String::new(), recv_s.clone())
+            } else {
+                (format!("\t_rh_recv := {recv_s}\n"), "_rh_recv".to_string())
+            };
             let sep = if args.is_empty() {
                 "\"\"".to_string()
             } else {
@@ -1972,11 +1979,12 @@ pub(super) fn emit_send(
                 return format!("strings.Join({recv_s}, {sep})");
             }
             return format!(
-                "strings.Join(func() []string {{\n\
+                "strings.Join(func() []string {{\n{bind_recv}\
                  \t_out := make([]string, 0, len({recv_s}))\n\
                  \tfor _, _v := range {recv_s} {{ _out = append(_out, fmt.Sprintf(\"%v\", _v)) }}\n\
                  \treturn _out\n\
                  }}(), {sep})",
+                recv_s = joined,
             );
         }
     }

@@ -749,3 +749,11 @@ fn go_nil_literal_left_nil_renders() {
 fn go_nil_literal_left_renders() {
     assert_content_tag_test_passes(go_nil_literal_left::strict_app());
 }
+
+/// `join` runs a receiver with an effect once, as Rails 8.1.4 does
+/// (`each_receiver_once::JOIN_VIEW`).
+#[test]
+#[ignore]
+fn join_receiver_once_renders() {
+    assert_content_tag_test_passes(each_receiver_once::strict_join_app());
+}
