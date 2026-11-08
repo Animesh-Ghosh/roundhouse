@@ -253,10 +253,30 @@ pub(super) fn confined_writes(
                 ExprNode::Send { recv: Some(r), .. } => match &*r.node {
                     // A framework's (`Rails.configuration.x`, `ENV`), whose methods write none of the program's.
                     ExprNode::Const { path } if !self.known.contains(&path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::")) => {}
-                    ExprNode::Send { .. } | ExprNode::Const { .. } | ExprNode::Lit { .. } | ExprNode::StringInterp { .. } | ExprNode::Array { .. } | ExprNode::Hash { .. } => {}
+                    ExprNode::Send { .. } | ExprNode::Lit { .. } | ExprNode::StringInterp { .. } | ExprNode::Array { .. } | ExprNode::Hash { .. } => {}
                     _ => self.general = true,
                 },
                 _ => {}
+            }
+            // A block attached to a call runs with it (`hosts.each { |h| config.host = h }`): its body is walked, not passed over as a value lambda is.
+            if let ExprNode::Send { recv, args, block, .. } = &*e.node {
+                if let Some(r) = recv {
+                    self.visit(r);
+                }
+                for a in args {
+                    self.visit(a);
+                }
+                if let Some(b) = block {
+                    match &*b.node {
+                        // Not the app's objects: what a call on a safe receiver yields (`split(",").map(&:strip)`).
+                        ExprNode::Lambda { body, params, rest_param, .. } => {
+                            self.fresh.extend(params.iter().chain(rest_param.iter()).cloned());
+                            self.visit(body);
+                        }
+                        _ => self.visit(b),
+                    }
+                }
+                return;
             }
             e.node.for_each_child(&mut |c| self.visit(c));
         }
