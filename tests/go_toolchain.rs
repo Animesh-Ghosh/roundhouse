@@ -51,6 +51,9 @@ mod view_unless_no_else;
 #[path = "support/nilable_string_view.rs"]
 #[allow(dead_code)]
 mod nilable_string_view;
+#[path = "support/each_receiver_once.rs"]
+#[allow(dead_code)]
+mod each_receiver_once;
 #[path = "support/join_nil.rs"]
 #[allow(dead_code)]
 mod join_nil;
@@ -721,6 +724,14 @@ fn nilable_string_view_nil_renders() {
 #[ignore]
 fn nilable_string_view_nil_effect_renders() {
     assert_content_tag_test_passes(nilable_string_view::strict_nil_effect_app());
+}
+
+/// #1946: `each` runs a receiver with an effect once, as Rails 8.1.4
+/// does (`each_receiver_once::VIEW`).
+#[test]
+#[ignore]
+fn each_receiver_once_renders() {
+    assert_content_tag_test_passes(each_receiver_once::strict_app());
 }
 
 /// #1949: `join` reads a nil element as an empty string, as Rails 8.1.4
