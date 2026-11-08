@@ -146,6 +146,7 @@ SPINEL_TESTS = [
     "rails_cache_entry_options_spinel",
     "params_tap_require_spinel",
     "association_extension_unscope_spinel",
+    "pluck_sql_literal_spinel",
 ]
 # Inputs of the Sidekiq push gate (tests/sidekiq_push.rs): the files its
 # driver loads beside it.

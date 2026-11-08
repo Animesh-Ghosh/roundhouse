@@ -2544,29 +2544,18 @@ module ActiveRecord
     # `Rooms::Direct.find_or_create_for` does exactly that: `find_for`
     # plucks the user ids, then hands the SAME relation to `grant_to`,
     # which built memberships for user 0.
+    #
+    # An `Arel.sql` fragment is the caller's own projection, past the
+    # column check as in `order`, and a single one can name several
+    # columns, so that form takes its row width from the result as Rails
+    # does: one column plucks scalars, more pluck rows.
     def pluck(*cols)
       return [] if @null
+      return pluck_sql(cols) if cols.any? { |col| col.is_a?(Arel::Nodes::SqlLiteral) }
       columns = cols.length == 0 ? @model.schema_columns : cols
       projections = []
       columns.each_with_index do |col, index|
-        name = sql_ident(col)
-        # Same rule as `schema::pluck_argument`. A real `id` column is
-        # what `pluck(:id)` selects. `:id` aliases the primary key only
-        # when that column is absent, which is also why a bare `pluck`
-        # must not rename `id` and project the key twice.
-        if name == "id" && !@model.schema_columns.include?(:id)
-          name = @model.primary_key.to_s
-        end
-        # `sql_ident` accepts a reserved word. Quote after substitution,
-        # each part of a qualified name on its own. `@table` is already
-        # `_table_sql`.
-        if name.include?(".")
-          table, column = name.split(".", 2)
-          name = "#{ActiveRecord.adapter.quote_column_name(table)}.#{ActiveRecord.adapter.quote_column_name(column)}"
-        else
-          name = "#{@table}.#{ActiveRecord.adapter.quote_column_name(name)}"
-        end
-        projections << "#{name} AS v#{index}"
+        projections << "#{pluck_column_sql(col)} AS v#{index}"
       end
       prior = @select_sql
       begin
@@ -2581,6 +2570,87 @@ module ActiveRecord
         columns.each_with_index { |col, index| values << @model.decode_plucked(col, row["v#{index}"]) }
         values
       end
+    end
+
+    # One `pluck` column as SQL.
+    def pluck_column_sql(col)
+      name = sql_ident(col)
+      # Same rule as `schema::pluck_argument`. A real `id` column is
+      # what `pluck(:id)` selects. `:id` aliases the primary key only
+      # when that column is absent, which is also why a bare `pluck`
+      # must not rename `id` and project the key twice.
+      if name == "id" && !@model.schema_columns.include?(:id)
+        name = @model.primary_key.to_s
+      end
+      # `sql_ident` accepts a reserved word. Quote after substitution,
+      # each part of a qualified name on its own. `@table` is already
+      # `_table_sql`.
+      if name.include?(".")
+        table, column = name.split(".", 2)
+        "#{ActiveRecord.adapter.quote_column_name(table)}.#{ActiveRecord.adapter.quote_column_name(column)}"
+      else
+        "#{@table}.#{ActiveRecord.adapter.quote_column_name(name)}"
+      end
+    end
+
+    # `pluck` with an `Arel.sql` fragment among its columns. Rows are Hashes
+    # keyed by column name, so result columns sharing a name arrive as one
+    # value: Rails answers both (`a.id, b.id`), and this raises rather than
+    # return a row with a column missing. A row wider than the projections
+    # is fine, since `*` can widen it.
+    def pluck_sql(cols)
+      projections = []
+      expected = 0
+      cols.each_with_index do |col, index|
+        if col.is_a?(Arel::Nodes::SqlLiteral)
+          sql = col.to_s
+          projections << sql
+          expected += sql_projection_width(sql)
+        else
+          projections << "#{pluck_column_sql(col)} AS v#{index}"
+          expected += 1
+        end
+      end
+      prior = @select_sql
+      begin
+        @select_sql = projections.join(", ")
+        rows = ActiveRecord.adapter.select_rows(bound_sql)
+      ensure
+        @select_sql = prior
+      end
+      rows.map do |row|
+        values = row.values
+        if values.length < expected
+          raise ArgumentError, "pluck expected #{expected} columns but the row has #{values.length}: result columns share a name, give them distinct names with AS"
+        end
+        values.length == 1 ? values[0] : values
+      end
+    end
+
+    # How many result columns a projection list names: its top-level commas
+    # plus one. A comma inside parentheses, brackets or a quoted string
+    # separates nothing here.
+    def sql_projection_width(sql)
+      width = 1
+      depth = 0
+      quote = ""
+      i = 0
+      while i < sql.length
+        ch = sql[i]
+        if quote != ""
+          quote = "" if ch == quote
+        elsif ch == "'" || ch == "\"" || ch == "`"
+          quote = ch
+        elsif ch == "(" || ch == "["
+          depth += 1
+        elsif ch == ")" || ch == "]"
+          depth -= 1
+        elsif ch == "," && depth == 0
+          width += 1
+        end
+        i += 1
+      end
+      width
     end
 
     # `pick(*cols)` — Rails' `limit(1).pluck(*cols).first`: a value or
