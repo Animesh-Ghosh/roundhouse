@@ -22,10 +22,8 @@
 //! authentication guards (`authenticate`, `authenticated`, and
 //! `unauthenticated`) are unsupported: flattening them would expose
 //! guarded handlers because the generated runtime does not enforce
-//! Warden/Devise route constraints. `devise_for` expands a static
-//! route/helper table (sessions / registrations / passwords /
-//! confirmations) from the resource name and optional `controllers:`
-//! overrides; it does not claim Warden or Devise controller runtime.
+//! Warden/Devise route constraints. `devise_for` is drawn from Devise's
+//! own source, as any gem's routing method is (`gem_routes`).
 
 use std::cell::{Cell, OnceCell, RefCell};
 use crate::det::{HashMap, HashSet};
@@ -2545,10 +2543,6 @@ fn ingest_route_call(
         // custom URL helper, not a route, so it contributes no entry
         // here.
         "direct" => Ok(None),
-        // `devise_for` — static Devise route/helper table; see
-        // `ingest::devise_routes`. Controllers override via
-        // `controllers:`. Does not model Warden or OmniAuth callbacks.
-        "devise_for" => super::devise_routes::ingest_devise_for(call, file),
         // Written only by `ingest::gem_routes`: the routes a gem's method drew under a scope it set for itself.
         EXCLUSIVE_SCOPE if call.receiver().is_none() && GEM_DSL.with(|g| !g.borrow().is_empty()) => {
             Ok(Some(RouteSpec::Exclusive { entries: block_entries(call, file, None, cx)? }))

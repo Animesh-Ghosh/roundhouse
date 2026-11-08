@@ -251,16 +251,30 @@ fn draw(app: &App, call: &Expr, initializers: &[Expr], enclosing: Enclosing) -> 
     if lc.name.0.as_str() != "ActionDispatch::Routing::Mapper" {
         roots.push(lc.name.0.as_str().split("::").next().unwrap_or_default().to_string());
     }
-    visit(&def.body, &mut |e| {
-        if let ExprNode::Const { path } = &*e.node
-            && let Some(top) = path.iter().map(|s| s.as_str()).find(|s| !s.is_empty())
-            && app.library_classes.iter().any(|c| c.name.0.as_str() == top)
-            && !roots.iter().any(|r| r == top)
-            && top != "ActionDispatch"
-        {
-            roots.push(top.to_string());
-        }
-    });
+    // Not only its own body: one it calls on the mapper names its constants too (devise_token_auth's `mount_devise_token_auth_for` reaches `Devise` only through `devise_for`).
+    let methods = extensions(app);
+    let mut walked: Vec<&str> = vec![def.name.as_str()];
+    let mut bodies = vec![&def.body];
+    while let Some(body) = bodies.pop() {
+        visit(body, &mut |e| match &*e.node {
+            ExprNode::Const { path } => {
+                if let Some(top) = path.iter().map(|s| s.as_str()).find(|s| !s.is_empty())
+                    && app.library_classes.iter().any(|c| c.name.0.as_str() == top)
+                    && !roots.iter().any(|r| r == top)
+                    && top != "ActionDispatch"
+                {
+                    roots.push(top.to_string());
+                }
+            }
+            ExprNode::Send { recv: None, method, .. } if !walked.contains(&method.as_str()) => {
+                if let Some((_, m)) = methods.iter().find(|(_, m)| m.name == *method) {
+                    walked.push(m.name.as_str());
+                    bodies.push(&m.body);
+                }
+            }
+            _ => {}
+        });
+    }
     let scope = def.enclosing_class.as_ref().map(|s| s.as_str().to_string()).unwrap_or_else(|| lc.name.0.as_str().to_string());
     let mut mixins: Vec<String> = Vec::new();
     for (owner, _) in extensions(app) {

@@ -751,9 +751,10 @@ const FATES: &[(&str, GemFate)] = &[
     ("acts_as_votable", GemFate::Modeled), // ingest/acts_as_votable: ActsAsVotable::Vote on `votes`; acts_as_votable/acts_as_voter macros -> votes_for/votes + vote_by/liked_by/unvote_by/update_cached_votes (not vote_up_for/get_voted/association extensions)
     // Not Modeled: the catalog types Addressable::URI, but no tree has a body for it, so it runs as the gem itself.
     ("addressable", GemFate::Unknown),
+    // Not Modeled: its routes depend on the modules every model and gem registers, which only its own source draws.
+    ("devise", GemFate::Unknown),
     ("bcrypt", GemFate::Modeled),      // catalog/gems: BCrypt::*; has_secure_password
     ("commonmarker", GemFate::Modeled), // catalog/gems: Commonmarker, Commonmarker::Node
-    ("devise", GemFate::Modeled), // helpers; devise_for = static 4 mappings (not model-module-driven); no Warden route guards
     ("discard", GemFate::Modeled),
     ("elastic-apm", GemFate::Modeled), // catalog/gems: ElasticAPM, SpanHelpers; the real gem on ruby and jruby, lower/ruby_family_gems refuses every other target     // ingest/discard: include Discard::Model -> scopes + predicates + discard/undiscard (not discard_all/undiscard_all); Relation#unscope(where:)
     ("faye-websocket", GemFate::Modeled), // Spinel faye_websocket: text/open/message/close; no protocols/error events

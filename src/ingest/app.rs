@@ -604,7 +604,26 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let mut auto: Vec<String> = Vec::new();
     loop {
         let marks = (super::survey::mark(), super::prism::mark());
-        let mut app = ingest_rails_app(vfs, dir, &auto)?;
+        let mut app = match ingest_rails_app(vfs, dir, &auto) {
+            Ok(app) => app,
+            Err(err) => {
+                let strict = super::prism::mark();
+                // Not the strict pass's first refusal as the answer: it can be a gem's DSL (`devise_for`) that only the gem's source, which this pass has not read yet, defines.
+                let more: Vec<String> = super::concern_accessors::not_deferring(|| super::survey::surveying(|| {
+                    ingest_rails_app(vfs, dir, &auto).map(|app| super::auto_source_gems::candidates(&app, vfs, dir)).unwrap_or_default()
+                }))
+                .into_iter()
+                .filter(|g| !auto.contains(g))
+                .collect();
+                if more.is_empty() || auto.len() >= 32 {
+                    super::prism::rewind(strict);
+                    return Err(err);
+                }
+                super::prism::rewind(marks.1);
+                auto.extend(more);
+                continue;
+            }
+        };
         let more: Vec<String> = super::auto_source_gems::candidates(&app, vfs, dir)
             .into_iter()
             .filter(|g| !auto.contains(g))
@@ -2209,7 +2228,6 @@ end
     if !route_roots.is_empty() {
         let block_wrappers = mapper_extension_block_methods(&app, vfs, dir, &engine_dirs);
         super::routes::set_gem_dsl(super::gem_routes::mapper_methods(&app));
-        super::devise_routes::set_model_modules(super::gem_hooks::devise_modules(&app));
         // The constants the route files read, folded from their owners
         // as a model body's are, for `constraints:` values. A route
         // names a controller's constant as often as a model's, so its
