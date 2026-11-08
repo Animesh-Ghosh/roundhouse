@@ -5,7 +5,7 @@
 //!
 //! Rails 8.1.4 + jbuilder 2.15.1 answers the three rows below; an empty
 //! collection is a value, `[]`. The Spinel side is
-//! `jbuilder_nested_conditional_array_spinel.rs`.
+//! `small_rails_gaps_spinel.rs`.
 
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]

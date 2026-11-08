@@ -3,7 +3,7 @@
 //! several columns. Rails 8.1.4 takes the row width from the result, so
 //! one literal naming three columns plucks three-element rows and one
 //! naming a single column plucks scalars.
-//! The Spinel side is `pluck_sql_literal_spinel.rs`.
+//! The Spinel side is `small_rails_gaps_spinel.rs`.
 
 #[path = "support/emit_and_run.rs"]
 #[allow(dead_code)]
