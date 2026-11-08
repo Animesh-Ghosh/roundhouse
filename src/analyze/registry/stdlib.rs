@@ -972,10 +972,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         "LoadError",
         // lobsters' `Sponge::OTHER_PEOPLES_PROBLEMS`, a class-body Array
         // of exception classes. zlib's and Encoding's are Ruby's own and
-        // spinel's (`packages/zlib`, `lib/sp_exc.c`). net/protocol's
-        // `HTTPBadResponse` is CRuby's only: spinel's `packages/net`
-        // does not define it, so `project::unavailable_class_module_construct`
-        // ledgers it there.
+        // spinel's (`packages/zlib`, `lib/sp_exc.c`, `packages/net`).
         "Zlib::DataError", "Encoding::CompatibilityError", "Net::HTTPBadResponse",
         // `rescue EncodingError` around a zone file's text (tzinfo's ZoneinfoDataSource).
         "EncodingError",
@@ -1202,12 +1199,21 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
             ("method", Ty::Str), ("path", Ty::Str),
         ]);
     }
-    // `Net::ProtocolError` — Spinel's packages/net defines it (with
-    // OpenTimeout / ReadTimeout). `Net::HTTPBadResponse` is registered
-    // above for Lobsters and Spinel-ledgers via
-    // `unavailable_class_module_construct`. `Net::HTTPHeaderSyntaxError`
-    // stays a CRuby-only constant gap until Spinel grows it (invariant 6).
+    // HTTP exceptions and their protocol bases are native class values.
     register_stdlib_class(classes, "Net::ProtocolError", &[], &exception_surface);
+    for (exc, parent) in [
+        ("Net::HTTPHeaderSyntaxError", "StandardError"),
+        ("Net::HTTPError", "Net::ProtocolError"),
+        ("Net::HTTPRetriableError", "Net::ProtoRetriableError"),
+        ("Net::HTTPClientException", "Net::ProtoServerError"),
+        ("Net::HTTPFatalError", "Net::ProtoFatalError"),
+        ("Net::ProtoFatalError", "Net::ProtocolError"),
+        ("Net::ProtoServerError", "Net::ProtocolError"),
+        ("Net::ProtoRetriableError", "Net::ProtocolError"),
+    ] {
+        register_stdlib_class(classes, exc, &[], &[]);
+        classes.entry(ClassId(Symbol::from(exc))).or_default().parent = Some(ClassId(Symbol::from(parent)));
+    }
     // `Mime::Type` — the class `runtime/ruby/mime.rb` ports from
     // actionpack. `lookup` is deliberately NON-nilable: upstream answers
     // a Type for any well-formed string (symbol nil when unregistered)
