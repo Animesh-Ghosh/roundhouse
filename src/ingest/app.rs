@@ -604,7 +604,26 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let mut auto: Vec<String> = Vec::new();
     loop {
         let marks = (super::survey::mark(), super::prism::mark());
-        let mut app = ingest_rails_app(vfs, dir, &auto)?;
+        let mut app = match ingest_rails_app(vfs, dir, &auto) {
+            Ok(app) => app,
+            Err(err) => {
+                let strict = super::prism::mark();
+                // Not the strict pass's first refusal as the answer: it can be a gem's DSL (`devise_for`) that only the gem's source, which this pass has not read yet, defines.
+                let more: Vec<String> = super::survey::surveying(|| {
+                    ingest_rails_app(vfs, dir, &auto).map(|app| super::auto_source_gems::candidates(&app, vfs, dir)).unwrap_or_default()
+                })
+                .into_iter()
+                .filter(|g| !auto.contains(g))
+                .collect();
+                if more.is_empty() || auto.len() >= 32 {
+                    super::prism::rewind(strict);
+                    return Err(err);
+                }
+                super::prism::rewind(marks.1);
+                auto.extend(more);
+                continue;
+            }
+        };
         let more: Vec<String> = super::auto_source_gems::candidates(&app, vfs, dir)
             .into_iter()
             .filter(|g| !auto.contains(g))
