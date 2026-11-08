@@ -1619,6 +1619,55 @@ fn report_block_render_partials(app: &App, target: BuildTarget) {
     }
 }
 
+/// Off the ruby family a target wraps every html response in
+/// `layouts/application` when the app has it, and in nothing when it
+/// does not; it has no layout per controller or action. A render that
+/// Rails wraps in another layout, or in none, for any controller and
+/// action running it is refused there. A render whose layout cannot be
+/// picked at all was reported by ingest.
+fn report_controller_layouts(app: &App, target: BuildTarget) {
+    if matches!(
+        target,
+        BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura
+    ) {
+        return;
+    }
+    use crate::controller_layout::{Layout, Layouts};
+    let layouts = Layouts::new(&app.controllers, &app.views);
+    let application = crate::ident::Symbol::from("layouts/application");
+    let wrapped = app.views.iter().any(|v| v.format.as_str() == "html" && v.name == application);
+    let target_layout = if wrapped { Layout::Template(application) } else { Layout::None };
+    let mut seen: crate::det::HashSet<(crate::span::Span, String)> = crate::det::HashSet::default();
+    for site in layouts.sites(&app.controllers, &app.views) {
+        let Ok(cases) = layouts.render_cases(site.class, site.method, site.option) else { continue };
+        let Some(case) = cases.iter().find(|c| c.layout != target_layout) else { continue };
+        let (class, action) = &case.runs[0];
+        let under = if (class.as_str(), action.as_str()) == (site.class, site.method) {
+            String::new()
+        } else {
+            format!(" under `{class}#{action}`")
+        };
+        let detail = format!(
+            "`{}#{}` renders {}{under}, and this target wraps every page {}",
+            site.class,
+            site.method,
+            match &case.layout {
+                Layout::Template(name) => format!("in `{}`", name.as_str()),
+                _ => "without a layout".to_string(),
+            },
+            if wrapped { "in `layouts/application`" } else { "without one" }
+        );
+        if seen.insert((site.span, detail.clone())) {
+            emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                site.span,
+                Some(crate::ident::Symbol::from(target.as_str())),
+                "controller layout",
+                detail,
+            ));
+        }
+    }
+}
+
 /// `current_page?` reads the request a view renders for. The ruby
 /// family's views reach it (`ActionController::Current.request`); measured
 /// through each target's own test runner, TypeScript's (`request is not
@@ -3451,6 +3500,7 @@ fn target_files_inner(
     report_config_for(app, target);
     report_i18n_table_sites(app, target);
     report_controller_content_type_writers(app, target);
+    report_controller_layouts(app, target);
     // Snapshot the optional measurement override at the target boundary. The
     // lowerers receive a value; they never consult process-global environment.
     let param_binds = target.param_binds_enabled(

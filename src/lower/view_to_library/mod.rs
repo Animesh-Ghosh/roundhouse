@@ -547,7 +547,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // that reads exactly its one resource ivar (the blog) gets the same
     // signature the convention would have produced.
     let is_partial = base.starts_with('_');
-    let is_layout = dir == "layouts";
+    let is_layout = is_layout_dir(dir, is_partial);
     let is_action_view = !is_partial && !is_layout && !dir.is_empty();
     // A layout, or a partial that yields and never reads its record local,
     // takes the yielded markup in its record slot (`render "x" do … end`,
@@ -2189,7 +2189,7 @@ pub(crate) fn build_view_signature(
     // Type for the main arg (when present).
     let arg_ty = if arg_name.is_empty() {
         None
-    } else if dir == "layouts" {
+    } else if is_layout_dir(dir, is_partial) {
         // `body` arg of a layout — the rendered inner HTML.
         Some(Ty::Str)
     } else if !is_partial && stem == "index" {
@@ -3071,7 +3071,7 @@ pub(crate) fn action_view_ivar_map(
     let mut out = crate::det::HashMap::default();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
-        if dir == "layouts" || base.starts_with('_') {
+        if is_layout_dir(dir, false) || base.starts_with('_') {
             continue;
         }
         // `json` joins the ERB formats HERE and not in
@@ -3513,6 +3513,13 @@ fn view_key_of(v: &View, stems: &PartialStems) -> Option<ViewKey> {
     })
 }
 
+/// Whether a template in `dir` is a layout: anything in `layouts/`, and a
+/// template (not a partial) further down, which `layout "admin/narrow"`
+/// or a namespaced controller's `layouts/admin/reports` names.
+pub(crate) fn is_layout_dir(dir: &str, is_partial: bool) -> bool {
+    dir == "layouts" || (!is_partial && dir.starts_with("layouts/"))
+}
+
 /// Ruby-emit-path layout wrap factory: the Expr for
 ///
 /// ```ruby
@@ -3521,27 +3528,27 @@ fn view_key_of(v: &View, stems: &PartialStems) -> Option<ViewKey> {
 ///
 /// mirroring the layout signature `build_library_class` constructs
 /// (body, closure ivars, flash-if-used, then the uniform notice/alert
-/// extras). None when the app has no `layouts/application` html view.
+/// extras), for the layout template `layout` (`layouts/application`).
+/// None when the app has no such html view.
 /// Consumed by `emit::ruby::library::apply_layout_lowering`, which
 /// rewrites each action's `render(Views::X.y(...))` — the controller
 /// seam where the @ivars a layout reads are statically in scope. (The
 /// generic dispatch previously wrapped layouts body-only; a layout
 /// reading @user had no way to receive it there.)
-pub fn layout_wrap_expr(app: &crate::App, inner: Expr) -> Option<Expr> {
-    layout_wrap_expr_with(app, &view_ivar_closures(&app.views, &app.controllers), inner)
+pub fn layout_wrap_expr(app: &crate::App, layout: &str, inner: Expr) -> Option<Expr> {
+    layout_wrap_expr_with(app, &view_ivar_closures(&app.views, &app.controllers), layout, inner)
 }
 
 /// `layout_wrap_expr` over closures the caller computed once for every render it wraps.
 pub(crate) fn layout_wrap_expr_with(
     app: &crate::App,
     closures: &crate::det::HashMap<ViewKey, Vec<Symbol>>,
+    layout: &str,
     inner: Expr,
 ) -> Option<Expr> {
-    let key: ViewKey = ("Layouts".to_string(), "application".to_string());
     let stems = PartialStems::of(&app.views);
-    let layout = app.views.iter().find(|v| {
-        v.format.as_str() == "html" && view_key_of(v, &stems).as_ref() == Some(&key)
-    })?;
+    let layout = app.views.iter().find(|v| v.format.as_str() == "html" && v.name.as_str() == layout)?;
+    let key = view_key_of(layout, &stems)?;
     let ivars = closures.get(&key).cloned().unwrap_or_default();
     let span = inner.span;
     let ivar = |name: &Symbol| Expr::new(span, ExprNode::Ivar { name: name.clone() });
@@ -3572,16 +3579,12 @@ pub(crate) fn layout_wrap_expr_with(
     }
     args.push(flash_slot("notice"));
     args.push(flash_slot("alert"));
+    let path = std::iter::once("Views").chain(key.0.split("::")).map(Symbol::from).collect();
     Some(Expr::new(
         span,
         ExprNode::Send {
-            recv: Some(Expr::new(
-                span,
-                ExprNode::Const {
-                    path: vec![Symbol::from("Views"), Symbol::from("Layouts")],
-                },
-            )),
-            method: Symbol::from("application"),
+            recv: Some(Expr::new(span, ExprNode::Const { path })),
+            method: crate::lower::view::view_method_name(&key.1),
             args,
             block: None,
             parenthesized: true,
@@ -4464,7 +4467,7 @@ fn infer_view_arg_raw(stem: &str, dir: &str, is_partial: bool, _known_models: &[
     if dir.is_empty() {
         return String::new();
     }
-    if dir == "layouts" {
+    if is_layout_dir(dir, is_partial) {
         return "body".to_string();
     }
     if is_partial {
