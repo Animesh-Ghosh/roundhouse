@@ -62,6 +62,20 @@ def git_repository():
             os.chdir(previous)
 
 
+class EncryptsRefusalCoverage(unittest.TestCase):
+    def test_model_encryption_refusal_runs_in_the_unit_floor(self):
+        # These are CLI emission checks; they do not require native compilation.
+        for path in [
+            "tests/model_encrypts_refusal.rs",
+            "src/lower/model_to_library/mod.rs",
+            "src/analyze/diagnostics.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("unit", plan["jobs"])
+                self.assertIn("build-roundhouse", plan["jobs"])
+
+
 class PublicationBoundary(unittest.TestCase):
     def test_scheduled_full_on_canonical_main_may_publish(self):
         for event in ("schedule", "workflow_dispatch"):
