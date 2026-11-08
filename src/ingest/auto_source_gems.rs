@@ -145,7 +145,11 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
             continue;
         }
         let lib = installed.join("lib");
-        if [gem.to_string(), gem.replace('-', "/")].iter().any(|f| vfs.exists(&lib.join(format!("{f}.rb")))) {
+        let has_entry = match lock.gemfile_requires.get(gem.as_str()).filter(|f| !f.is_empty()) {
+            Some(features) => features.iter().all(|f| vfs.exists(&lib.join(if f.ends_with(".rb") { f.clone() } else { format!("{f}.rb") }))),
+            None => [gem.to_string(), gem.replace('-', "/")].iter().any(|f| vfs.exists(&lib.join(format!("{f}.rb")))),
+        };
+        if has_entry {
             extenders.push(gem.clone());
         }
     }

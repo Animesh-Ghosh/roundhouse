@@ -2040,6 +2040,26 @@ impl<'a> Eval<'a> {
         {
             locals.insert(param.clone(), Val::Class(class));
         }
+        // Not a name a block in the statement binds again (`each { |config| … }`): there it is the block's value.
+        let mut bound: HashMap<Symbol, usize> = HashMap::default();
+        visit(e, &mut |x| {
+            if let ExprNode::Lambda { params, rest_param, .. } = &*x.node {
+                for p in params.iter().chain(rest_param.iter()) {
+                    *bound.entry(p.clone()).or_default() += 1;
+                }
+            }
+        });
+        let yielded = match &*e.node {
+            ExprNode::Send { block: Some(b), .. } => match &*b.node {
+                ExprNode::Lambda { params, .. } if params.len() == 1 => locals.get(&params[0]).is_some().then(|| params[0].clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        locals.retain(|name, _| match bound.get(name) {
+            None => true,
+            Some(n) => yielded.as_ref() == Some(name) && *n == 1,
+        });
         let locals = &locals;
         // Not a lambda handed as a value (`setup: ->(env) { … }`): it runs when called, not as the statement does.
         let e = &without_value_lambdas(e);
