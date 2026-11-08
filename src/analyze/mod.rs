@@ -5788,6 +5788,22 @@ impl Analyzer {
                 if let Some(lent) = self.host_folded.get(&lc.name) {
                     inst.retain(|name, _| !lent.contains(name));
                 }
+                // The AR instance catalog seeded onto a model concern
+                // (`registry::library`) types the concern's own bare calls;
+                // it is not a definition, so it must not claim the name on
+                // the includer ahead of a module that defines it.
+                inst.retain(|name, _| {
+                    !crate::catalog::AR_CATALOG.iter().any(|e| {
+                        e.receiver == crate::catalog::ReceiverContext::Instance
+                            && e.return_kind.is_some()
+                            && e.name == name.as_str()
+                    }) || app.library_classes.iter().any(|other| {
+                        other.name == lc.name
+                            && other.methods.iter().any(|d| {
+                                &d.name == name && d.receiver == crate::dialect::MethodReceiver::Instance
+                            })
+                    })
+                });
                 Some((lc.name.clone(), (inst, cls.class_methods.clone(), cls.includes.clone())))
             })
             .collect();
