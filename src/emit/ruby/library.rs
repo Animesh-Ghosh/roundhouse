@@ -2088,7 +2088,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     let _span = crate::timings::begin("scope lowering: setup");
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
     let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
-    let unique_keys = crate::lower::scope_chain::build_unique_keys(&app.models, &app.schema);
+    let unique_keys = crate::lower::scope_chain::build_unique_keys(app);
     let regs = crate::lower::scope_chain::Registries {
         scopes: &scopes,
         models: &models,
@@ -2160,6 +2160,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &scopes,
                 &models,
                 &assocs,
+                &unique_keys,
             );
         }
         // User-written class methods the registry admitted as
@@ -2192,6 +2193,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         &scopes,
                         &models,
                         &assocs,
+                        &unique_keys,
                     );
                 }
             }
@@ -2239,6 +2241,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                         &scopes,
                         &models,
                         &assocs,
+                        &unique_keys,
                     );
                 }
             }
@@ -5104,9 +5107,13 @@ fn rewrite_helper_calls(
     //
     // Self wins here too: a class that defines `widgets_url` itself
     // calls that method (Rails mixes url helpers in beneath a class's
-    // own methods, and a plain class has none mixed in at all).
+    // own methods, and a plain class has none mixed in at all). So does
+    // an app helper of the `_url` name (`index`): Rails mixes the app's
+    // helpers in above the url helpers, and the bare call takes case 3's
+    // qualification to that module below.
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node
         && !own_methods.contains(method)
+        && !index.contains_key(method)
     {
         if let Some(stem) = method.as_str().strip_suffix("_url") {
             let path_name = Symbol::from(format!("{stem}_path"));
@@ -8931,6 +8938,16 @@ fn emit_library_class_decl_inner(
     }
     for &i in &deferred {
         body_requires.extend(resolve_all(&lc.constants[i].1, true));
+    }
+    // Not only the interleaved ones, which the split plan places: an ordered body writes the rest after its methods, where they read their constants as the body loads (devise's `@@helpers << Devise::Controllers::Helpers`).
+    if ordered_body {
+        for init in lc.class_ivar_initializers.iter().filter(|init| {
+            init.span.is_synthetic() || !matches!(&*init.node, ExprNode::Assign { target: LValue::Ivar { .. }, .. } | ExprNode::OpAssign { target: LValue::Ivar { .. }, .. })
+        }) {
+            let mut paths = BTreeSet::new();
+            walk_load_time_paths(init, lc, &mut BTreeSet::new(), &mut paths);
+            body_requires.extend(paths.iter().filter_map(|p| resolve(p, true)));
+        }
     }
     let factory_methods: Vec<&MethodDef> = lc
         .constants

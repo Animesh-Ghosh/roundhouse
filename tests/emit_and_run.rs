@@ -5,6 +5,11 @@
 //! disagree: `check` is clean and the emitted program fails. Each is a
 //! complete statement of the fix: make it pass and drop the `#[ignore]`.
 
+#[path = "support/data_record_siblings.rs"]
+mod data_record_siblings_contract;
+#[path = "emit_and_run/data_record_siblings.rs"]
+mod data_record_siblings;
+
 #[path = "support/scratch.rs"]
 mod scratch;
 #[path = "support/emit_and_run.rs"]
@@ -177,6 +182,12 @@ mod temporal_index_assign;
 mod file_mtime_time;
 #[path = "support/class_attribute.rs"]
 mod class_attribute;
+#[path = "emit_and_run/gem_routes.rs"]
+mod gem_routes;
+#[path = "support/option_dsl.rs"]
+mod option_dsl;
+#[path = "emit_and_run/option_dsl.rs"]
+mod option_dsl_runs;
 #[path = "support/string_truncate.rs"]
 mod string_truncate;
 #[path = "emit_and_run/string_truncate.rs"]
@@ -790,6 +801,75 @@ puts "registry module passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("registry module passed"));
+}
+
+/// doorkeeper's `Client::Credentials = Struct.new(:uid, :secret) do … end`: the block is the class's
+/// body, with `class << self`, a private class method and a `delegate`, not one the file is dropped for.
+#[test]
+fn a_struct_block_body_keeps_its_class_methods_visibility_and_delegates() {
+    let run = emit_and_run::real_blog()
+        .write(
+            "app/models/cred.rb",
+            "class Cred\n  Pair = Struct.new(:uid, :secret) do\n    class << self\n      def from(text)\n        build(text)\n      end\n\n      private\n\n      def build(text)\n        new(*text.split(\":\", 2))\n      end\n    end\n\n    delegate :blank?, to: :uid\n  end\nend\n",
+        )
+        .run_ruby(
+            r##"pair = Cred::Pair.from("a:b")
+raise "from: #{pair.uid.inspect}" unless pair.uid == "a" && pair.secret == "b"
+raise "blank" unless Cred::Pair.new("", "x").blank?
+raise "present" if Cred::Pair.new("u", "x").blank?
+begin
+  Cred::Pair.build("x:y")
+  raise "build is public"
+rescue NoMethodError
+end
+puts "struct block passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("struct block passed"), "{}", run.stdout);
+}
+
+/// A `Struct.new` block's `include` is the class's own, as in a class body. An `alias_method` there
+/// keeps the constant: the struct class is written without its class-body calls.
+#[test]
+fn a_struct_block_body_keeps_its_includes() {
+    let run = emit_and_run::real_blog()
+        .write("app/models/greeting.rb", "module Greeting\n  def hi\n    \"hi #{name}\"\n  end\nend\n")
+        .write(
+            "app/models/greeter.rb",
+            "class Greeter\n  Person = Struct.new(:name) do\n    include Greeting\n  end\nend\n",
+        )
+        .run_ruby(
+            r##"person = Greeter::Person.new("Ann")
+raise "include: #{person.hi.inspect}" unless person.hi == "hi Ann"
+raise "ancestry" unless Greeter::Person.include?(Greeting)
+puts "struct include passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("struct include passed"), "{}", run.stdout);
+}
+
+/// A module body as devise's: an `autoload` beside `mattr_*` initializers, a
+/// class variable appended to after its seed, and a writer the body defines
+/// called in it. Each runs where the source has it, the autoloaded constant
+/// read as the body loads.
+#[test]
+fn a_module_body_runs_its_class_variable_steps_in_order() {
+    let run = emit_and_run::real_blog()
+        .write("app/models/registry/item.rb", "module Registry\n  module Item\n    def self.tag\n      :item\n    end\n  end\nend\n")
+        .write(
+            "app/models/registry.rb",
+            "module Registry\n  autoload :Item, \"registry/item\"\n\n  mattr_reader :items\n  @@items = []\n  @@items << Registry::Item\n  @@items << :b\n\n  def self.ref(name)\n    \"ref:#{name}\"\n  end\n\n  def self.mailer\n    @@mailer_ref\n  end\n\n  def self.mailer=(name)\n    @@mailer_ref = ref(name)\n  end\n  self.mailer = \"Registry::Mailer\"\nend\n",
+        )
+        .run_ruby(
+            r##"raise "items: #{Registry.items.inspect}" unless Registry.items == [Registry::Item, :b]
+raise "mailer: #{Registry.mailer.inspect}" unless Registry.mailer == "ref:Registry::Mailer"
+puts "module body passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("module body passed"), "{}", run.stdout);
 }
 
 /// `String#strip_heredoc` as Rails takes it: the least indentation of a
@@ -10229,6 +10309,53 @@ fn connected_to_the_writing_role_runs_its_block() {
         .assert_passes();
 }
 
+/// doorkeeper's `get_error_response_from_exception`: `exception.response` behind `respond_to?(:response)`,
+/// on an error class that has none, is a branch no value the inference sees takes, not a missing method.
+#[test]
+fn a_respond_to_guard_none_of_the_receivers_answers_is_no_dispatch_error() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/error_view.rb",
+            "class ErrorView\n  class Failure < StandardError\n  end\n\n  def self.describe(error)\n    if error.respond_to?(:response)\n      error.response\n    else\n      error.message\n    end\n  end\n\n  def self.sample\n    describe(Failure.new(\"broken\"))\n  end\nend\n",
+        )
+        .run_ruby("raise ErrorView.sample.inspect unless ErrorView.sample == \"broken\"")
+        .assert_passes();
+}
+
+/// doorkeeper's `SecretStoring::BCrypt.secret_matches?`: a stored value that is not a bcrypt hash raises the
+/// gem's `BCrypt::Errors::InvalidHash`, which the caller rescues.
+#[test]
+fn a_bcrypt_invalid_hash_is_the_gems_error() {
+    emit_and_run::real_blog()
+        .write(
+            "app/models/secret_check.rb",
+            "class SecretCheck\n  def self.matches?(stored, input)\n    BCrypt::Password.new(stored) == input\n  rescue BCrypt::Errors::InvalidHash\n    false\n  end\nend\n",
+        )
+        .run_ruby(
+            "raise \"invalid\" if SecretCheck.matches?(\"not a hash\", \"pw\")\n\
+             raise \"valid\" unless SecretCheck.matches?(BCrypt::Password.create(\"pw\", cost: 4).to_s, \"pw\")\n\
+             raise \"hierarchy\" unless BCrypt::Errors::InvalidHash.ancestors.include?(BCrypt::Error)",
+        )
+        .assert_passes();
+}
+
+/// doorkeeper's `with_primary_role(&block)`: the block handed on to `connected_to(role: :writing, &block)` is the one called.
+#[test]
+fn connected_to_the_writing_role_calls_a_block_handed_on() {
+    emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def self.with_primary(&block)\n    ::ActiveRecord::Base.connected_to(role: :writing, &block)\n  end\n",
+        )
+        .run_ruby(
+            "a = Article.create!(title: \"Hi\", body: \"Body text here\")\n\
+             raise \"value\" unless Article.with_primary { Article.find(a.id).update!(title: \"New\"); 7 } == 7\n\
+             raise \"write\" unless Article.find(a.id).title == \"New\"",
+        )
+        .assert_passes();
+}
+
 /// A reading role refuses writes in Rails, and a shard is another
 /// database; neither, nor a block whose `next` the call gives meaning,
 /// is the plain block.
@@ -10238,6 +10365,8 @@ fn connected_to_other_than_the_writing_role_stays_unsupported() {
         "ActiveRecord::Base.connected_to(role: :reading) do\n      count\n    end",
         "ActiveRecord::Base.connected_to(role: :writing, shard: :other) do\n      count\n    end",
         "ActiveRecord::Base.connected_to(role: :writing) do\n      next 0 if none?\n      count\n    end",
+        // Not the method's own block: `&callback` converts a local through `to_proc`.
+        "callback = method(:count)\n    ActiveRecord::Base.connected_to(role: :writing, &callback)",
     ] {
         let errors = emit_and_run::real_blog()
             .edit(
@@ -10247,6 +10376,29 @@ fn connected_to_other_than_the_writing_role_stays_unsupported() {
             )
             .check_errors();
         assert!(errors.iter().any(|e| e.contains("connected_to")), "{call}: {errors:?}");
+    }
+}
+
+/// An inner block that binds the method's block name hands on its own value, which `&` converts through `to_proc`.
+#[test]
+fn connected_to_with_a_shadowed_block_name_stays_unsupported() {
+    let errors = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def self.tally(&block)\n    [method(:count)].map { |block| ActiveRecord::Base.connected_to(role: :writing, &block) }\n  end\n",
+        )
+        .check_errors();
+    assert!(errors.iter().any(|e| e.contains("connected_to")), "{errors:?}");
+    // An arrow lambda binds it the same way, and a method that assigns it hands on what it assigned.
+    for body in [
+        "->(block) { ActiveRecord::Base.connected_to(role: :writing, &block) }.call(method(:count))",
+        "block = method(:count)\n    ActiveRecord::Base.connected_to(role: :writing, &block)",
+    ] {
+        let errors = emit_and_run::real_blog()
+            .edit("app/models/article.rb", "class Article < ApplicationRecord\n", &format!("class Article < ApplicationRecord\n  def self.tally(&block)\n    {body}\n  end\n"))
+            .check_errors();
+        assert!(errors.iter().any(|e| e.contains("connected_to")), "{body}: {errors:?}");
     }
 }
 
@@ -20531,6 +20683,10 @@ mod dynamic_where_forms;
 mod enum_cross_class_mapping;
 #[path = "emit_and_run/jbuilder_record_values.rs"]
 mod jbuilder_record_values;
+#[path = "support/jbuilder_dynamic_partial.rs"]
+mod jbuilder_dynamic_partial;
+#[path = "emit_and_run/jbuilder_dynamic_partial.rs"]
+mod jbuilder_dynamic_partial_test;
 #[path = "emit_and_run/nil_operand.rs"]
 mod nil_operand;
 #[path = "emit_and_run/descendant_ivar.rs"]
@@ -21219,6 +21375,24 @@ fn link_to_if_shadowing_a_nested_local_is_refused() {
 mod simple_format;
 #[path = "support/link_to_computed_url.rs"]
 mod link_to_computed_url;
+#[path = "support/nested_route_helper_record.rs"]
+#[allow(dead_code)]
+mod nested_route_helper_record;
+#[path = "support/concern_to_param.rs"]
+#[allow(dead_code)]
+mod concern_to_param;
+#[path = "support/ivar_named_local.rs"]
+#[allow(dead_code)]
+mod ivar_named_local;
+#[path = "support/record_if_condition.rs"]
+#[allow(dead_code)]
+mod record_if_condition;
+#[path = "support/link_to_template_local.rs"]
+#[allow(dead_code)]
+mod link_to_template_local;
+#[path = "support/view_unless_no_else.rs"]
+#[allow(dead_code)]
+mod view_unless_no_else;
 
 /// `simple_format` with `sanitize: false`: paragraphs, line breaks, html
 /// options and `wrapper_tag:`, as Rails 8.1.4 renders them.
@@ -21435,5 +21609,171 @@ fn link_to_computed_url_renders_as_rails_on_spinel() {
     html_safe_method_owner::app()
         .write("app/views/probes/show.html.erb", link_to_computed_url::VIEW)
         .run_spinel(&helper_escape_at_output::render_script(link_to_computed_url::RENDERS))
+        .assert_passes();
+}
+
+/// #1890: a record handed to a route helper inside an output
+/// expression renders as Rails 8.1.4 does
+/// (`nested_route_helper_record::VIEW`).
+#[test]
+fn nested_route_helper_record_renders_as_rails() {
+    let (view, renders) = nested_route_helper_record::view(true, true);
+    nested_route_helper_record::app(content_tag_options::app_rendering(&view, &[]), true)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(&renders))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1890: a record handed to a route helper inside an output
+/// expression renders as Rails 8.1.4 does
+/// (`nested_route_helper_record::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn nested_route_helper_record_renders_as_rails_on_spinel() {
+    let (view, renders) = nested_route_helper_record::view(true, false);
+    nested_route_helper_record::app(content_tag_options::app_rendering(&view, &[]), true)
+        .run_spinel(&helper_escape_at_output::render_script(&renders))
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a method of the module renders as Rails
+/// 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+fn concern_to_param_module_renders_as_rails() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::MODULE)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(concern_to_param::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a method of the module renders as Rails
+/// 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn concern_to_param_module_renders_as_rails_on_spinel() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::MODULE)
+        .run_spinel(&helper_escape_at_output::render_script(concern_to_param::RENDERS))
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a def in the concern's
+/// `included do` renders as Rails 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+fn concern_to_param_included_renders_as_rails() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::INCLUDED)
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(concern_to_param::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1897: a model whose `to_param` is a def in the concern's
+/// `included do` renders as Rails 8.1.4 does (`concern_to_param::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn concern_to_param_included_renders_as_rails_on_spinel() {
+    concern_to_param::app(content_tag_options::app_rendering(concern_to_param::VIEW, &[]), concern_to_param::INCLUDED)
+        .run_spinel(&helper_escape_at_output::render_script(concern_to_param::RENDERS))
+        .assert_passes();
+}
+
+/// A template local assigned from the ivar of its own name renders as
+/// Rails 8.1.4 does (`ivar_named_local::VIEW`).
+#[test]
+fn ivar_named_local_renders_as_rails() {
+    ivar_named_local::app(content_tag_options::app_rendering(ivar_named_local::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(ivar_named_local::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1909: a record as an `if` condition renders as Rails 8.1.4 does
+/// (`record_if_condition::VIEW`).
+#[test]
+fn record_if_condition_renders_as_rails() {
+    record_if_condition::app(content_tag_options::app_rendering(record_if_condition::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(record_if_condition::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1909: an assignment as the `if` condition, the record read in the
+/// branch, renders as Rails 8.1.4 does (`record_if_condition::ASSIGN_VIEW`).
+#[test]
+fn record_if_assignment_renders_as_rails() {
+    record_if_condition::app(content_tag_options::app_rendering(record_if_condition::ASSIGN_VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(record_if_condition::ASSIGN_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// A template local assigned from the ivar of its own name renders as
+/// Rails 8.1.4 does (`ivar_named_local::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn ivar_named_local_renders_as_rails_on_spinel() {
+    ivar_named_local::app(content_tag_options::app_rendering(ivar_named_local::VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(ivar_named_local::RENDERS))
+        .assert_passes();
+}
+
+/// #1909: a record as an `if` condition renders as Rails 8.1.4 does
+/// (`record_if_condition::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn record_if_condition_renders_as_rails_on_spinel() {
+    record_if_condition::app(content_tag_options::app_rendering(record_if_condition::VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(record_if_condition::RENDERS))
+        .assert_passes();
+}
+
+/// #1909: an assignment as the `if` condition, the record read in the
+/// branch, renders as Rails 8.1.4 does (`record_if_condition::ASSIGN_VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn record_if_assignment_renders_as_rails_on_spinel() {
+    record_if_condition::app(content_tag_options::app_rendering(record_if_condition::ASSIGN_VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(record_if_condition::ASSIGN_RENDERS))
+        .assert_passes();
+}
+
+/// #1898: a record in a local the template assigns, handed to
+/// `link_to`'s url helper, renders as Rails 8.1.4 does
+/// (`link_to_template_local::VIEW`).
+#[test]
+fn link_to_template_local_renders_as_rails() {
+    link_to_template_local::app(content_tag_options::app_rendering(link_to_template_local::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(link_to_template_local::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
+/// does (`view_unless_no_else::VIEW`).
+#[test]
+fn view_unless_no_else_renders_as_rails() {
+    view_unless_no_else::app(content_tag_options::app_rendering(view_unless_no_else::VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(view_unless_no_else::RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
+/// #1898: a record in a local the template assigns, handed to
+/// `link_to`'s url helper, renders as Rails 8.1.4 does
+/// (`link_to_template_local::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn link_to_template_local_renders_as_rails_on_spinel() {
+    link_to_template_local::app(content_tag_options::app_rendering(link_to_template_local::VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(link_to_template_local::RENDERS))
+        .assert_passes();
+}
+
+/// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
+/// does (`view_unless_no_else::VIEW`).
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn view_unless_no_else_renders_as_rails_on_spinel() {
+    view_unless_no_else::app(content_tag_options::app_rendering(view_unless_no_else::VIEW, &[]))
+        .run_spinel(&helper_escape_at_output::render_script(view_unless_no_else::RENDERS))
         .assert_passes();
 }

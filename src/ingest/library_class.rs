@@ -346,9 +346,6 @@ fn ingest_library_classes_impl(
         }));
     }
     if out.is_empty() && file_level {
-        if let Some(lc) = file_data_class(&root, file)? {
-            return Ok(vec![lc]);
-        }
         // Not an initializer's: the boot program replays that statement, and a class beside it would define the constant twice.
         if !file.contains("config/initializers/")
             && let Some(lc) = file_struct_class(&root, file)?
@@ -379,12 +376,42 @@ fn ingest_library_classes_impl(
     // while defining the subclass. A file of nothing else defines just
     // those classes. The nested and beside walks take no top-level
     // declaration.
-    let made = match (file_level, root.as_program_node()) {
+    let mut made = match (file_level, root.as_program_node()) {
         (true, Some(program)) => {
             super::class_new_factory::constant_classes(None, Some(program.statements().as_node()), file)
         }
         _ => Vec::new(),
     };
+    if file_level && let Some(program) = root.as_program_node() {
+        for statement in program.statements().body().iter() {
+            if let Some(class) = file_data_class(&statement, file)
+                .map_err(|err| super::error_site::at(err, &statement))?
+            {
+                if out.iter().chain(made.iter().map(|(_, class)| class)).any(|other| other.name == class.name) {
+                    return Err(super::error_site::at(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "Data.define beside another declaration of the same class".into(),
+                    }, &statement));
+                }
+                made.push((class.name.0.clone(), class));
+            }
+        }
+        if made.iter().any(|(_, class)| class.data_define().is_some()) {
+            for statement in program.statements().body().iter() {
+                let qualified_factory = statement.as_constant_path_write_node()
+                    .and_then(|write| static_constant_path(&write.target().as_node()))
+                    .is_some_and(|path| made.iter().any(|(_, class)| class.name.0.as_str() == path.join("::")));
+                if statement.as_constant_write_node().is_none() && statement.as_class_node().is_none()
+                    && statement.as_module_node().is_none() && !qualified_factory
+                {
+                    return Err(super::error_site::at(IngestError::Unsupported {
+                        file: file.into(),
+                        message: "file-level statements beside Data.define must be declarations".into(),
+                    }, &statement));
+                }
+            }
+        }
+    }
     // Hoist remaining file-level constants into the first class of the
     // file — including when that first class is a Class.new factory and
     // the file has no ordinary `class`/`module`. Otherwise a
@@ -517,8 +544,8 @@ fn data_block_classes(
     Ok(out)
 }
 
-/// The class that a file with the one statement `X = Data.define(:a,
-/// :b)` creates. This is the Zeitwerk shape of a value class: Ruby
+/// The class a file-level statement `X = Data.define(:a, :b)` creates.
+/// This is the Zeitwerk shape of a value class: Ruby
 /// creates the class when it assigns the constant, so it is a library
 /// class, not a file-level constant that is hoisted into another class.
 /// Only distinct literal Symbol members are admitted. Other factories
@@ -528,8 +555,8 @@ fn data_block_classes(
 /// the new class. A `class` or `module` in the block belongs to the
 /// enclosing scope, which the emitted reopen of `X` cannot express, so
 /// the file is rejected.
-fn file_data_class(root: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Option<LibraryClass>> {
-    let Some((name, call)) = file_data_factory(root) else { return Ok(None) };
+fn file_data_class(statement: &ruby_prism::Node<'_>, file: &str) -> IngestResult<Option<LibraryClass>> {
+    let Some((name, call)) = file_data_declaration(statement) else { return Ok(None) };
     let Some(members) = data_members(&call) else { return Ok(None) };
     let owner = ClassId(Symbol::from(name));
     let body = || call.block().and_then(|block| block.as_block_node()).and_then(|block| block.body());
@@ -602,17 +629,9 @@ fn file_struct_write<'pr>(root: &ruby_prism::Node<'pr>) -> Option<(String, Struc
     Some((name, struct_constant_spec(&value)?))
 }
 
-/// The constant name and the `Data.define` call of a file whose only
-/// statement is `X = Data.define(…)` or `A::X = Data.define(…)`, with no
-/// block or with a `do … end` block that takes no parameters.
-fn file_data_factory<'pr>(
-    root: &ruby_prism::Node<'pr>,
-) -> Option<(String, ruby_prism::CallNode<'pr>)> {
-    let statements = root.as_program_node()?.statements().body();
-    let mut iter = statements.iter();
-    let (Some(statement), None) = (iter.next(), iter.next()) else {
-        return None;
-    };
+/// A file-level `X = Data.define(…)` or `A::X = Data.define(…)`, with
+/// no block or with a block that takes no parameters.
+fn file_data_declaration<'pr>(statement: &ruby_prism::Node<'pr>) -> Option<(String, ruby_prism::CallNode<'pr>)> {
     let (name, value) = match statement.as_constant_write_node() {
         Some(write) => (constant_id_str(&write.name()).to_string(), write.value()),
         None => {
@@ -816,7 +835,9 @@ pub(super) fn library_class_and_struct_base(
         Some(_) => Some(struct_base_id(&owner)),
         None => parent,
     };
-    if parent.is_none() && class.superclass().is_some() {
+    let deferred = parent.is_none()
+        && class.superclass().is_some_and(|n| super::configured_superclass::defer(&owner, &n, source_parent_span, file));
+    if parent.is_none() && class.superclass().is_some() && !deferred {
         super::prism::push(crate::diagnostic::Diagnostic::unsupported(
             source_parent_span,
             None,
@@ -1897,9 +1918,18 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
                 return None;
             }
             let body = block.body();
-            // Not a general block body: only `def`s become the class's methods without running anything at definition time.
+            // Not a general block body: the class body's own declarations, which run nothing of the app's at definition time.
             if let Some(statements) = body.as_ref().and_then(|b| b.as_statements_node()) {
-                if !statements.body().iter().all(|stmt| stmt.as_def_node().is_some()) {
+                if !statements.body().iter().all(|stmt| struct_block_declaration(&stmt)) {
+                    return None;
+                }
+                // Not over a member: Ruby's block `attr_accessor :a` replaces the member's reader with one of `@a`, which this class cannot tell from the member.
+                if statements.body().iter().any(|stmt| {
+                    stmt.as_call_node().is_some_and(|call| {
+                        matches!(constant_id_str(&call.name()).as_ref(), "attr_reader" | "attr_writer" | "attr_accessor" | "delegate")
+                            && call.arguments().is_some_and(|a| a.arguments().iter().any(|arg| symbol_value(&arg).is_some_and(|n| members.iter().any(|m| m.as_str() == n))))
+                    })
+                }) {
                     return None;
                 }
                 // Not an `initialize` of its own: in Ruby the generated one is
@@ -1917,6 +1947,38 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
         }
     };
     Some(StructConstant { name: Symbol::from(""), members, keyword_init, positional_written, body })
+}
+
+fn struct_block_declaration(stmt: &ruby_prism::Node<'_>) -> bool {
+    if stmt.as_def_node().is_some() {
+        return true;
+    }
+    if let Some(sc) = stmt.as_singleton_class_node() {
+        return sc.expression().as_self_node().is_some()
+            && sc.body().is_none_or(|b| flatten_statements(b).iter().all(|s| s.as_def_node().is_some() || struct_block_marker(s)));
+    }
+    struct_block_marker(stmt)
+        || stmt.as_call_node().is_some_and(|call| {
+            call.receiver().is_none()
+                && call.block().is_none()
+                && matches!(
+                    constant_id_str(&call.name()).as_ref(),
+                    "delegate" | "attr_reader" | "attr_writer" | "attr_accessor" | "include"
+                )
+        })
+}
+
+fn struct_block_marker(stmt: &ruby_prism::Node<'_>) -> bool {
+    stmt.as_call_node().is_some_and(|call| {
+        call.receiver().is_none()
+            && call.block().is_none()
+            && matches!(constant_id_str(&call.name()).as_ref(), "public" | "protected" | "private" | "private_class_method" | "public_class_method")
+    })
+}
+
+/// `X = Struct.new(…) do … end` whose block this ingest reads as the class's body: the walk of the enclosing body leaves it to that class.
+pub(super) fn struct_constant_block(value: &ruby_prism::Node<'_>) -> bool {
+    value.as_call_node().is_some_and(|c| c.block().is_some()) && struct_constant_spec(value).is_some_and(|s| s.body.is_some())
 }
 
 /// The classes `owner`'s body defines through `X = Struct.new(…)`, with
@@ -1940,7 +2002,13 @@ fn struct_constant_classes(
             },
         );
         if spec.body.is_some() {
-            class.methods.extend(walk_decl_body(spec.body, &id, file, DeclBodyMode::Instance)?.methods);
+            let body = walk_decl_body(spec.body, &id, file, DeclBodyMode::Instance)?;
+            class.methods.extend(body.methods);
+            class.includes.extend(body.includes);
+            class.include_spans.extend(body.include_spans);
+            class.constants.extend(body.constants);
+            class.unknown_calls.extend(body.unknown_calls);
+            class.class_ivar_initializers.extend(body.class_initializers);
         }
         out.push((spec.name, class));
     }
@@ -2115,6 +2183,19 @@ impl DeclBody {
             .class_initializers
             .iter()
             .any(|expr| !expr.span.is_synthetic());
+        // Not where no `@@` initializer is written: there a writer call runs in place as a body statement already.
+        if has_source_ordered_init {
+            let methods = &self.methods;
+            let writes: Vec<Expr> = self.unknown_calls.extract_if(.., |call| runs_own_writer(call, methods)).collect();
+            for write in writes {
+                let at = self
+                    .class_initializers
+                    .iter()
+                    .position(|init| !init.span.is_synthetic() && init.span.file == write.span.file && init.span.start > write.span.start)
+                    .unwrap_or(self.class_initializers.len());
+                self.class_initializers.insert(at, write);
+            }
+        }
         // Constants and `@@` initializers whose values are all literals
         // cannot observe one another, so emitting them in a different order
         // than the source wrote them changes nothing (lobsters' `Twitter`:
@@ -2123,7 +2204,7 @@ impl DeclBody {
         let order_independent = self.constants.iter().all(|(_, value)| is_order_safe_value(value))
             && self.class_initializers.iter().all(|expr| match &*expr.node {
                 ExprNode::Assign { value, .. } => is_order_safe_value(value),
-                _ => false,
+                _ => is_cvar_mutation(expr),
             });
         let literal_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
             ExprNode::Assign { value, .. } => is_literal_value(value),
@@ -2136,6 +2217,8 @@ impl DeclBody {
                     && !args.is_empty()
                     && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. })))
                     // A visibility declaration over names reads no class variable.
+                    || (method.as_str() == "autoload"
+                        && matches!(args.as_slice(), [name, path] if matches!(&*name.node, ExprNode::Lit { value: Literal::Sym { .. } }) && matches!(&*path.node, ExprNode::Lit { value: Literal::Str { .. } })))
                     || (matches!(method.as_str(), "private_constant" | "public_constant" | "private_class_method" | "public_class_method")
                         && args.iter().all(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } })))
             }
@@ -2143,7 +2226,7 @@ impl DeclBody {
         });
         let safe_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
             ExprNode::Assign { value, .. } => is_order_safe_value(value),
-            _ => false,
+            _ => is_cvar_mutation(expr),
         });
         // Not an ancestor whose `@@x` this body's would share: Ruby's own mixins hold none.
         let builtin_includes = self.includes.iter().all(|i| matches!(i.0.as_str(), "Comparable" | "Enumerable" | "Kernel"));
@@ -2159,6 +2242,29 @@ impl DeclBody {
         }
         Ok(())
     }
+}
+
+/// `@@x << v`, or `self.x = v` through the body's own writer: a call whose arguments are order-safe values.
+fn is_cvar_mutation(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Send { recv: Some(recv), args, block: None, .. } => {
+            (matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str().starts_with("@@")) || matches!(&*recv.node, ExprNode::SelfRef))
+                && args.iter().all(is_order_safe_value)
+        }
+        ExprNode::Assign { target: LValue::Attr { recv, .. }, value } => matches!(&*recv.node, ExprNode::SelfRef) && is_order_safe_value(value),
+        _ => false,
+    }
+}
+
+fn runs_own_writer(expr: &Expr, methods: &[crate::dialect::MethodDef]) -> bool {
+    let writer = match &*expr.node {
+        ExprNode::Send { recv: Some(recv), method, .. } if matches!(&*recv.node, ExprNode::SelfRef) => format!("{}", method.as_str()),
+        ExprNode::Assign { target: LValue::Attr { recv, name }, .. } if matches!(&*recv.node, ExprNode::SelfRef) => format!("{}=", name.as_str()),
+        _ => return false,
+    };
+    writer.ends_with('=')
+        && is_cvar_mutation(expr)
+        && methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Class && m.name.as_str() == writer)
 }
 
 /// A value whose answer does not depend on where the class body runs it:
@@ -3088,6 +3194,18 @@ fn walk_decl_body_with_visibility<'pr>(
             if let Ok(e) = ingest_expr(&stmt, file) {
                 out.unknown_calls.push(e);
             }
+            continue;
+        }
+        // `@@helpers << Devise::Controllers::Helpers`: not a call the replay rules carry, which dropped it without a word; it is the initializer's next step.
+        if stmt.as_call_node().is_some_and(|call| call.receiver().is_some_and(|r| r.as_class_variable_read_node().is_some()) && call.block().is_none()) {
+            let mutation = ingest_expr(&stmt, file)?;
+            if !is_cvar_mutation(&mutation) {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "class-variable mutation with a non-literal argument".into(),
+                });
+            }
+            out.class_initializers.push(mutation);
             continue;
         }
         // Retain native nil initialization in source order. Only a declared
@@ -4498,8 +4616,8 @@ pub(super) fn ingest_library_method_with_keywords(
         });
 
     let body = match def.body() {
-        Some(b) => super::expr::with_anonymous_rest(formals.forwarded_rest_name.clone(), || {
-            ingest_expr(&b, file)
+        Some(b) => super::expr::with_block_param(super::expr::def_block_param(block_param.as_ref().map(|p| p.name.clone()), Some(&b)), || {
+            super::expr::with_anonymous_rest(formals.forwarded_rest_name.clone(), || ingest_expr(&b, file))
         })?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
@@ -4883,7 +5001,10 @@ pub fn classify_class_file(source: &[u8], bases: &ModelBases) -> Option<ClassKin
         }
         // `Breadcrumb = Data.define(:name, :path)`: the file declares a
         // value class, not a model (see `file_data_class`).
-        if file_data_factory(&root).is_some_and(|(_, call)| data_members(&call).is_some()) || file_struct_write(&root).is_some() {
+        if root.as_program_node().is_some_and(|program| program.statements().body().iter()
+            .any(|stmt| file_data_declaration(&stmt).is_some_and(|(_, call)| data_members(&call).is_some())))
+            || file_struct_write(&root).is_some()
+        {
             return Some(ClassKind::LibraryClass);
         }
         // `ExampleError = Class.new(StandardError)`: the file declares a

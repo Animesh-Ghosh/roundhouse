@@ -84,7 +84,7 @@ pub struct FlatRoute {
     /// this rides the flat route rather than staying a request-shaping
     /// detail: campfire calls `user_profile_url` with no argument at
     /// all, and the helper's own signature is what has to allow it.
-    pub param_defaults: Vec<(String, String)>,
+    pub param_defaults: Vec<(String, (String, crate::span::Span))>, // every enclosing default, with its source
     pub int_params: Vec<String>,
     /// Non-digit `constraints:` regexes, as `(param, regex_source)` for
     /// the params this route captures. The regex-free runtime router
@@ -368,7 +368,7 @@ struct Ctx {
     helpers_enabled: bool,
     /// Segment defaults from enclosing `scope defaults: { … }` entries,
     /// innermost last so a nested scope can override an outer one.
-    param_defaults: Vec<(String, String)>,
+    param_defaults: Vec<(String, (String, crate::span::Span))>,
     /// Enclosing `resources`/`resource` blocks, OUTERMOST FIRST.
     ///
     /// A stack rather than one pair because Rails accumulates every
@@ -455,7 +455,7 @@ impl Ctx {
             .iter()
             .rev()
             .find(|(n, _)| n == "format")
-            .map(|(_, v)| Symbol::from(v.as_str()))
+            .map(|(_, (v, _))| Symbol::from(v.as_str()))
     }
 
     /// `account_bot_` — every enclosing level's singular, in order.
@@ -580,6 +580,15 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
         // Rack mounts use the ordered prefix dispatcher, not controller rows
         // or `(.:format)` URL helpers.
         RouteSpec::RackMount { .. } => {}
+        // Not drawn: ingest replaces every one with the routes its call draws.
+        RouteSpec::Deferred { .. } => {}
+        // Not under the enclosing scopes: the method set its own path, module and name, as Rails' `@scope` swap does.
+        RouteSpec::Exclusive { entries } => {
+            let root = Ctx { helpers_enabled: ctx.helpers_enabled, mount_path: ctx.mount_path.clone(), ..Ctx::default() };
+            for entry in entries {
+                collect_flat_routes(entry, out, &root);
+            }
+        }
         RouteSpec::Explicit {
             method,
             path,
@@ -660,7 +669,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // route keeps the legacy action-name fallback in `as_name`
             // for consumers that key on it, but the helper generator
             // skips it.
-            let action_part = written_action(path);
+            // A canonical action's symbol is named by the action where `path:` moved its segment (`post :create, path: "sign_in"`), adding nothing on a member or collection; ingest roots only that path, a bare symbol's stays the symbol.
+            let action_part = if *action_symbol && path.starts_with('/') { Some(action.as_str()) } else { written_action(path) };
             let derived = match as_name.as_ref() {
                 // `as: nil`: no helper at all.
                 Some(s) if s.as_str().is_empty() => None,
@@ -770,7 +780,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     format: forced_format.clone().or_else(|| ctx.default_format()),
                     required_params,
                     required_path: if i == 0 { required_path.clone() } else { None },
-                    param_defaults: defaults_for(ctx, &params),
+                    param_defaults: ctx.param_defaults.clone(),
                     path_params: params,
                     int_params,
                     constraints,
@@ -826,7 +836,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 action: Symbol::from(action_name),
                 as_name: if ctx.helpers_enabled { helper } else { String::new() },
                 required_params: path_params.len(),
-                param_defaults: defaults_for(ctx, &path_params),
+                param_defaults: ctx.param_defaults.clone(),
                 path_params,
                 named: ctx.helpers_enabled,
                 helpers_enabled: ctx.helpers_enabled,
@@ -851,6 +861,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             param,
             path: path_segment,
             constraints: resource_constraints,
+            path_names,
         } => {
             let materialized;
             let ctx = if ctx.within.is_nested() {
@@ -965,6 +976,13 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     continue;
                 }
                 let member = suffix.replace(":id", &format!(":{id_param}"));
+                let member = match path_names.get(&Symbol::from(action_name)) {
+                    Some(named) if matches!(action_name, "new" | "edit") => {
+                        let base = member.strip_suffix(&format!("/{action_name}")).unwrap_or(&member).to_string();
+                        if named.is_empty() { base } else { format!("{base}/{named}") }
+                    }
+                    _ => member,
+                };
                 // Empty for an index or show mounted with `path: "/"`; it
                 // stays empty through the nesting (`/account`, not
                 // `/account/`) and is the root `/` only at the very top.
@@ -1073,7 +1091,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                             as_name: if ctx.helpers_enabled { as_name.clone() } else { String::new() },
                             required_params,
                             required_path: if i == 0 { required_path.clone() } else { None },
-                            param_defaults: defaults_for(ctx, &vparams),
+                            param_defaults: ctx.param_defaults.clone(),
                             path_params: vparams.clone(),
                             named: named && *primary && i == 0,
                             helpers_enabled: ctx.helpers_enabled,
@@ -1168,17 +1186,6 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             }
         }
     }
-}
-
-/// The scope defaults that apply to THIS route's params. A default for
-/// a segment the route does not carry is irrelevant here (Rails would
-/// put it in the query string; the helper signature is unaffected).
-fn defaults_for(ctx: &Ctx, params: &[String]) -> Vec<(String, String)> {
-    ctx.param_defaults
-        .iter()
-        .filter(|(n, _)| params.iter().any(|p| p == n))
-        .cloned()
-        .collect()
 }
 
 /// Prepend the accumulated namespace path. Both sides are `/`-rooted

@@ -580,6 +580,15 @@ pub enum Association {
 }
 
 impl Association {
+    pub fn set_target(&mut self, to: ClassId) {
+        match self {
+            Association::BelongsTo { target, .. }
+            | Association::HasMany { target, .. }
+            | Association::HasOne { target, .. }
+            | Association::HasAndBelongsToMany { target, .. } => *target = to,
+        }
+    }
+
     pub fn name(&self) -> &Symbol {
         match self {
             Association::BelongsTo { name, .. }
@@ -1357,8 +1366,8 @@ pub enum LibraryClassOrigin {
     DryValidation,
     /// dry-monads' Result and do-notation stand-ins (`ingest::dry_monads`).
     DryMonads,
-    /// The class a file-level `X = Data.define(:a, :b)` creates, in a
-    /// file that declares nothing else. `members` are the literal
+    /// The class a file-level `X = Data.define(:a, :b)` creates.
+    /// `members` are the literal
     /// Symbol members in declaration order; `span` is the
     /// `Data.define` call. The statements of a `do … end` block are the
     /// class body, and its constants are the class's `constants`. Ruby
@@ -2095,6 +2104,26 @@ pub const FORMAT_REQUIREMENT: &str = "(.:format)";
 /// accepted. Not a regex source; the route lowering knows it by name.
 pub const FORMAT_NONE: &str = "";
 
+// Schema-v1 scope defaults were strings before their source spans were kept.
+fn deserialize_scope_defaults<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<IndexMap<Symbol, (String, Span)>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum DefaultValue {
+        Spanned((String, Span)),
+        Legacy(String),
+    }
+    let defaults = IndexMap::<Symbol, DefaultValue>::deserialize(deserializer)?;
+    Ok(defaults.into_iter().map(|(key, value)| {
+        let value = match value {
+            DefaultValue::Spanned(value) => value,
+            DefaultValue::Legacy(value) => (value, Span::synthetic()),
+        };
+        (key, value)
+    }).collect())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RouteSpec {
@@ -2197,6 +2226,10 @@ pub enum RouteSpec {
         /// only the block form this field carries.
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
         constraints: IndexMap<Symbol, String>,
+        /// `resource :registration, path_names: { new: "sign_up" }` (devise's): the URL segment of
+        /// the `new` and `edit` actions, in place of the action name (`/users/sign_up`).
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        path_names: IndexMap<Symbol, String>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with
@@ -2217,8 +2250,8 @@ pub enum RouteSpec {
         /// under this scope is `/users/:user_id/profile`, and Rails'
         /// `user_profile_path` takes NO argument because the default
         /// supplies the segment.
-        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-        defaults: IndexMap<Symbol, String>,
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty", deserialize_with = "deserialize_scope_defaults")]
+        defaults: IndexMap<Symbol, (String, Span)>,
         /// `nested do … end` — Rails' explicit form of the nesting a
         /// `resources` block applies to a child `resources`/verb call
         /// automatically. `scope` is NOT one of the calls that gets it,
@@ -2250,6 +2283,19 @@ pub enum RouteSpec {
         within: ResourceScope,
         entries: Vec<RouteSpec>,
     },
+    /// A call to a routing method a gem adds to the mapper (doorkeeper's `use_doorkeeper`), kept where it
+    /// is written until its body can run against the expanded program (`ingest::gem_routes`). None
+    /// survives ingest: each becomes the scope of the routes it draws, or is dropped and reported.
+    Deferred {
+        call: crate::expr::Expr,
+        span: Span,
+        /// An enclosing `constraints` block's, applied to what it draws once it is drawn.
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        constraints: IndexMap<Symbol, String>,
+    },
+    /// Routes a gem's routing method draws under a scope it sets for itself (devise's
+    /// `with_devise_exclusive_scope`): they take none of the enclosing scopes' path, module or name.
+    Exclusive { entries: Vec<RouteSpec> },
 }
 
 /// One `get "/path", to: "c#a"` entry. Kept as a standalone struct so

@@ -190,6 +190,18 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // Epilogue `_buf` read — drop; the explicit trailing `io` is
         // appended once at method-body construction.
         ExprNode::Var { name, .. } if name.as_str() == "_buf" => Vec::new(),
+        // A local rebound to itself, which is what `<% article = @article %>`
+        // becomes once the ivar is the view's parameter `article`
+        // (`rewrite_ivars_to_locals`). Rails' two are one object, so the
+        // assignment changes nothing; written out, TypeScript refuses the
+        // second declaration and Crystal the no-op. Only for a local the
+        // view binds: Ruby's `x = x` with no local `x` before it is nil.
+        ExprNode::Assign { target: LValue::Var { name, .. }, value }
+            if ctx.is_local(name.as_str())
+                && matches!(&*value.node, ExprNode::Var { name: read, .. } if read == name) =>
+        {
+            Vec::new()
+        }
         // Template-local `||=` (`<% is_unread ||= false %>`) — same
         // statement treatment as plain assignment; Ruby's `x ||= v`
         // defines the local when unset.
@@ -290,26 +302,25 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // through `rewrite_predicates`: `.blank?` / `.present?` become
         // `(recv || "").empty?`, and `.any?` / `.none?` / `.empty?`
         // become collection `empty?`.
+        //
+        // A branch that is a nil literal stays nil: an `if` with no
+        // `else` has one, and so does an `unless` with no `else`, as its
+        // `then` branch. Walked, it would be an append of nothing, which
+        // the Go, TypeScript, Crystal and Python buffers don't take.
         ExprNode::If { cond, then_branch, else_branch } => {
-            let then_seq = walk_body(then_branch, ctx);
-            let then_body = if then_seq.len() == 1 {
-                then_seq.into_iter().next().unwrap()
-            } else {
-                seq(then_seq)
-            };
-            let else_body = if matches!(
-                &*else_branch.node,
-                ExprNode::Lit { value: Literal::Nil }
-            ) {
-                nil_lit()
-            } else {
-                let s = walk_body(else_branch, ctx);
+            let walk_branch = |branch: &Expr| {
+                if matches!(&*branch.node, ExprNode::Lit { value: Literal::Nil }) {
+                    return nil_lit();
+                }
+                let s = walk_body(branch, ctx);
                 if s.len() == 1 {
                     s.into_iter().next().unwrap()
                 } else {
                     seq(s)
                 }
             };
+            let then_body = walk_branch(then_branch);
+            let else_body = walk_branch(else_branch);
             vec![Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
@@ -1920,8 +1931,12 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
             // implementation. Leave unknown route helpers untouched.
             if let Some(stem) = method.as_str().strip_suffix("_url") {
                 let path_helper = format!("{stem}_path");
-                if ctx.route_helper_names.contains(&path_helper) {
-                    let mut call = super::absolute_url_interp(stem, args.clone());
+                // An app helper of the `_url` name is what the bare call
+                // reaches first (Rails mixes app helpers in above the url
+                // helpers), so it stays a call to that method.
+                if ctx.route_helper_names.contains(&path_helper) && !ctx.app_helper_names.contains(method.as_str()) {
+                    let args = route_args(method.as_str(), args, ctx);
+                    let mut call = super::absolute_url_interp(stem, args);
                     call.inherit_span(e.span);
                     return call;
                 }
@@ -1953,10 +1968,15 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
                 call.inherit_span(e.span);
                 return call;
             }
+            let args = if ctx.route_helper_names.contains(method.as_str()) {
+                route_args(method.as_str(), args, ctx)
+            } else {
+                args.iter().map(|a| rewrite_helpers_in_expr(a, ctx)).collect()
+            };
             ExprNode::Send {
                 recv: None,
                 method: method.clone(),
-                args: args.iter().map(|a| rewrite_helpers_in_expr(a, ctx)).collect(),
+                args,
                 block: None,
                 parenthesized: *parenthesized,
             }
@@ -2051,6 +2071,48 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
     // Not a fresh, untyped node: a rebuilt `[]` the i18n lowering typed `Array[String]` would read as `Array[untyped]`
     out.ty = e.ty.clone();
     out
+}
+
+/// A generated route helper's arguments inside an output expression
+/// (`<%= "" + article_path(article) %>`): an argument typed as one of the
+/// app's models passes its `to_param` (`.id`, or the model's own
+/// `to_param` where it overrides it), as Rails fills the segment from
+/// it. The strict targets' helpers take that scalar, not the record. A
+/// scalar argument, an untyped one, and every argument of a helper whose
+/// body the app wrote pass as written: an app helper module's method of
+/// the name (`app_helper_names`, which a bare call reaches first) or a
+/// `direct` route's block (`direct_route_helpers`).
+fn route_args(helper: &str, args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
+    let shadowed = ctx.app_helper_names.contains(helper) || ctx.direct_route_helpers.contains(helper);
+    args.iter()
+        .map(|a| {
+            let arg = rewrite_helpers_in_expr(a, ctx);
+            match record_segment_method(a, ctx) {
+                Some(param) if !shadowed => send(Some(arg), param, Vec::new(), None, false),
+                _ => arg,
+            }
+        })
+        .collect()
+}
+
+/// The method that fills a route segment from `a` when `a` is typed as a
+/// record of one of the app's models: `id`, or `to_param` for a model
+/// that overrides it. `None` for any other value.
+pub(super) fn record_segment_method(a: &Expr, ctx: &ViewCtx) -> Option<&'static str> {
+    let Some(crate::ty::Ty::Class { id, .. }) = a.ty.as_ref().map(crate::ty::Ty::peel_nilable) else {
+        return None;
+    };
+    // The app's key for the class (`model_param_keys`, which drops an
+    // isolated engine's namespace), the one `model_singulars` and
+    // `slug_models` hold.
+    let key = ctx
+        .model_param_keys
+        .get(id.0.as_str())
+        .cloned()
+        .unwrap_or_else(|| crate::naming::model_param_key(id.0.as_str()));
+    ctx.model_singulars
+        .contains(&key)
+        .then(|| if ctx.slug_models.contains(&key) { "to_param" } else { "id" })
 }
 
 /// Does a block body hold compiled-template buffer ops (`_buf = _buf + …`)?
@@ -2358,6 +2420,8 @@ mod tests {
             time_columns: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
+            app_helper_names: Default::default(),
+            direct_route_helpers: Default::default(),
             i18n: Default::default(),
             route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
@@ -3201,6 +3265,62 @@ mod tests {
             let emitted = emit_output(bare(name), &ctx.with_locals([name.to_string()]));
             assert!(!calls_a_helper(&emitted), "a block param `{name}` is a local again:\n{emitted}");
         }
+    }
+
+    /// `<x>_path(rec)` nested in an output expression, `rec` typed as an
+    /// isolated engine's model.
+    fn nested_route_call(direct: bool) -> Expr {
+        let ctx = ViewCtx {
+            locals: vec!["rec".to_string()],
+            route_helper_names: std::rc::Rc::new(["article_path".to_string()].into_iter().collect()),
+            direct_route_helpers: std::rc::Rc::new(
+                if direct { vec!["article_path".to_string()] } else { Vec::new() }.into_iter().collect(),
+            ),
+            model_singulars: std::rc::Rc::new(["article".to_string()].into_iter().collect()),
+            model_param_keys: std::rc::Rc::new(
+                [("Blorgh::Article".to_string(), "article".to_string())].into_iter().collect(),
+            ),
+            ..test_ctx()
+        };
+        let mut rec = var("rec");
+        rec.ty = Some(crate::ty::Ty::Class {
+            id: crate::ident::ClassId(Symbol::from("Blorgh::Article")),
+            args: Default::default(),
+        });
+        let call = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("article_path"),
+                args: vec![rec],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        rewrite_helpers_in_expr(&call, &ctx)
+    }
+
+    fn first_arg(call: &Expr) -> &Expr {
+        let ExprNode::Send { args, .. } = &*call.node else { panic!("not a call: {call:?}") };
+        &args[0]
+    }
+
+    #[test]
+    fn an_isolated_engine_record_projects_under_the_apps_key() {
+        // `Blorgh::Article`'s key is `article` (`model_param_keys`), not
+        // `blorgh_article` (`naming::model_param_key`).
+        let out = nested_route_call(false);
+        assert!(
+            matches!(&*first_arg(&out).node, ExprNode::Send { recv: Some(r), method, .. }
+                if method.as_str() == "id" && matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == "rec")),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_direct_route_keeps_its_record() {
+        let out = nested_route_call(true);
+        assert!(matches!(&*first_arg(&out).node, ExprNode::Var { name, .. } if name.as_str() == "rec"), "{out:?}");
     }
 }
 

@@ -2191,6 +2191,7 @@ pub(crate) fn push_scope_methods(
     scopes: &crate::lower::scope_chain::ScopeRegistry,
     models_set: &crate::det::HashSet<ClassId>,
     assocs: &crate::lower::scope_chain::AssocRegistry,
+    unique_keys: &crate::lower::scope_chain::UniqueKeys,
 ) {
     use crate::dialect::{AccessorKind, ModelBodyItem, Param};
     use crate::expr::{Expr, ExprNode, LValue};
@@ -2235,6 +2236,7 @@ pub(crate) fn push_scope_methods(
             scopes,
             models_set,
             assocs,
+            unique_keys,
         );
 
         // Rails relations are immutable, so every implicit-self root in
@@ -3377,7 +3379,7 @@ pub fn ty_of_column_slot(col: &Column) -> Ty {
     if col.array_stored {
         base = Ty::Array { elem: base.into() };
     }
-    if (col.nullable || col.generated.is_some()) && !col.primary_key {
+    if (col.nullable || col.generated.is_some() || col.persisted_computed_default().is_some()) && !col.primary_key {
         Ty::Union { variants: vec![base, Ty::Nil].into() }
     } else {
         base
