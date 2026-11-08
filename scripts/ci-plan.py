@@ -522,6 +522,7 @@ def native_coverage(path):
     if path in {
         "src/analyze/registry/stdlib.rs", "src/analyze/registry/library.rs", "src/project.rs",
         "tests/openssl_registrations.rs", "tests/support/openssl_registrations.rb",
+        "tests/support/cipher_registrations.rb", "runtime/spinel/message_digest.rb",
     }:
         suites.add("openssl_registrations")
     if path == "src/analyze/mod.rs":
