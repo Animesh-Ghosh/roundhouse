@@ -330,6 +330,9 @@ enum Holder {
 
 const MAPPER: &str = "ActionDispatch::Routing::Mapper";
 
+/// Marks an error no statement is passed over for (a gem hook's).
+const STOP: &str = "\u{0}stop ";
+
 /// The owner a write to a constant's value is tagged with.
 const CONSTANT_OWNER: &str = "::constant";
 
@@ -442,7 +445,8 @@ impl<'a> Eval<'a> {
         match self.eval(e, frame) {
             Ok(Flow::Return(v)) => Ok(Some(v)),
             Ok(Flow::Value(_)) => Ok(None),
-            Err(why) if !matches!(&*e.node, ExprNode::Return { .. }) => {
+            // Not one a gem hook gave: what it says is not known stops the evaluation where a statement passed over would leave a guess.
+            Err(why) if !matches!(&*e.node, ExprNode::Return { .. }) && !why.starts_with(STOP) => {
                 let (owner, side) = self.tag_of(&frame.this);
                 let Some(writes) = self.may_write(e, &owner, side, &mut HashSet::default()) else {
                     return Err(format!("{why}, in a statement whose writes are not known"));
@@ -1033,7 +1037,7 @@ impl<'a> Eval<'a> {
             let answer = super::gem_hooks::class_answer(&facts, c, method, &argv, all.as_deref(), &mut config);
             self.facts = facts;
             if let Some(v) = answer {
-                return Ok(v);
+                return v.map_err(|why| format!("{STOP}{why}"));
             }
         }
         // `mattr_reader :mapping` answers on instances too, as Rails defines it, though the library walk writes only the class's.
@@ -2340,7 +2344,7 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
         None => None,
     };
     eval.drawn.push(Vec::new());
-    eval.invoke(def, scope, Val::Router, argv, blk)?;
+    eval.invoke(def, scope, Val::Router, argv, blk).map_err(|why| why.trim_start_matches(STOP).to_string())?;
     Ok((eval.drawn.pop().unwrap_or_default(), eval.omitted))
 }
 

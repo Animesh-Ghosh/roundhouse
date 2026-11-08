@@ -90,19 +90,26 @@ pub(super) fn omits_on_failure(known: &HashSet<String>, owner: &str, name: &str)
 /// What a class outside the library classes (a model) answers that a gem's macro gave it.
 /// `all` is `Devise::ALL` as the evaluation holds it, the order `devise` keeps its modules in.
 /// `config` reads a setting of the gem's (`Devise.unlock_strategy`).
-pub(super) fn class_answer(facts: &Facts, class: &str, method: &str, argv: &[Val], all: Option<&[Val]>, config: &mut dyn FnMut(&str) -> Option<Val>) -> Option<Val> {
+/// An `Err` stops the evaluation with why: what the gem would answer is not known here.
+pub(super) fn class_answer(facts: &Facts, class: &str, method: &str, argv: &[Val], all: Option<&[Val]>, config: &mut dyn FnMut(&str) -> Option<Val>) -> Option<Result<Val, String>> {
     // `Devise::Models#devise`, which Devise extends onto every model: it records the modules as `devise_modules`, sorted by `Devise::ALL`.
     let class = class.trim_start_matches("::");
     let modules = facts.devise_models.get(class)?;
     match (method, argv) {
-        // `Devise::Models::Lockable::ClassMethods`: the model's `unlock_strategy` is Devise's unless its own `devise` call sets one.
         // `Devise::Models::Omniauthable::ClassMethods`: the model's providers are Devise's (`config.omniauth :github`) unless its own `devise` call names them.
-        ("omniauth_providers", []) if modules.iter().any(|m| m == "omniauthable") && !facts.devise_configured.contains(class) => config("omniauth_providers"),
+        ("omniauth_providers", []) if modules.iter().any(|m| m == "omniauthable") && !facts.devise_configured.contains(class) => config("omniauth_providers").map(Ok),
+        // `Devise::Models::Lockable::ClassMethods`: the model's `unlock_strategy` is Devise's unless its own `devise` call sets one.
         ("unlock_strategy_enabled?", [Val::Sym(strategy)]) if modules.iter().any(|m| m == "lockable") && !facts.devise_configured.contains(class) => {
             let Val::Sym(set) = config("unlock_strategy")? else { return None };
-            Some(Val::Bool(set == *strategy || set == "both"))
+            Some(Ok(Val::Bool(set == *strategy || set == "both")))
         }
-        ("respond_to?", [Val::Sym(name), ..]) if matches!(name.as_str(), "devise" | "devise_modules") => Some(Val::Bool(true)),
+        ("respond_to?", [Val::Sym(name), ..]) if matches!(name.as_str(), "devise" | "devise_modules") => Some(Ok(Val::Bool(true))),
+        // Not with a module no `Devise.add_module` the evaluation ran registered (devise-two-factor's `:two_factor_authenticatable`): which routes it adds is that gem's.
+        ("devise_modules", []) if all.is_none() => Some(Err("`Devise::ALL`, the modules gems register, is not known here".into())),
+        ("devise_modules", []) if all.is_some_and(|all| modules.iter().any(|m| !all.iter().any(|a| matches!(a, Val::Sym(s) if s == m)))) => {
+            let unknown: Vec<&str> = modules.iter().filter(|m| !all.is_some_and(|all| all.iter().any(|a| matches!(a, Val::Sym(s) if s == *m)))).map(String::as_str).collect();
+            Some(Err(format!("`{class}` declares devise modules no gem read here registers (`:{}`)", unknown.join("`, `:"))))
+        }
         ("devise_modules", []) => {
             let mut selected: Vec<String> = Vec::new();
             for m in modules {
@@ -112,7 +119,7 @@ pub(super) fn class_answer(facts: &Facts, class: &str, method: &str, argv: &[Val
             }
             let rank = |m: &String| all.and_then(|all| all.iter().position(|a| matches!(a, Val::Sym(s) if s == m))).map_or(-1, |i| i as i64);
             selected.sort_by_key(rank);
-            Some(Val::Array(selected.into_iter().map(Val::Sym).collect()))
+            Some(Ok(Val::Array(selected.into_iter().map(Val::Sym).collect())))
         }
         _ => None,
     }
