@@ -3193,6 +3193,7 @@ end
     drop(sources);
     carry_included_block_includes_into_controllers(&mut app);
     refuse_unread_concern_filters(&app)?;
+    drop_modelled_included_hooks(&mut app);
     splice_concerns_into_controllers(&mut app);
     // After the splice: an action a concern provides is not implicit.
     synthesize_template_only_actions(&mut app);
@@ -5099,6 +5100,9 @@ fn record_concern_filters(
             app.concern_filter_refusals.entry(module).or_default().push((file, message));
         }
     }
+    app.concern_hook_modules.extend(scan.hook_modules.into_iter().filter(|id| keep(id)));
+    app.modelled_included_hooks.extend(scan.modelled_hooks);
+    app.unguarded_included_hooks.extend(scan.unguarded_hooks);
 }
 
 /// Library modules no declaration of which makes them a Concern: no
@@ -5119,9 +5123,12 @@ fn plain_mixins(
         .filter(|lc| lc.is_module)
         .map(|lc| &lc.name)
         .filter(|name| {
+            // A hook runs on plain modules too, so only an `included do`
+            // block proves a Concern.
+            let hook = app.concern_hook_modules.contains(*name);
             !concerns.contains(*name)
-                && !app.concern_filters.contains_key(*name)
-                && !app.concern_filter_refusals.contains_key(*name)
+                && (hook || !app.concern_filters.contains_key(*name))
+                && (hook || !app.concern_filter_refusals.contains_key(*name))
         })
         .cloned()
         .collect()
@@ -5132,10 +5139,11 @@ fn plain_mixins(
 /// controller's actions running without the filter, with no error at
 /// run time. Survey mode lists the gap instead.
 fn refuse_unread_concern_filters(app: &App) -> super::IngestResult<()> {
-    if app.concern_filter_refusals.is_empty() {
+    if app.concern_filter_refusals.is_empty() && app.concern_hook_modules.is_empty() {
         return Ok(());
     }
     let surfaces = controller_concern_surfaces(app);
+    refuse_modelled_hooks_off_controllers(app, &surfaces)?;
     let mut reported = crate::det::HashSet::default();
     for controller in &app.controllers {
         let Some(surface) = surfaces.controllers.get(&controller.name) else { continue };
@@ -5150,8 +5158,144 @@ fn refuse_unread_concern_filters(app: &App) -> super::IngestResult<()> {
                 })?;
             }
         }
+        // Ruby calls `included` on every `include`, so Rails registers the
+        // hook's filter again, which moves it to the end of the chain.
+        for module in &surface.repeated_includes {
+            if app.concern_hook_modules.contains(module) && app.concern_filters.contains_key(module) {
+                super::survey::continue_or_fail(super::IngestError::Unsupported {
+                    file: controller.name.0.as_str().to_string(),
+                    message: format!(
+                        "controller concern `{}` with a `self.included` filter is included more than once, which moves the filter in Rails and is not modelled",
+                        module.0.as_str()
+                    ),
+                })?;
+            }
+        }
     }
     Ok(())
+}
+
+/// A modelled hook leaves the emitted module and only a controller's
+/// filter chain replays it, while Ruby runs it on every includer. A
+/// guarded hook stays out of the way of a class that does not answer the
+/// macro, which is what the guard is for; an unguarded one raises or
+/// calls that class's own macro, whichever it has.
+fn refuse_modelled_hooks_off_controllers(
+    app: &App,
+    surfaces: &ControllerConcernSurfaces,
+) -> super::IngestResult<()> {
+    let modelled_hook = |hooks: &crate::det::HashSet<crate::span::Span>| -> crate::det::HashSet<crate::ident::ClassId> {
+        app.library_classes
+            .iter()
+            .filter(|lc| lc.methods.iter().any(|m| hooks.contains(&m.name_span)))
+            .map(|lc| lc.name.clone())
+            .collect()
+    };
+    let modelled = modelled_hook(&app.modelled_included_hooks);
+    if modelled.is_empty() {
+        return Ok(());
+    }
+    let unguarded = modelled_hook(&app.unguarded_included_hooks);
+    let edges = filter_dependency_edges(app, &surfaces.module_includes);
+    let classes = app.library_classes.iter().map(|lc| (&lc.name, lc.is_module, lc.includes.clone()));
+    let models = app.models.iter().map(|m| (&m.name, false, crate::analyze::model_includes(m)));
+    for (name, is_module, includes) in classes.chain(models) {
+        if surfaces.controllers.contains_key(name) {
+            continue;
+        }
+        for module in filter_registration_order(&[includes], &edges) {
+            if !modelled.contains(&module) {
+                continue;
+            }
+            if (!is_module && unguarded.contains(&module)) || answers_callback_macro(app, name) {
+                super::survey::continue_or_fail(super::IngestError::Unsupported {
+                    file: name.0.as_str().to_string(),
+                    message: format!(
+                        "`{}` registers a filter from its `self.included` hook, and `{}` includes it but is not a controller, so the hook's effect there is not modelled",
+                        module.0.as_str(),
+                        name.0.as_str()
+                    ),
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether a class, its parents included, answers a controller callback
+/// macro: a controller, a mailer, or a class-side definition of its own
+/// (`class_methods` blocks are copied there by ingest). A macro that only
+/// arrives through `extend` is not seen; a guarded hook answers false for it.
+fn answers_callback_macro(app: &App, name: &crate::ident::ClassId) -> bool {
+    let macro_on = |methods: &[&crate::dialect::MethodDef]| {
+        methods.iter().any(|m| {
+            m.receiver == crate::dialect::MethodReceiver::Class
+                && super::library_class::is_controller_callback_macro(m.name.as_str())
+        })
+    };
+    let mut cur = Some(name.clone());
+    let mut seen = crate::det::HashSet::default();
+    while let Some(class) = cur {
+        if !seen.insert(class.clone()) {
+            break;
+        }
+        if matches!(
+            class.0.as_str(),
+            "ActionMailer::Base" | "ActionController::Base" | "ActionController::API" | "ActionController::Metal" | "AbstractController::Base"
+        ) || app.controllers.iter().any(|c| c.name == class)
+        {
+            return true;
+        }
+        let parts: Vec<_> = app.library_classes.iter().filter(|lc| lc.name == class).collect();
+        let methods: Vec<_> = parts.iter().flat_map(|lc| lc.methods.iter()).collect();
+        let model = app.models.iter().find(|m| m.name == class);
+        let model_methods: Vec<_> = model.into_iter().flat_map(|m| m.methods()).collect();
+        if macro_on(&methods) || macro_on(&model_methods) {
+            return true;
+        }
+        cur = parts.iter().find_map(|lc| lc.parent.clone()).or_else(|| model.and_then(|m| m.parent.clone()));
+    }
+    false
+}
+
+/// A modelled hook has nothing left to do at load, and the emitted
+/// controller has no class-level `before_action` for it to call.
+fn drop_modelled_included_hooks(app: &mut App) {
+    let hooks = std::mem::take(&mut app.modelled_included_hooks);
+    for lc in &mut app.library_classes {
+        lc.methods.retain(|m| !hooks.contains(&m.name_span));
+    }
+}
+
+/// Modules Ruby's `include` runs on one controller more than once. A
+/// dependency of a concern that is already included is not revisited:
+/// `Concern#append_features` returns early for it.
+fn repeated_includes(
+    include_groups: &[Vec<crate::ident::ClassId>],
+    edges: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+) -> Vec<crate::ident::ClassId> {
+    fn visit(
+        module: &crate::ident::ClassId,
+        edges: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
+        seen: &mut std::collections::BTreeSet<crate::ident::ClassId>,
+        repeated: &mut Vec<crate::ident::ClassId>,
+    ) {
+        if !seen.insert(module.clone()) {
+            if !repeated.contains(module) {
+                repeated.push(module.clone());
+            }
+            return;
+        }
+        for dependency in edges.get(module).into_iter().flatten() {
+            visit(dependency, edges, seen, repeated);
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut repeated = Vec::new();
+    for module in include_groups.iter().flatten() {
+        visit(module, edges, &mut seen, &mut repeated);
+    }
+    repeated
 }
 
 /// The include edges filter registration follows. A plain module's are
@@ -5162,7 +5306,16 @@ fn filter_dependency_edges(
     app: &App,
     module_includes: &HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>>,
 ) -> HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> {
-    module_includes.iter().filter(|(m, _)| !app.plain_mixins.contains(*m)).map(|(m, inc)| (m.clone(), inc.clone())).collect()
+    let is_plain = |m: &crate::ident::ClassId| app.plain_mixins.contains(m);
+    module_includes
+        .iter()
+        .filter(|(m, _)| !is_plain(m))
+        .map(|(m, includes)| {
+            // A concern defers only other concerns to its includer. A plain
+            // module it includes ran its hook then, with the concern as `base`.
+            (m.clone(), includes.iter().filter(|inc| !is_plain(inc)).cloned().collect())
+        })
+        .collect()
 }
 
 /// The order a controller's concern filters REGISTER in — the order
@@ -5230,6 +5383,8 @@ pub(super) struct ControllerConcernSurface {
     /// The modules whose `included` blocks run on this controller: `includes`
     /// without what is reached only through a plain module.
     pub filter_includes: Vec<crate::ident::ClassId>,
+    /// The modules Ruby's `include` runs more than once on this controller.
+    pub repeated_includes: Vec<crate::ident::ClassId>,
 }
 
 pub(super) struct ControllerConcernSurfaces {
@@ -5283,6 +5438,7 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
         }
         controllers.insert((*name).clone(), ControllerConcernSurface {
             filter_includes: filter_registration_order(&include_groups, &filter_edges),
+            repeated_includes: repeated_includes(&include_groups, &filter_edges),
             includes: filter_registration_order(&include_groups, &module_includes),
             inherited_includes: filter_registration_order(&inherited_groups, &module_includes),
             direct_includes,
