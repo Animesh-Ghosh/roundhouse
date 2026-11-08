@@ -1967,7 +1967,7 @@ fn block_request_guard(args: &ruby_prism::ArgumentsNode<'_>, file: &str) -> Inge
         if arg.as_keyword_hash_node().is_some() || arg.as_hash_node().is_some() {
             continue;
         }
-        return super::expr::ingest_expr(&arg, file).map(Some);
+        return Ok(Some(guard_expr(&arg, file)));
     }
     Ok(None)
 }
@@ -2473,10 +2473,17 @@ fn request_guard(call: &ruby_prism::CallNode<'_>, file: &str) -> IngestResult<Op
             if symbol_value(&pair.key()).as_deref() != Some("constraints") || pair.value().as_hash_node().is_some() {
                 continue;
             }
-            return super::expr::ingest_expr(&pair.value(), file).map(Some);
+            return Ok(Some(guard_expr(&pair.value(), file)));
         }
     }
     Ok(None)
+}
+
+/// The constraint as an expression, or one holding only its place when it does not ingest (`->(req, &block) { … }`):
+/// it is never run, only refused where it is written, so an argument it cannot read still leaves its routes' helpers.
+fn guard_expr(node: &Node<'_>, file: &str) -> crate::expr::Expr {
+    super::survey::without_recording(|| super::expr::ingest_expr(node, file))
+        .unwrap_or_else(|_| crate::expr::Expr::new(super::util::node_span(node, file), crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil }))
 }
 
 fn ingest_unguarded_route_call(

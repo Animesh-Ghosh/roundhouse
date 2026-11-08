@@ -48,3 +48,19 @@ get "/ping", to: "pings#show""#,
     let errors = app.routes.diagnostics.iter().filter(|d| d.message.contains("request constraint")).count();
     assert_eq!(errors, 1, "one error at the constraint: {:#?}", app.routes.diagnostics);
 }
+
+/// A constraint whose expression does not ingest (`->(req, &block) { … }`) is refused where it is
+/// written all the same: it is never run, so the rest of the table and the route's helper stand.
+#[test]
+fn a_constraint_that_does_not_ingest_is_still_refused_in_place() {
+    let app = app(
+        r#"get "/reports", to: "reports#index", as: :reports, constraints: ->(req, &block) { true }
+get "/ping", to: "pings#show""#,
+    );
+    let flat = flatten_routes(&app);
+    let dispatched: Vec<&str> = flat.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(dispatched, ["/ping"], "{dispatched:?}");
+    assert!(flatten_routes_for_helpers(&app).iter().any(|r| r.as_name == "reports"));
+    let error = app.routes.diagnostics.iter().find(|d| d.message.contains("request constraint")).expect("located refusal");
+    assert!(!error.span.is_synthetic(), "{error:?}");
+}
