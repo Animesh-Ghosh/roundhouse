@@ -654,6 +654,14 @@ fn each_no_param_renders() {
     assert_content_tag_test_passes(each_no_param::strict_app());
 }
 
+/// An empty `map` block maps each element to nil, as Rails 8.1.4
+/// does (`each_no_param::EMPTY_MAP_VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_empty_map_renders() {
+    assert_content_tag_test_passes(each_no_param::strict_empty_map_app());
+}
+
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
 /// #1910: a block whose only parameter is a rest (`|*args|`) is refused,
 /// not emitted as a loop that binds nothing (`each_no_param::REST_VIEW`).

@@ -1284,6 +1284,9 @@ pub(super) fn emit_send(
                         return crate::emit::diagnostics::report_unsupported(block_e.span, "go2", "map", "a block with more than two parameters");
                     }
                 };
+                // An empty block reads none of its parameters, and Go
+                // rejects a variable declared and not used.
+                let range_vars = if matches!(&*body.node, ExprNode::Seq { exprs } if exprs.is_empty()) { String::new() } else { range_vars };
                 let body_s = emit_map_block_body(&body_ctx, body);
                 // No block parameter binds nothing: Go's bare `for range`.
                 let range_clause = if range_vars.is_empty() { format!("range {recv_s}") } else { format!("{range_vars} := range {recv_s}") };
@@ -3731,6 +3734,9 @@ pub(super) fn emit_stmt(ctx: &EmitCtx, e: &Expr) -> String {
 /// the IIFE, one for the `for` loop.
 pub(super) fn emit_map_block_body(ctx: &EmitCtx, e: &Expr) -> String {
     let (stmts, tail) = match &*e.node {
+        // An empty block maps each element to nil: `append(out, )` would
+        // add nothing.
+        ExprNode::Seq { exprs } if exprs.is_empty() => (Vec::new(), "nil".to_string()),
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
             let last = exprs.len() - 1;
             let stmts: Vec<String> = exprs[..last]

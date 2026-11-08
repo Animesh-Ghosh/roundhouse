@@ -21760,6 +21760,16 @@ fn each_no_param_renders_as_rails() {
         .assert_passes();
 }
 
+/// An empty `map` block maps each element to nil, as Rails 8.1.4
+/// does (`each_no_param::EMPTY_MAP_VIEW`).
+#[test]
+fn each_no_param_empty_map_renders_as_rails() {
+    each_no_param::app(content_tag_options::app_rendering(each_no_param::EMPTY_MAP_VIEW, &[]))
+        .write("test/controllers/probes_controller_test.rb", &helper_escape_at_output::integration_test(each_no_param::EMPTY_MAP_RENDERS))
+        .run_test("test/controllers/probes_controller_test.rb")
+        .assert_passes();
+}
+
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
 /// does (`view_unless_no_else::VIEW`).
 #[test]

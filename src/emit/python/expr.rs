@@ -919,14 +919,16 @@ pub(super) fn emit_expr(e: &Expr) -> String {
         {
             let ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } = &*block.node else { unreachable!() };
             let other_params = rest_param.is_some() || !extra_params.is_empty() || block_param.is_some();
+            // An empty block maps each element to nil; it emits no expression.
+            let value = if matches!(&*body.node, ExprNode::Seq { exprs } if exprs.is_empty()) { "None".to_string() } else { emit_expr(body) };
             match params.as_slice() {
-                [p] => format!("[{} for {} in {}]", emit_expr(body), p, emit_expr(recv)),
+                [p] => format!("[{} for {} in {}]", value, p, emit_expr(recv)),
                 // A block with no parameter of any kind binds none, as
                 // `each` does (`|*args|` would read an unbound name). A
                 // comprehension takes one expression, so a body of several
                 // statements stays refused below.
                 [] if !other_params && !matches!(&*body.node, ExprNode::Seq { exprs } if exprs.len() > 1) => {
-                    format!("[{} for _ in {}]", emit_expr(body), emit_expr(recv))
+                    format!("[{} for _ in {}]", value, emit_expr(recv))
                 }
                 _ => crate::emit::diagnostics::report_unsupported(e.span, "python", "map-block", ""),
             }

@@ -46,3 +46,18 @@ pub const REST_VIEW: &str = concat!(
 pub fn strict_rest_app() -> Overlay {
     app(super::content_tag_options::app_rendering(REST_VIEW, &["L0:1,1,|", "L1:1,1|"]))
 }
+
+/// Empty blocks: `map` maps each element to nil and `each` runs nothing.
+pub const EMPTY_MAP_VIEW: &str = concat!(
+    "L0:<%= [1, 2].map {}.length %>|\n",
+    "L1:<%= [1, 2].map { |x| }.length %>|\n",
+    "L2:<% [1, 2].each {} %>|\n",
+);
+
+/// What Rails 8.1.4 renders for `EMPTY_MAP_VIEW`.
+pub const EMPTY_MAP_RENDERS: &[&str] = &["L0:2|", "L1:2|", "L2:|"];
+
+/// The strict targets' probe app for `EMPTY_MAP_VIEW`.
+pub fn strict_empty_map_app() -> Overlay {
+    app(super::content_tag_options::app_rendering(EMPTY_MAP_VIEW, EMPTY_MAP_RENDERS))
+}

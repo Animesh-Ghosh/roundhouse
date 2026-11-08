@@ -843,6 +843,26 @@ fn each_no_param_renders() {
     assert!(output.status.success() && stdout.contains("content_tag_renders ... ok"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }
 
+/// An empty `map` block maps each element to nil, as Rails 8.1.4
+/// does (`each_no_param::EMPTY_MAP_VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_empty_map_renders() {
+    let (emitted, errors) = each_no_param::strict_empty_map_app().emit(roundhouse::project::BuildTarget::Rust);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("src/tests/probes_controller_test.rs");
+    let mut source = std::fs::read_to_string(&test).expect("probes_controller_test.rs");
+    source.push_str("\nfn assert_includes(body: String, want: &str) {\n    assert!(body.contains(want), \"missing {want} in {body}\");\n}\n");
+    std::fs::write(&test, source).expect("write probe");
+    let output = Command::new("cargo")
+        .args(["test", "content_tag_renders"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run cargo test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("content_tag_renders ... ok"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+}
+
 /// #1921: an `unless` with no `else` in a view renders as Rails 8.1.4
 /// #1910: a block whose only parameter is a rest (`|*args|`) doesn't
 /// take the `_` closure a block with no parameter takes, so the rest

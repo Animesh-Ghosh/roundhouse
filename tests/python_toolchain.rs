@@ -378,6 +378,25 @@ fn each_no_param_renders() {
     assert!(output.status.success() && stderr.contains("Ran 1 test"), "{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
 }
 
+/// An empty `map` block maps each element to nil, as Rails 8.1.4
+/// does (`each_no_param::EMPTY_MAP_VIEW`).
+#[test]
+#[ignore]
+fn each_no_param_empty_map_renders() {
+    let (emitted, errors) = each_no_param::strict_empty_map_app().emit(roundhouse::project::BuildTarget::Python);
+    assert!(errors.is_empty(), "{errors:?}");
+    let test = emitted.join("tests/test_probes_controller.py");
+    let source = std::fs::read_to_string(&test).expect("test_probes_controller.py");
+    std::fs::write(&test, source.replace(".include_p(", ".__contains__(")).expect("write probe");
+    let output = Command::new("python3")
+        .args(["-m", "unittest", "tests.test_probes_controller"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run python unittest");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success() && stderr.contains("Ran 1 test"), "{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
+}
+
 /// #1910: a `map` block with no parameter whose body is more than one
 /// statement is refused, as before, rather than emitted into a
 /// comprehension, which takes only an expression
