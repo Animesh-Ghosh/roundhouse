@@ -132,6 +132,8 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
         consider(path, *from_gem, false);
     }
     // Not only by namespace: a gem can define constants of another's (responders' `ActionController::Responder`), and a sourced gem's `require` of a dependency's feature loads it as Ruby does.
+    let mut libs: std::collections::BTreeMap<&str, Option<std::path::PathBuf>> = std::collections::BTreeMap::new();
+    let mut required: BTreeSet<&str> = BTreeSet::new();
     for program in &app.file_programs {
         let Some(owner) = lock.source.iter().find(|g| lock.version_of(g).is_some_and(|v| super::source_gems::file_of(&program.source, g, v))) else {
             continue;
@@ -139,14 +141,23 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
         let Some(deps) = lock.spec_deps.get(owner.as_str()) else { continue };
         let mut features = Vec::new();
         required_features(&program.items, &mut features);
-        for feature in features {
-            for dep in deps {
-                let installed = lock.version_of(dep).and_then(|v| crate::i18n::gems::installed_gem(vfs, &roots, dep, v));
-                if installed.is_some_and(|dir| vfs.exists(&dir.join("lib").join(format!("{feature}.rb")))) {
-                    consider(dep, true, true);
-                }
+        if features.is_empty() {
+            continue;
+        }
+        for dep in deps {
+            if required.contains(dep.as_str()) {
+                continue;
+            }
+            let lib = libs
+                .entry(dep.as_str())
+                .or_insert_with(|| lock.version_of(dep).and_then(|v| crate::i18n::gems::installed_gem(vfs, &roots, dep, v)).map(|dir| dir.join("lib")));
+            if lib.as_ref().is_some_and(|lib| features.iter().any(|f| vfs.exists(&lib.join(format!("{f}.rb"))))) {
+                required.insert(dep.as_str());
             }
         }
+    }
+    for dep in required {
+        consider(dep, true, true);
     }
     // Not only gems the app names: Bundler requires every direct dependency, and one that depends on a gem compiled from source can extend it as it loads (devise_invitable's `Devise.add_module :invitable`).
     let mut extenders: Vec<String> = Vec::new();
