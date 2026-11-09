@@ -346,9 +346,9 @@ fn a_float_optional_of_mixed_types_takes_a_bare_integer() {
         .edit(
             "app/models/article.rb",
             "class Article < ApplicationRecord\n",
-            "class Article < ApplicationRecord\n  def scored(label = \"a\", ratio = 1.5, count = 7)\n    ratio\n  end\n\n",
+            "class Article < ApplicationRecord\n  def scored(label = \"a\", ratio = 1.5, count = 7)\n    ratio\n  end\n\n  def scored_from_ruby\n    scored(\"x\", 2, 3)\n  end\n\n  def counted(label = \"a\", count = 7)\n    count\n  end\n\n  def counted_from_ruby\n    counted(\"x\", 3)\n  end\n\n  def counted_nil_label\n    counted(nil, 4)\n  end\n\n",
         )
-        .write("sig/article_scored.rbs", "class Article\n  def scored: (?String label, ?Float ratio, ?Integer count) -> Float\nend\n")
+        .write("sig/article_scored.rbs", "class Article\n  def scored: (?String label, ?Float ratio, ?Integer count) -> Float\n  def scored_from_ruby: () -> Float\n  def counted: (?String? label, ?Integer count) -> Integer\n  def counted_from_ruby: () -> Integer\n  def counted_nil_label: () -> Integer\nend\n")
         .emit(roundhouse::project::BuildTarget::Go);
     assert!(errors.is_empty(), "{errors:?}");
     std::fs::write(emitted.join("app/v2/float_optional_test.go"), r#"package v2
@@ -368,6 +368,15 @@ func TestFloatOptional(t *testing.T) {
 	}
 	if got := a.Scored("x", int64(3)); got != 3.0 {
 		t.Fatalf("an int64: %v", got)
+	}
+	if got := a.ScoredFromRuby(); got != 2.0 {
+		t.Fatalf("a float from a Ruby call: %v", got)
+	}
+	if got := a.CountedFromRuby(); got != 3 {
+		t.Fatalf("an integer from a Ruby call: %v", got)
+	}
+	if got := a.CountedNilLabel(); got != 4 {
+		t.Fatalf("a nil from a Ruby call: %v", got)
 	}
 }
 "#).expect("write probe");

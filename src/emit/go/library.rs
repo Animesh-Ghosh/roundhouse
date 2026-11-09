@@ -686,19 +686,97 @@ fn render_constructor_params(m: &MethodDef) -> (String, String) {
     let sig_tys = signature_param_tys(m);
     let split = trailing_optional_split(&m.params);
     let mut params_out: Vec<String> = Vec::new();
-    let mut unpack = String::new();
-    for (i, p) in m.params.iter().enumerate() {
+    for (i, p) in m.params[..split].iter().enumerate() {
         let ty = sig_tys.as_ref().and_then(|tys| tys.get(i));
-        if i < split {
-            params_out.push(format!("{} {}", sanitize(p.name.as_str()), go_ty_stub(ty)));
-        } else if i == split {
-            let (go_ty, body) = optional_unpack(m, split, sig_tys.as_deref());
-            params_out.push(format!("_opts ...{go_ty}"));
-            unpack = body;
-            break;
-        }
+        params_out.push(format!("{} {}", sanitize(p.name.as_str()), go_ty_stub(ty)));
     }
+    if split == m.params.len() {
+        return (params_out.join(", "), String::new());
+    }
+    let (variadic, unpack) = fold_optional_tail(m, sig_tys.as_deref(), split);
+    params_out.push(variadic);
     (params_out.join(", "), unpack)
+}
+
+/// The trailing defaulted params from `split` on, folded into one
+/// variadic catch-all (`_opts ...T`) plus the unpack that binds each to
+/// its local. Shared by constructors and methods. When every trailing
+/// param has the same Go type the slice carries it; otherwise it widens
+/// to `interface{}` and each slot is read back with a type assertion
+/// (`Route.new(..., req_format, int_params, seg_constraints, guard)`
+/// mixes `string` and `int64`). An omitted param starts at its literal
+/// Ruby default where one fits (`guard = -1`), not Go's zero value.
+fn fold_optional_tail(m: &MethodDef, sig_tys: Option<&[Ty]>, split: usize) -> (String, String) {
+    let trailing_tys: Vec<String> = (split..m.params.len())
+        .map(|i| go_ty_stub(sig_tys.and_then(|tys| tys.get(i))))
+        .collect();
+    let go_ty = if trailing_tys.iter().all(|t| t == &trailing_tys[0]) {
+        trailing_tys[0].clone()
+    } else {
+        "interface{}".to_string()
+    };
+    let mut unpack = String::new();
+    for (j, opt) in m.params[split..].iter().enumerate() {
+        // Ruby's `_X` marks an intentionally unused param; the body never reads it
+        if opt.name.as_str().starts_with('_') {
+            continue;
+        }
+        let opt_name = sanitize(opt.name.as_str());
+        let opt_go_ty = if go_ty == "interface{}" { trailing_tys[j].clone() } else { go_ty.clone() };
+        unpack.push_str(&format!("\tvar {opt_name} {opt_go_ty}\n"));
+        let opt_sig = sig_tys.and_then(|tys| tys.get(split + j));
+        let bind = optional_read(&opt_name, j, &opt_go_ty, &go_ty, nilable_numeric(opt_sig));
+        let omitted = opt.default.as_ref().and_then(|d| go_param_default(d, &opt_go_ty, nilable_numeric(opt_sig)));
+        match omitted {
+            Some(default) => unpack.push_str(&format!(
+                "\tif len(_opts) > {j} {{ {bind} }} else {{ {opt_name} = {default} }}\n"
+            )),
+            None => unpack.push_str(&format!("\tif len(_opts) > {j} {{ {bind} }}\n")),
+        }
+        // Go rejects a declared-and-unused local; a body may ignore an optional param
+        unpack.push_str(&format!("\t_ = {opt_name}\n"));
+    }
+    (format!("_opts ...{go_ty}"), unpack)
+}
+
+/// The statement that binds slot `j` of a folded optional tail. A caller's
+/// bare integer literal boxes as `int`, so a numeric read converts it, and
+/// an explicit `nil` asserts to the zero value, the types' empty-as-absent
+/// convention. A nilable numeric stays `interface{}` for its nil, and a nil
+/// guard narrows it with a plain assertion, so it holds the type asserted.
+fn optional_read(name: &str, j: usize, opt_go_ty: &str, tail_ty: &str, nilable: Option<&str>) -> String {
+    match nilable {
+        Some("float64") => {
+            return format!(
+                "{name} = _opts[{j}]; switch v := {name}.(type) {{ case int: {name} = float64(v); case int64: {name} = float64(v) }}"
+            );
+        }
+        Some(_) => return format!("{name} = _opts[{j}]; if v, ok := {name}.(int); ok {{ {name} = int64(v) }}"),
+        None => {}
+    }
+    if opt_go_ty == "interface{}" || tail_ty == opt_go_ty {
+        return format!("{name} = _opts[{j}]");
+    }
+    match opt_go_ty {
+        "int64" => format!("switch v := _opts[{j}].(type) {{ case int64: {name} = v; case int: {name} = int64(v) }}"),
+        "float64" => format!("switch v := _opts[{j}].(type) {{ case float64: {name} = v; case int64: {name} = float64(v); case int: {name} = float64(v) }}"),
+        _ => format!("{name}, _ = _opts[{j}].({opt_go_ty})"),
+    }
+}
+
+/// The Go type a nilable numeric param (`Integer?`, `Float?`) holds in
+/// its `interface{}`.
+fn nilable_numeric(ty: Option<&Ty>) -> Option<&'static str> {
+    let Some(Ty::Union { variants }) = ty else { return None };
+    let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
+    if non_nil.len() == variants.len() {
+        return None;
+    }
+    match non_nil.as_slice() {
+        [Ty::Int] => Some("int64"),
+        [Ty::Float] => Some("float64"),
+        _ => None,
+    }
 }
 
 /// Index of the first trailing-defaulted param. Returns
@@ -1216,79 +1294,15 @@ fn render_params_with_unpack(m: &MethodDef) -> (String, String) {
         if i < split {
             params_out.push(format!("{} {}", sanitize(p.name.as_str()), go_ty_stub(ty)));
         } else if i == split {
-            let (go_ty, body) = optional_unpack(m, split, sig_tys.as_deref());
             // Not after the variadic: Go accepts a variadic only as the last parameter
             params_out.extend(yield_block_param(m));
-            params_out.push(format!("_opts ...{go_ty}"));
-            unpack = body;
+            let (variadic, tail_unpack) = fold_optional_tail(m, sig_tys.as_deref(), split);
+            params_out.push(variadic);
+            unpack = tail_unpack;
             break;
         }
     }
     (params_out.join(", "), unpack)
-}
-
-/// The trailing defaulted params folded into one variadic: its element
-/// type, and the statements that bind each param as a local. Trailing
-/// params of different types make the variadic `interface{}`, and each
-/// read asserts its own type. A caller's bare integer literal boxes as
-/// `int`, so an `int64` read takes both and a `float64` read converts it.
-/// An explicit `nil` asserts to the zero value, the types'
-/// empty-as-absent convention.
-fn optional_unpack(m: &MethodDef, split: usize, sig_tys: Option<&[Ty]>) -> (String, String) {
-    let opt_ty = |j: usize| go_ty_stub(sig_tys.and_then(|tys| tys.get(split + j)));
-    let trailing: Vec<String> = (0..m.params.len() - split).map(opt_ty).collect();
-    let go_ty = if trailing.iter().all(|t| t == &trailing[0]) { trailing[0].clone() } else { "interface{}".to_string() };
-    let mut unpack = String::new();
-    for (j, opt) in m.params[split..].iter().enumerate() {
-        // Ruby's `_X` convention: intentionally unused, and an unused Go local doesn't vet.
-        if opt.name.as_str().starts_with('_') {
-            continue;
-        }
-        let opt_name = sanitize(opt.name.as_str());
-        let opt_go_ty = &trailing[j];
-        unpack.push_str(&format!("\tvar {opt_name} {opt_go_ty}\n"));
-        let opt_sig = sig_tys.and_then(|tys| tys.get(split + j));
-        let bind = if let Some(numeric) = nilable_numeric(opt_sig) {
-            // Stays `interface{}` for its nil, and a nil guard narrows it with a plain assertion.
-            let convert = if numeric == "float64" {
-                format!("switch v := {opt_name}.(type) {{ case int: {opt_name} = float64(v); case int64: {opt_name} = float64(v) }}")
-            } else {
-                format!("if v, ok := {opt_name}.(int); ok {{ {opt_name} = int64(v) }}")
-            };
-            format!("{opt_name} = _opts[{j}]; {convert}")
-        } else if opt_go_ty == "interface{}" || &go_ty == opt_go_ty {
-            format!("{opt_name} = _opts[{j}]")
-        } else if opt_go_ty == "int64" {
-            format!("switch v := _opts[{j}].(type) {{ case int64: {opt_name} = v; case int: {opt_name} = int64(v) }}")
-        } else if opt_go_ty == "float64" {
-            format!("switch v := _opts[{j}].(type) {{ case float64: {opt_name} = v; case int64: {opt_name} = float64(v); case int: {opt_name} = float64(v) }}")
-        } else {
-            format!("{opt_name}, _ = _opts[{j}].({opt_go_ty})")
-        };
-        // Not left at Go's zero value when the arg is omitted: Ruby binds the default
-        match opt.default.as_ref().and_then(|d| go_param_default(d, opt_go_ty, nilable_numeric(opt_sig))) {
-            Some(default) => unpack.push_str(&format!("\tif len(_opts) > {j} {{ {bind} }} else {{ {opt_name} = {default} }}\n")),
-            None => unpack.push_str(&format!("\tif len(_opts) > {j} {{ {bind} }}\n")),
-        }
-        // Go rejects a declared local the body doesn't read.
-        unpack.push_str(&format!("\t_ = {opt_name}\n"));
-    }
-    (go_ty, unpack)
-}
-
-/// The Go type a nilable numeric param (`Integer?`, `Float?`) holds in
-/// its `interface{}`.
-fn nilable_numeric(ty: Option<&Ty>) -> Option<&'static str> {
-    let Some(Ty::Union { variants }) = ty else { return None };
-    let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
-    if non_nil.len() == variants.len() {
-        return None;
-    }
-    match non_nil.as_slice() {
-        [Ty::Int] => Some("int64"),
-        [Ty::Float] => Some("float64"),
-        _ => None,
-    }
 }
 
 /// The Go value an omitted optional param starts with: its literal Ruby
@@ -1760,5 +1774,33 @@ mod predicate_naming_tests {
             send.contains("return \"inline\"") && send.contains("return \"attachment\""),
             "void send_data IIFE must return disposition strings:\n{send}"
         );
+    }
+
+    /// A constructor whose trailing optionals mix types (`Route`'s
+    /// `req_format`/`int_params`/`seg_constraints` strings, then the
+    /// `guard` Integer) widens `_opts` to `interface{}` and asserts each
+    /// slot back; an omitted `guard` starts at its Ruby default -1.
+    #[test]
+    fn router_ctor_mixed_optionals_widen_and_keep_defaults() {
+        let ruby = include_str!("../../../runtime/ruby/action_dispatch/router.rb");
+        let rbs = include_str!("../../../runtime/ruby/action_dispatch/router.rbs");
+        let classes = crate::runtime_src::parse_library_with_rbs(
+            ruby.as_bytes(),
+            rbs,
+            "action_dispatch/router.rb",
+        )
+        .expect("action_dispatch/router parses and types");
+        let mut src = String::new();
+        for c in &classes {
+            src.push_str(&emit_library_class(c).expect("emits"));
+            src.push('\n');
+        }
+        let ctor = src
+            .find("func NewActionDispatchRouterRoute(")
+            .map(|i| &src[i..i + src[i..].find("\n}\n").unwrap_or(src.len() - i)])
+            .expect("Route constructor");
+        assert!(ctor.contains("_opts ...interface{}"), "mixed tail must widen:\n{ctor}");
+        assert!(ctor.contains("case int64: guard = v; case int: guard = int64(v)"), "guard slot reads int64:\n{ctor}");
+        assert!(ctor.contains("else { guard = -1 }"), "omitted guard keeps Ruby's -1:\n{ctor}");
     }
 }
