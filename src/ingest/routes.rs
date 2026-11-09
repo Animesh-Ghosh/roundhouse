@@ -3728,7 +3728,13 @@ fn ingest_explicit_route(
 
                 // String-keyed entry → path → target pair (hashrocket
                 // form). Only consume the first such entry as path.
-                if let Some(key_str) = string_value(&key_node) {
+                if key_node.as_interpolated_string_node().is_some() && path.is_none() && rstring(&key_node).is_none() {
+                    return Err(IngestError::Unsupported {
+                        file: file.into(),
+                        message: format!("{} route path is not a literal string", format!("{method:?}").to_lowercase()),
+                    });
+                }
+                if let Some(key_str) = rstring(&key_node).filter(|_| key_node.as_symbol_node().is_none()) {
                     if path.is_none() {
                         path = Some(key_str);
                         if let Some(v) = rstring(value) {

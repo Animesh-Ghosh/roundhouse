@@ -51,3 +51,20 @@ fn an_interpolated_route_path_is_refused_rather_than_drawn_at_its_scope() {
     .expect_err("a path that is not a literal");
     assert!(err.to_string().contains("route path is not a literal string"), "{err}");
 }
+
+/// The hashrocket spelling (`get "#{root_path}/x" => "c#a"`) reads a path a loop binds, as the
+/// positional one does, and refuses one it cannot read rather than dropping the route.
+#[test]
+fn an_interpolated_hashrocket_path_is_read_from_its_loop_or_refused() {
+    let mut app = App::default();
+    app.routes = ingest_routes(
+        b"Rails.application.routes.draw do\n  %w[users u].each do |root_path|\n    post \"#{root_path}/confirm-session\" => \"users#confirm_session\"\n  end\nend\n",
+        "config/routes.rb",
+    )
+    .expect("ingest routes");
+    let paths: Vec<String> = flatten_routes(&app).into_iter().map(|r| r.path).collect();
+    assert_eq!(paths, ["/users/confirm-session", "/u/confirm-session"], "{paths:?}");
+    let err = ingest_routes(b"Rails.application.routes.draw do\n  get \"/#{ENV.fetch('X', 'bb')}/:id\" => \"billboards#show\"\nend\n", "config/routes.rb")
+        .expect_err("a path that is not a literal");
+    assert!(err.to_string().contains("route path is not a literal string"), "{err}");
+}
