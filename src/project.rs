@@ -4975,6 +4975,7 @@ fn ruby_family_runtime_files(
     // Keep the original immutable App borrowed across base assembly and overlays.
     let _indexes = emit::ruby::install_lookup_indexes(app);
     let _body_names = crate::lower::model_to_library::schema::share_model_body_names(&app.models, &Default::default());
+    let _registry = crate::lower::model_to_library::share_request_finder_registry(&app.models, &app.schema);
     let (mut files, test_stems) = spinel_files(app, fixture, param_binds)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/faye_websocket.rb");
@@ -10101,6 +10102,9 @@ end
 }
 
 fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(String, String)>, Vec<String>), String> {
+    // Each controller lowering and the tests type against the models'
+    // request-finder registry; one model lowering serves them all.
+    let _registry = crate::lower::model_to_library::share_request_finder_registry(&app.models, &app.schema);
     let mut files: Vec<(String, String)> = Vec::new();
 
     crate::runtime_files::walk_into("runtime/spinel/scaffold", "", &mut files)?;

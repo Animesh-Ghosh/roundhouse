@@ -42,8 +42,22 @@ struct Bind {
 /// One shaped-read site gets one id so `__rh_value_0` from two reads in
 /// the same method cannot collide under Spinel's pinned local types.
 fn next_read_id() -> usize {
-    static NEXT: AtomicUsize = AtomicUsize::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
+    NEXT_READ_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+static NEXT_READ_ID: AtomicUsize = AtomicUsize::new(1);
+
+/// Read ids handed out so far. A lowering whose output is cached and
+/// replayed (`model_to_library::request_finder_registry`) reads this
+/// before and after it runs and calls [`skip_read_ids`] with the
+/// difference on a hit, so the ids every later lowering takes are the
+/// ones it would have taken had the cached one run again.
+pub(crate) fn read_ids_taken() -> usize {
+    NEXT_READ_ID.load(Ordering::Relaxed)
+}
+
+pub(crate) fn skip_read_ids(count: usize) {
+    NEXT_READ_ID.fetch_add(count, Ordering::Relaxed);
 }
 
 fn bind_local(kind: &str, i: usize, read_id: usize) -> Symbol {
