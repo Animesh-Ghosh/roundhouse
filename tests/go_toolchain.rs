@@ -290,6 +290,56 @@ func TestRecordSliceProbe(t *testing.T) {
 
 #[test]
 #[ignore]
+fn constructor_optionals_of_mixed_types_build_and_keep_their_defaults() {
+    // The router's constructors have String optionals, then Integer ones;
+    // an omitted `guard` is -1, no guard, not Go's zero.
+    let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/ctor_optionals_test.go"), r#"package v2
+
+import "testing"
+
+func TestCtorOptionals(t *testing.T) {
+	r := NewActionDispatchRouterRoute("GET", "/x", "XController", "show")
+	if r.Guard != -1 || r.ReqFormat != "" {
+		t.Fatalf("omitted: guard %d format %q", r.Guard, r.ReqFormat)
+	}
+	g := NewActionDispatchRouterRoute("GET", "/x", "XController", "show", "json", "", "", 3)
+	if g.Guard != 3 || g.ReqFormat != "json" {
+		t.Fatalf("passed: guard %d format %q", g.Guard, g.ReqFormat)
+	}
+	m := NewActionDispatchRouterMatchResult("C", "a", map[string]string{})
+	if m.Index != 0 || m.Guard != -1 {
+		t.Fatalf("result omitted: index %d guard %d", m.Index, m.Guard)
+	}
+	f := NewActionDispatchRouterMatchResult("C", "a", map[string]string{}, "json", int64(2), int64(5))
+	if f.Index != 2 || f.Guard != 5 || f.ReqFormat != "json" {
+		t.Fatalf("result passed: index %d guard %d format %q", f.Index, f.Guard, f.ReqFormat)
+	}
+	hit := ActionDispatchRouter_match("GET", "/x", []*ActionDispatchRouterRoute{r})
+	if hit == nil || hit.Guard != -1 {
+		t.Fatalf("a matched route with no guard: %#v", hit)
+	}
+	n := NewActionDispatchRouterMatchResult("C", "a", map[string]string{}, nil, 2, 5)
+	if n.ReqFormat != "" || n.Index != 2 || n.Guard != 5 {
+		t.Fatalf("an explicit nil and bare integers: format %q index %d guard %d", n.ReqFormat, n.Index, n.Guard)
+	}
+}
+"#).expect("write probe");
+    go_mod_tidy(&emitted);
+    for args in [vec!["build", "./..."], vec!["test", "-count=1", "-run", "TestCtorOptionals", "./app/v2/"]] {
+        let output = Command::new("go").args(&args).current_dir(&*emitted).output().expect("run go");
+        assert!(
+            output.status.success(),
+            "go {args:?}\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+#[ignore]
 fn real_blog_flash_each_yields() {
     // A yielding runtime method takes the block as a Go function.
     let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Go);

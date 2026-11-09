@@ -692,28 +692,9 @@ fn render_constructor_params(m: &MethodDef) -> (String, String) {
         if i < split {
             params_out.push(format!("{} {}", sanitize(p.name.as_str()), go_ty_stub(ty)));
         } else if i == split {
-            let go_ty = go_ty_stub(ty);
+            let (go_ty, body) = optional_unpack(m, split, sig_tys.as_deref());
             params_out.push(format!("_opts ...{go_ty}"));
-            // Per-param unpack — first variadic slot = the original
-            // param's name, subsequent params (also defaulted) pull
-            // from successive slots.
-            for (j, opt) in m.params[split..].iter().enumerate() {
-                // Ruby's `_X` convention signals an intentionally
-                // unused parameter. Go allows unused PARAMS (not
-                // unused LOCALS), and our variadic emit lowers
-                // optional params to locals. Skip the unpack for
-                // `_`-prefixed names so vet doesn't error on the
-                // unused declaration — the body never references
-                // them anyway.
-                if opt.name.as_str().starts_with('_') {
-                    continue;
-                }
-                let opt_ty = sig_tys.as_ref().and_then(|tys| tys.get(split + j));
-                let opt_go_ty = go_ty_stub(opt_ty);
-                let opt_name = sanitize(opt.name.as_str());
-                unpack.push_str(&format!("\tvar {opt_name} {opt_go_ty}\n"));
-                unpack.push_str(&format!("\tif len(_opts) > {j} {{ {opt_name} = _opts[{j}] }}\n"));
-            }
+            unpack = body;
             break;
         }
     }
@@ -1235,64 +1216,52 @@ fn render_params_with_unpack(m: &MethodDef) -> (String, String) {
         if i < split {
             params_out.push(format!("{} {}", sanitize(p.name.as_str()), go_ty_stub(ty)));
         } else if i == split {
-            // Pick the trailing-slot variadic type. If every trailing
-            // defaulted param has the same Ty stub, use it; otherwise
-            // fall back to `interface{}` (the safe widening).
-            let trailing_tys: Vec<String> = m.params[split..]
-                .iter()
-                .enumerate()
-                .map(|(j, _)| {
-                    let opt_ty = sig_tys.as_ref().and_then(|tys| tys.get(split + j));
-                    go_ty_stub(opt_ty)
-                })
-                .collect();
-            let go_ty = if trailing_tys.iter().all(|t| t == &trailing_tys[0]) {
-                trailing_tys[0].clone()
-            } else {
-                "interface{}".to_string()
-            };
+            let (go_ty, body) = optional_unpack(m, split, sig_tys.as_deref());
             // Not after the variadic: Go accepts a variadic only as the last parameter
             params_out.extend(yield_block_param(m));
             params_out.push(format!("_opts ...{go_ty}"));
-            for (j, opt) in m.params[split..].iter().enumerate() {
-                if opt.name.as_str().starts_with('_') {
-                    continue;
-                }
-                let opt_name = sanitize(opt.name.as_str());
-                let opt_go_ty = if go_ty == "interface{}" {
-                    let opt_ty = sig_tys.as_ref().and_then(|tys| tys.get(split + j));
-                    go_ty_stub(opt_ty)
-                } else {
-                    go_ty.clone()
-                };
-                unpack.push_str(&format!("\tvar {opt_name} {opt_go_ty}\n"));
-                let read = if opt_go_ty == "interface{}" || go_ty == opt_go_ty {
-                    format!("_opts[{j}]")
-                } else {
-                    format!("_opts[{j}].({opt_go_ty})")
-                };
-                // Not left at Go's zero value when the arg is omitted: Ruby binds the default
-                let omitted = opt.default.as_ref().and_then(|d| go_param_default(d, &opt_go_ty));
-                match omitted {
-                    Some(default) => unpack.push_str(&format!(
-                        "\tif len(_opts) > {j} {{ {opt_name} = {read} }} else {{ {opt_name} = {default} }}\n"
-                    )),
-                    None => unpack.push_str(&format!(
-                        "\tif len(_opts) > {j} {{ {opt_name} = {read} }}\n"
-                    )),
-                }
-                // Suppress Go's "declared and not used" error for
-                // optional params the body doesn't reference. Many
-                // view methods accept `notice`/`alert` from the
-                // controller but don't render them when no flash is
-                // set; the variadic-unpack still declares the
-                // locals.
-                unpack.push_str(&format!("\t_ = {opt_name}\n"));
-            }
+            unpack = body;
             break;
         }
     }
     (params_out.join(", "), unpack)
+}
+
+/// The trailing defaulted params folded into one variadic: its element
+/// type, and the statements that bind each param as a local. Trailing
+/// params of different types make the variadic `interface{}`, and each
+/// read asserts its own type. A caller's bare integer literal boxes as
+/// `int`, so an `int64` read takes both. An explicit `nil` asserts to the
+/// zero value, the types' empty-as-absent convention.
+fn optional_unpack(m: &MethodDef, split: usize, sig_tys: Option<&[Ty]>) -> (String, String) {
+    let opt_ty = |j: usize| go_ty_stub(sig_tys.and_then(|tys| tys.get(split + j)));
+    let trailing: Vec<String> = (0..m.params.len() - split).map(opt_ty).collect();
+    let go_ty = if trailing.iter().all(|t| t == &trailing[0]) { trailing[0].clone() } else { "interface{}".to_string() };
+    let mut unpack = String::new();
+    for (j, opt) in m.params[split..].iter().enumerate() {
+        // Ruby's `_X` convention: intentionally unused, and an unused Go local doesn't vet.
+        if opt.name.as_str().starts_with('_') {
+            continue;
+        }
+        let opt_name = sanitize(opt.name.as_str());
+        let opt_go_ty = &trailing[j];
+        unpack.push_str(&format!("\tvar {opt_name} {opt_go_ty}\n"));
+        let bind = if opt_go_ty == "interface{}" || &go_ty == opt_go_ty {
+            format!("{opt_name} = _opts[{j}]")
+        } else if opt_go_ty == "int64" {
+            format!("switch v := _opts[{j}].(type) {{ case int64: {opt_name} = v; case int: {opt_name} = int64(v) }}")
+        } else {
+            format!("{opt_name}, _ = _opts[{j}].({opt_go_ty})")
+        };
+        // Not left at Go's zero value when the arg is omitted: Ruby binds the default
+        match opt.default.as_ref().and_then(|d| go_param_default(d, opt_go_ty)) {
+            Some(default) => unpack.push_str(&format!("\tif len(_opts) > {j} {{ {bind} }} else {{ {opt_name} = {default} }}\n")),
+            None => unpack.push_str(&format!("\tif len(_opts) > {j} {{ {bind} }}\n")),
+        }
+        // Go rejects a declared local the body doesn't read.
+        unpack.push_str(&format!("\t_ = {opt_name}\n"));
+    }
+    (go_ty, unpack)
 }
 
 /// The Go value an omitted optional param starts with: its literal Ruby
