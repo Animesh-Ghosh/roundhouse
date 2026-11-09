@@ -2562,6 +2562,14 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
             if let Some(why) = unwritable.into_inner() {
                 return Err(why);
             }
+            // Checked on the result, not trusted to the walk: a read the substitution did not reach
+            // (a `when` pattern) would run unbound, and a pattern match can bind a name of its own.
+            if let Some(name) = reads(&body).into_iter().find(|n| locals.contains_key(n) && !params.contains(n)) {
+                return Err(format!("a block that reads `{}`, a local it closes over, where it cannot be written in", name.as_str()));
+            }
+            if matches_patterns(&body) {
+                return Err("a block with a pattern match, whose patterns may bind a local it closes over".into());
+            }
             Expr::new(span, ExprNode::Lambda {
                 params: params.clone(),
                 rest_param: None,
@@ -2573,6 +2581,21 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
         }
         other => return Err(format!("a routing argument it cannot write ({})", val_kind(other))),
     })
+}
+
+fn reads(e: &Expr) -> Vec<Symbol> {
+    let mut out = Vec::new();
+    if let ExprNode::Var { name, .. } = &*e.node {
+        out.push(name.clone());
+    }
+    e.node.for_each_child(&mut |c| out.extend(reads(c)));
+    out
+}
+
+fn matches_patterns(e: &Expr) -> bool {
+    let mut found = matches!(&*e.node, ExprNode::CaseMatch { .. } | ExprNode::MatchPredicate { .. } | ExprNode::MatchRequired { .. });
+    e.node.for_each_child(&mut |c| found |= matches_patterns(c));
+    found
 }
 
 /// The names `e` binds: nested blocks' parameters and the locals it assigns, either of which makes a
@@ -2588,6 +2611,12 @@ fn rebound(e: &Expr) -> Vec<Symbol> {
     | ExprNode::OpAssign { target: crate::expr::LValue::Var { name, .. }, .. } = &*e.node
     {
         out.push(name.clone());
+    }
+    if let ExprNode::MultiAssign { targets, .. } = &*e.node {
+        out.extend(targets.iter().filter_map(|t| match t {
+            crate::expr::LValue::Var { name, .. } => Some(name.clone()),
+            _ => None,
+        }));
     }
     e.node.for_each_child(&mut |c| out.extend(rebound(c)));
     out
