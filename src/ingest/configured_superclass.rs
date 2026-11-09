@@ -249,6 +249,17 @@ fn initializer_statements<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std:
         let Some(program) = node.as_program_node() else { continue };
         for statement in program.statements().body().iter() {
             // Not a declaration: a class or module body is the library walk's, not a call that runs here.
+            // But what `module Devise` runs as it loads (devise-jwt's bare `add_module(:jwt_authenticatable, strategy: :jwt)`), the same call as a gem's top-level `Devise.add_module`.
+            if let Some(module) = statement.as_module_node()
+                && let Some(read) = module.constant_path().as_constant_read_node()
+                && let Some(body) = module.body().and_then(|b| b.as_statements_node())
+            {
+                let owner = super::util::constant_id_str(&read.name()).to_string();
+                for inner in body.body().iter().filter(|s| s.as_call_node().is_some()) {
+                    let (read, _) = super::prism::scope(|| super::expr::ingest_expr(&inner, &name));
+                    out.extend(read.ok().and_then(|call| super::gem_hooks::module_body_registration(&owner, &call)));
+                }
+            }
             if statement.as_class_node().is_some() || statement.as_module_node().is_some() || statement.as_call_node().is_some_and(|c| matches!(super::util::constant_id_str(&c.name()), "require" | "require_relative" | "autoload")) {
                 continue;
             }
@@ -494,7 +505,8 @@ impl<'a> Eval<'a> {
                         _ => Some(Err(())),
                     }
                 };
-                let confined = super::gem_hooks::confined_writes(&self.known, self.calls.last().map(|c| (c.0.as_str(), c.1.as_str())), e, &devise, &writer);
+                let yields_other = |name: &str| self.lookup_in("Devise", name, MethodReceiver::Class, &mut HashSet::default()).is_some_and(|(def, _)| super::gem_hooks::yields_another_object(&def.body));
+                let confined = super::gem_hooks::confined_writes(&self.known, self.calls.last().map(|c| (c.0.as_str(), c.1.as_str())), e, &devise, &writer, &yields_other);
                 let Some(writes) = confined.or_else(|| self.may_write_with(e, &owner, side, &mut HashSet::default(), &frame.locals)) else {
                     return Err(format!("{why}, in a statement whose writes are not known"));
                 };
@@ -2759,6 +2771,42 @@ mod tests {
         let first = program.statements().body().iter().next().expect("a statement");
         let (expr, _) = super::super::prism::scope(|| super::super::expr::ingest_expr(&first, "t.rb"));
         expr.expect("ingest")
+    }
+
+    fn setup_writes(source: &str, yields_other: &dyn Fn(&str) -> bool) -> Option<HashSet<(String, bool, String)>> {
+        let known: HashSet<String> = ["Devise".to_string()].into_iter().collect();
+        let devise: HashSet<Symbol> = HashSet::default();
+        super::super::gem_hooks::confined_writes(&known, Some(("Devise", "setup")), &statement(source), &devise, &|_| None, yields_other)
+    }
+
+    /// A block handed another object writes none of Devise's settings through it.
+    #[test]
+    fn a_block_handed_another_object_leaves_devises_settings_known() {
+        let writes = setup_writes("Devise.token do |token|\n  token.secret = \"x\"\nend\n", &|m| m == "token").expect("confined");
+        assert!(writes.is_empty(), "{writes:?}");
+    }
+
+    /// What the block writes through `config` is still Devise's, and only that.
+    #[test]
+    fn a_block_handed_another_object_keeps_what_it_writes_through_config() {
+        let writes = setup_writes("Devise.token do |token|\n  Devise.pepper = \"x\"\n  token.secret = \"x\"\nend\n", &|m| m == "token").expect("confined");
+        assert_eq!(writes.into_iter().collect::<Vec<_>>(), vec![("Devise".to_string(), true, "@@pepper".to_string())]);
+    }
+
+    /// A method not known to hand over another object may keep or run the block on Devise: every setting stays unsure.
+    #[test]
+    fn a_devise_method_with_a_block_it_cannot_read_leaves_every_setting_unsure() {
+        let writes = setup_writes("Devise.token do |token|\n  token.secret = \"x\"\nend\n", &|_| false).expect("confined");
+        assert_eq!(writes.into_iter().collect::<Vec<_>>(), vec![("Devise".to_string(), true, "*".to_string())]);
+    }
+
+    #[test]
+    fn only_a_yield_of_another_constants_reader_hands_over_another_object() {
+        let body = |source: &str| statement(source);
+        assert!(super::super::gem_hooks::yields_another_object(&body("yield(Devise::Token.config)\n")));
+        for other in ["yield(self)\n", "yield(Devise.config)\n", "yield(thing)\n", "yield\n", "@@x = 1\n"] {
+            assert!(!super::super::gem_hooks::yields_another_object(&body(other)), "{other}");
+        }
     }
 
     /// A block parameter that shadows a local the frame knows is the block's value, not the local's.

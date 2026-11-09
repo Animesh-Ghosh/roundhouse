@@ -161,3 +161,42 @@ fn devise_authenticated_asks_the_warden_proxy_its_engine_stacks() {
     let guards = std::fs::read_to_string(tree.join("app/models/roundhouse_route_guards.rb")).expect("guards");
     assert!(guards.contains("request.env[\"warden\"].send(:authenticate?, scope: :user) && true"), "{guards}");
 }
+
+/// A gem's `Devise.token` (devise-jwt's `Devise.jwt` is written this way) yields a settings object of the gem's own, not `Devise`:
+/// that `Devise.setup` cannot run it leaves none of Devise's settings unsure, and the routes that read them are still drawn.
+#[test]
+fn devise_for_is_drawn_past_a_setup_block_configuring_another_object() {
+    let gem = "module Devise\n  def self.token\n    yield(Devise::Token.config)\n  end\n\n  module Token\n  end\nend\n";
+    let setup = "Devise.setup do |config|\n  config.mailer_sender = \"please-change-me@example.com\"\n  require \"devise/orm/active_record\"\n  config.token do |token|\n    token.secret = \"x\"\n  end\nend\n";
+    let (routes, helpers) = drawn(
+        app(":database_authenticatable", "  devise_for :users\n")
+            .write("lib/devise_token.rb", gem)
+            .write("config/initializers/devise.rb", setup),
+    );
+    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#), "{routes}");
+    assert!(helpers.contains("def self.new_user_session_path"), "{helpers}");
+}
+
+/// A gem can register its module with a bare `add_module` inside `module Devise` (devise-jwt does): the module is one Devise knows, as `Devise.add_module` makes it.
+#[test]
+fn devise_for_knows_a_module_registered_inside_module_devise() {
+    let (routes, _) = drawn(
+        app(":database_authenticatable, :token_authenticatable", "  devise_for :users\n")
+            .edit("Gemfile.lock", "    devise (4.9.4)\n", "    devise-token (0.1.0)\n      devise (~> 4.0)\n    devise (4.9.4)\n")
+            .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  devise-token\n")
+            .edit("Gemfile", "gem \"devise\"\n", "gem \"devise\"\ngem \"devise-token\"\n")
+            .write("vendor/bundle/ruby/3.4.0/gems/devise-token-0.1.0/lib/devise-token.rb", "module Devise\n  add_module(:token_authenticatable, strategy: :token)\nend\n"),
+    );
+    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#), "{routes}");
+}
+
+/// A `devise` option sets that option on the model and no other: `stretches:` leaves the unlock strategy Devise's, so its unlock routes are drawn.
+/// The option it does read, set on the model, is the model's own: no route is guessed from Devise's default.
+#[test]
+fn devise_for_reads_past_a_model_option_it_does_not_ask_about() {
+    let (routes, _) = drawn(app(":database_authenticatable, :lockable, stretches: 1", "  devise_for :users\n"));
+    assert!(routes.contains(r#"Route.new("GET", "/users/unlock/new", :devise__unlocks, :new)"#), "{routes}");
+
+    let (routes, _) = drawn(app(":database_authenticatable, :lockable, unlock_strategy: :time", "  devise_for :users\n"));
+    assert!(!routes.contains("/users/unlock"), "{routes}");
+}
