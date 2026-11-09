@@ -231,9 +231,9 @@ pub(super) fn push_schema_methods(
         model,
         &table.columns.iter().map(|c| (c.name.clone(), super::ty_of_column_slot(c))).collect(),
         runtime_relation == super::RuntimeRelation::Present,
-        &|attr, value| {
+        &|attr, value, stored| {
             let col = table.columns.iter().find(|c| &c.name == attr)?;
-            enum_normalizer_input(model, col, value)
+            enum_normalizer_input(model, col, value, stored)
         },
     );
     if runtime_relation == super::RuntimeRelation::Present {
@@ -3913,11 +3913,12 @@ fn push_enum_condition_methods(methods: &mut Vec<MethodDef>, model: &Model, tabl
 
 /// What `normalizes` on an enum hands its lambda: the label, as Rails'
 /// enum type casts before the normalizer runs (activerecord 8.1.4). A
-/// blank or nil is nil, and a value no mapping names raises here, before
-/// the lambda sees it.
-fn enum_normalizer_input(model: &Model, col: &Column, value: Expr) -> Option<Expr> {
+/// blank or nil is nil, and a value no mapping names raises, before the
+/// lambda sees it. The stored value the write names, bound to `stored`,
+/// and the label read back from it, through the runtime's enum helpers.
+fn enum_normalizer_input(model: &Model, col: &Column, value: Expr, stored: &Symbol) -> Option<(Expr, Expr)> {
     let (_, _, value_ty) = enum_arrays(model, col)?;
-    let (labels, values, texts) = enum_array_refs(model, col, &value_ty);
+    let (labels, values, _) = enum_array_refs(model, col, &value_ty);
     let text = with_ty(
         Expr::new(
             Span::synthetic(),
@@ -3925,41 +3926,43 @@ fn enum_normalizer_input(model: &Model, col: &Column, value: Expr) -> Option<Exp
         ),
         Ty::Str,
     );
-    let attr = with_ty(lit_str(col.name.as_str().to_string()), Ty::Str);
+    // The `_or_nil` cast on a NOT NULL column too: a blank is nil here, not the zero `enum_int` answers.
+    let cast = enum_int_call_as(model, col, text.clone(), true)?;
+    let read_stored = || with_ty(Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: stored.clone() }), value_ty.clone());
+    let is_nil = with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Send { recv: Some(read_stored()), method: Symbol::from("nil?"), args: vec![], block: None, parenthesized: false }),
+        Ty::Bool,
+    );
     let label_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() };
-    let call = with_ty(
+    let read_label = with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] })),
-                method: Symbol::from("enum_cast"),
-                args: vec![text.clone(), labels, texts.unwrap_or(values), attr],
+                method: Symbol::from(if value_ty == Ty::Int { "enum_label" } else { "enum_label_str" }),
+                args: vec![read_stored(), labels, values],
                 block: None,
                 parenthesized: true,
             },
         ),
         label_ty.clone(),
     );
-    // The mapping's `nil` label is a label too; the arrays leave it out.
-    let Some(label) = enum_nil_label(model, col) else {
-        return Some(call);
+    let nil = with_ty(Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }), Ty::Nil);
+    let label = with_ty(Expr::new(Span::synthetic(), ExprNode::If { cond: is_nil, then_branch: nil, else_branch: read_label }), label_ty.clone());
+    // The mapping's `nil` label is a label too: the cast answers nil for it, and the arrays leave it out.
+    let Some(nil_label) = enum_nil_label(model, col) else {
+        return Some((cast, label));
     };
     let is_label = with_ty(
         Expr::new(
             Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(text),
-                method: Symbol::from("=="),
-                args: vec![with_ty(lit_str(label.clone()), Ty::Str)],
-                block: None,
-                parenthesized: false,
-            },
+            ExprNode::Send { recv: Some(text), method: Symbol::from("=="), args: vec![with_ty(lit_str(nil_label.clone()), Ty::Str)], block: None, parenthesized: false },
         ),
         Ty::Bool,
     );
-    Some(with_ty(
-        Expr::new(Span::synthetic(), ExprNode::If { cond: is_label, then_branch: with_ty(lit_str(label), Ty::Str), else_branch: call }),
-        label_ty,
+    Some((
+        cast,
+        with_ty(Expr::new(Span::synthetic(), ExprNode::If { cond: is_label, then_branch: with_ty(lit_str(nil_label), Ty::Str), else_branch: label }), label_ty),
     ))
 }
 
@@ -4147,9 +4150,13 @@ pub(super) fn enum_constants(model: &Model, table: &Table) -> Vec<(Symbol, Expr)
 }
 
 fn enum_int_call(model: &Model, col: &Column, text: Expr) -> Option<Expr> {
+    enum_int_call_as(model, col, text, matches!(super::ty_of_column_slot(col), Ty::Union { .. }))
+}
+
+/// The enum cast of `text`; `nullable` picks the form that answers nil for a blank.
+fn enum_int_call_as(model: &Model, col: &Column, text: Expr, nullable: bool) -> Option<Expr> {
     let (_, values, value_ty) = enum_arrays(model, col)?;
     let text_for_nil = text.clone();
-    let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. });
     let method = match (&value_ty, nullable) {
         (Ty::Int, false) => "enum_int",
         (Ty::Int, true) => "enum_int_or_nil",

@@ -120,7 +120,7 @@ pub(crate) fn push_normalize_methods(
     model: &Model,
     columns: &HashMap<Symbol, Ty>,
     cast: bool,
-    enum_input: &dyn Fn(&Symbol, Expr) -> Option<Expr>,
+    enum_input: &dyn Fn(&Symbol, Expr, &Symbol) -> Option<(Expr, Expr)>,
 ) {
     let type_class = |ty: &Ty| match ty {
         Ty::Str => Some("String"),
@@ -166,13 +166,15 @@ pub(crate) fn push_normalize_methods(
         //   `ActiveRecord::Type::Integer.new.cast(value)` (blank is nil).
         let cast_value = Symbol::from("cast_value");
         let read_cast = || synthetic(ExprNode::Var { id: VarId(0), name: cast_value.clone() });
-        let enum_cast = if cast { enum_input(&attr, read_value()) } else { None };
+        let stored_value = Symbol::from("stored_value");
+        let enum_cast = if cast { enum_input(&attr, read_value(), &stored_value) } else { None };
         let is_enum = enum_cast.is_some();
         let body = match if cast { type_class(col_ty) } else { None } {
             _ if is_enum => {
+                let (stored, label) = enum_cast.expect("is_enum");
                 let normalized = lambda_with(read_cast());
                 let guarded = if apply_to_nil { normalized } else { if_nil(read_cast(), nil_lit(), normalized) };
-                synthetic(ExprNode::Seq { exprs: vec![assign(&cast_value, enum_cast.expect("is_enum")), guarded] })
+                synthetic(ExprNode::Seq { exprs: vec![assign(&stored_value, stored), assign(&cast_value, label), guarded] })
             }
             Some("String") => {
                 let as_string = synthetic(ExprNode::If {

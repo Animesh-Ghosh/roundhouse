@@ -79,19 +79,6 @@ module ActiveRecord
     text == "" ? nil : enum_str(text, labels, values, attr)
   end
 
-  # The label a write names, by its label or by its stored value's text: what `normalizes` on an enum hands its lambda.
-  # A blank is nil, and a value no label names raises as `enum_int` does.
-  def self.enum_cast(text, labels, texts, attr)
-    found = -1
-    i = 0
-    while i < labels.length
-      found = i if found == -1 && (labels[i] == text || texts[i] == text)
-      i += 1
-    end
-    raise ArgumentError, "'" + text + "' is not a valid " + attr if found == -1 && text != ""
-    found == -1 ? nil : labels[found]
-  end
-
   def self.enum_label_str(value, labels, values)
     found = -1
     i = 0
