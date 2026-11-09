@@ -149,8 +149,16 @@ object Server {
         for ((k, vals) in ctx.queryParamMap()) {
             vals.firstOrNull()?.let { setParam(params, k, it) }
         }
-        for ((k, vals) in ctx.formParamMap()) {
-            vals.firstOrNull()?.let { setParam(params, k, it) }
+        // Read a form body only when the request carries one, as the
+        // crystal/rust/python servers do. `formParamMap` otherwise reads the
+        // (empty) body of every GET through Jetty's request-content lock
+        // (+2-4% GET throughput on the real-blog bench routes without it).
+        val contentType = ctx.contentType() ?: ""
+        if (contentType.startsWith("application/x-www-form-urlencoded") ||
+            contentType.startsWith("multipart/form-data")) {
+            for ((k, vals) in ctx.formParamMap()) {
+                vals.firstOrNull()?.let { setParam(params, k, it) }
+            }
         }
 
         val controller = factory()
