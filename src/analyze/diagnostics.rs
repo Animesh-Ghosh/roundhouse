@@ -811,10 +811,9 @@ fn diagnose_controller_output_collisions(app: &App, out: &mut Vec<Diagnostic>) {
     }
 }
 
-/// [`diagnose`] plus the missing-preload coverage triple, for report
-/// skins that state the denominator (#64: "0 findings" must be
-/// distinguishable from "couldn't check").
-pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
+/// What [`diagnose_with_coverage`] collects before the forwarding, private-call,
+/// filter-target and preload passes: the diagnostics in the order they are reported.
+fn diagnose_head(app: &App) -> Vec<Diagnostic> {
     let mut out = app.routes.diagnostics.clone();
     diagnose_controller_output_collisions(app, &mut out);
     // A `default_url_options` whose path segments the route helpers do not take.
@@ -993,14 +992,36 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     for stmt in &app.boot_program {
         diagnose_expr(stmt, &mut out);
     }
-    out.extend(super::forwarding::diagnose(app));
-    out.extend(super::private_calls::diagnose(app));
-    out.extend(super::filter_targets::diagnose(app));
+    out
+}
 
-    // Static N+1 pass (#64): missing-preload warnings over the typed
-    // query chains, same-procedure and through the controller→view
-    // ivar channel.
-    let (preload_diags, coverage) = preload::missing_preload_report(app);
+/// [`diagnose`] plus the missing-preload coverage triple, for report
+/// skins that state the denominator (#64: "0 findings" must be
+/// distinguishable from "couldn't check").
+pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
+    // The passes after the head read the app alone, as the head does, so they run beside it
+    // and their findings follow the head's, in this order.
+    let (mut out, (forwarding, (private_calls, filter_targets), (preload_diags, coverage))) = super::parallel::join(
+        || diagnose_head(app),
+        || {
+            let (forwarding, (private_calls_and_filters, preload)) = super::parallel::join(
+                || super::forwarding::diagnose(app),
+                || {
+                    super::parallel::join(
+                        || (super::private_calls::diagnose(app), super::filter_targets::diagnose(app)),
+                        // Static N+1 pass (#64): missing-preload warnings over the typed
+                        // query chains, same-procedure and through the controller→view
+                        // ivar channel.
+                        || preload::missing_preload_report(app),
+                    )
+                },
+            );
+            (forwarding, private_calls_and_filters, preload)
+        },
+    );
+    out.extend(forwarding);
+    out.extend(private_calls);
+    out.extend(filter_targets);
     out.extend(preload_diags);
     unshipped_gem_helpers(app, &mut out);
     let refused_gem_sites: crate::det::HashSet<_> = out.iter().filter_map(|diagnostic| {
