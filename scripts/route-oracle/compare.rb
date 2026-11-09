@@ -23,6 +23,9 @@ def read(file)
 end
 
 rails = read(ARGV.fetch(0)).reject { |r| %w[INTERNAL ENGINE RACK].include?(r.endpoint) }
+# Rails' own engines' routes (`/rails/active_storage`, `/rails/action_mailbox`, `/rails/conductor`):
+# roundhouse serves Active Storage from its runtime table, not the app's, so these are counted apart.
+framework, rails = rails.partition { |r| r.path.start_with?("/rails/") }
 ours = read(ARGV.fetch(1))
 # A route roundhouse knows it cannot run (`RoundhouseUnmodeledEndpoint`) is reported, not served.
 unmodeled, ours = ours.partition { |r| r.endpoint.start_with?("RoundhouseUnmodeledEndpoint") }
@@ -67,7 +70,7 @@ names_moved = rails_names.select do |n, shape|
 end.keys
 
 puts "rails #{rails_first.size} routes, roundhouse #{ours_first.size} served (#{refused.values.sum} refused: #{refused.map { |k, v| "#{k.sub("refused:", "")} #{v}" }.join(", ")})"
-puts "known unmodeled endpoints #{unmodeled.size}, guarded #{served.count { |r| r.state == "guarded" }}"
+puts "framework routes (/rails/*) #{framework.size}, known unmodeled endpoints #{unmodeled.size}, guarded #{served.count { |r| r.state == "guarded" }}"
 puts "missing #{missing.size}, extra #{extra.size}, different endpoint #{wrong.size}, helpers missing #{names_missing.size}, helpers at another path #{names_moved.size}"
 puts "\n## missing (Rails serves, roundhouse does not)"; missing.each { |r| puts "  #{r.verb} #{r.path} #{r.endpoint}#{ours.any? { |o| o.key == r.key } ? "  [refused here]" : ""}" }
 puts "\n## extra (roundhouse serves, Rails does not)"; extra.each { |r| puts "  #{r.verb} #{r.path} #{r.endpoint}" }
