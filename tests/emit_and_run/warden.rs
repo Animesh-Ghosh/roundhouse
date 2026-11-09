@@ -1,0 +1,98 @@
+//! Warden on the app's own stack (`config.middleware.use Warden::Manager do … end`), compiled from
+//! its installed source: a request constraint asks the proxy the middleware put in the Rack env.
+
+use roundhouse::build_target::BuildTarget;
+
+use super::emit_and_run;
+
+const VERSION: &str = "1.2.9";
+
+fn installed_warden() -> std::path::PathBuf {
+    let out = std::process::Command::new("ruby")
+        .args(["-e", &format!("print Gem::Specification.find_by_name('warden', '{VERSION}').gem_dir")])
+        .output()
+        .expect("spawn ruby");
+    assert!(out.status.success(), "warden {VERSION} is not installed: {}", String::from_utf8_lossy(&out.stderr));
+    std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn rb_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            rb_files(root, &path, out);
+        } else if path.extension().is_some_and(|e| e == "rb") {
+            out.push(path.strip_prefix(root).unwrap().to_path_buf());
+        }
+    }
+}
+
+const ROUTES: &str = r#"  constraints ->(req) { req.env["warden"].authenticated?(:user) } do
+    get "/dashboard", to: "articles#index"
+  end
+"#;
+
+fn app() -> emit_and_run::Overlay {
+    let gem = installed_warden();
+    let fixture = roundhouse::fixtures::real_blog();
+    let lock = std::fs::read_to_string(fixture.join("Gemfile.lock")).unwrap();
+    let lock = lock
+        // Not a bare "    rack (": a dependency line ("      rack (>= 2.2.4)") holds it too.
+        .replacen("\n    rack (", &format!("\n    warden ({VERSION})\n      rack (>= 2.0.9)\n    rack ("), 1)
+        .replacen("DEPENDENCIES\n", "DEPENDENCIES\n  warden\n", 1);
+    let gemfile = std::fs::read_to_string(fixture.join("Gemfile")).unwrap() + "gem \"warden\"\n";
+    let mut overlay = emit_and_run::real_blog()
+        .write("Gemfile", &gemfile)
+        .write("Gemfile.lock", &lock)
+        .write(".bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n")
+        .edit(
+            "config/application.rb",
+            "  class Application < Rails::Application\n",
+            "  class Application < Rails::Application\n    config.middleware.use Warden::Manager do |manager|\n      manager.default_scope = :user\n    end\n",
+        )
+        .edit("config/routes.rb", "  root \"articles#index\"\n", &format!("  root \"articles#index\"\n{ROUTES}"));
+    let mut files = Vec::new();
+    rb_files(&gem, &gem.join("lib"), &mut files);
+    for file in files {
+        let text = std::fs::read_to_string(gem.join(&file)).unwrap();
+        overlay = overlay.write(&format!("vendor/bundle/ruby/3.4.0/gems/warden-{VERSION}/{}", file.display()), &text);
+    }
+    overlay
+}
+
+/// The app's `use` stacks the gem's class with its block, and the tree requires the gem it names.
+#[test]
+fn the_apps_own_middleware_use_stacks_warden_with_its_block() {
+    let (tree, _) = app().emit(BuildTarget::Ruby);
+    let stack = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    assert!(stack.contains("Warden::Manager.new(app) { |manager|\nmanager.default_scope = :user\n}"), "{stack}");
+    let gemfile = std::fs::read_to_string(tree.join("Gemfile")).expect("Gemfile");
+    assert!(gemfile.contains("gem \"warden\", \"= 1.2.9\""), "{gemfile}");
+}
+
+// Not `assert_passes`: warden's source still reports what Spinel cannot compile (`Rack::Response`, a runtime `extend`); CRuby runs the installed gem.
+/// The constraint asks `env["warden"]`, typed as the `Warden::Proxy` the manager's `call(env)` writes:
+/// with no user in the session the route is not there, and the session's user lets it through.
+#[test]
+fn a_constraint_asks_the_warden_proxy_with_the_session_restored_before_the_routes() {
+    let run = app().run_ruby(
+        r##"
+def hit(path, cookie = nil)
+  env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "", "REMOTE_ADDR" => "127.0.0.1",
+          "HTTP_HOST" => "localhost", "rack.input" => StringIO.new("") }
+  env["HTTP_COOKIE"] = cookie if cookie
+  Main.run_rack(env)
+end
+status, = hit("/dashboard")
+raise "anonymous: #{status}" unless status == 404
+key = Rails.application.session_cookie_key
+# Not a record: with no `serialize_from_session`, Warden reads back the stored value itself.
+signed = ActionDispatch::Session.signed_cookie("warden.user.user.key=42", key)
+status, = hit("/dashboard", "#{key}=#{CgiIo.url_encode(signed)}")
+raise "signed in: #{status}" unless status == 200
+puts "warden passed"
+"##,
+    );
+    assert!(!run.errors.iter().any(|e| e.contains("request constraint")), "{:#?}", run.errors);
+    assert!(run.success && run.stdout.contains("warden passed"), "{}\n{}", run.stdout, run.stderr);
+}

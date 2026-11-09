@@ -146,6 +146,9 @@ pub struct App {
     /// as brace-block Ruby the stack hands the constructor.
     #[serde(default, skip_serializing_if = "crate::det::HashMap::is_empty")]
     pub gem_middleware_blocks: crate::det::HashMap<String, String>,
+    /// The Rack env keys a stacked middleware writes, and the class there (`"warden"` → `Warden::Proxy`).
+    #[serde(default, skip_serializing_if = "crate::det::HashMap::is_empty")]
+    pub rack_env_writes: crate::det::HashMap<String, String>,
     /// The insertions it could not read, reported by analyze.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gem_middleware_refusals: Vec<crate::diagnostic::Diagnostic>,
@@ -1289,6 +1292,7 @@ impl App {
             boot_gem_constants: Vec::new(),
             gem_middlewares: Vec::new(),
             gem_middleware_blocks: Default::default(),
+            rack_env_writes: Default::default(),
             gem_middleware_refusals: Vec::new(),
             included_hoist_conflicts: Vec::new(),
             superclass_refusals: Vec::new(),

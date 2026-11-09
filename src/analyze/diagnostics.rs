@@ -1154,7 +1154,7 @@ fn route_guard_untyped_sends(app: &App) -> Vec<Diagnostic> {
         // Not one every object answers (`params["id"].nil?`): that cannot raise, whatever the value is.
         if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node
             && !matches!(method.as_str(), "nil?" | "==" | "!=" | "!" | "equal?" | "is_a?" | "kind_of?" | "instance_of?" | "respond_to?" | "to_s" | "inspect" | "frozen?" | "hash" | "class")
-            && (matches!(r.ty, Some(Ty::Untyped)) || is_unknown_ty(r.ty.as_ref()) || is_unknown_ty(expr.ty.as_ref()))
+            && (gradual(r.ty.as_ref()) || is_unknown_ty(r.ty.as_ref()) || is_unknown_ty(expr.ty.as_ref()))
             && expr.diagnostic().is_none()
         {
             out.push(Diagnostic::unsupported(
@@ -1176,6 +1176,15 @@ fn route_guard_untyped_sends(app: &App) -> Vec<Diagnostic> {
         }
     }
     out
+}
+
+/// Not `Untyped` alone: a Hash read of an untyped value is `untyped | nil`, still nothing the router can check.
+fn gradual(ty: Option<&Ty>) -> bool {
+    match ty {
+        Some(Ty::Untyped) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| gradual(Some(v))),
+        _ => false,
+    }
 }
 
 fn is_unknown_ty(ty: Option<&Ty>) -> bool {
