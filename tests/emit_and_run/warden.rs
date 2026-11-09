@@ -72,7 +72,6 @@ fn the_apps_own_middleware_use_stacks_warden_with_its_block() {
     assert!(gemfile.contains("gem \"warden\", \"= 1.2.9\""), "{gemfile}");
 }
 
-// Not `assert_passes`: warden's source still reports what Spinel cannot compile (`Rack::Response`, a runtime `extend`); CRuby runs the installed gem.
 /// The constraint asks `env["warden"]`, typed as the `Warden::Proxy` the manager's `call(env)` writes:
 /// with no user in the session the route is not there, and the session's user lets it through.
 #[test]
@@ -99,8 +98,18 @@ raise "session cookies: #{headers.inspect}" unless session_cookies.length == 1 &
 puts "warden passed"
 "##,
     );
-    assert!(!run.errors.iter().any(|e| e.contains("request constraint")), "{:#?}", run.errors);
-    assert!(run.success && run.stdout.contains("warden passed"), "{}\n{}", run.stdout, run.stderr);
+    run.assert_passes();
+    assert!(run.stdout.contains("warden passed"), "{}", run.stdout);
+}
+
+/// What stops Warden on Spinel, reported rather than left to the C build: `Warden::Hooks#_run_callbacks`
+/// calls `send("_#{kind}")`, and the kinds reach it through `Manager#_run_callbacks(*args)`.
+/// The gem's code the app does not reach (its test helpers, `Strategies.add`) is no error.
+#[test]
+fn the_spinel_tree_reports_the_computed_send_warden_runs_its_callbacks_by() {
+    let (_, errors) = app().emit(BuildTarget::Spinel);
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(errors[0].contains("dynamic send not supported (spinel)"), "{errors:#?}");
 }
 
 // Not through an emitted app: the ruby family loads rack's own Rack::Response, so only Spinel runs the port.

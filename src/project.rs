@@ -9428,6 +9428,20 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 format!("`{}` requires a runtime class object; this form is supported on Ruby and JRuby only", method.as_str()),
             );
         }
+        // Not left to the C build: Spinel resolves a computed name only for a writer it hands a value (`__send__("#{k}=", v)`).
+        if target == "spinel"
+            && let crate::expr::ExprNode::Send { method, args, .. } = &*expr.node
+            && matches!(method.as_str(), "send" | "public_send" | "__send__")
+            && let [name] = args.as_slice()
+            && matches!(&*name.node, crate::expr::ExprNode::StringInterp { .. })
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "dynamic send",
+                format!("`{}` calls a method whose name is built when it runs, which Spinel resolves only for a writer it hands a value", method.as_str()),
+            );
+        }
         // A name computed when it runs: the Ruby family defines it then, which no compiled target can.
         if !matches!(target, "jruby")
             && let crate::expr::ExprNode::Send { recv, method, args, .. } = &*expr.node
