@@ -69,6 +69,13 @@ end
     render json: { logged: request.filtered_parameters }
   end
 
+  def plural_kind
+    value = params[:kind]
+    permitted = params.permit(:kind).to_h
+    from_hash = permitted[:kind]
+    render plain: value.pluralize.capitalize + "|" + from_hash.pluralize.capitalize + "|" + value.pluralize(1)
+  end
+
   def invalid
     Widget.create!(name: nil)
     head :ok
@@ -109,6 +116,7 @@ end
   get "/widgets/admins", to: "widgets#admins"
   post "/widgets/staged", to: "widgets#staged"
   post "/widgets/filtered", to: "widgets#filtered"
+  get "/widgets/plural_kind", to: "widgets#plural_kind"
   post "/widgets/invalid", to: "widgets#invalid"
   get "/widgets/labels", to: "widgets#labels"
   resources :widgets, only: %i[show]
@@ -176,6 +184,10 @@ fn api_parity_round4_fixes_run_on_spinel() {
     assert_eq!(labels.body, r#"{"labels":["g2"],"loaded":false}"#, "safe-nav chains:\n{}", server.log());
     let none = server.get("/widgets/labels?name=none");
     assert_eq!(none.body, r#"{"labels":null,"loaded":false}"#, "safe-nav nil:\n{}", server.log());
+
+    // `String#pluralize` on a request value (Rails 8.1.4).
+    let plural = server.get("/widgets/plural_kind?kind=status");
+    assert_eq!(plural.body, "Statuses|Statuses|status", "pluralize:\n{}", server.log());
 
     let show = server.get("/widgets/1.json");
     assert_eq!(
