@@ -1,6 +1,8 @@
 //! Warden on the app's own stack (`config.middleware.use Warden::Manager do … end`), compiled from
 //! its installed source: a request constraint asks the proxy the middleware put in the Rack env.
 
+#[path = "../support/prerequisite.rs"]
+mod prerequisite;
 use roundhouse::build_target::BuildTarget;
 
 use super::emit_and_run;
@@ -95,4 +97,36 @@ puts "warden passed"
     );
     assert!(!run.errors.iter().any(|e| e.contains("request constraint")), "{:#?}", run.errors);
     assert!(run.success && run.stdout.contains("warden passed"), "{}\n{}", run.stdout, run.stderr);
+}
+
+// Not through an emitted app: the ruby family loads rack's own Rack::Response, so only Spinel runs the port.
+#[test]
+fn the_spinel_rack_response_port_answers_as_rack_does() {
+    let rack = std::process::Command::new("ruby").args(["-rrack", "-e", "1"]).status();
+    if !rack.is_ok_and(|s| s.success()) {
+        prerequisite::missing("ruby with the rack gem not available");
+        return;
+    }
+    let script = r#"
+p Rack::Response.new.finish
+p Rack::Response.new("hi", 201, { "X-Own" => "1" }).finish
+r = Rack::Response.new(["a", "b"])
+p [r.write("cd"), r.length, r.finish]
+r = Rack::Response.new
+r.redirect("/next")
+p [r.status, r.location, r["Location"], r.redirect?, r.successful?, r.finish]
+p Rack::Response.new("gone", 204, { "Content-Type" => "text/plain" }).finish
+r = Rack::Response.new("x", 404)
+r.content_type = "text/html"
+p [r.not_found?, r.client_error?, r.content_type, r.has_header?("CONTENT-TYPE"), r.delete_header("content-type"), r.headers]
+"#;
+    let run = |prelude: String| {
+        let out = std::process::Command::new("ruby").args(["-e", &(prelude + script)]).output().expect("spawn ruby");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let port = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/spinel/rack_response.rb");
+    let ported = run(format!("load {:?}\n", port.display().to_string()));
+    let rack = run("require \"rack\"\n".to_string());
+    assert_eq!(ported, rack);
 }

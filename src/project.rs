@@ -4978,8 +4978,8 @@ fn ruby_family_runtime_files(
     let (mut files, test_stems) = spinel_files(app, fixture, param_binds)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/faye_websocket.rb");
-    // Spinel's stand-ins for rack's Rack::Request and Ruby's SimpleDelegator: the ruby family's gems load the real ones.
-    files.retain(|(p, _)| p != "runtime/rack_request.rb" && p != "runtime/delegate_spinel.rb");
+    // Spinel's stand-ins for rack's Rack::Request and Rack::Response and Ruby's SimpleDelegator: the ruby family's gems load the real ones.
+    files.retain(|(p, _)| p != "runtime/rack_request.rb" && p != "runtime/rack_response.rb" && p != "runtime/delegate_spinel.rb");
     // The spinel SQL-functions file is FFI; CRuby writes its own below
     // (the sqlite3 gem's `create_function`), JRuby has none yet.
     files.retain(|(p, _)| p != "runtime/sql_functions.rb");
