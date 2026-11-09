@@ -75,6 +75,22 @@ const CONTROLLER: &str = r#"class GadgetsController < ApplicationController
     respond_with(@article) { |format| format.any(:json) { render plain: "json-arm" } }
   end
 
+  def blk_bare_any
+    @article = Article.new
+    @article.valid?
+    respond_with(@article) { |format| format.any { render plain: "wildcard-arm" } }
+  end
+
+  def blk_navigational
+    @article = Article.new
+    respond_with(@article) { |format| format.any(*navigational_formats) { render plain: "navigational-arm" } }
+  end
+
+  def blk_unread
+    @article = Article.new
+    respond_with(@article) { |format| format.any(*other_formats) { render plain: "unread-arm" } }
+  end
+
   def computed
     @article = Article.new(title: "x", body: "a body long enough to pass")
     respond_with @article, plain_options
@@ -97,6 +113,14 @@ const CONTROLLER: &str = r#"class GadgetsController < ApplicationController
   end
 
   private
+
+  def navigational_formats
+    [:html]
+  end
+
+  def other_formats
+    [:json]
+  end
 
   def plain_options
     { only: [:title] }
@@ -132,6 +156,9 @@ const ROUTES: &str = r#"  get "g/new", to: "gadgets#new"
   post "g/stat", to: "gadgets#stat"
   post "g/blk_json", to: "gadgets#blk_json"
   post "g/nearest", to: "nearest_gadgets#create"
+  post "g/blk_bare_any", to: "gadgets#blk_bare_any"
+  post "g/blk_navigational", to: "gadgets#blk_navigational"
+  post "g/blk_unread", to: "gadgets#blk_unread"
   post "g/computed", to: "gadgets#computed"
   post "g/ordered", to: "gadgets#ordered"
   post "g/computed_location", to: "gadgets#computed_location"
@@ -182,6 +209,8 @@ end
   ["POST",   "/g/stat",    "",       302, "/done", ""],
   ["POST",   "/g/nearest", "",       422, "/done", "nearest-new"],
   ["POST",   "/g/blk_json", "",      200, nil,     "new-template"],
+  ["POST",   "/g/blk_bare_any", "",  200, nil,     "new-template"],
+  ["POST",   "/g/blk_navigational", "", 200, nil,  "navigational-arm"],
   ["POST",   "/g/computed", "",      200, nil,     "computed-template"],
   ["POST",   "/g/ordered", "",       200, nil,     "resource,options"],
 ].each do |verb, path, query, status, location, body|
@@ -190,7 +219,7 @@ end
   raise "#{verb} #{path}?#{query}: got #{got.inspect}, want #{[status, location, body].inspect}" unless ok
 end
 # Not modeled: these must fail, not answer with a response Rails wouldn't give.
-["/g/computed_location", "/g/several"].each do |path|
+["/g/computed_location", "/g/several", "/g/blk_unread"].each do |path|
   got = begin
     hit("POST", path)
   rescue ArgumentError, NoMethodError, NameError

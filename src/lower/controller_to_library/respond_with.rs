@@ -127,10 +127,11 @@ fn is_pure(expr: &Expr) -> bool {
 }
 
 /// The html arm a `respond_with` block gives: the body of `format.html { … }` or
-/// `format.any(…) { … }`, or a call of a forwarded `&block`. `None` when the block has no such arm.
-fn block_html_arm(block: &Expr) -> Option<Expr> {
-    let ExprNode::Lambda { body, params, .. } = &*block.node else { return None };
-    let format_param = params.first().map(|p| p.as_str().to_string())?;
+/// `format.any(…) { … }` naming html, or a call of a forwarded `&block`. `Ok(None)` when the block has no
+/// such arm, `Err` when it has an arm whose formats this cannot read.
+fn block_html_arm(block: &Expr) -> Result<Option<Expr>, ()> {
+    let ExprNode::Lambda { body, params, .. } = &*block.node else { return Ok(None) };
+    let Some(format_param) = params.first().map(|p| p.as_str().to_string()) else { return Ok(None) };
     let stmts: Vec<&Expr> = match &*body.node {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![body],
@@ -140,23 +141,34 @@ fn block_html_arm(block: &Expr) -> Option<Expr> {
         if !matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == format_param) || !matches!(method.as_str(), "html" | "any" | "all") {
             continue;
         }
-        // `format.any(:json)` answers those formats only; an html request falls through to the default response.
-        let names_html = args.iter().any(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "html"));
-        if method.as_str() != "html" && !args.is_empty() && !names_html {
-            continue;
+        // `format.any(:json)` answers those formats only, and a bare `format.any` adds a wildcard beside the html
+        // entry `respond_to :html` made: either way an html request falls through to the default response.
+        if method.as_str() != "html" {
+            let names_html = args.iter().any(|a| match &*a.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str() == "html",
+                // Devise's `format.any(*navigational_formats, &block)`, html among them by default.
+                ExprNode::Splat { value } => matches!(&*value.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "navigational_formats"),
+                _ => false,
+            });
+            if !names_html {
+                if args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. })) {
+                    return Err(());
+                }
+                continue;
+            }
         }
         match arm {
             Some(arm) => {
                 if let ExprNode::Lambda { body, .. } = &*arm.node {
-                    return Some(body.clone());
+                    return Ok(Some(body.clone()));
                 }
                 // `&block`: the block the enclosing method was given is the arm.
-                return Some(call(Some(arm.clone()), "call", vec![], arm.span));
+                return Ok(Some(call(Some(arm.clone()), "call", vec![], arm.span)));
             }
-            None => return None,
+            None => return Ok(None),
         }
     }
-    None
+    Ok(None)
 }
 
 /// `respond_with` rewritten to the navigational response, or `None` for a shape this does not read
@@ -169,7 +181,7 @@ fn lower_call(call_expr: &Expr, facts: &Facts<'_>) -> Option<Expr> {
     }
     let mut args: Vec<Expr> = args.clone();
     if let Some(block) = block {
-        if let Some(arm) = block_html_arm(block) {
+        if let Some(arm) = block_html_arm(block).ok()? {
             // The block is the html response; the responders' arguments only pass to a block the block ignores.
             let mut stmts: Vec<Expr> = args
                 .into_iter()
