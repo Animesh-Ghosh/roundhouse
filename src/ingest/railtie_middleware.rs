@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use ruby_prism::Node;
 
 use crate::diagnostic::Diagnostic;
+use crate::expr::Expr;
 use crate::span::Span;
 use crate::vfs::Vfs;
 
@@ -54,11 +55,15 @@ pub(super) struct Stack {
     /// Where each stacked `config.middleware.use` of the app's `config/application.rb` starts.
     pub application_taken: Vec<u32>,
     pub diags: Vec<Diagnostic>,
+    /// An initializer's loop that inserts a middleware per element (`Devise.omniauth_configs.each do … use … end`): the
+    /// collection, and the refusal that stands unless the app's settings leave it empty.
+    pub loops: Vec<(Expr, Diagnostic)>,
 }
 
 pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -> Stack {
     let mut out = Vec::new();
     let mut diags = Vec::new();
+    let mut loops = Vec::new();
     // Not this gem's constants alone: Devise's engine stacks Warden's `Warden::Manager`, another source gem's class.
     let mut every_lib_file = Vec::new();
     for lib in gem_libs {
@@ -99,12 +104,12 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
                 let file_id = super::sources::register(&name, &String::from_utf8_lossy(&bytes));
                 if matches!(loaded, Loading::Autoload | Loading::Unknown) {
                     // Not reported for a Railtie that inserts no middleware (acts_as_follower's): its loading changes no stack.
-                    let (mut probe_uses, mut probe_diags) = (Vec::new(), Vec::new());
+                    let (mut probe_uses, mut probe_diags, mut probe_loops) = (Vec::new(), Vec::new(), Vec::new());
                     for stmt in flatten_statements(body) {
-                        read_initializer(&stmt, file_id, &lexical, &mut probe_uses, &mut probe_diags);
+                        read_initializer(&stmt, file_id, &name, &lexical, &mut probe_uses, &mut probe_diags, &mut probe_loops);
                         read_class_body_use(&stmt, file_id, &lexical, false, &mut probe_uses, &mut probe_diags);
                     }
-                    if probe_uses.is_empty() && probe_diags.is_empty() {
+                    if probe_uses.is_empty() && probe_diags.is_empty() && probe_loops.is_empty() {
                         continue;
                     }
                     let loc = class.location();
@@ -122,7 +127,7 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
                     continue;
                 }
                 for stmt in flatten_statements(body) {
-                    read_initializer(&stmt, file_id, &lexical, &mut uses, &mut diags);
+                    read_initializer(&stmt, file_id, &name, &lexical, &mut uses, &mut diags, &mut loops);
                     read_class_body_use(&stmt, file_id, &lexical, false, &mut uses, &mut diags);
                 }
             }
@@ -171,7 +176,7 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
     let blocks = out.iter().filter_map(|(class, _, _, block, _)| block.clone().map(|b| (class.clone(), b))).collect();
     let classes: Vec<String> = out.into_iter().map(|(class, _, _, _, _)| class).collect();
     let env_writes = env_writes(vfs, &every_lib_file, &classes, &every_gem_defines);
-    Stack { classes, blocks, env_writes, application_taken, diags }
+    Stack { classes, blocks, env_writes, application_taken, diags, loops }
 }
 
 /// `env["warden"] = Proxy.new(env, self)`: a top-level statement of a stacked class's `call(env)`,
@@ -529,13 +534,33 @@ fn rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The receiver of `coll.each do … end` (or `each_value`/`each_key`/`each_pair`), when it is a call chain rooted at a constant.
+fn each_collection<'p>(stmt: &Node<'p>) -> Option<Node<'p>> {
+    let call = stmt.as_call_node()?;
+    if !matches!(constant_id_str(&call.name()), "each" | "each_value" | "each_key" | "each_pair") || call.arguments().is_some() {
+        return None;
+    }
+    call.block()?.as_block_node()?;
+    let recv = call.receiver()?;
+    let mut root = recv.as_call_node()?;
+    loop {
+        match root.receiver() {
+            Some(r) if r.as_constant_read_node().is_some() || r.as_constant_path_node().is_some() => return Some(recv),
+            Some(r) => root = r.as_call_node()?,
+            None => return None,
+        }
+    }
+}
+
 /// `initializer "…" do |app| app.middleware.use(K) end`.
 fn read_initializer(
     stmt: &Node<'_>,
     file: crate::span::FileId,
+    path: &str,
     lexical: &[String],
     uses: &mut Vec<Use>,
     diags: &mut Vec<Diagnostic>,
+    loops: &mut Vec<(Expr, Diagnostic)>,
 ) {
     let Some(call) = stmt.as_call_node() else { return };
     if constant_id_str(&call.name()) != "initializer" || call.receiver().is_some() {
@@ -571,12 +596,16 @@ fn read_initializer(
         let Some(use_call) = direct else {
             // Not passed over: a middleware inserted under a condition, a loop or a hook is one Rails may run.
             if String::from_utf8_lossy(loc.as_slice()).contains(".middleware") {
-                diags.push(Diagnostic::unsupported(
+                let refusal = Diagnostic::unsupported(
                     span,
                     None,
                     "railtie middleware",
                     "a middleware inserted under a condition or inside another statement: only a plain `app.middleware.use(Klass)` is put on the emitted stack".to_string(),
-                ));
+                );
+                match each_collection(&inner).and_then(|c| super::expr::ingest_expr(&c, path).ok()) {
+                    Some(collection) => loops.push((collection, refusal)),
+                    None => diags.push(refusal),
+                }
             }
             continue;
         };

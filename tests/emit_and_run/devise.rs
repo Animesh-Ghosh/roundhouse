@@ -149,6 +149,20 @@ fn devise_puts_warden_on_the_middleware_stack_with_its_configuring_block() {
     let (tree, errors) = app(":database_authenticatable", "  devise_for :users\n").emit(BuildTarget::Ruby);
     let stack = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
     assert!(stack.contains("Warden::Manager.new(app) { |config|\nDevise.warden_config = config\n}"), "{stack}\n{errors:#?}");
+    // Not refused: with no `config.omniauth`, the engine's loop over `Devise.omniauth_configs` inserts nothing.
+    assert!(!errors.iter().any(|e| e.contains("railtie middleware")), "{errors:#?}");
+}
+
+/// A provider the app configures is a middleware the engine's loop inserts, which the stack does not hold.
+#[test]
+fn an_omniauth_provider_keeps_the_engines_middleware_loop_refused() {
+    let (_, errors) = app(":database_authenticatable", "  devise_for :users\n")
+        .write(
+            "config/initializers/devise.rb",
+            "Devise.setup do |config|\n  config.mailer_sender = \"please-change-me@example.com\"\n  require \"devise/orm/active_record\"\n  config.omniauth :github, \"id\", \"secret\"\nend\n",
+        )
+        .emit(BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("railtie middleware") && e.contains("inserted under a condition")), "{errors:#?}");
 }
 
 /// `authenticated :user` with no block: Devise's `block.nil? || block.call(…)` is `true` once the

@@ -2695,6 +2695,22 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
     Ok((eval.drawn.pop().unwrap_or_default(), eval.omitted))
 }
 
+/// An engine initializer's loop that inserts a middleware per element: over a collection the app's own
+/// initializers leave empty (no `config.omniauth` for `Devise.omniauth_configs`), Rails inserts none.
+pub(super) fn fold_middleware_loops<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App, loops: Vec<(Expr, crate::diagnostic::Diagnostic)>) {
+    if loops.is_empty() {
+        return;
+    }
+    let initializers = initializer_statements(vfs, dir, &[]);
+    for (collection, refusal) in loops {
+        let empty = matches!(Eval::new(app).answer_value(&collection, &initializers), Ok(Val::Hash(e)) if e.is_empty())
+            || matches!(Eval::new(app).answer_value(&collection, &initializers), Ok(Val::Array(e)) if e.is_empty());
+        if !empty {
+            app.gem_middleware_refusals.push(refusal);
+        }
+    }
+}
+
 pub(super) fn initializers_of<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path::PathBuf]) -> Vec<Expr> {
     initializer_statements(vfs, dir, gem_dirs)
 }
