@@ -1056,7 +1056,7 @@ pub(crate) fn apply_post_analyze_lowerings_for(
     ran!("authenticate_by");
     // After authenticate_by: its expansion is a `find_by` whose keyword
     // a `normalizes` declaration applies to.
-    normalizes::apply_normalizes_finder_lowering(app);
+    normalizes::apply_normalizes_finder_lowering(app, target);
     ran!("normalizes");
     dead_default::apply_dead_default_lowering(app, registry);
     ran!("dead_default");

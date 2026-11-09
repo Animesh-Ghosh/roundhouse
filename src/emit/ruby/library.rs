@@ -11550,6 +11550,9 @@ fn enum_default_input(model: &crate::dialect::Model, column: &Symbol, seed: &Exp
 /// what was assigned, not what `normalizes` made of it (activerecord
 /// 8.1.4), and the remembered input mustn't call the normalizer again.
 fn before_normalizer(input: Expr, column: &Symbol) -> Expr {
+    if matches!(&*input.node, ExprNode::Var { name, .. } if name.as_str() == crate::lower::normalizes::NORMALIZED_LOCAL) {
+        return sp_expr(ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("value") });
+    }
     if let ExprNode::Send { method, args, .. } = &*input.node
         && method.as_str() == format!("_normalize_{}", column.as_str())
         && let [assigned] = args.as_slice()
