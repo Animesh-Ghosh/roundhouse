@@ -3607,6 +3607,8 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     let view_ivars = view_assigned_ivars(app);
     // Instance-method names the app defines anywhere that collide with a
     // framework view helper; only these need the ancestry lookup above.
+    let app_defines_pluralize =
+        lcs.iter().any(|lc| lc.methods.iter().any(|m| m.name.as_str() == "pluralize"));
     let app_framework_helper_names: BTreeSet<String> = app
         .models
         .iter()
@@ -3748,6 +3750,7 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                     &own_params,
                     &app.view_visible_controller_methods,
                 );
+                ground_string_pluralize(default, app_defines_pluralize);
                 if is_helper_module {
                     rewrite_helper_ivars(default, &helper_ivars);
                 }
@@ -3762,6 +3765,7 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &own_params,
                 &app.view_visible_controller_methods,
             );
+            ground_string_pluralize(&mut m.body, app_defines_pluralize);
             // A CONTROLLER IVAR read in a helper body. Rails mixes
             // helpers into the view instance, which carries the
             // controller's assigns, so `@room` there IS the
@@ -4839,6 +4843,52 @@ fn bang_to_reassign(expr: &mut Expr) {
     }
 }
 
+/// ActiveSupport `String#pluralize` / `String#pluralize(count)`, inflection
+/// of the string ITSELF (singular when count == 1, else the plural),
+/// distinct from the count-labeling `Inflector.pluralize(count, word)`.
+/// Spinel can't reopen the built-in String, so the call lands on the
+/// ruby-family `Inflector.pluralize_word` module function. A value read
+/// out of `params` or an untyped Hash reaches here as untyped or nilable,
+/// so those receivers count too, unless the app defines a `pluralize` of
+/// its own that such a receiver could be dispatching to.
+fn ground_string_pluralize(expr: &mut Expr, app_defines_pluralize: bool) {
+    expr.node.for_each_child_mut(&mut |c| ground_string_pluralize(c, app_defines_pluralize));
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node else { return };
+    if method.as_str() != "pluralize" || args.len() > 1 {
+        return;
+    }
+    let Some(ty) = r.ty.as_ref() else { return };
+    let string_receiver = matches!(ty, crate::ty::Ty::Str)
+        || (!app_defines_pluralize && pluralize_receiver_may_be_string(ty));
+    if !string_receiver {
+        return;
+    }
+    let span = expr.span;
+    let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+    let ExprNode::Send { recv, args, .. } = node else { unreachable!() };
+    let count = args.into_iter().next().unwrap_or_else(|| Expr::new(span, ExprNode::Lit { value: Literal::Nil }));
+    *expr.node = ExprNode::Send {
+        recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Inflector")] })),
+        method: Symbol::from("pluralize_word"),
+        args: vec![recv.unwrap(), count],
+        block: None,
+        parenthesized: true,
+    };
+}
+
+/// A String or untyped value, possibly nilable (a Hash read nests the nil).
+fn pluralize_receiver_may_be_string(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Str | Ty::Untyped => true,
+        Ty::Union { variants } => {
+            variants.iter().any(|v| !matches!(v, Ty::Nil))
+                && variants.iter().all(|v| matches!(v, Ty::Nil) || pluralize_receiver_may_be_string(v))
+        }
+        _ => false,
+    }
+}
+
 fn rewrite_helper_calls(
     expr: &mut Expr,
     index: &HashMap<Symbol, ClassId>,
@@ -4881,36 +4931,6 @@ fn rewrite_helper_calls(
     {
         for statement in statements {
             bang_to_reassign(statement);
-        }
-    }
-
-    // ActiveSupport `String#pluralize(count)` — count-aware inflection of
-    // the string ITSELF (singular when count == 1, else the inflected
-    // plural), distinct from the count-labeling `Inflector.pluralize(count,
-    // word)` grounded below. Spinel can't reopen the built-in String, so
-    // lower the String-receiver form to the ruby-family `Inflector.
-    // pluralize_word` module function. String-typed receiver only, so a
-    // model's own one-arg `pluralize` (should one exist) is left alone.
-    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node {
-        if method.as_str() == "pluralize"
-            && args.len() == 1
-            && matches!(r.ty, Some(crate::ty::Ty::Str))
-        {
-            let span = expr.span;
-            let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
-            let ExprNode::Send { recv, args, .. } = node else { unreachable!() };
-            let count = args.into_iter().next().unwrap();
-            *expr.node = ExprNode::Send {
-                recv: Some(Expr::new(
-                    span,
-                    ExprNode::Const { path: vec![Symbol::from("Inflector")] },
-                )),
-                method: Symbol::from("pluralize_word"),
-                args: vec![recv.unwrap(), count],
-                block: None,
-                parenthesized: true,
-            };
-            return;
         }
     }
 
