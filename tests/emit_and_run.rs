@@ -21955,3 +21955,5 @@ fn join_nil_renders_as_rails() {
 mod cable_connection_request;
 #[path = "emit_and_run/route_loop_index.rs"]
 mod route_loop_index;
+#[path = "emit_and_run/deprecation.rs"]
+mod deprecation;

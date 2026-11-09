@@ -153,6 +153,16 @@ fn devise_puts_warden_on_the_middleware_stack_with_its_configuring_block() {
     assert!(!errors.iter().any(|e| e.contains("railtie middleware")), "{errors:#?}");
 }
 
+/// Devise's `require 'responders'` compiles the responders gem too, though its `ActionController::Responder`
+/// names no namespace of its own: Devise's Responder then settles `respond_to?(:error_status=)` on it.
+#[test]
+fn devise_compiles_the_responders_it_requires() {
+    let (tree, errors) = app(":database_authenticatable", "  devise_for :users\n").emit(BuildTarget::Spinel);
+    let responder = std::fs::read_to_string(tree.join("app/models/action_controller/responder.rb")).expect("responder.rb");
+    assert!(responder.contains("class Responder"), "{responder}");
+    assert!(!errors.iter().any(|e| e.contains("devise/controllers/responder.rb")), "{errors:#?}");
+}
+
 /// A provider the app configures is a middleware the engine's loop inserts, which the stack does not hold.
 #[test]
 fn an_omniauth_provider_keeps_the_engines_middleware_loop_refused() {

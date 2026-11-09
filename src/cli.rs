@@ -224,6 +224,8 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     };
     let mut analyzer = Analyzer::for_source(&app);
     crate::timings::phase("analyze", || analyzer.analyze(&mut app));
+    // Not left to lowering: a branch the fold removes holds no code of the emitted program, which is what emit diagnoses.
+    crate::lower::defined_const_fold::apply_defined_const_fold(&mut app);
     let mut diags = crate::timings::phase("diagnose", || diagnose(&app));
     crate::source_gem_shake::demote_unreached_gem_errors(&app, &mut diags);
     crate::source_gem_shake::demote_unreached_gem_errors(&app, &mut parse_diags);

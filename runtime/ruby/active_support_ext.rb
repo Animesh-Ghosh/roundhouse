@@ -506,6 +506,27 @@ module ActiveSupport
   # `rescue_from(ActiveSupport::MessageVerifier::InvalidSignature) {
   # head :not_found }` over an avatar URL that carries a signed id.
   #
+  # Rails' deprecator a gem keeps for itself (`Devise.deprecator`): `warn`
+  # writes Rails' line to stderr, the default behavior of a deprecator
+  # the app's `config.active_support.deprecation` has not configured.
+  class Deprecation
+    attr_reader :deprecation_horizon, :gem_name
+    attr_accessor :silenced
+
+    def initialize(deprecation_horizon = "next release", gem_name = "Rails")
+      @deprecation_horizon = deprecation_horizon
+      @gem_name = gem_name
+      @silenced = false
+    end
+
+    # Not Rails' "(called from …)" suffix: no target keeps the caller's location.
+    def warn(message = nil, callstack = nil)
+      return nil if @silenced
+      Rails.log_line("DEPRECATION WARNING: #{message}")
+      nil
+    end
+  end
+
   # A namespace with no verifier in it, because ours is
   # `ActionController::MessageVerifier` (it serves the cookie jar first).
   # The error keeps Rails' path so app code that names it resolves.

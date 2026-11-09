@@ -44,6 +44,19 @@ module ActiveSupport
   def self.interpolate: (String template, Hash[String, String] values) -> String
   def self.errors_merge: (Array[String] errors, Array[ActiveRecord::ErrorDetail] details, Array[ActiveRecord::ErrorDetail] others, Hash[String, String] names, String before, String between, String after) -> Array[ActiveRecord::ErrorDetail]
 
+  class Deprecation
+    @deprecation_horizon: String
+    @gem_name: String
+    @silenced: bool
+
+    attr_reader deprecation_horizon: String
+    attr_reader gem_name: String
+    attr_accessor silenced: bool
+
+    def initialize: (?String deprecation_horizon, ?String gem_name) -> void
+    def warn: (?String? message, ?untyped callstack) -> nil
+  end
+
   # Rails' name for "this signed value does not verify" — see the .rb.
   class MessageVerifier
     class InvalidSignature < StandardError
