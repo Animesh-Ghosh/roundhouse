@@ -16039,6 +16039,8 @@ end
 mod relation_finders;
 #[path = "emit_and_run/attach_hash.rs"]
 mod attach_hash;
+#[path = "emit_and_run/attached_record.rs"]
+mod attached_record;
 #[path = "emit_and_run/many_attached.rs"]
 mod many_attached;
 

@@ -1323,6 +1323,12 @@ module ActiveStorage
       @variations
     end
 
+    # The id of the record this proxy reads for. The model's reader
+    # compares it with the record's id before it reuses the proxy.
+    def record_id
+      @record_id
+    end
+
     # The attachment row and its blob, in one join. `attachment_id` 0
     # means nothing is attached.
     def load_row
@@ -1631,6 +1637,11 @@ module ActiveStorage
       @name = name
       @rows = []
       @rows_loaded = false
+    end
+
+    # The id of the record this proxy reads for — see `Attached#record_id`.
+    def record_id
+      @record_id
     end
 
     def attached?

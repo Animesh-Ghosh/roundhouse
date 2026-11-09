@@ -63,6 +63,34 @@ fn attached_many_class() -> ClassId {
     ClassId(Symbol::from("ActiveStorage::AttachedMany"))
 }
 
+/// `return cached if cached.record_id == @id` — the reader's memo is
+/// for the record's current id only. Rails' proxy holds the record, so
+/// it follows the id that the insert gives a new record. This proxy
+/// holds a copy of the id, and a read before the insert (a validation
+/// that asks `attached?`) copies the id of a record not yet saved. A
+/// write through that proxy would belong to the wrong record.
+fn reuse_when_same_record(cached: Expr) -> Expr {
+    let syn = |node: ExprNode| Expr::new(Span::synthetic(), node);
+    let record_id = syn(ExprNode::Send {
+        recv: Some(cached.clone()),
+        method: Symbol::from("record_id"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
+    syn(ExprNode::If {
+        cond: syn(ExprNode::Send {
+            recv: Some(record_id),
+            method: Symbol::from("=="),
+            args: vec![syn(ExprNode::Ivar { name: Symbol::from("id") })],
+            block: None,
+            parenthesized: false,
+        }),
+        then_branch: syn(ExprNode::Return { value: cached }),
+        else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
+    })
+}
+
 /// `has_one_attached :logo` declarations this pass expands, with the
 /// span of the declaration. The BLOCK form (`do |attachable|
 /// attachable.variant … end`) declares variants, which are not
@@ -574,6 +602,31 @@ pub fn many_attached_attrs(model: &Model) -> Vec<(Span, Symbol)> {
     macro_attrs(model, "has_many_attached")
 }
 
+/// What `reload` forgets about attachments, as in Rails: each reader's
+/// proxy (`@<attr>_cache = nil`), so the next read queries again, and
+/// each `has_one_attached` assignment not yet saved
+/// (`@<attr>_pending = nil`, Rails' `@attachment_changes = nil`).
+pub fn reload_resets(model: &Model) -> Vec<Expr> {
+    let nil_assign = |ivar: String| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: crate::expr::LValue::Ivar { name: Symbol::from(ivar) },
+                value: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            },
+        )
+    };
+    let mut out = Vec::new();
+    for (_span, attr) in attached_attrs(model) {
+        out.push(nil_assign(format!("{}_cache", attr.as_str())));
+        out.push(nil_assign(format!("{}_pending", attr.as_str())));
+    }
+    for (_span, attr) in many_attached_attrs(model) {
+        out.push(nil_assign(format!("{}_cache", attr.as_str())));
+    }
+    out
+}
+
 fn macro_attrs(model: &Model, macro_name: &str) -> Vec<(Span, Symbol)> {
     let mut out = Vec::new();
     for item in &model.body {
@@ -908,7 +961,7 @@ fn push_attachment_changes(methods: &mut Vec<MethodDef>, model: &Model) {
 /// ```ruby
 /// def logo
 ///   cached = @logo_cache
-///   return cached unless cached.nil?
+///   return cached if !cached.nil? && cached.record_id == @id
 ///   fresh = ActiveStorage::Attached.new("Account", @id, "logo")
 ///   @logo_cache = fresh
 ///   fresh
@@ -990,7 +1043,7 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
                     block: None,
                     parenthesized: false,
                 }),
-                then_branch: syn(ExprNode::Return { value: var(&cached) }),
+                then_branch: reuse_when_same_record(var(&cached)),
                 else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
             }),
             syn(ExprNode::Assign {
@@ -1254,7 +1307,7 @@ pub fn many_preload_setter_name(attr: &Symbol) -> Symbol {
 /// ```ruby
 /// def uploads
 ///   cached = @uploads_cache
-///   return cached unless cached.nil?
+///   return cached if !cached.nil? && cached.record_id == @id
 ///   fresh = ActiveStorage::AttachedMany.new("Doc", @id, "uploads")
 ///   @uploads_cache = fresh
 ///   fresh
@@ -1316,7 +1369,7 @@ fn push_many_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) 
                     block: None,
                     parenthesized: false,
                 }),
-                then_branch: syn(ExprNode::Return { value: var(&cached) }),
+                then_branch: reuse_when_same_record(var(&cached)),
                 else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
             }),
             syn(ExprNode::Assign {
