@@ -1246,6 +1246,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("symbol", Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() }),
         ("to_sym", Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() }),
         ("to_s", Ty::Str), ("to_str", Ty::Str), ("inspect", Ty::Str),
+        ("ref", Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() }),
         ("hash", Ty::Int), ("==", Ty::Bool), ("eql?", Ty::Bool),
     ]);
     // `html?`, `json?`, …: one predicate per registered symbol, as `runtime/ruby/mime.rb` spells them out.

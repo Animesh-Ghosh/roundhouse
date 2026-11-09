@@ -193,6 +193,11 @@ module Mime
       @symbol
     end
 
+    # Rails' `ref`: the symbol, or the string of a type registered without one.
+    def ref
+      @symbol.nil? ? @string : @symbol
+    end
+
     # Rails compares the string or the symbol, so `request.format == :json`
     # and `== "application/json"` both hold (synonyms are not registered here).
     def ==(other)

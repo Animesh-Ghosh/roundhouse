@@ -1149,7 +1149,9 @@ pub fn diagnose_helper_modules(app: &App) -> Vec<Diagnostic> {
 fn route_guard_untyped_sends(app: &App) -> Vec<Diagnostic> {
     fn visit(expr: &Expr, out: &mut Vec<Diagnostic>) {
         // The call's own type unknown too: a method the receiver's class does not answer (`format.json?`).
+        // Not one every object answers (`params["id"].nil?`): that cannot raise, whatever the value is.
         if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node
+            && !matches!(method.as_str(), "nil?" | "==" | "!=" | "!" | "equal?" | "is_a?" | "kind_of?" | "instance_of?" | "respond_to?" | "to_s" | "inspect" | "frozen?" | "hash" | "class")
             && (matches!(r.ty, Some(Ty::Untyped)) || is_unknown_ty(r.ty.as_ref()) || is_unknown_ty(expr.ty.as_ref()))
             && expr.diagnostic().is_none()
         {

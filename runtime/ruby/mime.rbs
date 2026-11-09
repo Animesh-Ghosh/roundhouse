@@ -15,6 +15,7 @@ module Mime
     def to_s: () -> String
     def to_str: () -> String
     def to_sym: () -> Symbol?
+    def ref: () -> (Symbol | String)
     def ==: (untyped other) -> bool
     def atom?: () -> bool
     def bmp?: () -> bool
