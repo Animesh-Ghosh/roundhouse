@@ -1247,7 +1247,16 @@ fn optional_unpack(m: &MethodDef, split: usize, sig_tys: Option<&[Ty]>) -> (Stri
         let opt_name = sanitize(opt.name.as_str());
         let opt_go_ty = &trailing[j];
         unpack.push_str(&format!("\tvar {opt_name} {opt_go_ty}\n"));
-        let bind = if opt_go_ty == "interface{}" || &go_ty == opt_go_ty {
+        let opt_sig = sig_tys.and_then(|tys| tys.get(split + j));
+        let bind = if let Some(numeric) = nilable_numeric(opt_sig) {
+            // Stays `interface{}` for its nil, and a nil guard narrows it with a plain assertion.
+            let convert = if numeric == "float64" {
+                format!("switch v := {opt_name}.(type) {{ case int: {opt_name} = float64(v); case int64: {opt_name} = float64(v) }}")
+            } else {
+                format!("if v, ok := {opt_name}.(int); ok {{ {opt_name} = int64(v) }}")
+            };
+            format!("{opt_name} = _opts[{j}]; {convert}")
+        } else if opt_go_ty == "interface{}" || &go_ty == opt_go_ty {
             format!("{opt_name} = _opts[{j}]")
         } else if opt_go_ty == "int64" {
             format!("switch v := _opts[{j}].(type) {{ case int64: {opt_name} = v; case int: {opt_name} = int64(v) }}")
@@ -1257,7 +1266,7 @@ fn optional_unpack(m: &MethodDef, split: usize, sig_tys: Option<&[Ty]>) -> (Stri
             format!("{opt_name}, _ = _opts[{j}].({opt_go_ty})")
         };
         // Not left at Go's zero value when the arg is omitted: Ruby binds the default
-        match opt.default.as_ref().and_then(|d| go_param_default(d, opt_go_ty)) {
+        match opt.default.as_ref().and_then(|d| go_param_default(d, opt_go_ty, nilable_numeric(opt_sig))) {
             Some(default) => unpack.push_str(&format!("\tif len(_opts) > {j} {{ {bind} }} else {{ {opt_name} = {default} }}\n")),
             None => unpack.push_str(&format!("\tif len(_opts) > {j} {{ {bind} }}\n")),
         }
@@ -1267,13 +1276,28 @@ fn optional_unpack(m: &MethodDef, split: usize, sig_tys: Option<&[Ty]>) -> (Stri
     (go_ty, unpack)
 }
 
+/// The Go type a nilable numeric param (`Integer?`, `Float?`) holds in
+/// its `interface{}`.
+fn nilable_numeric(ty: Option<&Ty>) -> Option<&'static str> {
+    let Some(Ty::Union { variants }) = ty else { return None };
+    let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
+    if non_nil.len() == variants.len() {
+        return None;
+    }
+    match non_nil.as_slice() {
+        [Ty::Int] => Some("int64"),
+        [Ty::Float] => Some("float64"),
+        _ => None,
+    }
+}
+
 /// The Go value an omitted optional param starts with: its literal Ruby
 /// default when that literal fits the param's Go type. `None` keeps Go's
 /// zero value: right for `nil` (the types' empty-as-absent convention)
 /// and, for reads, for an empty-hash default such as `{}` or
 /// `EMPTY_HTML_OPTS` (a nil map reads as empty); not yet right for other
 /// non-literal defaults.
-fn go_param_default(default: &Expr, go_ty: &str) -> Option<String> {
+fn go_param_default(default: &Expr, go_ty: &str, boxed_as: Option<&str>) -> Option<String> {
     use crate::expr::{ExprNode, Literal};
     let ExprNode::Lit { value } = &*default.node else {
         return None;
@@ -1291,7 +1315,7 @@ fn go_param_default(default: &Expr, go_ty: &str) -> Option<String> {
     let lit = super::expr::emit_literal(value);
     // An untyped Go constant in an `interface{}` would box as `int`, not the `int64` the reads assert
     Some(match value {
-        Literal::Int { .. } if go_ty == "interface{}" => format!("int64({lit})"),
+        Literal::Int { .. } if go_ty == "interface{}" => format!("{}({lit})", boxed_as.unwrap_or("int64")),
         _ => lit,
     })
 }

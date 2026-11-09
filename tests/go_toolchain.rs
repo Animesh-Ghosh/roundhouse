@@ -387,6 +387,74 @@ func TestFloatOptional(t *testing.T) {
 
 #[test]
 #[ignore]
+fn nilable_numeric_optionals_narrow_after_a_nil_guard() {
+    // `return … if x.nil?` narrows with a plain assertion, so the boxed value must be the type it asserts.
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def nil_ratio(label = \"a\", ratio = 1)\n    return 0.5 if ratio.nil?\n    ratio + 1.5\n  end\n\n  def nil_count(label = \"a\", count = 2)\n    return 0 if count.nil?\n    count + 1\n  end\n\n  def ratio_from_ruby\n    nil_ratio(\"x\", 2)\n  end\n\n  def count_from_ruby\n    nil_count(\"x\", 3)\n  end\n\n",
+        )
+        .write("sig/article_nilable.rbs", "class Article\n  def nil_ratio: (?String label, ?Float? ratio) -> Float\n  def nil_count: (?String label, ?Integer? count) -> Integer\n  def ratio_from_ruby: () -> Float\n  def count_from_ruby: () -> Integer\nend\n")
+        .emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/nilable_optional_test.go"), r#"package v2
+
+import "testing"
+
+func checkFloat(t *testing.T, name string, want float64, f func() float64) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("%s: panic: %v", name, r)
+		}
+	}()
+	if got := f(); got != want {
+		t.Errorf("%s: %v (want %v)", name, got, want)
+	}
+}
+
+func checkInt(t *testing.T, name string, want int64, f func() int64) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("%s: panic: %v", name, r)
+		}
+	}()
+	if got := f(); got != want {
+		t.Errorf("%s: %v (want %v)", name, got, want)
+	}
+}
+
+func TestNilableOptionals(t *testing.T) {
+	a := &Article{}
+	checkFloat(t, "float omitted", 2.5, func() float64 { return a.NilRatio() })
+	checkFloat(t, "float nil", 0.5, func() float64 { return a.NilRatio("x", nil) })
+	checkFloat(t, "float bare int", 3.5, func() float64 { return a.NilRatio("x", 2) })
+	checkFloat(t, "float int64", 3.5, func() float64 { return a.NilRatio("x", int64(2)) })
+	checkFloat(t, "float float", 4.0, func() float64 { return a.NilRatio("x", 2.5) })
+	checkFloat(t, "float from ruby", 3.5, func() float64 { return a.RatioFromRuby() })
+	checkInt(t, "int omitted", 3, func() int64 { return a.NilCount() })
+	checkInt(t, "int nil", 0, func() int64 { return a.NilCount("x", nil) })
+	checkInt(t, "int bare int", 4, func() int64 { return a.NilCount("x", 3) })
+	checkInt(t, "int int64", 4, func() int64 { return a.NilCount("x", int64(3)) })
+	checkInt(t, "int from ruby", 4, func() int64 { return a.CountFromRuby() })
+}
+"#).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-run", "TestNilableOptionals", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
 fn real_blog_flash_each_yields() {
     // A yielding runtime method takes the block as a Go function.
     let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Go);
