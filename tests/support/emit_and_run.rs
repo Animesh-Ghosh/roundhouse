@@ -536,7 +536,10 @@ pub struct Run {
     /// Analysis, lowering and emission error diagnostics for the overlaid app.
     pub errors: Vec<String>,
     /// Exit status 0, and for a script run, its completion line printed.
-    pub success: bool,
+    /// Private so that no test passes on this half alone: read
+    /// [`Run::passed`] (or [`Run::assert_passes`]) for the claim, and
+    /// [`Run::program_succeeded`] only beside an assertion on `errors`.
+    success: bool,
     /// Whether the exit status was 0, whatever the script reached.
     exited_zero: bool,
     pub stdout: String,
@@ -568,6 +571,21 @@ impl Run {
             None => self.success = false,
         }
         self
+    }
+
+    /// The whole claim as a value: analysis and emit report no errors AND
+    /// the emitted program ran clean. For a test that words its own
+    /// failure; [`Run::assert_passes`] says which half failed.
+    pub fn passed(&self) -> bool {
+        self.errors.is_empty() && self.success
+    }
+
+    /// The program's half alone: it exited 0 and, for a script, reached
+    /// its last line. A test reading this asserts on `errors` itself (a
+    /// refusal it expects, or errors it reports apart); otherwise a false
+    /// error in the construct under test goes unseen.
+    pub fn program_succeeded(&self) -> bool {
+        self.success
     }
 
     /// The whole claim: analysis and emit report no errors AND the emitted
