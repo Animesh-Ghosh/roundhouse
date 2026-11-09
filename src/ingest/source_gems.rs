@@ -755,4 +755,17 @@ mod tests {
         assert_eq!(files(1), vec!["lib/plain.rb"]);
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn a_load_error_fallback_is_blanked_where_the_feature_is_provided() {
+        let text = "begin\n  require \"active_support/x\"\n  A = 1\nrescue LoadError\n  A = 2\nend\n";
+        let loaded = super::loaded_begins(text, &|f| f == "active_support/x").expect("rewritten");
+        assert_eq!(loaded.len(), text.len());
+        assert!(loaded.contains("A = 1") && !loaded.contains("A = 2") && !loaded.contains("rescue"), "{loaded}");
+        assert_eq!(loaded.lines().count(), text.lines().count());
+        assert!(super::loaded_begins(text, &|_| false).is_none());
+        // Not a rescue of more than LoadError, nor one that keeps the error: the fallback can run for another reason.
+        assert!(super::loaded_begins(&text.replace("rescue LoadError", "rescue LoadError, NameError"), &|_| true).is_none());
+        assert!(super::loaded_begins(&text.replace("rescue LoadError", "rescue LoadError => e"), &|_| true).is_none());
+    }
 }

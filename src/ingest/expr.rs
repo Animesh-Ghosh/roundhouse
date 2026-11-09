@@ -3123,6 +3123,13 @@ fn ingest_expr_node(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // own expressions, so a constant or call in the block is not lost.
         n if n.as_singleton_class_node().is_some() => {
             let sc = n.as_singleton_class_node().unwrap();
+            // Not another object's (`class << mod; attr_accessor :x; end`): its body defines on that object, not on `self`.
+            if sc.expression().as_self_node().is_none() {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "`class << obj` on an object other than self inside a method or block (its body defines on that object)".into(),
+                });
+            }
             match sc.body() {
                 Some(body) => return ingest_expr(&body, file),
                 None => ExprNode::Lit { value: Literal::Nil },

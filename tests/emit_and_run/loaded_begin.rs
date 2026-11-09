@@ -62,3 +62,14 @@ fn a_gems_load_error_fallback_is_left_natively() {
     run.assert_passes();
     assert!(run.stdout.contains("loaded begin passed"), "{}", run.stdout);
 }
+
+/// `class << mod` in a method defines on `mod`; it is refused rather than read as `class << self`.
+#[test]
+fn a_singleton_class_of_another_object_in_a_method_is_refused() {
+    let result = ruby_prism::parse(b"def config(mod)\n  class << mod; attr_accessor :x; end\nend\n");
+    let program = result.node();
+    let def = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+    let body = def.as_def_node().unwrap().body().unwrap();
+    let err = roundhouse::ingest::expr::ingest_expr(&body, "t.rb").expect_err("refused");
+    assert!(format!("{err:?}").contains("other than self"), "{err:?}");
+}
