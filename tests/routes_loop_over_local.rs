@@ -64,3 +64,22 @@ fn a_loop_over_a_list_a_call_may_have_changed_is_refused() {
         assert!(err.to_string().contains("not a literal Array"), "{change}: {err}");
     }
 }
+
+/// A list changed inside a drawn file (`draw :admin`) is that file's: the caller's own list, in a
+/// frame the drawn file does not share, still draws its loop.
+#[test]
+fn a_list_changed_in_a_drawn_file_leaves_the_callers_list_alone() {
+    let table = roundhouse::ingest::routes::ingest_routes_with_draws(
+        b"Rails.application.routes.draw do\n  pages = %w[welcome]\n  draw :admin\n  pages.each do |page|\n    get page, controller: \"pages\", action: page\n  end\nend\n",
+        "config/routes.rb",
+        &roundhouse::det::HashMap::from_iter([(
+            "admin".to_string(),
+            (b"items = %w[a]\nitems << \"b\"\n".to_vec(), "config/routes/admin.rb".to_string()),
+        )]),
+    )
+    .expect("ingest routes");
+    let mut app = App::default();
+    app.routes = table;
+    let paths: Vec<String> = flatten_routes(&app).into_iter().map(|r| r.path).collect();
+    assert_eq!(paths, ["/welcome"], "{paths:?}");
+}

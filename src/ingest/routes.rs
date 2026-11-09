@@ -3264,10 +3264,13 @@ mod eval {
 
     thread_local! {
         static FRAMES: RefCell<Vec<HashMap<String, RVal>>> = const { RefCell::new(Vec::new()) };
+        /// Per frame, whether it is a loop body's copy of the one below it (`push_inherited_frame`).
+        static INHERITED: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
     }
 
     pub(super) fn push_frame() {
         FRAMES.with(|f| f.borrow_mut().push(HashMap::default()));
+        INHERITED.with(|i| i.borrow_mut().push(false));
     }
 
     /// A frame that starts as a copy of the enclosing one: a block body
@@ -3278,11 +3281,15 @@ mod eval {
             let top = frames.last().cloned().unwrap_or_default();
             frames.push(top);
         });
+        INHERITED.with(|i| i.borrow_mut().push(true));
     }
 
     pub(super) fn pop_frame() {
         FRAMES.with(|f| {
             f.borrow_mut().pop();
+        });
+        INHERITED.with(|i| {
+            i.borrow_mut().pop();
         });
     }
 
@@ -3297,13 +3304,18 @@ mod eval {
     /// A call on a local was passed over (`pages << "x"`, `pages.concat(…)`, through an alias too):
     /// no list the frame holds is known any more, so a later loop over one is a gap, not the old list.
     pub(super) fn forget_lists() {
-        // Every frame, not the top one: a loop's frame is a copy of its scope's, popped after the loop.
+        // Down through the loop bodies' copies to the file's own frame, not the top one alone (a copy is
+        // popped after its loop), and no further: an included file's frame is not its caller's.
+        let inherited = INHERITED.with(|i| i.borrow().clone());
         FRAMES.with(|f| {
-            for frame in f.borrow_mut().iter_mut() {
+            for (frame, copy) in f.borrow_mut().iter_mut().rev().zip(inherited.iter().rev()) {
                 for value in frame.values_mut() {
                     if matches!(value, RVal::List(_)) {
                         *value = RVal::Unknown;
                     }
+                }
+                if !copy {
+                    break;
                 }
             }
         });
