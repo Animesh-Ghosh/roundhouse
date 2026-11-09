@@ -596,6 +596,11 @@ jobs:
           # addressable and its public_suffix, compiled from source (tests/emit_and_run/addressable.rs).
           gem install --no-document --ignore-dependencies public_suffix -v 7.0.5
           gem install --no-document --ignore-dependencies addressable -v 2.9.0
+          # devise and what it requires, compiled from source (tests/emit_and_run/devise.rs).
+          gem install --no-document --ignore-dependencies devise -v 4.9.4
+          gem install --no-document --ignore-dependencies warden -v 1.2.9
+          gem install --no-document --ignore-dependencies orm_adapter -v 0.5.0
+          gem install --no-document --ignore-dependencies responders -v 3.1.1
           # Gem extensions whose finders the native controls run (tests/finder_ownership_and_form_keys.rs).
           gem install --no-document friendly_id -v 5.5.1
           gem install --no-document sorbet-runtime -v 0.5.11934
