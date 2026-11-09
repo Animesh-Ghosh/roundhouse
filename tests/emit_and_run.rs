@@ -20965,6 +20965,8 @@ mod devise;
 mod warden;
 #[path = "emit_and_run/class_eval_string_macro.rs"]
 mod class_eval_string_macro;
+#[path = "emit_and_run/send_built_name.rs"]
+mod send_built_name;
 #[path = "support/addressable_gem.rs"]
 mod addressable_gem;
 #[path = "emit_and_run/addressable.rs"]

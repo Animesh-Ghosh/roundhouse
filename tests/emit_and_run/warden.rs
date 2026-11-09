@@ -102,14 +102,29 @@ puts "warden passed"
     assert!(run.stdout.contains("warden passed"), "{}", run.stdout);
 }
 
-/// What stops Warden on Spinel, reported rather than left to the C build: `Warden::Hooks#_run_callbacks`
-/// calls `send("_#{kind}")`, and the kinds reach it through `Manager#_run_callbacks(*args)`.
-/// The gem's code the app does not reach (its test helpers, `Strategies.add`) is no error.
+/// The same constraint on the Spinel tree, compiled from Warden's source: the request runs through
+/// the stack, whose `Warden::Manager` puts its proxy in the env the router asks.
 #[test]
-fn the_spinel_tree_reports_the_computed_send_warden_runs_its_callbacks_by() {
-    let (_, errors) = app().emit(BuildTarget::Spinel);
-    assert_eq!(errors.len(), 1, "{errors:#?}");
-    assert!(errors[0].contains("dynamic send not supported (spinel)"), "{errors:#?}");
+#[ignore = "requires the Spinel toolchain"]
+fn the_spinel_tree_asks_the_warden_proxy_its_stack_puts_in_the_env() {
+    let script = r#"
+def answer(session)
+  env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => "/dashboard", "rack.session" => session }
+  result = GemMiddleware.around(env) do |inner|
+    request = ActionDispatch::Request.new
+    inner.each { |key, value| request.env[key] = value }
+    matched = RouteTable.match_asking("GET", "/dashboard", [RouteTable.root] + RouteTable.table, request)
+    [200, {}, [matched.nil? ? "none" : matched.action.to_s]]
+  end
+  result[2][0].to_s
+end
+raise "anonymous" unless answer(ActionDispatch::Session.new) == "none"
+raise "signed in" unless answer(ActionDispatch::Session.new({ "warden.user.user.key" => "42" })) == "index"
+puts "warden on spinel passed"
+"#;
+    let run = app().run_spinel(script);
+    run.assert_passes();
+    assert!(run.stdout.contains("warden on spinel passed"), "{}", run.stdout);
 }
 
 // Not through an emitted app: the ruby family loads rack's own Rack::Response, so only Spinel runs the port.

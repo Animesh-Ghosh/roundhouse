@@ -85,6 +85,7 @@ pub fn apply_send_static_dispatch(
     let providers = collect_hash_providers(app);
     let defined = defined_method_name_counts(app);
     let mut diags = Vec::new();
+    apply_pattern_name_dispatch(app, registry);
     apply_param_selector_dispatch(app, &providers, registry, &mut diags);
     super::for_each_hook_body(app, &mut |body| {
         let elems = collect_var_element_sets(body);
@@ -276,6 +277,130 @@ fn apply_param_selector_dispatch(
             let bindings: Vec<IterBinding<'_>> =
                 owned.iter().map(|(n, e)| IterBinding { name: n, elems: e }).collect();
             rewrite(&mut m.body, &HashMap::default(), providers, &HashMap::default(), &bindings, registry, diags);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Shape E: a name built around one value, answered by the class's own methods
+// ---------------------------------------------------------------------
+
+/// `send("_#{kind}")` on `self` (Warden's `Hooks#_run_callbacks`): the
+/// name is the prefix and suffix around one value, so the methods that can
+/// answer it are the receiver's own of that shape. Rewritten into a `case`
+/// over those names, and NoMethodError past them, as `send` raises.
+///
+/// The receiver's class is the method's owner, with its ancestors and
+/// included modules; a module's are also its includers' and extenders',
+/// and a class's its subclasses'. A name one of those adds that the owner
+/// does not answer leaves the site as it was: the arm list would miss it.
+/// A method whose arity the call cannot fill is no arm, as Ruby's
+/// ArgumentError is no answer either.
+fn apply_pattern_name_dispatch(app: &mut App, registry: &HashMap<ClassId, ClassInfo>) {
+    use crate::dialect::MethodReceiver;
+    let classes: Vec<(ClassId, bool, Vec<ClassId>, Option<ClassId>, Vec<String>, Vec<(Symbol, bool, Vec<crate::dialect::Param>)>)> = app
+        .library_classes
+        .iter()
+        .map(|c| {
+            let extends: Vec<String> = c
+                .unknown_calls
+                .iter()
+                .filter_map(|e| match &*e.node {
+                    ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "extend" => Some(args.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .filter_map(|a| match &*a.node {
+                    ExprNode::Const { path } => path.last().map(|s| s.as_str().to_string()),
+                    _ => None,
+                })
+                .collect();
+            let methods = c.methods.iter().map(|m| (m.name.clone(), m.receiver == MethodReceiver::Class, m.params.clone())).collect();
+            (c.name.clone(), c.is_module, c.includes.clone(), c.parent.clone(), extends, methods)
+        })
+        .collect();
+    let leaf = |id: &ClassId| id.0.as_str().rsplit("::").next().unwrap_or("").to_string();
+    // Not by name alone: an `include Hooks` written inside `module Warden` names `Warden::Hooks`.
+    let same = |a: &ClassId, b: &ClassId| a == b || a.0.as_str().ends_with(&format!("::{}", b.0.as_str())) || b.0.as_str().ends_with(&format!("::{}", a.0.as_str()));
+    // The names on `side` of each class a call from `owner` may be answered by: (the owner's own lineage, the others).
+    let lineage_names = |owner: &ClassId, side: bool, matches: &dyn Fn(&str) -> bool| -> (Vec<(Symbol, Vec<crate::dialect::Param>)>, Vec<Symbol>) {
+        let mut own: Vec<(Symbol, Vec<crate::dialect::Param>)> = Vec::new();
+        let mut lineage: Vec<ClassId> = vec![owner.clone()];
+        let mut i = 0;
+        while i < lineage.len() && lineage.len() < 64 {
+            let id = lineage[i].clone();
+            for (name, _, includes, parent, _, _) in &classes {
+                if !same(name, &id) { continue; }
+                for inc in includes { if !lineage.iter().any(|l| same(l, inc)) { lineage.push(inc.clone()); } }
+                if let Some(p) = parent { if !lineage.iter().any(|l| same(l, p)) { lineage.push(p.clone()); } }
+            }
+            i += 1;
+        }
+        for id in &lineage {
+            for (name, _, _, _, _, methods) in &classes {
+                if !same(name, id) { continue; }
+                for (m, class_side, params) in methods {
+                    // A module's instance method answers on the class side of a class that extends it.
+                    if (*class_side == side || !class_side) && matches(m.as_str()) && !own.iter().any(|(n, _)| n == m) {
+                        own.push((m.clone(), params.clone()));
+                    }
+                }
+            }
+        }
+        let mut others = Vec::new();
+        for (_, _, includes, parent, extends, methods) in &classes {
+            let user = includes.iter().any(|i| same(i, owner)) || extends.iter().any(|e| *e == leaf(owner)) || parent.as_ref().is_some_and(|p| same(p, owner));
+            if !user { continue; }
+            for (m, _, _) in methods {
+                if matches(m.as_str()) && !own.iter().any(|(n, _)| n == m) { others.push(m.clone()); }
+            }
+        }
+        (own, others)
+    };
+    for lc in &mut app.library_classes {
+        let owner = lc.name.clone();
+        for m in &mut lc.methods {
+            let side = m.receiver == MethodReceiver::Class;
+            crate::lower::controller_to_library::util::map_expr_mut(&mut m.body, &|e| {
+                let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else { return None };
+                if !is_send_method(method.as_str()) || recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::SelfRef)) {
+                    return None;
+                }
+                let (name, rest) = args.split_first()?;
+                let ExprNode::StringInterp { parts } = &*name.node else { return None };
+                let (prefix, suffix) = match parts.as_slice() {
+                    [crate::expr::InterpPart::Text { value: p }, crate::expr::InterpPart::Expr { .. }] => (p.clone(), String::new()),
+                    [crate::expr::InterpPart::Expr { .. }, crate::expr::InterpPart::Text { value: s }] => (String::new(), s.clone()),
+                    [crate::expr::InterpPart::Text { value: p }, crate::expr::InterpPart::Expr { .. }, crate::expr::InterpPart::Text { value: s }] => (p.clone(), s.clone()),
+                    _ => return None,
+                };
+                // Not a writer's name (`"#{k}="`): Spinel answers that form itself, handed its value.
+                if prefix.is_empty() && suffix == "=" {
+                    return None;
+                }
+                let matches = |n: &str| n.len() > prefix.len() + suffix.len() && n.starts_with(prefix.as_str()) && n.ends_with(suffix.as_str());
+                let (own, others) = lineage_names(&owner, side, &matches);
+                if own.is_empty() || !others.is_empty() || rest.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. } | ExprNode::KeywordSplat { .. })) {
+                    return None;
+                }
+                let n = rest.len();
+                let fits = |params: &[crate::dialect::Param]| {
+                    let positional: Vec<_> = params.iter().filter(|p| !p.keyword && !p.forwarding).collect();
+                    let required = positional.iter().filter(|p| !p.rest && p.default.is_none()).count();
+                    let total = positional.iter().filter(|p| !p.rest).count();
+                    let keyword_required = params.iter().any(|p| p.keyword && p.default.is_none());
+                    !keyword_required && required <= n && (n <= total || positional.iter().any(|p| p.rest))
+                };
+                let names: Vec<String> = own.iter().filter(|(_, params)| fits(params)).map(|(n, _)| n.as_str().to_string()).collect();
+                if names.is_empty() {
+                    return None;
+                }
+                let dispatch = Dispatch { names, string_scrutinee: true };
+                let arms = build_arms(&dispatch, recv, rest, e.span, registry);
+                let mut case = Expr::new(e.span, ExprNode::Case { scrutinee: name.clone(), arms });
+                case.ty = e.ty.clone();
+                Some(case)
+            });
         }
     }
 }
