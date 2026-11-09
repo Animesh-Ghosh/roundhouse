@@ -5403,7 +5403,7 @@ fn ruby_family_runtime_files(
     if !app.gem_middlewares.is_empty() {
         let stacked = stack_middlewares(&app.gem_middlewares, &app.gem_middleware_blocks, "app");
         let body = format!(
-            "# frozen_string_literal: true\n# The Rack middleware the app's gems put on Rails' stack from their\n# Railties (`App::gem_middlewares`), outermost first.\nmodule GemMiddleware\n  def self.wrap(app)\n    {stacked}\n  end\nend\n"
+            "# frozen_string_literal: true\n# The Rack middleware the app's gems put on Rails' stack from their\n# Railties (`App::gem_middlewares`), outermost first.\nmodule GemMiddleware\n  def self.wrap(app)\n    {stacked}\n  end\n\n  # The test harness's request through the stack (Rails' integration tests run it), the block at its bottom.\n  def self.around(env, &inner)\n    wrap(inner).call(env)\n  end\nend\n"
         );
         for (path, content) in files.iter_mut() {
             if path == "runtime/gem_middleware.rb" {
@@ -9943,6 +9943,7 @@ fn stack_middlewares(classes: &[String], blocks: &crate::det::HashMap<String, St
 
 fn spinel_gem_middleware(classes: &[String], blocks: &crate::det::HashMap<String, String>) -> String {
     let stacked = stack_middlewares(classes, blocks, "App.new");
+    let around = stack_middlewares(classes, blocks, "Inner.new(inner)");
     format!(
         r#"# frozen_string_literal: true
 # The Rack middleware the app's gems put on Rails' stack from their
@@ -9992,6 +9993,23 @@ module GemMiddleware
   STACK_LOCK = Mutex.new
 
   # Not at load: Rails builds the stack after the initializers, which configure the middleware.
+  # The bottom of the test harness's stack: the block it routes the request with.
+  class Inner
+    def initialize(inner)
+      @inner = inner
+    end
+
+    def call(env)
+      @inner.call(env)
+    end
+  end
+
+  # The test harness's request through the stack (Rails' integration tests run it), built per
+  # request: the block at its bottom is the harness's own.
+  def self.around(env, &inner)
+    ({around}).call(env)
+  end
+
   def self.stack
     return @stack if @stack
     # Not a bare `||=`: two first requests at once would each build a stack and run its constructors twice.

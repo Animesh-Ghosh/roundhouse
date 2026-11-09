@@ -2455,16 +2455,47 @@ module RequestDispatch
       asked_env.fetch("HTTP_X_REQUESTED_WITH", "").to_s,
       as == :json ? "application/json" : ""
     )
-    matched = RouteTable.match_asking(
-      method, match_path, [RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table, asked
+    # Through the gem middleware's stack, as Rails' integration tests run the request: what a
+    # middleware sets in the env (`env["warden"]`) is the request's, and one may answer it itself.
+    rack_env = {}
+    asked_env.each { |k, v| rack_env[k] = v }
+    rack_env["REQUEST_METHOD"] = method
+    rack_env["PATH_INFO"] = match_path
+    rack_env["QUERY_STRING"] = query.to_s
+    @__routed = false
+    @__rack_env = nil
+    answered = GemMiddleware.around(rack_env) do |env|
+      @__routed = true
+      @__rack_env = env
+      env.each { |k, v| asked.env[k] = v }
+      matched = RouteTable.match_asking(
+        method, match_path, [RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table, asked
+      )
+      raise "No route matches #{method} #{path}" if matched.nil?
+      controller = case matched.controller
+                   when :articles then ArticlesController.new
+                   when :comments then CommentsController.new
+                   else ActiveStorage::Routes.instantiate_controller(matched.controller)
+                   end
+      run_controller(controller, matched.action, matched.path_params, matched.req_format, method, wire_method, path, query, params, headers, as)
+      [@__response.status, @__response.headers, [@__response.body.to_s]]
+    end
+    return @__response if @__routed
+    # A middleware answered before the routes (a throttle's 429): its Rack response is the test's.
+    status, answer_headers, chunks = answered
+    text = +""
+    chunks.each { |chunk| text << chunk.to_s }
+    @__response = ActionResponse.new(
+      status: status.to_i,
+      body: text,
+      location: answer_headers["Location"] || answer_headers["location"],
+      flash: ActionDispatch::Flash.new,
+      cookies: ActionController::CookieJar.new({}),
+      content_type: (answer_headers["Content-Type"] || answer_headers["content-type"] || "text/html").to_s,
+      headers: answer_headers,
     )
-    raise "No route matches #{method} #{path}" if matched.nil?
-    controller = case matched.controller
-                 when :articles then ArticlesController.new
-                 when :comments then CommentsController.new
-                 else ActiveStorage::Routes.instantiate_controller(matched.controller)
-                 end
-    run_controller(controller, matched.action, matched.path_params, matched.req_format, method, wire_method, path, query, params, headers, as)
+    @response = @__response
+    @__response
   end
 
   # The request through `controller`, once the route is known: the
@@ -2585,6 +2616,8 @@ module RequestDispatch
     env["PATH_INFO"]      = request_path
     env["QUERY_STRING"]   = request_query
     controller.request = ActionDispatch::Request.for(env, merged)
+    # What the gem middleware set in the Rack env (`env["warden"]`), the controller's request env too.
+    @__rack_env&.each { |k, v| controller.request.env[k] = v unless controller.request.env.key?(k) }
     controller.request.body = request_body
     # Body params alone — what ParamsWrapper copies from. Production
     # dispatchers fill this from the parsed JSON body; the harness
