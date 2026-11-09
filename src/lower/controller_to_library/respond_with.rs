@@ -136,8 +136,13 @@ fn block_html_arm(block: &Expr) -> Option<Expr> {
         _ => vec![body],
     };
     for stmt in stmts {
-        let ExprNode::Send { recv: Some(r), method, block: arm, .. } = &*stmt.node else { continue };
+        let ExprNode::Send { recv: Some(r), method, args, block: arm, .. } = &*stmt.node else { continue };
         if !matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == format_param) || !matches!(method.as_str(), "html" | "any" | "all") {
+            continue;
+        }
+        // `format.any(:json)` answers those formats only; an html request falls through to the default response.
+        let names_html = args.iter().any(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "html"));
+        if method.as_str() != "html" && !args.is_empty() && !names_html {
             continue;
         }
         match arm {

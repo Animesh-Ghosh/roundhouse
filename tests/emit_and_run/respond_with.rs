@@ -69,6 +69,12 @@ const CONTROLLER: &str = r#"class GadgetsController < ApplicationController
     respond_with @article, status: :created, location: "/done"
   end
 
+  def blk_json
+    @article = Article.new
+    @article.valid?
+    respond_with(@article) { |format| format.any(:json) { render plain: "json-arm" } }
+  end
+
   def computed
     @article = Article.new(title: "x", body: "a body long enough to pass")
     respond_with @article, plain_options
@@ -124,6 +130,8 @@ const ROUTES: &str = r#"  get "g/new", to: "gadgets#new"
   post "g/rend", to: "gadgets#rend"
   post "g/act", to: "gadgets#act"
   post "g/stat", to: "gadgets#stat"
+  post "g/blk_json", to: "gadgets#blk_json"
+  post "g/nearest", to: "nearest_gadgets#create"
   post "g/computed", to: "gadgets#computed"
   post "g/ordered", to: "gadgets#ordered"
   post "g/computed_location", to: "gadgets#computed_location"
@@ -138,6 +146,12 @@ fn respond_with_answers_as_the_responder_does_for_html() {
         .write("app/views/gadgets/edit.html.erb", "edit-template")
         .write("app/views/gadgets/made.html.erb", "made-template")
         .write("app/views/gadgets/computed.html.erb", "computed-template")
+        .write("app/models/far_responder.rb", "class FarResponder\n  def self.error_status = :bad_request\n  def self.redirect_status = :found\nend\n")
+        .write("app/models/near_responder.rb", "class NearResponder\n  def self.error_status = :unprocessable_entity\n  def self.redirect_status = :see_other\nend\n")
+        .write("app/controllers/far_gadgets_controller.rb", "class FarGadgetsController < ApplicationController\n  self.responder = FarResponder\n  respond_to :html\nend\n")
+        .write("app/controllers/near_gadgets_controller.rb", "class NearGadgetsController < FarGadgetsController\n  self.responder = NearResponder\nend\n")
+        .write("app/controllers/nearest_gadgets_controller.rb", "class NearestGadgetsController < NearGadgetsController\n  skip_forgery_protection\n\n  def create\n    @article = Article.new\n    @article.valid?\n    respond_with @article, location: \"/done\"\n  end\nend\n")
+        .write("app/views/nearest_gadgets/new.html.erb", "nearest-new")
         .write("app/views/gadgets/ordered.html.erb", "<%= @trace.join(\",\") %>")
         .edit("config/routes.rb", "  root \"articles#index\"\n", &format!("  root \"articles#index\"\n{ROUTES}"))
         .run_ruby(
@@ -166,6 +180,8 @@ end
   ["POST",   "/g/rend",    "",       418, "/done", "r"],
   ["POST",   "/g/act",     "",       200, "/done", "edit-template"],
   ["POST",   "/g/stat",    "",       302, "/done", ""],
+  ["POST",   "/g/nearest", "",       422, "/done", "nearest-new"],
+  ["POST",   "/g/blk_json", "",      200, nil,     "new-template"],
   ["POST",   "/g/computed", "",      200, nil,     "computed-template"],
   ["POST",   "/g/ordered", "",       200, nil,     "resource,options"],
 ].each do |verb, path, query, status, location, body|

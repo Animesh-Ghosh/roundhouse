@@ -3262,7 +3262,7 @@ fn action_to_method(
         can_respond_within(&a.body, &resolve, &mut std::collections::BTreeSet::new())
     };
     let inheritor_modules = inheritor_view_modules(controller, all_controllers_for_params);
-    let chain: Vec<&Controller> = std::iter::once(controller).chain(ancestor_chain(controller, all_controllers_for_params)).collect();
+    let chain: Vec<&Controller> = std::iter::once(controller).chain(ancestor_chain(controller, all_controllers_for_params).into_iter().rev()).collect();
     let responder_expr = chain.iter().find_map(|c| {
         c.body.iter().find_map(|item| {
             let crate::dialect::ControllerBodyItem::Unknown { expr, .. } = item else { return None };
