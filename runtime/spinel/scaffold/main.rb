@@ -368,6 +368,8 @@ module Main
     started = ActionDispatch::Runtime.clock_time
     request_obj = ActionDispatch::Request.new
     request_obj.request_id = ActionDispatch::RequestId.make(req.req_headers.fetch("x-request-id", ""))
+    # Not for an asset: Rails' Static answers it above the session middleware, with no cookie verified.
+    Main.restore_session(req, request_obj) unless Main.static_asset?(req.path)
     GemMiddleware.dispatch(req, res, request_obj)
     return nil if res.file_path.length > 0 || res.upgrading_ws
     res.headers[ActionDispatch::RequestId::HEADER] =
@@ -376,6 +378,38 @@ module Main
     unless res.headers.keys.any? { |k| k.downcase == "x-runtime" }
       res.headers[ActionDispatch::Runtime::HEADER] = ActionDispatch::Runtime.header_value(started)
     end
+    nil
+  end
+
+  # Cookie-carried session: restore the whole session from the session
+  # cookie (url-encoded k=v pairs; empty when absent or garbled).
+  # Persisted after the action only when the encoding changed — an
+  # action that leaves the session untouched emits no Set-Cookie.
+  #
+  # The NAME comes from `Rails.application.session_cookie_key`, not a
+  # literal: apps declare it via `config.session_store :cookie_store,
+  # key: "..."`, which ingest lifts onto the Rails::Application reopen
+  # (framework default "_session" when they don't). App code reads the
+  # same accessor, and the two must agree — lobsters'
+  # `remove_unknown_cookies` deletes every cookie whose key isn't the
+  # configured one, so a literal here would clear the session on every
+  # request.
+  #
+  # SIGNED (runtime/signed_cookies.rb): a value that does not verify
+  # restores as an empty session. `roundhouse.session.in` is the
+  # restored session's PLAIN encoding — what the persist step compares
+  # against, so an untouched session writes no Set-Cookie and a
+  # rejected one is not rewritten until the action changes it.
+  #
+  # Not in `dispatch_request` beside the controller: Rails' session
+  # middleware sits above Warden's and the routes, which read it first.
+  def self.restore_session(req, request_obj)
+    session_cookie = Rails.application.session_cookie_key
+    restored = ActionDispatch::Session.from_signed_cookie(
+      req.cookies.fetch(session_cookie, ""), session_cookie)
+    request_obj.session = restored
+    request_obj.env["rack.session"] = restored
+    request_obj.env["roundhouse.session.in"] = restored.to_cookie
     nil
   end
 
@@ -597,29 +631,9 @@ module Main
     controller.query_string = request_obj.query_string
     ActionController::Current.request = request_obj
     ActionController::Current.controller = controller
-    # Cookie-carried session: restore the whole session from the session
-    # cookie (url-encoded k=v pairs; empty when absent or garbled).
-    # Persisted below only when the encoding changed — an action that
-    # leaves the session untouched emits no Set-Cookie.
-    #
-    # The NAME comes from `Rails.application.session_cookie_key`, not a
-    # literal: apps declare it via `config.session_store :cookie_store,
-    # key: "..."`, which ingest lifts onto the Rails::Application reopen
-    # (framework default "_session" when they don't). App code reads the
-    # same accessor, and the two must agree — lobsters'
-    # `remove_unknown_cookies` deletes every cookie whose key isn't the
-    # configured one, so a literal here would clear the session on every
-    # request.
     session_cookie = Rails.application.session_cookie_key
-    # SIGNED (runtime/signed_cookies.rb): a value that does not
-    # verify restores as an empty session. `session_in` is the restored
-    # session's PLAIN encoding — what the persist step below compares
-    # against, so an untouched session writes no Set-Cookie and a
-    # rejected one is not rewritten until the action changes it.
-    restored = ActionDispatch::Session.from_signed_cookie(
-      req.cookies.fetch(session_cookie, ""), session_cookie)
-    session_in = restored.to_cookie
-    controller.assign_http_session(restored)
+    session_in = request_obj.env.fetch("roundhouse.session.in", "").to_s
+    controller.assign_http_session(request_obj.session)
     # Controller-level cookie access (`cookies[:k]` reads, `cookies[:k] = v`
     # records writes surfaced as Set-Cookie below). The inbound jar is the
     # request's parsed cookies (String-keyed Tep.str_hash); the CookieJar

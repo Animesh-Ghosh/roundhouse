@@ -10069,6 +10069,7 @@ module GemMiddleware
     end
     env["rack.input"] = StringIO.new(req.raw_body.to_s)
     env["action_dispatch.request_id"] = request_obj.request_id.to_s
+    env["rack.session"] = request_obj.session
     env
   end
 end

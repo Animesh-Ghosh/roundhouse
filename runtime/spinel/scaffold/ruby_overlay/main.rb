@@ -116,6 +116,8 @@ module Main
     end
 
     request = CgiIo.parse_request(env, stdin)
+    # Not beside the controller below: a request constraint reads the session before its route is chosen.
+    Main.restore_session(env, request[:cookies] || {})
     # Browser forms can only GET/POST; a hidden `_method` field carries
     # the real verb (PATCH/DELETE) — the same override Rails' middleware
     # stack performs. Done here, after the body parse, so every serving
@@ -235,21 +237,9 @@ module Main
     # header, and `controller.cookies.pending` already contributes String
     # keys to the same hash.
     session_cookie = Rails.application.session_cookie_key
-    # SIGNED — see the spinel main.rb twin: `session_in` is the restored
-    # session's plain encoding, and only a changed session is re-signed.
-    #
-    # Under the futamura bridge the host Rails app owns the session: it
-    # arrives already decoded as `roundhouse.session` and leaves as
-    # `roundhouse.session.out`, with no cookie signed or verified on
-    # this side.
+    restored = Main.restore_session(env, cookies)
     host_session = env["roundhouse.session"]
-    restored = if host_session.nil?
-      ActionDispatch::Session.from_signed_cookie(
-        cookies[session_cookie.to_sym].to_s, session_cookie)
-    else
-      ActionDispatch::Session.new(host_session)
-    end
-    session_in = restored.to_cookie
+    session_in = env["roundhouse.session.in"].to_s
     controller.assign_http_session(restored)
     # Expose the inbound cookies to the controller as a CookieJar so
     # `cookies[:k]` reads (and `cookies[:k] = v` records writes, surfaced
@@ -480,11 +470,39 @@ module Main
   def self.run_rack(env)
     started = ActionDispatch::Runtime.clock_time
     env["action_dispatch.request_id"] = ActionDispatch::RequestId.make(env["HTTP_X_REQUEST_ID"].to_s)
+    # Not restored in dispatch_core alone: Rails' session middleware sits above Warden's, which reads `rack.session`.
+    Main.restore_session(env, CgiIo.parse_cookies(env["HTTP_COOKIE"].to_s))
     @gem_stack ||= GemMiddleware.wrap(->(inner_env) { Main.run_app(inner_env) })
     status, headers, body = @gem_stack.call(env)
     headers["x-request-id"] = env["action_dispatch.request_id"].to_s
     headers["x-runtime"] = ActionDispatch::Runtime.header_value(started) unless headers.key?("x-runtime")
     [status, headers, body]
+  end
+
+  # SIGNED — see the spinel main.rb twin: `roundhouse.session.in` is the
+  # restored session's plain encoding, and only a changed session is
+  # re-signed.
+  #
+  # Under the futamura bridge the host Rails app owns the session: it
+  # arrives already decoded as `roundhouse.session` and leaves as
+  # `roundhouse.session.out`, with no cookie signed or verified on
+  # this side.
+  #
+  # `.to_sym` on the read: CgiIo.parse_cookies keys the inbound hash by
+  # Symbol (`out[name.to_sym] = val`).
+  def self.restore_session(env, cookies)
+    existing = env["rack.session"]
+    return existing if existing.is_a?(ActionDispatch::Session)
+    session_cookie = Rails.application.session_cookie_key
+    host_session = env["roundhouse.session"]
+    restored = if host_session.nil?
+      ActionDispatch::Session.from_signed_cookie(
+        cookies[session_cookie.to_sym].to_s, session_cookie)
+    else
+      ActionDispatch::Session.new(host_session)
+    end
+    env["roundhouse.session.in"] = restored.to_cookie
+    env["rack.session"] = restored
   end
 
   def self.run_app(env)

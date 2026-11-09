@@ -175,6 +175,7 @@ module ActionDispatch
       # defect `@params` had, one read away from surfacing.
       @user_agent = +""
       @session_options = {}
+      @session = ActionDispatch::Session.new
       # Memo for `content_security_policy`. False until the first read
       # copies the app default; a later read returns that same object so
       # a before_action and the header writer share the narrowed policy.
@@ -211,6 +212,15 @@ module ActionDispatch
 
     def session_options
       @session_options
+    end
+
+    # Not read from `@env["rack.session"]` as Rails does: that value is untyped, and the slot keeps it a Session.
+    def session
+      @session
+    end
+
+    def session=(value)
+      @session = value
     end
 
     # Whether the dispatcher should leave the session cookie alone this

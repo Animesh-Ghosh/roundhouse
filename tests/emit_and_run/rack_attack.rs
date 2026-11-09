@@ -169,7 +169,7 @@ module Tep
 end
 Res = Struct.new(:status, :headers, :body, :file_path, :streaming, :set_cookies, :header_fields)
 Req = Struct.new(:verb, :path, :raw_query, :remote_host, :http_version, :req_headers, :raw_body)
-ReqObj = Struct.new(:request_id, :env)
+ReqObj = Struct.new(:request_id, :env, :session)
 module Main
   def self.dispatch_request(req, res, _obj)
     res.status = 200
@@ -202,7 +202,7 @@ class Probe
 end
 def run(path)
   res = Res.new(0, {{}}, +"", +"", false, [], [])
-  GemMiddleware.dispatch(Req.new("GET", path, "", "127.0.0.1", "HTTP/1.1", {{}}, ""), res, ReqObj.new("id", {{}}))
+  GemMiddleware.dispatch(Req.new("GET", path, "", "127.0.0.1", "HTTP/1.1", {{}}, ""), res, ReqObj.new("id", {{}}, {{}}))
   res
 end
 # Two first requests at once still build one stack.

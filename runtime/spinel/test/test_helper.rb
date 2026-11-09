@@ -2462,6 +2462,8 @@ module RequestDispatch
     rack_env["REQUEST_METHOD"] = method
     rack_env["PATH_INFO"] = match_path
     rack_env["QUERY_STRING"] = query.to_s
+    rack_env["rack.session"] = @__session ||= ActionDispatch::Session.new
+    asked.session = @__session
     @__routed = false
     @__rack_env = nil
     answered = GemMiddleware.around(rack_env) do |env|
@@ -2616,6 +2618,7 @@ module RequestDispatch
     env["PATH_INFO"]      = request_path
     env["QUERY_STRING"]   = request_query
     controller.request = ActionDispatch::Request.for(env, merged)
+    controller.request.session = controller.session
     # What the gem middleware set in the Rack env (`env["warden"]`), the controller's request env too.
     @__rack_env&.each { |k, v| controller.request.env[k] = v unless controller.request.env.key?(k) }
     controller.request.body = request_body

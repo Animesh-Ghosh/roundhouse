@@ -57,6 +57,11 @@ module ActionDispatch
       @data.delete(key.to_s)
     end
 
+    def clear
+      @data.clear
+      self
+    end
+
     def length
       @data.length
     end

@@ -55,6 +55,15 @@ module ActionDispatch
       @session_options[:skip] == true
     end
 
+    # Not a slot as in the twin: Rails reads the Rack env's, the one Warden's proxy holds too.
+    def session
+      @env["rack.session"] ||= ActionDispatch::Session.new
+    end
+
+    def session=(value)
+      @env["rack.session"] = value
+    end
+
     # `request.headers["Accept-Encoding"]` — the shared
     # `ActionDispatch::Http::Headers` over this request's env.
     def headers
@@ -394,8 +403,8 @@ module ActionController
       attr_accessor :request
       # The dispatching controller, parked so module-function helpers
       # can reach per-request session state. Held as the controller
-      # (not the session object) because `reset_session` swaps the
-      # controller's @session for a fresh instance mid-action — a
+      # (not the session object) because the controller's @session can be
+      # swapped for another instance (a test's `session=`) — a
       # parked session reference would go stale, and a CSRF token
       # generated during the post-logout render would land in the
       # discarded session instead of the one the dispatch persists.
