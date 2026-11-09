@@ -425,3 +425,110 @@ pub(super) fn yields_another_object(body: &Expr) -> bool {
     let ExprNode::Const { path } = &*r.node else { return false };
     given.is_empty() && !path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Devise"])
 }
+
+/// What one `devise_for` left in the evaluation for `Devise::Controllers::UrlHelpers.generate_helpers!`.
+#[derive(Clone, Debug)]
+pub(super) struct DeviseUrlFacts {
+    /// `Devise::URL_HELPERS`: each route module and the actions it names a helper for (`nil` is none).
+    pub modules: Vec<(String, Vec<Option<String>>)>,
+    pub mappings: Vec<DeviseMapping>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct DeviseMapping {
+    pub name: String,
+    pub class_name: String,
+    pub used_helpers: Vec<String>,
+}
+
+/// Reads `Devise::URL_HELPERS` and `Devise.mappings` as the evaluation left them. `router_of` answers a mapping's `@router_name`,
+/// the context the generated helper would send to; `Err` names what cannot be written down.
+pub(super) fn devise_url_facts(url_helpers: Option<&Val>, mappings: Option<&Val>, ivar: &dyn Fn(usize, &str) -> Option<Val>) -> Result<DeviseUrlFacts, String> {
+    let Some(Val::Hash(helpers)) = url_helpers else { return Err("`Devise::URL_HELPERS` was not read".into()) };
+    let mut modules = Vec::new();
+    for (key, actions) in helpers {
+        let Val::Sym(module) = key else { return Err(format!("`Devise::URL_HELPERS` has the key {key:?}")) };
+        let Val::Array(actions) = actions else { return Err(format!("`Devise::URL_HELPERS[:{module}]` is not a list")) };
+        let mut names = Vec::new();
+        for action in actions {
+            names.push(match action {
+                Val::Nil => None,
+                Val::Sym(a) | Val::Str(a) => Some(a.clone()),
+                other => return Err(format!("`Devise::URL_HELPERS[:{module}]` holds {other:?}")),
+            });
+        }
+        modules.push((module.clone(), names));
+    }
+    let Some(Val::Hash(entries)) = mappings else { return Err("`Devise.mappings` was not read".into()) };
+    let mut rows = Vec::new();
+    for (key, value) in entries {
+        let (Val::Sym(name), Val::Obj(id)) = (key, value) else { return Err(format!("`Devise.mappings` holds {key:?}")) };
+        // `send(router_name)`: a helper of another router's, which `RouteHelpers` does not hold.
+        match ivar(*id, "router_name") {
+            None | Some(Val::Nil) => {}
+            Some(_) => return Err(format!("mapping `{name}` names a `router_name`")),
+        }
+        let Some(Val::Str(class_name)) = ivar(*id, "class_name") else { return Err(format!("mapping `{name}`'s class is not read")) };
+        let Some(Val::Array(used)) = ivar(*id, "used_helpers") else { return Err(format!("mapping `{name}`'s `used_helpers` are not read")) };
+        let mut used_helpers = Vec::new();
+        for helper in used {
+            let Val::Sym(helper) = helper else { return Err(format!("mapping `{name}` uses the helper {helper:?}")) };
+            used_helpers.push(helper);
+        }
+        rows.push(DeviseMapping { name: name.clone(), class_name, used_helpers });
+    }
+    Ok(DeviseUrlFacts { modules, mappings: rows })
+}
+
+/// The keys `url_for` takes for itself rather than the query, which the helpers below do not write.
+const DEVISE_URL_RESERVED: &str = "format anchor only_path host protocol port domain subdomain tld_length trailing_slash script_name user password params routing_type use_route original_script_name relative_url_root";
+
+/// `RouteHelpers` methods standing for what `generate_helpers!` defines: `new_session_path(resource_or_scope, *args)` calling
+/// `new_user_session_path(*args)`. Written against the program's own routes, since the runtime holds no `Devise.mappings` and no routes proxy.
+/// `routes` maps each helper the routes draw to the segments it needs.
+///
+/// Every name of `URL_HELPERS` gets one, used by a mapping or not: Devise's shared views call `new_password_path` behind
+/// `devise_mapping.recoverable?`, and Rails, which never defines the unused ones, raises `NoMethodError` only if the call is reached, as these do.
+/// A route of the same name keeps its own helper, as it does in Rails, where the routes module sits nearer than Devise's in a controller's ancestors.
+pub(super) fn devise_url_helpers_source(facts: &DeviseUrlFacts, routes: &HashMap<String, usize>) -> String {
+    let mut out = String::new();
+    out.push_str("def self.devise_scope_of(obj)\n  return obj.to_sym if obj.is_a?(String) || obj.is_a?(Symbol)\n  if obj.is_a?(Class)\n");
+    for m in &facts.mappings {
+        out.push_str(&format!("    return :{} if obj <= ::{}\n", m.name, m.class_name));
+    }
+    out.push_str("  else\n");
+    for m in &facts.mappings {
+        out.push_str(&format!("    return :{} if obj.is_a?(::{})\n", m.name, m.class_name));
+    }
+    out.push_str("  end\n  raise \"Could not find a valid mapping for #{obj.inspect}\"\nend\n\n");
+    out.push_str(&format!(
+        "def self.devise_path_with(path, params)\n  return path if params.nil?\n  raise ArgumentError, \"a positional argument to a Devise url helper is not supported\" unless params.is_a?(Hash)\n  params.each_key {{ |key| raise ArgumentError, \"`#{{key}}:` on a Devise url helper is not supported\" if %w[{DEVISE_URL_RESERVED}].include?(key.to_s) }}\n  path + RouteHelpers.query_suffix(params)\nend\n\n"
+    ));
+    for (module, actions) in &facts.modules {
+        for action in actions {
+            let prefix = action.as_ref().map_or(String::new(), |a| format!("{a}_"));
+            let name = format!("{prefix}{module}_path");
+            if routes.contains_key(&name) {
+                continue;
+            }
+            let mut arms = String::new();
+            for m in &facts.mappings {
+                let target = format!("{prefix}{}_{module}_path", m.name);
+                if !m.used_helpers.iter().any(|h| h == module) {
+                    continue;
+                }
+                let Some(segments) = routes.get(&target) else { continue };
+                let answer = if *segments == 0 {
+                    format!("RouteHelpers.{target}")
+                } else {
+                    format!("raise ArgumentError, \"`{target}` needs its {segments} path segment(s), which a Devise url helper does not pass\"")
+                };
+                arms.push_str(&format!("  return RouteHelpers.devise_path_with({answer}, params) if scope == :{}\n", m.name));
+            }
+            out.push_str(&format!(
+                "def self.{name}(resource_or_scope, params = nil)\n  scope = RouteHelpers.devise_scope_of(resource_or_scope)\n{arms}  raise NoMethodError, \"undefined method '{prefix}#{{scope}}_{module}_path'\"\nend\n\n"
+            ));
+        }
+    }
+    out
+}
