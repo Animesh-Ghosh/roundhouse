@@ -11516,7 +11516,7 @@ fn remember_enum_input(e: &mut Expr, columns: &[Symbol], defaults: Option<&crate
             let Some(input) = enum_cast_input(value) else {
                 return;
             };
-            input
+            before_normalizer(input, &column)
         }
     };
     let remember = sp_expr(ExprNode::Assign {
@@ -11544,6 +11544,19 @@ fn enum_default_input(model: &crate::dialect::Model, column: &Symbol, seed: &Exp
         return Some(Literal::Sym { value: Symbol::from(label.as_str()) });
     }
     Some(Literal::Str { value: text })
+}
+
+/// The value handed to `Model._normalize_<col>(x)`. The reader answers
+/// what was assigned, not what `normalizes` made of it (activerecord
+/// 8.1.4), and the remembered input mustn't call the normalizer again.
+fn before_normalizer(input: Expr, column: &Symbol) -> Expr {
+    if let ExprNode::Send { method, args, .. } = &*input.node
+        && method.as_str() == format!("_normalize_{}", column.as_str())
+        && let [assigned] = args.as_slice()
+    {
+        return assigned.clone();
+    }
+    input
 }
 
 fn writer_column(name: &Symbol) -> Symbol {

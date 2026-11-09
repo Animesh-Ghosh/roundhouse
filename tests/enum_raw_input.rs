@@ -195,6 +195,50 @@ fn roda_refuses_the_generated_reader() {
     assert!(errors.iter().any(|e| e.contains("enum_before_type_cast not supported (roda)")), "{errors:?}");
 }
 
+/// Roda's emit carries no tests or library classes, so a read only there
+/// has nothing to refuse.
+#[test]
+fn roda_ignores_a_read_it_does_not_emit() {
+    let in_test = state_app().write("test/models/article_probe_test.rb", &format!(
+        "require \"test_helper\"\n\nclass ArticleProbeTest < ActiveSupport::TestCase\n  def raw\n    {READ}\n  end\nend\n"));
+    let in_library = state_app().write("app/models/raw_reader.rb", &format!("class RawReader\n  def raw\n    {READ}\n  end\nend\n"));
+    for app in [in_test, in_library] {
+        let (_, errors) = app.emit(roundhouse::project::BuildTarget::Roda);
+        assert!(!errors.iter().any(|e| e.contains("enum_before_type_cast")), "{errors:?}");
+    }
+}
+
+/// A read in a body Roda does convert is still refused.
+#[test]
+fn roda_refuses_a_read_in_a_controller_or_a_view() {
+    let route = |app: emit_and_run::Overlay| {
+        app.edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/probe\", to: \"probes#show\"\n")
+    };
+    let controller = route(state_app()).write("app/controllers/probes_controller.rb",
+        &format!("class ProbesController < ApplicationController\n  def show\n    render plain: {READ}.to_s\n  end\nend\n"));
+    let view = route(state_app())
+        .write("app/controllers/probes_controller.rb", "class ProbesController < ApplicationController\n  def show\n  end\nend\n")
+        .write("app/views/probes/show.html.erb", &format!("<%= {READ} %>\n"));
+    for app in [controller, view] {
+        let (_, errors) = app.emit(roundhouse::project::BuildTarget::Roda);
+        assert!(errors.iter().any(|e| e.contains("enum_before_type_cast not supported (roda)")), "{errors:?}");
+    }
+}
+
+/// The reader answers what was assigned, not the normalized value, and
+/// remembering it doesn't call the normalizer (activerecord 8.1.4).
+#[test]
+fn a_normalized_enum_remembers_the_assigned_value() {
+    let app = || state_app().edit("app/models/article.rb", "class Article < ApplicationRecord\n",
+        "class Article < ApplicationRecord\n  normalizes :state, with: ->(v) { v.to_s == \"draft\" ? \"published\" : v }\n  def raw_state\n    state_before_type_cast\n  end\n\n");
+    app()
+        .run_ruby("a = Article.new\na.state = \"draft\"\nraise a.raw_state.inspect unless a.raw_state == \"draft\"\nb = Article.new\nb.state = :draft\nraise b.raw_state.inspect unless b.raw_state == :draft\nc = Article.new\nc.state = \"published\"\nraise c.raw_state.inspect unless c.raw_state == \"published\"")
+        .assert_passes();
+    let (emitted, _) = app().emit(roundhouse::project::BuildTarget::Ruby);
+    let model = std::fs::read_to_string(emitted.join("app/models/article.rb")).expect("the emitted model");
+    assert!(!model.contains("_before_type_cast = Article._normalize_state"), "{model}");
+}
+
 #[test]
 fn roda_keeps_a_source_reader() {
     let (_, errors) = emit_and_run::real_blog()

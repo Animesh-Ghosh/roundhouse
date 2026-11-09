@@ -43,6 +43,16 @@ fn reaches_generated(app: &App, owner: Option<&ClassId>, recv: Option<&Expr>, me
 
 /// Every call of a generated reader, in any body the app's emit carries.
 pub(crate) fn generated_reads(app: &App) -> Vec<GeneratedRead> {
+    reads_in(app, false)
+}
+
+/// The same for the bodies Roda converts: models, controllers and views.
+/// Its emit carries no test, fixture, seed, route helper or library class.
+pub(crate) fn roda_generated_reads(app: &App) -> Vec<GeneratedRead> {
+    reads_in(app, true)
+}
+
+fn reads_in(app: &App, roda: bool) -> Vec<GeneratedRead> {
     if app.models.iter().all(|model| model.enums.is_empty()) {
         return Vec::new();
     }
@@ -60,7 +70,16 @@ pub(crate) fn generated_reads(app: &App) -> Vec<GeneratedRead> {
         expr.node.for_each_child(&mut |child| walk(child, owner, app, out));
     }
     let mut out = Vec::new();
-    crate::lower::for_each_owned_hook_body_ref(app, &mut |owner, body| walk(body, owner, app, &mut out));
+    let not_emitted_by_roda = |owner: Option<&ClassId>| {
+        owner.is_some_and(|id| {
+            app.library_classes.iter().chain(app.rails_application.iter()).any(|class| &class.name == id)
+        })
+    };
+    crate::lower::for_each_owned_hook_body_ref(app, &mut |owner, body| {
+        if !(roda && not_emitted_by_roda(owner)) {
+            walk(body, owner, app, &mut out);
+        }
+    });
     for model in &app.models {
         for method in model.methods() {
             walk(&method.body, Some(&model.name), app, &mut out);
@@ -68,6 +87,9 @@ pub(crate) fn generated_reads(app: &App) -> Vec<GeneratedRead> {
     }
     for view in &app.views {
         walk(&view.body, None, app, &mut out);
+    }
+    if roda {
+        return out;
     }
     for class in &app.library_classes {
         for method in &class.methods {

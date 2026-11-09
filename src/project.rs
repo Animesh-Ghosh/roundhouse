@@ -9059,7 +9059,8 @@ fn report_enum_before_type_cast(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel | BuildTarget::Futamura) {
         return;
     }
-    for read in crate::analyze::generated_reads(app).into_iter().filter(|read| !read.span.is_synthetic()) {
+    let reads = if target == BuildTarget::Roda { crate::analyze::roda_generated_reads(app) } else { crate::analyze::generated_reads(app) };
+    for read in reads.into_iter().filter(|read| !read.span.is_synthetic()) {
         emit::diagnostics::report_unsupported(
             read.span,
             target.as_str(),
