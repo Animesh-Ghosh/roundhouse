@@ -99,7 +99,16 @@ pub fn enforceable(guard: &Expr) -> bool {
 /// not ingest (a placeholder `nil`) or a lambda Rails cannot call with one request.
 fn guard_body(guard: &Expr) -> Option<(Symbol, Expr)> {
     let request = Symbol::from("request");
-    match &*guard.node {
+    // `lambda { |req| ... }` and `proc { |req| ... }` ingest as a call with a block.
+    let callable = match &*guard.node {
+        ExprNode::Send { recv: None, method, args, block: Some(block), .. }
+            if args.is_empty() && matches!(method.as_str(), "lambda" | "proc") =>
+        {
+            block
+        }
+        _ => guard,
+    };
+    match &*callable.node {
         ExprNode::Lit { value: crate::expr::Literal::Nil } => None,
         ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. }
             if params.len() <= 1 && extra_params.is_empty() =>

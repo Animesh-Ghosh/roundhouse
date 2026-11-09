@@ -7,6 +7,8 @@ use super::emit_and_run;
 const ROUTES: &str = r#"  root "articles#index"
   get "/invite/:code", to: "gates#api", constraints: ->(req) { req.format == :json }
   get "/invite/:code", to: "gates#page"
+  get "/door/:code", to: "gates#api", constraints: lambda { |req| req.format == :json }
+  get "/door/:code", to: "gates#page"
   constraints subdomain: "admin" do
     get "/panel", to: "gates#admin"
   end
@@ -41,6 +43,13 @@ class GatesControllerTest < ActionDispatch::IntegrationTest
     get "/invite/abc", headers: { "Accept" => "application/json" }
     assert_equal "api", response.body
     get "/invite/abc"
+    assert_equal "page", response.body
+  end
+
+  test "a Kernel lambda on the format" do
+    get "/door/abc", headers: { "Accept" => "application/json" }
+    assert_equal "api", response.body
+    get "/door/abc"
     assert_equal "page", response.body
   end
 

@@ -165,3 +165,16 @@ fn a_constraint_before_a_mount_elsewhere_is_still_asked() {
     assert_eq!(flatten_routes_asking_guards(&app).len(), 1, "the guarded route is asked");
     assert!(route_guard_gaps_for_target(&app, BuildTarget::Ruby).is_empty());
 }
+
+/// `lambda { |req| ... }` and `proc { |req| ... }` are callables like
+/// `->(req) { ... }`. Neither answers `matches?`.
+#[test]
+fn a_kernel_lambda_or_proc_constraint_is_asked_as_a_callable() {
+    for form in ["lambda", "proc"] {
+        let app = app(&format!(r#"get "/invite/:code", to: "widgets#show", constraints: {form} {{ |req| req.format == :json }}"#));
+        let (class, _) = guard_class(&app.routes.entries).expect("a guard method");
+        assert_eq!(class.methods[0].params[0].name.as_str(), "req", "{form}");
+        let body = format!("{:?}", class.methods[0].body);
+        assert!(!body.contains("matches?"), "{form}: {body}");
+    }
+}
