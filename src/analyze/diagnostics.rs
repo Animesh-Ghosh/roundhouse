@@ -827,7 +827,6 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     // graphql-ruby object types: their bodies, and each `null: false`
     // field's resolved value.
     out.extend(super::graphql::diagnose(app, diagnose_expr));
-    out.extend(super::enum_raw_input::diagnose(app));
     out.extend(super::data::diagnose(app));
     out.extend(super::database_identity::diagnose(app));
     out.extend(crate::lower::model_to_library::encrypts_diagnostics(app));

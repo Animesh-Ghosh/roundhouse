@@ -8221,23 +8221,53 @@ fn fold_concern_enums_into_models(
 /// holds. A label with no matching enum entry also stays put — the
 /// mapping only fires on an exact label match, so a same-named column
 /// on another model can't be caught by rule one.
+///
+/// A writer call keeps the label of a column the app reads through
+/// `<column>_before_type_cast`: Rails answers the value as assigned
+/// until the record is saved or loaded.
 fn map_enum_labels(app: &mut App) {
     use crate::dialect::ModelBodyItem;
     use crate::expr::{Expr, ExprNode, Literal};
     use crate::ident::{ClassId, Symbol};
+    use std::collections::BTreeSet;
 
     type EnumTable = indexmap::IndexMap<Symbol, Vec<(String, Literal)>>;
 
+    fn is_writer(expr: &Expr) -> bool {
+        matches!(&*expr.node, ExprNode::Send { method, .. }
+            if crate::lower::ENUM_WRITER_METHODS.contains(&method.as_str()))
+    }
+
     /// Rewrite every hash entry in this subtree whose key names a column
     /// in `table` and whose value is a label of that column.
-    fn map_in_subtree(expr: &mut Expr, table: &EnumTable) {
-        expr.node.for_each_child_mut(&mut |child| map_in_subtree(child, table));
+    fn map_in_subtree(expr: &mut Expr, table: &EnumTable, kept: &BTreeSet<Symbol>, in_writer: bool) {
+        if let ExprNode::Send { recv, method, args, block, .. } = &mut *expr.node {
+            // Only a writer's own arguments, through the `merge` a double
+            // splat desugars to, are assigned. A query in its receiver or
+            // inside an argument compares against the column.
+            let writer = crate::lower::ENUM_WRITER_METHODS.contains(&method.as_str());
+            let merged = in_writer && matches!(method.as_str(), "merge" | "merge!" | "reverse_merge" | "reverse_merge!");
+            if let Some(recv) = recv {
+                map_in_subtree(recv, table, kept, merged);
+            }
+            for arg in args.iter_mut() {
+                map_in_subtree(arg, table, kept, writer || merged);
+            }
+            if let Some(block) = block {
+                map_in_subtree(block, table, kept, false);
+            }
+            return;
+        }
+        expr.node.for_each_child_mut(&mut |child| map_in_subtree(child, table, kept, in_writer));
         let ExprNode::Hash { entries, .. } = &mut *expr.node else { return };
         for (key, value) in entries.iter_mut() {
             let ExprNode::Lit { value: Literal::Sym { value: column } } = &*key.node else {
                 continue;
             };
             let Some(mapping) = table.get(column) else { continue };
+            if in_writer && kept.contains(column) {
+                continue;
+            }
             let label = match &*value.node {
                 ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
                 ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
@@ -8249,8 +8279,13 @@ fn map_enum_labels(app: &mut App) {
     }
 
     /// Rule two: `Model.method(…)` anywhere in the app.
-    fn map_const_receiver_sites(expr: &mut Expr, tables: &HashMap<ClassId, EnumTable>) {
-        expr.node.for_each_child_mut(&mut |child| map_const_receiver_sites(child, tables));
+    fn map_const_receiver_sites(
+        expr: &mut Expr,
+        tables: &HashMap<ClassId, EnumTable>,
+        kept: &BTreeSet<Symbol>,
+    ) {
+        expr.node.for_each_child_mut(&mut |child| map_const_receiver_sites(child, tables, kept));
+        let in_writer = is_writer(expr);
         let ExprNode::Send { recv: Some(recv), args, .. } = &mut *expr.node else { return };
         let ExprNode::Const { path } = &*recv.node else { return };
         let id = ClassId(Symbol::from(
@@ -8258,7 +8293,7 @@ fn map_enum_labels(app: &mut App) {
         ));
         let Some(table) = tables.get(&id) else { return };
         for arg in args.iter_mut() {
-            map_in_subtree(arg, table);
+            map_in_subtree(arg, table, kept, in_writer);
         }
     }
 
@@ -8271,19 +8306,20 @@ fn map_enum_labels(app: &mut App) {
     if tables.is_empty() {
         return;
     }
+    let kept = crate::analyze::raw_input_columns(app);
 
     for model in &mut app.models {
         let Some(table) = tables.get(&model.name).cloned() else { continue };
         for item in &mut model.body {
             match item {
-                ModelBodyItem::Method { method, .. } => map_in_subtree(&mut method.body, &table),
-                ModelBodyItem::Scope { scope, .. } => map_in_subtree(&mut scope.body, &table),
-                ModelBodyItem::Unknown { expr, .. } => map_in_subtree(expr, &table),
+                ModelBodyItem::Method { method, .. } => map_in_subtree(&mut method.body, &table, &kept, false),
+                ModelBodyItem::Scope { scope, .. } => map_in_subtree(&mut scope.body, &table, &kept, false),
+                ModelBodyItem::Unknown { expr, .. } => map_in_subtree(expr, &table, &kept, false),
                 _ => {}
             }
         }
     }
-    crate::lower::for_each_hook_body(app, &mut |expr| map_const_receiver_sites(expr, &tables));
+    crate::lower::for_each_hook_body(app, &mut |expr| map_const_receiver_sites(expr, &tables, &kept));
 }
 
 /// Fill each `belongs_to …, polymorphic: true` association's target

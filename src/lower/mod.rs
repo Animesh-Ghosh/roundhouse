@@ -267,6 +267,7 @@ pub use in_predicate::apply_in_predicate_lowering;
 pub use including::apply_including_lowering;
 pub use relation_select_block::apply_relation_select_block_lowering;
 pub use enum_symbols::apply_enum_symbol_lowering;
+pub(crate) use enum_symbols::WRITER_METHODS as ENUM_WRITER_METHODS;
 pub use has_json::apply_has_json_lowering;
 pub use route_format_suffix::apply_route_format_suffix_lowering;
 pub use route_url_options::apply_route_url_options_lowering;
