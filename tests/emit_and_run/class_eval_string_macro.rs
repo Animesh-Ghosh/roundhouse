@@ -43,6 +43,7 @@ fn a_class_macro_that_class_evals_a_string_defines_its_methods_on_cruby() {
 }
 
 #[test]
+#[ignore = "requires the Spinel toolchain"]
 fn a_class_macro_that_class_evals_a_string_defines_its_methods_on_spinel() {
     let run = emit_and_run::real_blog().write("app/models/knobs.rb", KNOBS).run_spinel_slim(&[], SCRIPT);
     run.assert_passes();
