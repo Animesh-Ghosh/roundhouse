@@ -6418,8 +6418,9 @@ impl Analyzer {
                 self.collect_send_sites(body, Some(&module.name), false, helpers, &[], &mut test_sites);
             }
         }
+        let helper_names = test_module::test_helper_names(app);
         test_sites.into_iter().filter_map(|(class, method, args, kwargs, recv)| {
-            self.test_helper_owner(app, &class, &method)
+            self.test_helper_owner(&helper_names, &class, &method)
                 .map(|owner| (owner, method, args, kwargs, recv))
         }).collect()
     }

@@ -1,5 +1,5 @@
 //! Canonical typing of original test scopes, shared with test emission.
-use crate::det::HashMap;
+use crate::det::{HashMap, HashSet};
 
 use super::{Analyzer, ClassInfo, ConstScope, Ctx, extract_ivar_assignments};
 use crate::App;
@@ -58,22 +58,34 @@ pub(super) fn register(classes: &mut HashMap<ClassId, ClassInfo>, app: &App) {
     }
 }
 
+/// Helper names by test module name, so `Analyzer::test_helper_owner`
+/// looks a name up instead of scanning every module. Modules sharing a
+/// name contribute the union of their helpers.
+pub(super) fn test_helper_names(app: &App) -> HashMap<&ClassId, HashSet<&Symbol>> {
+    let mut names: HashMap<&ClassId, HashSet<&Symbol>> = HashMap::default();
+    for module in &app.test_modules {
+        names.entry(&module.name).or_default()
+            .extend(module.helpers.iter().map(|helper| &helper.name));
+    }
+    names
+}
+
 impl Analyzer {
     /// Test call sites infer test helpers, never production signatures.
     /// Attribute inherited helpers to their real defining test class, but
     /// stop at a nearer registered/include surface that shadows that def.
+    /// `helper_names` maps each test module name to the helper names of
+    /// every module of that name (see `test_helper_names`).
     pub(super) fn test_helper_owner(
         &self,
-        app: &App,
+        helper_names: &HashMap<&ClassId, HashSet<&Symbol>>,
         class: &ClassId,
         method: &Symbol,
     ) -> Option<ClassId> {
         let mut current = Some(class);
         for _ in 0..32 {
             let id = current?;
-            if app.test_modules.iter().any(|module| {
-                module.name == *id && module.helpers.iter().any(|helper| helper.name == *method)
-            }) {
+            if helper_names.get(id).is_some_and(|names| names.contains(method)) {
                 return Some(id.clone());
             }
             let registered = self.classes.get(id)?;
