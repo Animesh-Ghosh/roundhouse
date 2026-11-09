@@ -467,8 +467,10 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             .map(|lc| lc.name.0.as_str().to_string())
             .collect()
     };
-    fn class_side_mentions(e: &Expr, name: &Symbol, class_body: bool, owners: &HashSet<String>) -> usize {
-        let on_owner = |recv: Option<&Expr>| match recv.map(|r| &*r.node) {
+    // The mentions of every candidate name, in one walk: `names` maps each name to the classes that
+    // own it as a macro, and `counts` takes one per mention (a name's own arm only, as its own walk did).
+    fn class_side_mentions(e: &Expr, names: &HashMap<&Symbol, HashSet<String>>, class_body: bool, counts: &mut HashMap<Symbol, usize>) {
+        let on_owner = |recv: Option<&Expr>, owners: &HashSet<String>| match recv.map(|r| &*r.node) {
             Some(ExprNode::Const { path }) => {
                 let full = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
                 owners.iter().any(|o| o == &full || o.ends_with(&format!("::{full}"))) as usize
@@ -476,57 +478,66 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
             Some(ExprNode::SelfRef) | None => class_body as usize,
             _ => 0,
         };
-        let here = match &*e.node {
-            ExprNode::Send { recv, method, .. } if method == name => on_owner(recv.as_ref()),
+        let mut mention = |name: &Symbol, recv: Option<&Expr>| {
+            if let Some(owners) = names.get(name) {
+                let n = on_owner(recv, owners);
+                if n > 0 {
+                    *counts.entry(name.clone()).or_default() += n;
+                }
+            }
+        };
+        match &*e.node {
             // `send(:root)`, `method(:root)`: a call by a name held as a Symbol, on the macro's owner.
-            ExprNode::Send { recv, method, args, .. }
+            ExprNode::Send { recv, method, args, .. } => {
+                mention(method, recv.as_ref());
                 if matches!(method.as_str(), "send" | "public_send" | "__send__" | "method" | "public_method" | "respond_to?")
-                    && matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Sym { value } }) if value == name) =>
-            {
-                on_owner(recv.as_ref())
+                    && let Some(ExprNode::Lit { value: Literal::Sym { value } }) = args.first().map(|a| &*a.node)
+                    && value != method
+                {
+                    mention(value, recv.as_ref());
+                }
             }
             // `&method(:level)`: ingest's bound-method reference.
-            ExprNode::MethodRef { recv, name: referenced } if referenced == name => on_owner(recv.as_ref()),
-            _ => 0,
-        };
-        let mut inner = 0;
-        e.node.for_each_child(&mut |c| inner += class_side_mentions(c, name, class_body, owners));
-        here + inner
+            ExprNode::MethodRef { recv, name: referenced } => mention(referenced, recv.as_ref()),
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| class_side_mentions(c, names, class_body, counts));
     }
-    let remaining = |name: &Symbol| -> usize {
-        let owners = owners(name);
-        let mut everywhere = 0;
-        crate::lower::for_each_emit_body_ref(app, &mut |e| everywhere += class_side_mentions(e, name, false, &owners));
-        let class_bodies: Vec<&MethodDef> = app
-            .library_classes
-            .iter()
-            .flat_map(|lc| lc.methods.iter())
-            .filter(|m| m.receiver == MethodReceiver::Class && &m.name != name)
-            .collect();
+    let candidates: Vec<&Symbol> = expanded_total.keys().filter(|name| !failed_total.contains(*name)).collect();
+    let spent: HashSet<Symbol> = if candidates.is_empty() {
+        HashSet::default()
+    } else {
+        let names: HashMap<&Symbol, HashSet<String>> = candidates.iter().map(|&name| (name, owners(name))).collect();
+        let mut everywhere: HashMap<Symbol, usize> = HashMap::default();
+        crate::lower::for_each_emit_body_ref(app, &mut |e| class_side_mentions(e, &names, false, &mut everywhere));
         // Not every call in a same-named class method: a subclass's `def self.level(v) = RuleBase.level(v)` still reaches the macro.
-        let own: usize = app
-            .library_classes
-            .iter()
-            .flat_map(|lc| {
-                let only: HashSet<String> = std::iter::once(lc.name.0.to_string()).collect();
-                lc.methods
-                    .iter()
-                    .filter(|m| m.receiver == MethodReceiver::Class && &m.name == name)
-                    .map(move |m| class_side_mentions(&m.body, name, false, &only))
-                    .collect::<Vec<_>>()
-            })
-            .sum();
-        let class_side: usize = class_bodies
-            .iter()
-            .map(|m| class_side_mentions(&m.body, name, true, &owners) - class_side_mentions(&m.body, name, false, &owners))
-            .sum();
-        everywhere.saturating_sub(own) + class_side
+        let mut own: HashMap<Symbol, usize> = HashMap::default();
+        let mut class_side: HashMap<Symbol, usize> = HashMap::default();
+        for lc in &app.library_classes {
+            let only: HashSet<String> = std::iter::once(lc.name.0.to_string()).collect();
+            for m in lc.methods.iter().filter(|m| m.receiver == MethodReceiver::Class) {
+                if let Some((&name, _)) = names.get_key_value(&m.name) {
+                    let mut counted = HashMap::default();
+                    class_side_mentions(&m.body, &HashMap::from_iter([(name, only.clone())]), false, &mut counted);
+                    *own.entry(name.clone()).or_default() += counted.get(name).copied().unwrap_or(0);
+                }
+                let (mut inside, mut outside) = (HashMap::default(), HashMap::default());
+                class_side_mentions(&m.body, &names, true, &mut inside);
+                class_side_mentions(&m.body, &names, false, &mut outside);
+                for (name, n) in inside {
+                    if name != m.name {
+                        *class_side.entry(name.clone()).or_default() += n - outside.get(&name).copied().unwrap_or(0);
+                    }
+                }
+            }
+        }
+        let count = |counts: &HashMap<Symbol, usize>, name: &Symbol| counts.get(name).copied().unwrap_or(0);
+        candidates
+            .into_iter()
+            .filter(|name| count(&everywhere, name).saturating_sub(count(&own, name)) + count(&class_side, name) == 0)
+            .cloned()
+            .collect()
     };
-    let spent: HashSet<Symbol> = expanded_total
-        .keys()
-        .filter(|name| !failed_total.contains(*name) && remaining(name) == 0)
-        .cloned()
-        .collect();
     if !spent.is_empty() {
         for lc in app.library_classes.iter_mut().filter(|lc| !lc.is_module) {
             lc.methods.retain(|m| !(m.receiver == MethodReceiver::Class && spent.contains(&m.name)));
@@ -546,16 +557,17 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
                 .filter(|lc| ancestors(&named, &parents, &lc.name).iter().chain(std::iter::once(&lc.name)).any(|a| extenders.contains(a)))
                 .map(|lc| lc.name.0.as_str().to_string())
                 .collect();
-            let mut left = 0;
-            crate::lower::for_each_emit_body_ref(app, &mut |e| left += class_side_mentions(e, name, false, &owners));
+            let mut left: HashMap<Symbol, usize> = HashMap::default();
+            let on_owners: HashMap<&Symbol, HashSet<String>> = std::iter::once((name, owners.clone())).collect();
+            crate::lower::for_each_emit_body_ref(app, &mut |e| class_side_mentions(e, &on_owners, false, &mut left));
             for lc in app.library_classes.iter().filter(|lc| owners.contains(lc.name.0.as_str())) {
-                left += lc.unknown_calls.iter().map(|e| class_side_mentions(e, name, true, &owners)).sum::<usize>();
+                lc.unknown_calls.iter().for_each(|e| class_side_mentions(e, &on_owners, true, &mut left));
             }
-            let itself: HashSet<String> = std::iter::once(module.clone()).collect();
+            let on_itself: HashMap<&Symbol, HashSet<String>> = std::iter::once((name, std::iter::once(module.clone()).collect())).collect();
             for lc in app.library_classes.iter().filter(|lc| lc.name.0.as_str() == module) {
-                left += lc.methods.iter().filter(|m| &m.name != name).map(|m| class_side_mentions(&m.body, name, true, &itself)).sum::<usize>();
+                lc.methods.iter().filter(|m| &m.name != name).for_each(|m| class_side_mentions(&m.body, &on_itself, true, &mut left));
             }
-            left == 0
+            left.is_empty()
         })
         .collect();
     for (module, name) in &module_spent {

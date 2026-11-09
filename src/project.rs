@@ -6393,10 +6393,14 @@ fn i18n_table_text(app: &App) -> String {
 /// The app's `I18n::Config` subclasses, a subclass ahead of its parent
 /// so `case config when …` takes the nearest.
 fn i18n_config_classes(app: &App) -> Vec<String> {
+    // The first library class of each name, once.
+    let mut first: std::collections::HashMap<&str, &crate::dialect::LibraryClass> = std::collections::HashMap::new();
+    for lc in app.library_classes.iter().rev() {
+        first.insert(lc.name.0.as_str(), lc);
+    }
     let parent_of = |name: &str| {
-        app.library_classes
-            .iter()
-            .find(|lc| lc.name.0.as_str() == name)
+        first
+            .get(name)
             .and_then(|lc| lc.parent.as_ref())
             .map(|p| p.0.as_str().trim_start_matches("::").to_string())
     };

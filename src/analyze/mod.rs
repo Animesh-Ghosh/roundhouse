@@ -9877,10 +9877,15 @@ fn is_abstract_body(body: &Expr) -> bool {
 /// defines `x` on the instance side — the last in `helper :all`'s sorted
 /// order, as the view's own lookup would find it.
 fn helper_instance_index(app: &App) -> HashMap<Symbol, ClassId> {
+    // The library classes by name, once, instead of a scan of every
+    // library class per helper name.
+    let mut by_name: std::collections::HashMap<&ClassId, Vec<&crate::dialect::LibraryClass>> = std::collections::HashMap::new();
+    for lc in &app.library_classes {
+        by_name.entry(&lc.name).or_default().push(lc);
+    }
     let defines = |owner: &ClassId, name: &Symbol| {
-        app.library_classes.iter().any(|lc| {
-            &lc.name == owner
-                && lc.methods.iter().any(|m| &m.name == name && m.receiver == crate::dialect::MethodReceiver::Instance)
+        by_name.get(owner).is_some_and(|lcs| {
+            lcs.iter().any(|lc| lc.methods.iter().any(|m| &m.name == name && m.receiver == crate::dialect::MethodReceiver::Instance))
         })
     };
     // Every helper module, not only the index's owners: a module whose
