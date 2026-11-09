@@ -4978,8 +4978,8 @@ fn ruby_family_runtime_files(
     let (mut files, test_stems) = spinel_files(app, fixture, param_binds)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/faye_websocket.rb");
-    // Spinel's stand-ins for rack's Rack::Request and Ruby's SimpleDelegator: the ruby family's gems load the real ones.
-    files.retain(|(p, _)| p != "runtime/rack_request.rb" && p != "runtime/delegate_spinel.rb");
+    // Spinel's stand-ins for rack's Rack::Request and Rack::Response and Ruby's SimpleDelegator: the ruby family's gems load the real ones.
+    files.retain(|(p, _)| p != "runtime/rack_request.rb" && p != "runtime/rack_response.rb" && p != "runtime/delegate_spinel.rb");
     // The spinel SQL-functions file is FFI; CRuby writes its own below
     // (the sqlite3 gem's `create_function`), JRuby has none yet.
     files.retain(|(p, _)| p != "runtime/sql_functions.rb");
@@ -5083,6 +5083,9 @@ fn ruby_family_runtime_files(
             *content = "# The rack gem's own Rack::Utils — see `project::ruby_runtime_files`.\n\
                         # The port at runtime/ruby/rack_utils.rb exists for the targets\n\
                         # that have no rack to load.\n\
+                        # Not `rack/utils` alone: a gem's middleware names `Rack::Response` (Warden's\n\
+                        # manager), which `rack` autoloads, on an entry point no Puma loaded rack for.\n\
+                        require \"rack\"\n\
                         require \"rack/utils\"\n"
                 .to_string();
         }
@@ -5401,9 +5404,9 @@ fn ruby_family_runtime_files(
     )?;
     // The middleware the app's gems' Railties `use`, outermost first, as Rails stacks them.
     if !app.gem_middlewares.is_empty() {
-        let stacked = app.gem_middlewares.iter().rev().fold("app".to_string(), |inner, class| format!("{class}.new({inner})"));
+        let stacked = stack_middlewares(&app.gem_middlewares, &app.gem_middleware_blocks, "app");
         let body = format!(
-            "# frozen_string_literal: true\n# The Rack middleware the app's gems put on Rails' stack from their\n# Railties (`App::gem_middlewares`), outermost first.\nmodule GemMiddleware\n  def self.wrap(app)\n    {stacked}\n  end\nend\n"
+            "# frozen_string_literal: true\n# The Rack middleware the app's gems put on Rails' stack from their\n# Railties (`App::gem_middlewares`), outermost first.\nmodule GemMiddleware\n  def self.wrap(app)\n    {stacked}\n  end\n\n  # The test harness's request through the stack (Rails' integration tests run it), the block at its bottom.\n  def self.around(env, &inner)\n    wrap(inner).call(env)\n  end\nend\n"
         );
         for (path, content) in files.iter_mut() {
             if path == "runtime/gem_middleware.rb" {
@@ -9428,6 +9431,20 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 format!("`{}` requires a runtime class object; this form is supported on Ruby and JRuby only", method.as_str()),
             );
         }
+        // Not left to the C build: Spinel resolves a computed name only for a writer it hands a value (`__send__("#{k}=", v)`).
+        if target == "spinel"
+            && let crate::expr::ExprNode::Send { method, args, .. } = &*expr.node
+            && matches!(method.as_str(), "send" | "public_send" | "__send__")
+            && let [name] = args.as_slice()
+            && matches!(&*name.node, crate::expr::ExprNode::StringInterp { .. })
+        {
+            emit::diagnostics::report_unsupported(
+                expr.span,
+                target,
+                "dynamic send",
+                format!("`{}` calls a method whose name is built when it runs, which Spinel resolves only for a writer it hands a value", method.as_str()),
+            );
+        }
         // A name computed when it runs: the Ruby family defines it then, which no compiled target can.
         if !matches!(target, "jruby")
             && let crate::expr::ExprNode::Send { recv, method, args, .. } = &*expr.node
@@ -9933,8 +9950,17 @@ fn drop_solid_queue_standin(app: &App, files: &mut Vec<(String, String)>) {
 /// The Spinel tree's `GemMiddleware` for an app whose gems' Railties
 /// `use` middleware (`App::gem_middlewares`): the request as a Rack env,
 /// through the stack, with the routes at the bottom.
-fn spinel_gem_middleware(classes: &[String]) -> String {
-    let stacked = classes.iter().rev().fold("App.new".to_string(), |inner, class| format!("{class}.new({inner})"));
+/// `A.new(B.new(app) { |config| … })`: outermost first, each with the block its `use` passed.
+fn stack_middlewares(classes: &[String], blocks: &crate::det::HashMap<String, String>, app: &str) -> String {
+    classes.iter().rev().fold(app.to_string(), |inner, class| match blocks.get(class) {
+        Some(block) => format!("{class}.new({inner}) {block}"),
+        None => format!("{class}.new({inner})"),
+    })
+}
+
+fn spinel_gem_middleware(classes: &[String], blocks: &crate::det::HashMap<String, String>) -> String {
+    let stacked = stack_middlewares(classes, blocks, "App.new");
+    let around = stack_middlewares(classes, blocks, "Inner.new(inner)");
     format!(
         r#"# frozen_string_literal: true
 # The Rack middleware the app's gems put on Rails' stack from their
@@ -9949,7 +9975,7 @@ module GemMiddleware
       exchange = env["roundhouse.exchange"]
       raise TypeError, "no roundhouse.exchange in the Rack env" unless exchange.is_a?(Exchange)
       # Not the request's own path: a middleware above may have rewritten PATH_INFO, and Rails routes the rewritten one.
-      exchange.route(env["PATH_INFO"].to_s)
+      exchange.route(env["PATH_INFO"].to_s, env)
     end
   end
 
@@ -9963,8 +9989,14 @@ module GemMiddleware
       @body = nil
     end
 
-    def route(path)
+    def route(path, env)
       @req.path = path
+      # Rails' `request.env` is the Rack env: what a middleware above set (`env["warden"]`) is the request's.
+      env.each do |key, value|
+        @request_obj.env[key] = value unless key == "roundhouse.exchange"
+        # Not left at the restored one: a middleware above may have put another session in its place.
+        @request_obj.session = value if key == "rack.session" && value.is_a?(ActionDispatch::Session)
+      end
       Main.dispatch_request(@req, @res, @request_obj)
       @routes_body = @res.body
       @body = [@routes_body]
@@ -9980,6 +10012,23 @@ module GemMiddleware
   STACK_LOCK = Mutex.new
 
   # Not at load: Rails builds the stack after the initializers, which configure the middleware.
+  # The bottom of the test harness's stack: the block it routes the request with.
+  class Inner
+    def initialize(inner)
+      @inner = inner
+    end
+
+    def call(env)
+      @inner.call(env)
+    end
+  end
+
+  # The test harness's request through the stack (Rails' integration tests run it), built per
+  # request: the block at its bottom is the harness's own.
+  def self.around(env, &inner)
+    ({around}).call(env)
+  end
+
   def self.stack
     return @stack if @stack
     # Not a bare `||=`: two first requests at once would each build a stack and run its constructors twice.
@@ -10039,6 +10088,7 @@ module GemMiddleware
     end
     env["rack.input"] = StringIO.new(req.raw_body.to_s)
     env["action_dispatch.request_id"] = request_obj.request_id.to_s
+    env["rack.session"] = request_obj.session
     env
   end
 end
@@ -10066,7 +10116,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
 
     crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files)?;
     if !app.gem_middlewares.is_empty() {
-        let body = spinel_gem_middleware(&app.gem_middlewares);
+        let body = spinel_gem_middleware(&app.gem_middlewares, &app.gem_middleware_blocks);
         for (path, content) in files.iter_mut() {
             if path == "runtime/gem_middleware.rb" {
                 *content = body.clone();
@@ -11732,6 +11782,10 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     for_each_app_constant(app, &mut |_, path| {
         owned.extend(ownership.owners(path).into_iter().map(str::to_string));
     });
+    // Not only the app's code: a middleware the app's `config.middleware.use` stacks (`Warden::Manager`) is the gem's class too.
+    for class in &app.gem_middlewares {
+        owned.extend(ownership.owners(class).into_iter().map(str::to_string));
+    }
     // Not only direct gems: a gem compiled from source no longer requires its own dependencies, so the real ones it names come in here (fugit's raabro and et-orbi).
     let source_deps: Vec<crate::gems::GemEntry> = lock
         .source

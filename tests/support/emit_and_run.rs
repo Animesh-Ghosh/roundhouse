@@ -494,17 +494,17 @@ impl Overlay {
         } else {
             roundhouse::session::analyze_and_lower(&mut app)
         };
-        let mut errors: Vec<_> = ingest_diags
-            .into_iter()
-            .chain(diagnose(&app))
-            .chain(lower_diags)
-            .filter(|d| d.severity == Severity::Error)
-            .collect();
+        let mut found: Vec<_> = ingest_diags.into_iter().chain(diagnose(&app)).chain(lower_diags).collect();
+        // As the CLI does: a gem's code the app does not reach is no error of the emitted program.
+        roundhouse::source_gem_shake::demote_unreached_gem_errors(&app, &mut found);
+        let mut errors: Vec<_> = found.into_iter().filter(|d| d.severity == Severity::Error).collect();
 
         let emitted = scratch.join("emitted");
         let (files, emit_diags) = roundhouse::emit::diagnostics::scope(|| {
             roundhouse::project::target_files(&app, &source, target)
         });
+        let mut emit_diags = emit_diags;
+        roundhouse::source_gem_shake::demote_unreached_gem_errors(&app, &mut emit_diags);
         errors.extend(emit_diags.into_iter().filter(|d| d.severity == Severity::Error));
         let files = match files {
             Ok(files) => files,

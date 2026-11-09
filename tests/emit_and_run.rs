@@ -20961,6 +20961,12 @@ mod controller_surface;
 mod rack_attack;
 #[path = "emit_and_run/devise.rs"]
 mod devise;
+#[path = "emit_and_run/warden.rs"]
+mod warden;
+#[path = "emit_and_run/class_eval_string_macro.rs"]
+mod class_eval_string_macro;
+#[path = "emit_and_run/send_built_name.rs"]
+mod send_built_name;
 #[path = "support/addressable_gem.rs"]
 mod addressable_gem;
 #[path = "emit_and_run/addressable.rs"]
