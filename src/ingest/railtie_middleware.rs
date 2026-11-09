@@ -51,6 +51,8 @@ pub(super) struct Stack {
     pub blocks: crate::det::HashMap<String, String>,
     /// The Rack env keys a stacked middleware's `call(env)` writes, and the class it writes there.
     pub env_writes: crate::det::HashMap<String, String>,
+    /// Where each stacked `config.middleware.use` of the app's `config/application.rb` starts.
+    pub application_taken: Vec<u32>,
     pub diags: Vec<Diagnostic>,
 }
 
@@ -143,9 +145,11 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
     }
     // Not after every gem's: a gem's class body runs as Bundler requires it, before the app's, and its initializers after.
     let mut app_uses = Vec::new();
+    let mut application_taken = Vec::new();
     for u in application_uses(vfs, dir) {
         // Not a class of a gem the app does not compile from source (`Rack::Deflater`): the ledger reports it, as before.
         if let Some(class) = resolve(&u, &every_gem_defines) {
+            application_taken.push(u.span.start);
             app_uses.push((class, false, u.span, u.block, true));
         }
     }
@@ -167,7 +171,7 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
     let blocks = out.iter().filter_map(|(class, _, _, block, _)| block.clone().map(|b| (class.clone(), b))).collect();
     let classes: Vec<String> = out.into_iter().map(|(class, _, _, _, _)| class).collect();
     let env_writes = env_writes(vfs, &every_lib_file, &classes, &every_gem_defines);
-    Stack { classes, blocks, env_writes, diags }
+    Stack { classes, blocks, env_writes, application_taken, diags }
 }
 
 /// `env["warden"] = Proxy.new(env, self)`: a top-level statement of a stacked class's `call(env)`,
