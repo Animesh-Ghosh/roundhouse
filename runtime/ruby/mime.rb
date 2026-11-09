@@ -232,8 +232,9 @@ module Mime
       @symbol == :gzip
     end
 
+    # Rails' one exception: any HTML type, Turbo Stream's `text/vnd.turbo-stream.html` among them.
     def html?
-      @symbol == :html
+      @symbol == :html || @string.include?("html")
     end
 
     def ics?

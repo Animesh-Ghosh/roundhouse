@@ -2536,6 +2536,11 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
         // closes over written in as its value; one it cannot write, or `self`, is no routing argument.
         // The block it closed over is the one a `yield` inside would run; a body with none does not need it.
         Val::Proc { params, rest: None, body, locals, block, .. } if block.is_none() || !yields(body) => {
+            // A nested block that binds a name the outer one closes over: its reads are its own, which
+            // a substitution by name would replace.
+            if let Some(name) = rebound(body).into_iter().find(|n| locals.contains_key(n) && !params.contains(n)) {
+                return Err(format!("a block whose inner block rebinds `{}`, a local it closes over", name.as_str()));
+            }
             let unwritable = std::cell::RefCell::new(None::<String>);
             let body = crate::lower::controller_to_library::util::map_expr(body, &|e| match &*e.node {
                 ExprNode::Var { name, .. } if !params.contains(name) => {
@@ -2568,6 +2573,18 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
         }
         other => return Err(format!("a routing argument it cannot write ({})", val_kind(other))),
     })
+}
+
+/// The names nested blocks in `e` bind as parameters.
+fn rebound(e: &Expr) -> Vec<Symbol> {
+    let mut out = Vec::new();
+    if let ExprNode::Lambda { params, rest_param, block_param, .. } = &*e.node {
+        out.extend(params.iter().cloned());
+        out.extend(rest_param.iter().cloned());
+        out.extend(block_param.iter().cloned());
+    }
+    e.node.for_each_child(&mut |c| out.extend(rebound(c)));
+    out
 }
 
 fn yields(e: &Expr) -> bool {
