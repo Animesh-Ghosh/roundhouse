@@ -99,7 +99,8 @@ pub fn guard_class(entries: &[RouteSpec]) -> Option<(LibraryClass, String)> {
     for (index, guard) in guards(entries).into_iter().enumerate() {
         let Some((param, body)) = guard_body(guard) else { continue };
         let name = Symbol::from(format!("guard_{index}"));
-        rbs.push_str(&format!("  def self.{name}: (ActionDispatch::Request {param}) -> bool\n"));
+        // Named `request` whatever the lambda calls it: the analyzer binds the parameter by position, and an RBS name must be ASCII.
+        rbs.push_str(&format!("  def self.{name}: (ActionDispatch::Request request) -> bool\n"));
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,

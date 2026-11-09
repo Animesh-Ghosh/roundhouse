@@ -644,7 +644,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
 /// The request constraints the Ruby-family router asks, as `RoundhouseRouteGuards` methods typed against the request.
 fn add_route_guards(app: &mut App) {
     let Some((class, rbs)) = crate::lower::route_guards::guard_class(&app.routes.entries) else { return };
-    let signatures = crate::rbs::parse_app_signatures(&rbs).expect("route guard signatures parse");
+    let Ok(signatures) = crate::rbs::parse_app_signatures(&rbs) else { return };
     for (owner, methods) in signatures {
         app.rbs_signatures.entry(owner).or_default().extend(methods);
     }

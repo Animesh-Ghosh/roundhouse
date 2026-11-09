@@ -37,7 +37,8 @@ get "/invite/:code", to: "gadgets#new""#,
     assert_eq!(asked, [("WidgetsController".to_string(), vec![0]), ("GadgetsController".to_string(), vec![])], "{asked:?}");
     let (class, rbs) = guard_class(&app.routes.entries).expect("a guard method");
     assert_eq!(class.methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["guard_0"]);
-    assert!(rbs.contains("def self.guard_0: (ActionDispatch::Request req) -> bool"), "{rbs}");
+    assert!(rbs.contains("def self.guard_0: (ActionDispatch::Request request) -> bool"), "{rbs}");
+    assert_eq!(class.methods[0].params[0].name.as_str(), "req");
     assert!(!app.routes.diagnostics.iter().any(|d| d.message.contains("request constraint")), "{:#?}", app.routes.diagnostics);
     let dispatched: Vec<String> = flatten_routes(&app).iter().map(|r| r.controller.0.as_str().to_string()).collect();
     assert_eq!(dispatched, ["GadgetsController"], "{dispatched:?}");
@@ -90,4 +91,22 @@ get "/audits", to: "audits#index", constraints: ->(req, &block) { true }"#,
     let spans: Vec<_> = app.routes.diagnostics.iter().filter(|d| d.message.contains("request constraint")).map(|d| d.span).collect();
     assert_eq!(spans.len(), 2, "{:#?}", app.routes.diagnostics);
     assert!(spans.iter().all(|s| !s.is_synthetic()) && spans[0] != spans[1], "{spans:?}");
+}
+
+/// The Ruby-family table keeps a route's segment requirements beside its constraints' chain, and a
+/// route with requirements and no constraint keeps them too.
+#[test]
+fn a_guarded_routes_table_entry_keeps_its_segment_requirements() {
+    let app = app(
+        r#"get "/files/:name", to: "files#show", constraints: { name: /[a-z]+/, subdomain: "cdn" }
+get "/files/:name", to: "files#index", constraints: { name: /[a-z]+/ }"#,
+    );
+    let table = roundhouse::lower::routes_to_library::lower_routes_to_guarded_dispatch_functions(&app)
+        .into_iter()
+        .find(|f| f.name.as_str() == "table")
+        .expect("RouteTable.table");
+    let source = roundhouse::emit::ruby::emit_expr(&table.body);
+    let requirement = r#""4.name33.C+0026.abcdefghijklmnopqrstuvwxyz""#;
+    assert!(source.contains(&format!(r#"Route.new("GET", "/files/:name", :files, :show, nil, "", {requirement}, 0)"#)), "{source}");
+    assert!(source.contains(&format!(r#"Route.new("GET", "/files/:name", :files, :index, nil, "", {requirement})"#)), "{source}");
 }
