@@ -9103,15 +9103,15 @@ pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassIn
         }
         out
     }
-    fn hook_methods(includes: &[ClassId], hook: &str, app: &App, resolver: &ConstResolver, seen: &mut crate::det::HashSet<(ClassId, String)>) -> crate::det::HashSet<Symbol> {
-        fn body(expr: &Expr, target: &Symbol, app: &App, resolver: &ConstResolver, seen: &mut crate::det::HashSet<(ClassId, String)>) -> Option<crate::det::HashSet<Symbol>> {
+    fn hook_methods(includes: &[ClassId], hook: &str, app: &App, by_name: &crate::ingest::LibraryClassesByName, resolver: &ConstResolver, seen: &mut crate::det::HashSet<(ClassId, String)>) -> crate::det::HashSet<Symbol> {
+        fn body(expr: &Expr, target: &Symbol, app: &App, by_name: &crate::ingest::LibraryClassesByName, resolver: &ConstResolver, seen: &mut crate::det::HashSet<(ClassId, String)>) -> Option<crate::det::HashSet<Symbol>> {
             let mut methods = crate::det::HashSet::default();
             match &*expr.node {
                 ExprNode::Seq { exprs } => for expr in exprs {
-                    methods.extend(body(expr, target, app, resolver, seen)?);
+                    methods.extend(body(expr, target, app, by_name, resolver, seen)?);
                     if matches!(&*expr.node, ExprNode::Return { .. }) { break; }
                 },
-                ExprNode::Return { value } => return body(value, target, app, resolver, seen),
+                ExprNode::Return { value } => return body(value, target, app, by_name, resolver, seen),
                 ExprNode::Lit { .. } => {},
                 ExprNode::Send { recv: Some(recv), method, args, block, .. }
                     if matches!(&*recv.node, ExprNode::Var { name, .. } if name == target) => {
@@ -9124,7 +9124,7 @@ pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassIn
                             let ExprNode::Const { path } = &*arg.node else { return None };
                             modules.push(resolver.namespace(arg.span, path).cloned().unwrap_or_else(|| mixin_path_id(path)));
                         }
-                        methods.extend(hook_methods(&modules, if method.as_str() == "include" { "included" } else { "extended" }, app, resolver, seen));
+                        methods.extend(hook_methods(&modules, if method.as_str() == "include" { "included" } else { "extended" }, app, by_name, resolver, seen));
                     } else { return None; }
                 },
                 _ => return None,
@@ -9136,11 +9136,11 @@ pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassIn
             if !seen.insert((id.clone(), hook.to_owned())) { continue; }
             // A plain inclusion does not copy another module's singleton
             // hook. Follow only explicit registration on the hook target.
-            if let Some(method) = app.library_classes.iter().rev().filter(|class| &class.name == id)
+            if let Some(method) = by_name.get(id).into_iter().flatten().rev()
                 .flat_map(|class| class.methods.iter().rev())
                 .find(|method| method.receiver == MethodReceiver::Class && method.name.as_str() == hook && method.params.len() == 1)
             {
-                if let Some(installed) = body(&method.body, &method.params[0].name, app, resolver, seen) { methods.extend(installed); }
+                if let Some(installed) = body(&method.body, &method.params[0].name, app, by_name, resolver, seen) { methods.extend(installed); }
             }
         }
         methods
@@ -9150,14 +9150,15 @@ pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassIn
         (model.name.clone(), model_includes(model), extensions(exprs, resolver))
     }).chain(app.library_classes.iter().map(|class|
         (class.name.clone(), class.includes.clone(), extensions(class.unknown_calls.iter(), resolver))));
+    let by_name = crate::ingest::library_classes_by_name(app);
     for (id, mut includes, extensions) in declarations {
-        let mut installed = hook_methods(&includes, "included", app, resolver, &mut crate::det::HashSet::default());
-        installed.extend(hook_methods(&extensions, "extended", app, resolver, &mut crate::det::HashSet::default()));
+        let mut installed = hook_methods(&includes, "included", app, &by_name, resolver, &mut crate::det::HashSet::default());
+        installed.extend(hook_methods(&extensions, "extended", app, &by_name, resolver, &mut crate::det::HashSet::default()));
         includes.extend(extensions.iter().cloned());
         let info = classes.entry(id).or_default();
         info.class_method_extensions.extend(extensions);
         info.class_side_hook_methods.extend(installed);
-        info.unknown_class_side_hook |= crate::ingest::unconsumed_class_side_hook(&includes, app).is_some();
+        info.unknown_class_side_hook |= crate::ingest::unconsumed_class_side_hook(&includes, app, &by_name).is_some();
     }
 }
 
