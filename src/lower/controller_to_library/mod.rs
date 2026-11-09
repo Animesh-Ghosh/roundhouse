@@ -32,6 +32,7 @@ mod params_values;
 mod params_sources;
 mod permit_splat;
 mod typed_update;
+mod respond_with;
 pub mod params_wrapper;
 pub mod rewrites;
 pub mod util;
@@ -3261,8 +3262,24 @@ fn action_to_method(
         can_respond_within(&a.body, &resolve, &mut std::collections::BTreeSet::new())
     };
     let inheritor_modules = inheritor_view_modules(controller, all_controllers_for_params);
+    let chain: Vec<&Controller> = std::iter::once(controller).chain(ancestor_chain(controller, all_controllers_for_params)).collect();
+    let responder_expr = chain.iter().find_map(|c| {
+        c.body.iter().find_map(|item| {
+            let crate::dialect::ControllerBodyItem::Unknown { expr, .. } = item else { return None };
+            match &*expr.node {
+                ExprNode::Assign { target: crate::expr::LValue::Attr { recv, name }, value } if matches!(&*recv.node, ExprNode::SelfRef) && name.as_str() == "responder" => Some(value),
+                // The setter call a class body writes as `self.responder = v`.
+                ExprNode::Send { recv: Some(recv), method, args, .. } if method.as_str() == "responder=" && matches!(&*recv.node, ExprNode::SelfRef) && args.len() == 1 => args.first(),
+                _ => None,
+            }
+        })
+    });
+    let respond_with_body = (respond_with::html_only_declared(&chain) == Some(true)).then(|| {
+        let has_template = chain.iter().any(|c| views_module_name(c).is_some_and(|m| view_ivars.contains_key(&(m, a.name.as_str().to_string()))));
+        respond_with::lower(&a.body, &respond_with::Facts { action: is_public.then_some(a.name.as_str()), has_template, responder: responder_expr })
+    });
     let (body, deferred_tail) = lower_action_body(
-        &a.body,
+        respond_with_body.as_ref().unwrap_or(&a.body),
         controller,
         a.name.as_str(),
         privs,

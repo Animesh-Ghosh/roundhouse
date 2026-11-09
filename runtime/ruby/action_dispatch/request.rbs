@@ -86,6 +86,7 @@ module ActionDispatch
     def get?: () -> bool
     def post?: () -> bool
     def put?: () -> bool
+    def patch?: () -> bool
     def head?: () -> bool
     def xhr?: () -> bool
     def inertia?: () -> bool

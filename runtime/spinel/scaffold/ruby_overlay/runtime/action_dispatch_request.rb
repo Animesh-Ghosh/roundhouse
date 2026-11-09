@@ -119,6 +119,7 @@ module ActionDispatch
     # `"put"` must stay false). Shared `runtime/ruby` `put?` is likewise
     # case-sensitive on `@request_method` (no upcase on assign).
     def put? = @env["REQUEST_METHOD"] == "PUT"
+    def patch? = @env["REQUEST_METHOD"] == "PATCH"
     # Rails' "is this a safe request" idiom is `request.get? ||
     # request.head?`, and campfire writes exactly that in
     # `BlockBannedRequests#safe_request?`. This overlay is the Request
