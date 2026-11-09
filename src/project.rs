@@ -5401,7 +5401,7 @@ fn ruby_family_runtime_files(
     )?;
     // The middleware the app's gems' Railties `use`, outermost first, as Rails stacks them.
     if !app.gem_middlewares.is_empty() {
-        let stacked = app.gem_middlewares.iter().rev().fold("app".to_string(), |inner, class| format!("{class}.new({inner})"));
+        let stacked = stack_middlewares(&app.gem_middlewares, &app.gem_middleware_blocks, "app");
         let body = format!(
             "# frozen_string_literal: true\n# The Rack middleware the app's gems put on Rails' stack from their\n# Railties (`App::gem_middlewares`), outermost first.\nmodule GemMiddleware\n  def self.wrap(app)\n    {stacked}\n  end\nend\n"
         );
@@ -9933,8 +9933,16 @@ fn drop_solid_queue_standin(app: &App, files: &mut Vec<(String, String)>) {
 /// The Spinel tree's `GemMiddleware` for an app whose gems' Railties
 /// `use` middleware (`App::gem_middlewares`): the request as a Rack env,
 /// through the stack, with the routes at the bottom.
-fn spinel_gem_middleware(classes: &[String]) -> String {
-    let stacked = classes.iter().rev().fold("App.new".to_string(), |inner, class| format!("{class}.new({inner})"));
+/// `A.new(B.new(app) { |config| … })`: outermost first, each with the block its `use` passed.
+fn stack_middlewares(classes: &[String], blocks: &crate::det::HashMap<String, String>, app: &str) -> String {
+    classes.iter().rev().fold(app.to_string(), |inner, class| match blocks.get(class) {
+        Some(block) => format!("{class}.new({inner}) {block}"),
+        None => format!("{class}.new({inner})"),
+    })
+}
+
+fn spinel_gem_middleware(classes: &[String], blocks: &crate::det::HashMap<String, String>) -> String {
+    let stacked = stack_middlewares(classes, blocks, "App.new");
     format!(
         r#"# frozen_string_literal: true
 # The Rack middleware the app's gems put on Rails' stack from their
@@ -10066,7 +10074,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
 
     crate::runtime_files::walk_flat("runtime/spinel", &["rb"], "runtime/", &mut files)?;
     if !app.gem_middlewares.is_empty() {
-        let body = spinel_gem_middleware(&app.gem_middlewares);
+        let body = spinel_gem_middleware(&app.gem_middlewares, &app.gem_middleware_blocks);
         for (path, content) in files.iter_mut() {
             if path == "runtime/gem_middleware.rb" {
                 *content = body.clone();

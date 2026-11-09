@@ -742,7 +742,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     app.spinel_int_overflow = spinel_int_overflow;
     // Not a framework gem's models (solid_queue's): only a gem compiled for the app runs its Railtie here.
     let gem_libs: Vec<PathBuf> = source_gems.iter().map(|gem| gem.mount.join("lib")).collect();
-    (app.gem_middlewares, app.gem_middleware_refusals) = super::railtie_middleware::read(vfs, &gem_libs);
+    (app.gem_middlewares, app.gem_middleware_blocks, app.gem_middleware_refusals) = super::railtie_middleware::read(vfs, &gem_libs);
     // `enum` columns declared inside a concern's `included do`, keyed by
     // the module. Local rather than a field on `App`: they exist only
     // until the splice folds them into each including model's own

@@ -142,6 +142,10 @@ pub struct App {
     /// them in front of the routes, where Rails puts them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gem_middlewares: Vec<String>,
+    /// The block a `use` passes its middleware (`use Warden::Manager do |config| … end`), by class,
+    /// as brace-block Ruby the stack hands the constructor.
+    #[serde(default, skip_serializing_if = "crate::det::HashMap::is_empty")]
+    pub gem_middleware_blocks: crate::det::HashMap<String, String>,
     /// The insertions it could not read, reported by analyze.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gem_middleware_refusals: Vec<crate::diagnostic::Diagnostic>,
@@ -1284,6 +1288,7 @@ impl App {
             boot_program: Vec::new(),
             boot_gem_constants: Vec::new(),
             gem_middlewares: Vec::new(),
+            gem_middleware_blocks: Default::default(),
             gem_middleware_refusals: Vec::new(),
             included_hoist_conflicts: Vec::new(),
             superclass_refusals: Vec::new(),

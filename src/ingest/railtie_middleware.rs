@@ -38,11 +38,19 @@ struct Use {
     span: Span,
     /// The initializer names `before:` or `after:`, an order this reader does not keep.
     ordered: bool,
+    /// The block passed with it, as `{ |params| body }` source.
+    block: Option<String>,
 }
 
-pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, gem_libs: &[PathBuf]) -> (Vec<String>, Vec<Diagnostic>) {
+pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, gem_libs: &[PathBuf]) -> (Vec<String>, crate::det::HashMap<String, String>, Vec<Diagnostic>) {
     let mut out = Vec::new();
     let mut diags = Vec::new();
+    // Not this gem's constants alone: Devise's engine stacks Warden's `Warden::Manager`, another source gem's class.
+    let mut every_lib_file = Vec::new();
+    for lib in gem_libs {
+        rb_files(vfs, lib, &mut every_lib_file);
+    }
+    let every_gem_defines = defined_constants(vfs, &every_lib_file);
     for lib in gem_libs {
         let mut files = Vec::new();
         rb_files(vfs, lib, &mut files);
@@ -80,6 +88,7 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, gem_libs: &[PathBuf]) -> (Vec<Strin
                     let (mut probe_uses, mut probe_diags) = (Vec::new(), Vec::new());
                     for stmt in flatten_statements(body) {
                         read_initializer(&stmt, file_id, &lexical, &mut probe_uses, &mut probe_diags);
+                        read_class_body_use(&stmt, file_id, &lexical, &mut probe_uses, &mut probe_diags);
                     }
                     if probe_uses.is_empty() && probe_diags.is_empty() {
                         continue;
@@ -100,6 +109,7 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, gem_libs: &[PathBuf]) -> (Vec<Strin
                 }
                 for stmt in flatten_statements(body) {
                     read_initializer(&stmt, file_id, &lexical, &mut uses, &mut diags);
+                    read_class_body_use(&stmt, file_id, &lexical, &mut uses, &mut diags);
                 }
             }
         }
@@ -108,8 +118,8 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, gem_libs: &[PathBuf]) -> (Vec<Strin
         }
         let defined = defined_constants(vfs, &files);
         for u in uses {
-            match resolve(&u, &defined) {
-                Some(class) => out.push((class, u.ordered, u.span)),
+            match resolve(&u, &defined).or_else(|| resolve(&u, &every_gem_defines)) {
+                Some(class) => out.push((class, u.ordered, u.span, u.block)),
                 None => diags.push(Diagnostic::unsupported(
                     u.span,
                     None,
@@ -121,7 +131,7 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, gem_libs: &[PathBuf]) -> (Vec<Strin
     }
     // Not stacked in reading order when initializers order themselves: Rails sorts them by `before:` and `after:`.
     if out.len() > 1 {
-        for (_, _, span) in out.iter().filter(|(_, ordered, _)| *ordered) {
+        for (_, _, span, _) in out.iter().filter(|(_, ordered, _, _)| *ordered) {
             diags.push(Diagnostic::unsupported(
                 *span,
                 None,
@@ -130,7 +140,46 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, gem_libs: &[PathBuf]) -> (Vec<Strin
             ));
         }
     }
-    (out.into_iter().map(|(class, _, _)| class).collect(), diags)
+    let blocks = out.iter().filter_map(|(class, _, _, block)| block.clone().map(|b| (class.clone(), b))).collect();
+    (out.into_iter().map(|(class, _, _, _)| class).collect(), blocks, diags)
+}
+
+/// `config.app_middleware.use Warden::Manager do |config| … end` in an Engine's or Railtie's class
+/// body (Devise's), which Rails runs as the class loads; `config.middleware.use` alike.
+fn read_class_body_use(stmt: &Node<'_>, file: crate::span::FileId, lexical: &[String], uses: &mut Vec<Use>, diags: &mut Vec<Diagnostic>) {
+    let Some(call) = stmt.as_call_node() else { return };
+    let on_stack = call.receiver().and_then(|r| r.as_call_node()).is_some_and(|stack| {
+        matches!(constant_id_str(&stack.name()), "app_middleware" | "middleware")
+            && stack.arguments().is_none()
+            && stack.receiver().and_then(|c| c.as_call_node()).is_some_and(|c| constant_id_str(&c.name()) == "config" && c.receiver().is_none())
+    });
+    if !on_stack {
+        return;
+    }
+    let loc = call.location();
+    let span = Span { file, start: loc.start_offset() as u32, end: loc.end_offset() as u32 };
+    let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    let block = call.block().and_then(|b| b.as_block_node());
+    let target = match (constant_id_str(&call.name()), args.as_slice()) {
+        ("use", [only]) => constant_path_of(only).map(|path| (path, only.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)))),
+        _ => None,
+    };
+    let Some((path, rooted)) = target else {
+        diags.push(Diagnostic::unsupported(
+            span,
+            None,
+            "railtie middleware",
+            format!("`{}` with these arguments: only `config.app_middleware.use(Klass)`, with or without a block, is put on the emitted stack", constant_id_str(&call.name())),
+        ));
+        return;
+    };
+    // Braces, not `do … end`: nested in the stack's `A.new(B.new(app) { … })`, a `do` would bind to `A.new`.
+    let block = block.map(|b| {
+        let params = b.parameters().map(|p| String::from_utf8_lossy(p.location().as_slice()).into_owned()).unwrap_or_default();
+        let body = b.body().map(|body| String::from_utf8_lossy(body.location().as_slice()).into_owned()).unwrap_or_default();
+        format!("{{ {params}\n{body}\n}}")
+    });
+    uses.push(Use { path, rooted, lexical: lexical.to_vec(), span, ordered: false, block });
 }
 
 #[derive(PartialEq)]
@@ -439,7 +488,7 @@ fn read_initializer(
             _ => None,
         };
         match class {
-            Some((path, rooted)) => uses.push(Use { path, rooted, lexical: lexical.to_vec(), span, ordered }),
+            Some((path, rooted)) => uses.push(Use { path, rooted, lexical: lexical.to_vec(), span, ordered, block: None }),
             None => diags.push(Diagnostic::unsupported(
                 span,
                 None,
@@ -472,8 +521,28 @@ mod tests {
 
     fn read(files: &[(&str, &str)]) -> (Vec<String>, Vec<String>) {
         let map = files.iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
-        let (classes, diags) = super::read(&MapVfs::new(map), &[PathBuf::from("/gem/lib")]);
+        let (classes, _, diags) = super::read(&MapVfs::new(map), &[PathBuf::from("/gem/lib")]);
         (classes, diags.iter().map(|d| d.message.clone()).collect())
+    }
+
+    /// Devise's engine: a class-body `config.app_middleware.use` of another source gem's class, with
+    /// the block the constructor takes, as braces.
+    #[test]
+    fn an_engine_class_body_stacks_another_gems_middleware_with_its_block() {
+        let engine = "module Devise\n  class Engine < ::Rails::Engine\n    config.app_middleware.use Warden::Manager do |config|\n      Devise.warden_config = config\n    end\n  end\nend\n";
+        let map = [
+            ("/devise/lib/devise.rb", "module Devise\nend\nrequire \"devise/rails\"\n"),
+            ("/devise/lib/devise/rails.rb", engine),
+            ("/warden/lib/warden.rb", "module Warden\n  class Manager\n  end\nend\n"),
+        ]
+        .iter()
+        .map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec()))
+        .collect();
+        let (classes, blocks, diags) =
+            super::read(&MapVfs::new(map), &[PathBuf::from("/devise/lib"), PathBuf::from("/warden/lib")]);
+        assert_eq!(classes, ["Warden::Manager"], "{diags:?}");
+        assert_eq!(blocks.get("Warden::Manager").map(String::as_str), Some("{ |config|\nDevise.warden_config = config\n}"));
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
     const ENTRY: &str = "module Gem\n  class Middleware\n  end\nend\nrequire \"gem/railtie\"\n";
