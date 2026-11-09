@@ -73,7 +73,7 @@ end
     value = params[:kind]
     permitted = params.permit(:kind).to_h
     from_hash = permitted[:kind]
-    render plain: value.pluralize.capitalize + "|" + from_hash.pluralize.capitalize + "|" + value.pluralize(1)
+    render plain: value.pluralize.capitalize + "|" + from_hash.pluralize.capitalize + "|" + value.pluralize(1) + "|" + value.pluralize
   end
 
   def invalid
@@ -186,8 +186,17 @@ fn api_parity_round4_fixes_run_on_spinel() {
     assert_eq!(none.body, r#"{"labels":null,"loaded":false}"#, "safe-nav nil:\n{}", server.log());
 
     // `String#pluralize` on a request value (Rails 8.1.4).
-    let plural = server.get("/widgets/plural_kind?kind=status");
-    assert_eq!(plural.body, "Statuses|Statuses|status", "pluralize:\n{}", server.log());
+    for (kind, expected) in [
+        ("status", "Statuses|Statuses|status|statuses"),
+        // Rails' uncountables match at a word boundary.
+        ("big%20fish", "Big fish|Big fish|big fish|big fish"),
+        // Rails' rules keep what they capture and take the rest as written.
+        ("CHILD", "Children|Children|CHILD|Children"),
+        ("BUS", "Buses|Buses|BUS|BUses"),
+    ] {
+        let plural = server.get(&format!("/widgets/plural_kind?kind={kind}"));
+        assert_eq!(plural.body, expected, "pluralize {kind}:\n{}", server.log());
+    }
 
     let show = server.get("/widgets/1.json");
     assert_eq!(

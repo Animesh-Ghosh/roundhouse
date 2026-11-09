@@ -40,8 +40,7 @@ module Inflector
     return s + "zes" if d.end_with?("quiz")
     return s if d == "oxen"
     return s + "en" if d == "ox"
-    return s if d == "mice" || d == "lice"
-    return pluralize_tail(s, 4) + "ice" if d == "mouse" || d == "louse"
+    return s[0, 1].to_s + "ice" if d == "mouse" || d == "louse" || d == "mice" || d == "lice"
     return pluralize_tail(s, 2) + "ices" if pluralize_ix?(d)
     return s + "es" if d.end_with?("x") || d.end_with?("ch") || d.end_with?("ss") || d.end_with?("sh")
     return pluralize_tail(s, 1) + "ies" if pluralize_consonant_y?(d)
@@ -49,12 +48,12 @@ module Inflector
     return pluralize_tail(s, 2) + "ves" if pluralize_fe?(d)
     return pluralize_tail(s, 1) + "ves" if d.end_with?("lf") || d.end_with?("rf")
     return pluralize_tail(s, 3) + "ses" if d.end_with?("sis")
-    return s if d.end_with?("ta") || d.end_with?("ia")
+    return pluralize_tail(s, 1) + "a" if d.end_with?("ta") || d.end_with?("ia")
     return pluralize_tail(s, 2) + "a" if d.end_with?("tum") || d.end_with?("ium")
-    return s + "es" if d.end_with?("buffalo") || d.end_with?("tomato")
-    return s + "es" if d.end_with?("bus")
+    return pluralize_tail(s, 1) + "oes" if d.end_with?("buffalo") || d.end_with?("tomato")
+    return pluralize_tail(s, 1) + "ses" if d.end_with?("bus")
     return s + "es" if d.end_with?("alias") || d.end_with?("status")
-    return s if d.end_with?("octopi") || d.end_with?("viri")
+    return pluralize_tail(s, 1) + "i" if d.end_with?("octopi") || d.end_with?("viri")
     return pluralize_tail(s, 2) + "i" if d.end_with?("octopus") || d.end_with?("virus")
     return pluralize_tail(s, 2) + "es" if d == "axis" || d == "testis"
     return pluralize_tail(s, 1) + "s" if d.end_with?("s")
@@ -65,22 +64,47 @@ module Inflector
     s[0, s.length - drop].to_s
   end
 
+  # Rails' `\b<word>\Z`: a word boundary before it, so `big fish` counts
+  # and `my_fish` doesn't (`_` is a word character).
   def self.pluralize_uncountable?(d)
-    d == "equipment" || d == "information" || d == "rice" || d == "money" || d == "species" ||
-      d == "series" || d == "fish" || d == "sheep" || d == "jeans" || d == "police"
+    pluralize_ends_word?(d, "equipment") || pluralize_ends_word?(d, "information") ||
+      pluralize_ends_word?(d, "rice") || pluralize_ends_word?(d, "money") ||
+      pluralize_ends_word?(d, "species") || pluralize_ends_word?(d, "series") ||
+      pluralize_ends_word?(d, "fish") || pluralize_ends_word?(d, "sheep") ||
+      pluralize_ends_word?(d, "jeans") || pluralize_ends_word?(d, "police")
   end
 
-  # Rails' `inflect.irregular` rules match the tail, and keep the first
-  # letter's case. The answer is nil when none applies.
+  def self.pluralize_ends_word?(d, word)
+    return false unless d.end_with?(word)
+    return true if d.length == word.length
+    !pluralize_word_char?(d[d.length - word.length - 1, 1].to_s)
+  end
+
+  # `d` is downcased. A non-ASCII character counts as a word character,
+  # which holds for letters and not for non-ASCII punctuation.
+  def self.pluralize_word_char?(c)
+    (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "_" || c > "\x7f"
+  end
+
+  # Rails' `irregular` rules match either form of the word's tail, keep
+  # the matched first letter and take the rest from the rule, so `CHILD`
+  # is `Children`. The answer is nil when none applies.
   def self.pluralize_irregular(s, d)
-    return pluralize_tail(s, 6) + s[s.length - 6, 1].to_s + "eople" if d.end_with?("person")
-    return s if d.end_with?("people") || d.end_with?("children")
-    return pluralize_tail(s, 2) + "en" if d.end_with?("man")
-    return s if d.end_with?("men") || d.end_with?("sexes") || d.end_with?("moves") || d.end_with?("zombies")
-    return s + "ren" if d.end_with?("child")
-    return s + "es" if d.end_with?("sex")
-    return s + "s" if d.end_with?("move") || d.end_with?("zombie")
+    return pluralize_cased(s, 6, "eople") if d.end_with?("person") || d.end_with?("people")
+    return pluralize_cased(s, 3, "en") if d.end_with?("man") || d.end_with?("men")
+    return pluralize_cased(s, 5, "hildren") if d.end_with?("child")
+    return pluralize_cased(s, 8, "hildren") if d.end_with?("children")
+    return pluralize_cased(s, 3, "exes") if d.end_with?("sex")
+    return pluralize_cased(s, 5, "exes") if d.end_with?("sexes")
+    return pluralize_cased(s, 4, "oves") if d.end_with?("move")
+    return pluralize_cased(s, 5, "oves") if d.end_with?("moves")
+    return pluralize_cased(s, 6, "ombies") if d.end_with?("zombie")
+    return pluralize_cased(s, 7, "ombies") if d.end_with?("zombies")
     nil
+  end
+
+  def self.pluralize_cased(s, tail, rest)
+    pluralize_tail(s, tail) + s[s.length - tail, 1].to_s + rest
   end
 
   def self.pluralize_ix?(d)
