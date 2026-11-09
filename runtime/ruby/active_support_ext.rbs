@@ -49,9 +49,10 @@ module ActiveSupport
     @gem_name: String
     @silenced: bool
 
-    attr_reader deprecation_horizon: String
-    attr_reader gem_name: String
-    attr_accessor silenced: bool
+    def deprecation_horizon: () -> String
+    def gem_name: () -> String
+    def silenced: () -> bool
+    def silenced=: (bool value) -> bool
 
     def initialize: (?String deprecation_horizon, ?String gem_name) -> void
     def warn: (?String? message, ?untyped callstack) -> nil
