@@ -525,6 +525,13 @@ module ActiveSupport
       Rails.log_line("DEPRECATION WARNING: #{message}")
       nil
     end
+
+    # Rails installs a `const_missing` hook that warns and answers the
+    # replacement. Not ported: a hook no target has, and a program that
+    # reads no deprecated name never calls it (`deprecate_constant` is
+    # refused where one is read).
+    module DeprecatedConstantAccessor
+    end
   end
 
   # A namespace with no verifier in it, because ours is

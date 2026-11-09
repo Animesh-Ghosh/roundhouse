@@ -3344,6 +3344,7 @@ end
     // Before the body statements, which ask whether a class-side writer
     // the class body writes through is defined.
     super::hook_class_attribute::expand(&mut app);
+    super::aliased_includes::resolve(&mut app);
     // Between the two: a class body's `respond_to?(:status=)` asks for the writers just made, and the settled branch's writes join the body statements.
     super::settled_conditionals::settle(&mut app);
     super::app_extension_calls::mark(&mut app);

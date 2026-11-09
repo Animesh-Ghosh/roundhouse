@@ -1156,6 +1156,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("warn", Ty::Nil), ("deprecation_horizon", Ty::Str), ("gem_name", Ty::Str),
         ("silenced", Ty::Bool), ("silenced=", Ty::Bool),
     ]);
+    register_stdlib_class(classes, "ActiveSupport::Deprecation::DeprecatedConstantAccessor", &[], &[]);
     register_stdlib_class(classes, crate::analyze::indifferent::CLASS, &[], &[]);
     // Not answered here beyond `new`: the dispatch arm for `ActiveSupport::StringInquirer` types its predicates and String surface.
     register_stdlib_class(classes, "ActiveSupport::StringInquirer", &[("new", Ty::Str)], &[]);

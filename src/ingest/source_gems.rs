@@ -391,6 +391,56 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+use super::prism_api::PrismLocation;
+
+/// `begin require "feature" … rescue LoadError … end` at a file's top level, where the tree provides
+/// the feature: the file as Ruby runs it, the `begin` side alone. The rest is blanked byte for byte, so
+/// every span still points into the file as written.
+fn loaded_begins(text: &str, provided: &dyn Fn(&str) -> bool) -> Option<String> {
+    let result = ruby_prism::parse(text.as_bytes());
+    let program = result.node();
+    let program = program.as_program_node()?;
+    let mut blanks: Vec<(usize, usize)> = Vec::new();
+    for stmt in program.statements().body().iter() {
+        let Some(begin) = stmt.as_begin_node() else { continue };
+        let (Some(body), Some(rescue)) = (begin.statements(), begin.rescue_clause()) else { continue };
+        if begin.else_clause().is_some() || begin.ensure_clause().is_some() || rescue.subsequent().is_some() {
+            continue;
+        }
+        let exceptions: Vec<_> = rescue.exceptions().iter().collect();
+        let [only] = exceptions.as_slice() else { continue };
+        if super::util::constant_path_of(only).is_none_or(|p| p.join("::") != "LoadError") || rescue.reference().is_some() {
+            continue;
+        }
+        let Some(first) = body.body().iter().next() else { continue };
+        let Some(call) = first.as_call_node() else { continue };
+        if call.receiver().is_some() || super::util::constant_id_str(&call.name()) != "require" {
+            continue;
+        }
+        let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        let [arg] = args.as_slice() else { continue };
+        let Some(feature) = arg.as_string_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned()) else { continue };
+        if !provided(&feature) {
+            continue;
+        }
+        let start = begin.location().start_offset();
+        blanks.push((start, start + "begin".len()));
+        blanks.push((rescue.location().start_offset(), begin.location().end_offset()));
+    }
+    if blanks.is_empty() {
+        return None;
+    }
+    let mut bytes = text.as_bytes().to_vec();
+    for (from, to) in blanks {
+        for b in &mut bytes[from..to] {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
 pub(super) struct MountVfs<'a, V: Vfs + ?Sized> {
     pub inner: &'a V,
     pub gems: &'a [SourceGem],
@@ -399,6 +449,14 @@ pub(super) struct MountVfs<'a, V: Vfs + ?Sized> {
 impl<V: Vfs + ?Sized> MountVfs<'_, V> {
     fn mounted(&self, path: &Path) -> Option<(&SourceGem, PathBuf)> {
         self.gems.iter().find_map(|gem| path.strip_prefix(&gem.mount).ok().map(|rel| (gem, rel.to_path_buf())))
+    }
+
+    fn as_loaded(&self, text: String) -> String {
+        let provided = |feature: &str| {
+            crate::project::is_framework_feature(feature)
+                || self.gems.iter().any(|gem| gem.files.contains(&PathBuf::from(format!("lib/{}.rb", feature.trim_end_matches(".rb")))))
+        };
+        loaded_begins(&text, &provided).unwrap_or(text)
     }
 
     fn file(&self, path: &Path) -> io::Result<PathBuf> {
@@ -412,11 +470,22 @@ impl<V: Vfs + ?Sized> MountVfs<'_, V> {
 
 impl<V: Vfs + ?Sized> Vfs for MountVfs<'_, V> {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        self.inner.read(&self.file(path)?)
+        let bytes = self.inner.read(&self.file(path)?)?;
+        if self.mounted(path).is_none() || path.extension().is_none_or(|e| e != "rb") {
+            return Ok(bytes);
+        }
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(self.as_loaded(text).into_bytes()),
+            Err(err) => Ok(err.into_bytes()),
+        }
     }
 
     fn read_to_string(&self, path: &Path) -> io::Result<String> {
-        self.inner.read_to_string(&self.file(path)?)
+        let text = self.inner.read_to_string(&self.file(path)?)?;
+        if self.mounted(path).is_none() {
+            return Ok(text);
+        }
+        Ok(self.as_loaded(text))
     }
 
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {

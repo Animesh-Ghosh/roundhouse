@@ -55,6 +55,9 @@ module ActiveSupport
 
     def initialize: (?String deprecation_horizon, ?String gem_name) -> void
     def warn: (?String? message, ?untyped callstack) -> nil
+
+    module DeprecatedConstantAccessor
+    end
   end
 
   # Rails' name for "this signed value does not verify" — see the .rb.

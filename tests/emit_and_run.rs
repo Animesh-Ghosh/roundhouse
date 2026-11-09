@@ -21957,3 +21957,5 @@ mod cable_connection_request;
 mod route_loop_index;
 #[path = "emit_and_run/deprecation.rs"]
 mod deprecation;
+#[path = "emit_and_run/loaded_begin.rs"]
+mod loaded_begin;

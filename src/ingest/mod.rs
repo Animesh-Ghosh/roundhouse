@@ -41,6 +41,7 @@ mod dry_types;
 mod oj;
 pub(crate) mod source_gems;
 mod auto_source_gems;
+mod aliased_includes;
 mod forwardable;
 mod railtie_middleware;
 mod absence_guards;
