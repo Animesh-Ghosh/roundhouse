@@ -271,6 +271,45 @@ puts "devise url helpers passed"
     assert!(stdout.contains("devise url helpers passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
 }
 
+/// `Devise.mappings` is a Hash, so a scope drawn again keeps its first place, and `find_scope!` walks it in that order.
+#[test]
+fn devise_url_helpers_keep_a_redrawn_scopes_first_place() {
+    let admins = "  create_table \"admins\", force: :cascade do |t|\n    t.string \"email\", default: \"\", null: false\n    t.string \"encrypted_password\", default: \"\", null: false\n  end\n\n";
+    let (tree, _) = app(":database_authenticatable", "  devise_for :users, skip: :all\n  devise_for :admins\n  devise_for :users\n")
+        .edit("db/schema.rb", "  create_table \"articles\"", &format!("{admins}  create_table \"articles\""))
+        .write("app/models/admin.rb", "class Admin < ApplicationRecord\n  devise :database_authenticatable\nend\n")
+        .emit(BuildTarget::Spinel);
+    let script = r##"
+module ActiveSupport; end
+class User; end
+class Admin < User; end
+require "./runtime/action_view/view_helpers"
+require "./runtime/hash_to_query"
+require "./app/route_helpers"
+got = RouteHelpers.new_session_path(Admin.new)
+raise "got #{got}" unless got == "/users/sign_in"
+puts "first place kept"
+"##;
+    let out = std::process::Command::new("ruby").args(["-e", script]).current_dir(&tree).output().expect("spawn ruby");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("first place kept"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// The helper asks the record itself for its scope, so a caller's record reaches it whole: `@user.id` would map to no scope.
+#[test]
+fn devise_generated_url_helpers_take_a_record_as_written() {
+    let (tree, _) = app(":database_authenticatable", "  devise_for :users\n")
+        .write("app/controllers/gadgets_controller.rb", "class GadgetsController < ApplicationController\n  def show\n    @user = User.new\n    @path = new_session_path(@user)\n    @url = new_session_url(@user)\n  end\nend\n")
+        .write("app/views/gadgets/show.html.erb", "<%= new_session_path(@user) %>\n")
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"gadget\", to: \"gadgets#show\"\n")
+        .emit(BuildTarget::Spinel);
+    let controller = std::fs::read_to_string(tree.join("app/controllers/gadgets_controller.rb")).expect("controller");
+    assert!(controller.contains("RouteHelpers.new_session_path(@user)"), "{controller}");
+    assert!(!controller.contains("@user.id"), "{controller}");
+    let view = std::fs::read_to_string(tree.join("app/views/gadgets/show.rb")).expect("view");
+    assert!(!view.contains(".id"), "{view}");
+}
+
 /// Without a `define_method` by a computed name left for Spinel to refuse: the generator's bodies are written out.
 #[test]
 fn devise_generate_helpers_is_emptied_once_its_helpers_are_written() {

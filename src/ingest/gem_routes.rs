@@ -114,11 +114,15 @@ fn write_devise_url_helpers(app: &mut App, draws: DeviseDraws) {
         }
     }
     let Some(mut facts) = merged else { return };
-    // Rails replays `devise_for` by name: a later mapping of a scope replaces the earlier.
-    let mut seen = HashSet::default();
-    facts.mappings.reverse();
-    facts.mappings.retain(|m| seen.insert(m.name.clone()));
-    facts.mappings.reverse();
+    // `Devise.mappings` is a Hash: a later mapping of a scope replaces the earlier in its place, and `find_scope!` walks them in that order.
+    let mut mappings: Vec<super::gem_hooks::DeviseMapping> = Vec::new();
+    for mapping in std::mem::take(&mut facts.mappings) {
+        match mappings.iter_mut().find(|m| m.name == mapping.name) {
+            Some(existing) => *existing = mapping,
+            None => mappings.push(mapping),
+        }
+    }
+    facts.mappings = mappings;
     let scope_defined_by_program = app.library_classes.iter().filter(|c| c.name.0.as_str() != "ActionDispatch::Routing::Mapper").any(|c| c.methods.iter().any(|m| m.name.as_str() == "devise_scope"))
         || app.models.iter().any(|m| m.methods().any(|d| d.name.as_str() == "devise_scope"));
     if scope_defined_by_program {
