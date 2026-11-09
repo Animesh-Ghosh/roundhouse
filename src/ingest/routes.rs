@@ -1353,6 +1353,9 @@ fn ingest_route_stmts<'pr>(
             continue;
         }
 
+        if call.receiver().is_some_and(|recv| recv.as_local_variable_read_node().is_some()) {
+            eval::forget_lists();
+        }
         if call.receiver().is_some_and(|recv| cx.strict || recv.as_self_node().is_none()) {
             // Any other receiver-bearing call with a block (`PAGES.each`,
             // `3.times`, `.each_with_index`) holds routes the walker
@@ -3287,6 +3290,20 @@ mod eval {
         FRAMES.with(|f| {
             if let Some(top) = f.borrow_mut().last_mut() {
                 top.insert(name.to_string(), value);
+            }
+        });
+    }
+
+    /// A call on a local was passed over (`pages << "x"`, `pages.concat(…)`, through an alias too):
+    /// no list the frame holds is known any more, so a later loop over one is a gap, not the old list.
+    pub(super) fn forget_lists() {
+        FRAMES.with(|f| {
+            if let Some(top) = f.borrow_mut().last_mut() {
+                for value in top.values_mut() {
+                    if matches!(value, RVal::List(_)) {
+                        *value = RVal::Unknown;
+                    }
+                }
             }
         });
     }
