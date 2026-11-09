@@ -105,3 +105,17 @@ puts "route guards passed"
 "#;
     app().run_spinel(script).assert_passes();
 }
+
+/// A constraint the router asks has to type: `req.env["warden"]` is a gradual value, so calling
+/// on it is an error at the constraint, not an unchecked send that raises once a request matches.
+#[test]
+fn a_constraint_that_does_not_type_is_an_error_where_it_is_written() {
+    let (_, errors) = emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/desk\", to: \"articles#index\", constraints: ->(req) { req.env[\"warden\"].authenticate?(scope: :user) }\n",
+        )
+        .emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("request constraint") && e.contains("cannot type")), "{errors:#?}");
+}
