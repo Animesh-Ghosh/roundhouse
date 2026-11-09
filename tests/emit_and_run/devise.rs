@@ -223,6 +223,9 @@ fn devise_generated_url_helpers_answer_for_a_scope_and_a_resource_as_in_rails() 
     let (tree, _) = app(":database_authenticatable, :recoverable", "  devise_for :users\n  devise_for :admins, skip: [:sessions]\n")
         .edit("db/schema.rb", "  create_table \"articles\"", &format!("{admins}  create_table \"articles\""))
         .write("app/models/admin.rb", "class Admin < ApplicationRecord\n  devise :database_authenticatable\nend\n")
+        // A query passed to the scope's own helper gives it a keyword parameter, which is no path segment.
+        .write("app/controllers/gadgets_controller.rb", "class GadgetsController < ApplicationController\n  def show\n    redirect_to new_user_session_path(foo: 1)\n  end\nend\n")
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"gadget\", to: \"gadgets#show\"\n")
         .emit(BuildTarget::Spinel);
     // The Spinel tree is the one holding the gem compiled from source; `RouteHelpers` and its query rendering load on their own.
     let script = r##"

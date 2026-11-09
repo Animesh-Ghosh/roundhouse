@@ -518,12 +518,12 @@ pub(super) fn devise_url_helpers_source(facts: &DeviseUrlFacts, routes: &HashMap
                     continue;
                 }
                 let Some(segments) = routes.get(&target) else { continue };
-                let answer = if *segments == 0 {
-                    format!("RouteHelpers.{target}")
+                // A statement of its own: as the argument of a call, `raise` would take `params` for its backtrace.
+                if *segments == 0 {
+                    arms.push_str(&format!("  return RouteHelpers.devise_path_with(RouteHelpers.{target}, params) if scope == :{}\n", m.name));
                 } else {
-                    format!("raise ArgumentError, \"`{target}` needs its {segments} path segment(s), which a Devise url helper does not pass\"")
-                };
-                arms.push_str(&format!("  return RouteHelpers.devise_path_with({answer}, params) if scope == :{}\n", m.name));
+                    arms.push_str(&format!("  raise ArgumentError, \"`{target}` needs its {segments} path segment(s), which a Devise url helper does not pass\" if scope == :{}\n", m.name));
+                }
             }
             out.push_str(&format!(
                 "def self.{name}(resource_or_scope, params = nil)\n  scope = RouteHelpers.devise_scope_of(resource_or_scope)\n{arms}  raise NoMethodError, \"undefined method '{prefix}#{{scope}}_{module}_path'\"\nend\n\n"
@@ -531,4 +531,21 @@ pub(super) fn devise_url_helpers_source(facts: &DeviseUrlFacts, routes: &HashMap
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_route_needing_segments_raises_as_its_own_statement() {
+        let facts = DeviseUrlFacts {
+            modules: vec![("session".to_string(), vec![Some("new".to_string())])],
+            mappings: vec![DeviseMapping { name: "user".to_string(), class_name: "User".to_string(), used_helpers: vec!["session".to_string()] }],
+        };
+        let routes = HashMap::from_iter([("new_user_session_path".to_string(), 1)]);
+        let source = devise_url_helpers_source(&facts, &routes);
+        assert!(source.contains("\n  raise ArgumentError, \"`new_user_session_path` needs its 1 path segment(s), which a Devise url helper does not pass\" if scope == :user\n"), "{source}");
+        assert!(!source.contains("devise_path_with(raise"), "{source}");
+    }
 }

@@ -127,7 +127,7 @@ fn write_devise_url_helpers(app: &mut App, draws: DeviseDraws) {
     }
     let routes: crate::det::HashMap<String, usize> = crate::lower::lower_routes_to_library_functions(app)
         .into_iter()
-        .map(|f| (f.name.as_str().to_string(), f.params.len()))
+        .map(|f| (f.name.as_str().to_string(), f.params.iter().filter(|p| p.default.is_none() && !p.keyword && !p.rest && !p.forwarding).count()))
         .collect();
     let source = format!("module RouteHelpersDeviseUrl\n{}end\n", super::gem_hooks::devise_url_helpers_source(&facts, &routes));
     let parsed = super::prism::scope(|| super::ingest_library_classes(source.as_bytes(), "<devise url helpers>")).0;
