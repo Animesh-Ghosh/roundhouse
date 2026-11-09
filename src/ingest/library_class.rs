@@ -2336,8 +2336,13 @@ fn conditional_definitions(
             methods: Vec::new(),
             nested: Vec::new(),
             declarations: Vec::new(),
+            statements: Vec::new(),
         };
         for stmt in stmts {
+            if visibility::self_write(&stmt).is_some() {
+                arm.statements.push(ingest_expr(&stmt, file)?);
+                continue;
+            }
             // Its library class is ingested by `conditional_declaration_classes`.
             let declared = stmt
                 .as_class_node()

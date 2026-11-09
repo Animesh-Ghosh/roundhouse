@@ -744,6 +744,7 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let gem_libs: Vec<PathBuf> = source_gems.iter().map(|gem| gem.mount.join("lib")).collect();
     let stack = super::railtie_middleware::read(vfs, dir, &gem_libs);
     let stacked_application_uses = stack.application_taken;
+    let middleware_loops = stack.loops;
     (app.gem_middlewares, app.gem_middleware_blocks, app.rack_env_writes, app.gem_middleware_refusals) =
         (stack.classes, stack.blocks, stack.env_writes, stack.diags);
     // `enum` columns declared inside a concern's `included do`, keyed by
@@ -3182,6 +3183,7 @@ end
     // After the macros: a configured object's readers and its builder's writers are methods by now.
     super::configured_superclass::fold(vfs, dir, &mut app);
     super::configured_superclass::fold_class_names(vfs, dir, &mut app);
+    super::configured_superclass::fold_middleware_loops(vfs, dir, &mut app, middleware_loops);
     super::gem_routes::expand(vfs, dir, &path_gems, &mut app);
     super::class_macros::drop_expanded_hook_macros(&mut app, &hook_macros_called, &mentions);
     super::model_callbacks::expand_model_callbacks(&mut app);
@@ -3342,6 +3344,8 @@ end
     // Before the body statements, which ask whether a class-side writer
     // the class body writes through is defined.
     super::hook_class_attribute::expand(&mut app);
+    // Between the two: a class body's `respond_to?(:status=)` asks for the writers just made, and the settled branch's writes join the body statements.
+    super::settled_conditionals::settle(&mut app);
     super::app_extension_calls::mark(&mut app);
     super::body_statements::mark(&mut app);
     report_unmodelled_records(&app);
@@ -3355,7 +3359,6 @@ end
     for d in crate::controller_layout::diagnostics(&app.controllers, &app.views) {
         super::prism::push(d);
     }
-    super::settled_conditionals::settle(&mut app);
     // Not beside the hoists: later passes give an included module methods and ancestors (forwardable, carried includes, props bases, the queue adapter reader) or take an inactive branch's away.
     app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);
     // Here, once later passes stop giving modules methods: a concern's `to_param` before analysis types it on the model.
