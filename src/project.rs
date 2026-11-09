@@ -11799,29 +11799,63 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
         .filter(|dep| matches!(crate::gems::fate_of(dep), crate::gems::GemFate::Unknown))
         .map(|dep| crate::gems::GemEntry { name: dep.clone(), version: lock.version_of(dep).map(str::to_string), fate: crate::gems::GemFate::Unknown })
         .collect();
-    let needed: Vec<_> = census
+    let candidates: Vec<_> = census
         .unknown()
         .chain(source_deps.iter())
         .filter(|gem| {
             // Fail-closed: a GIT-sourced unknown must not be rewritten as a
             // rubygems.org name/version pin.
-            if lock.is_from_git(&gem.name) {
-                return false;
-            }
             // A gem a project extension says reaches Rails is never
             // required natively (`crate::extensions`).
-            if app.extensions.is_rails_dependent(&gem.name) {
-                return false;
-            }
-            let namespace = crate::gems::namespace_of(&gem.name);
-            owned.contains(&gem.name)
-                || files.iter().any(|(path, content)| {
-                    (path.starts_with("app/") || path.starts_with("lib/"))
-                        && path.ends_with(".rb")
-                        && names_constant(content, &namespace)
-                })
+            !(lock.is_from_git(&gem.name) || app.extensions.is_rails_dependent(&gem.name))
         })
-        .cloned()
+        .collect();
+    // The files that spell each unowned candidate's namespace root as a
+    // word, from one pass over the sources instead of one per gem:
+    // `names_constant` only matches a constant that starts a word, so it
+    // need only read those files. A root that is not a plain capitalised
+    // word keeps the full scan.
+    let app_source = |path: &str| (path.starts_with("app/") || path.starts_with("lib/")) && path.ends_with(".rb");
+    let namespaces: Vec<String> = candidates.iter().map(|gem| crate::gems::namespace_of(&gem.name)).collect();
+    let root = |namespace: &str| {
+        namespace
+            .split("::")
+            .next()
+            .filter(|w| w.starts_with(|c: char| c.is_ascii_uppercase()) && w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+            .map(str::to_string)
+    };
+    let mut spelled: crate::det::HashMap<String, Vec<usize>> = candidates
+        .iter()
+        .zip(&namespaces)
+        .filter(|(gem, _)| !owned.contains(&gem.name))
+        .filter_map(|(_, namespace)| root(namespace))
+        .map(|w| (w, Vec::new()))
+        .collect();
+    if !spelled.is_empty() {
+        for (at, (path, content)) in files.iter().enumerate() {
+            if !app_source(path) {
+                continue;
+            }
+            for_each_capitalised_word(content, |word| {
+                if let Some(list) = spelled.get_mut(word)
+                    && list.last() != Some(&at)
+                {
+                    list.push(at);
+                }
+            });
+        }
+    }
+    let needed: Vec<_> = candidates
+        .into_iter()
+        .zip(&namespaces)
+        .filter(|(gem, namespace)| {
+            owned.contains(&gem.name)
+                || match root(namespace) {
+                    Some(word) => spelled[&word].iter().any(|&at| names_constant(&files[at].1, namespace)),
+                    None => files.iter().any(|(path, content)| app_source(path) && names_constant(content, namespace)),
+                }
+        })
+        .map(|(gem, _)| gem.clone())
         .collect();
     if needed.is_empty() {
         return;
@@ -12522,6 +12556,23 @@ fn inside_quotes(head: &[u8]) -> bool {
         i += 1;
     }
     matches!(open.last(), Some((_, 0)))
+}
+
+/// Every whole identifier in `src` that starts with an ASCII capital:
+/// the words a constant [`names_constant`] matches can begin with.
+fn for_each_capitalised_word(src: &str, mut f: impl FnMut(&str)) {
+    let bytes = src.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_uppercase() || (i > 0 && ident(bytes[i - 1])) {
+            i += 1;
+            continue;
+        }
+        let end = bytes[i..].iter().position(|&b| !ident(b)).map_or(bytes.len(), |n| i + n);
+        f(&src[i..end]);
+        i = end;
+    }
 }
 
 fn names_constant(src: &str, konst: &str) -> bool {
@@ -14624,6 +14675,35 @@ mod tests {
         };
         assert!(!test("WebMock.stub_request(:get, \"/\")\n"));
         assert!(test("assert true\n"));
+    }
+
+    #[test]
+    fn names_constant_matches_only_a_whole_capitalised_word() {
+        // The locked-gem wiring reads only the files that spell a
+        // namespace's root as a word; every match must be one.
+        let hits = [
+            ("class ApplicationPlatform < PlatformAgent\n", "PlatformAgent"),
+            ("  include Raabro\n", "Raabro"),
+            ("  extend ::Raabro, Other\n", "Raabro"),
+            ("x = ::RestClient.get(u)\n", "RestClient"),
+            ("::RestClient::Request.execute(a)\n", "RestClient"),
+            ("rescue ::RestClient::NotFound\n", "RestClient"),
+            ("CLIENT = RestClient\n", "RestClient"),
+            ("register(RestClient)\n", "RestClient"),
+            ("msg = \"#{::RestClient::Request.new(a).url}\"\n", "RestClient"),
+            ("CLIENTS = [ RestClient , Net::HTTP ]\n", "RestClient"),
+            ("x = SVG::Graph::Bar.new\n", "SVG::Graph"),
+        ];
+        for (src, konst) in hits {
+            assert!(names_constant(src, konst), "{src:?} names {konst}");
+            let root = konst.split("::").next().unwrap();
+            let mut seen = false;
+            for_each_capitalised_word(src, |w| seen |= w == root);
+            assert!(seen, "{src:?} spells {root} as a word");
+        }
+        let mut words = Vec::new();
+        for_each_capitalised_word("x = MyRestClient.get(u); y = rest_Client; Ünï Abc", |w| words.push(w.to_string()));
+        assert_eq!(words, ["MyRestClient", "Abc"]);
     }
 
     #[test]
