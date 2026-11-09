@@ -127,3 +127,28 @@ fn a_constraint_before_a_rack_mount_is_refused_on_the_ruby_family_too() {
     assert!(errors[0].message.contains("Rack mount"), "{errors:#?}");
     assert!(route_guard_gaps_for_target(&app, BuildTarget::Blog).is_empty());
 }
+
+/// A split draw (`draw :files`) holds a guarded route and a later mount in one transparent scope.
+#[test]
+fn a_constraint_before_a_mount_in_the_same_drawn_file_is_refused_too() {
+    let mut app = app(r#"get "/files/:name", to: "files#show", constraints: ->(req) { req.subdomain == "cdn" }"#);
+    let mut entries = std::mem::take(&mut app.routes.entries);
+    entries.push(roundhouse::dialect::RouteSpec::RackMount {
+        target: roundhouse::ClassId(roundhouse::ident::Symbol::from("StaticFiles")),
+        path: "/files".into(),
+        span: roundhouse::span::Span::synthetic(),
+    });
+    app.routes.entries.push(roundhouse::dialect::RouteSpec::Scope {
+        path: None,
+        module: None,
+        as_prefix: None,
+        defaults: Default::default(),
+        nest: false,
+        suppress_helpers: false,
+        mount: false,
+        within: roundhouse::dialect::ResourceScope::Nested,
+        entries,
+    });
+    assert!(flatten_routes_asking_guards(&app).is_empty(), "the guarded route is not asked");
+    assert_eq!(route_guard_gaps_for_target(&app, BuildTarget::Ruby).len(), 1);
+}

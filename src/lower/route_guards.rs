@@ -54,16 +54,20 @@ pub fn guard_index(entries: &[RouteSpec], guard: &Expr) -> Option<usize> {
 /// A Rack mount after the constraint's routes is chosen before the router runs
 /// (`RouteTable.rack_index`), which would pass over a route the constraint admits.
 fn precedes_a_mount(entries: &[RouteSpec], guard: &Expr) -> bool {
-    fn has_mount(entries: &[RouteSpec]) -> bool {
-        entries.iter().any(|e| match e {
-            RouteSpec::RackMount { .. } => true,
-            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => has_mount(entries),
+    // In declaration order, through every scope: a split draw (`draw :files`) puts both in one transparent scope.
+    fn walk(entries: &[RouteSpec], guard: &Expr, seen: &mut bool) -> bool {
+        entries.iter().any(|entry| match entry {
+            RouteSpec::RackMount { .. } => *seen,
+            RouteSpec::Guarded { guard: g, entries } => {
+                *seen |= g.span == guard.span;
+                walk(entries, guard, seen)
+            }
+            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => walk(entries, guard, seen),
+            RouteSpec::Resources { nested, .. } => walk(nested, guard, seen),
             _ => false,
         })
     }
-    entries.iter().enumerate().any(|(at, entry)| {
-        guards(std::slice::from_ref(entry)).iter().any(|g| g.span == guard.span) && has_mount(&entries[at + 1..])
-    })
+    walk(entries, guard, &mut false)
 }
 
 /// Whether the Ruby-family router can ask this constraint.
