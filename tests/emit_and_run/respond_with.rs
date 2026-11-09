@@ -91,6 +91,16 @@ const CONTROLLER: &str = r#"class GadgetsController < ApplicationController
     respond_with(@article) { |format| format.any(*other_formats) { render plain: "unread-arm" } }
   end
 
+  def blk_variant
+    @article = Article.new
+    respond_with(@article) { |format| format.html { |variant| render plain: "variant-arm" } }
+  end
+
+  def blk_statement
+    @article = Article.new
+    respond_with(@article) { |format| @seen = "before"; format.html { render plain: @seen.to_s } }
+  end
+
   def computed
     @article = Article.new(title: "x", body: "a body long enough to pass")
     respond_with @article, plain_options
@@ -159,6 +169,8 @@ const ROUTES: &str = r#"  get "g/new", to: "gadgets#new"
   post "g/blk_bare_any", to: "gadgets#blk_bare_any"
   post "g/blk_navigational", to: "gadgets#blk_navigational"
   post "g/blk_unread", to: "gadgets#blk_unread"
+  post "g/blk_variant", to: "gadgets#blk_variant"
+  post "g/blk_statement", to: "gadgets#blk_statement"
   post "g/computed", to: "gadgets#computed"
   post "g/ordered", to: "gadgets#ordered"
   post "g/computed_location", to: "gadgets#computed_location"
@@ -219,7 +231,7 @@ end
   raise "#{verb} #{path}?#{query}: got #{got.inspect}, want #{[status, location, body].inspect}" unless ok
 end
 # Not modeled: these must fail, not answer with a response Rails wouldn't give.
-["/g/computed_location", "/g/several", "/g/blk_unread"].each do |path|
+["/g/computed_location", "/g/several", "/g/blk_unread", "/g/blk_variant", "/g/blk_statement"].each do |path|
   got = begin
     hit("POST", path)
   rescue ArgumentError, NoMethodError, NameError

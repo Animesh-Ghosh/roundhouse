@@ -136,6 +136,11 @@ fn block_html_arm(block: &Expr) -> Result<Option<Expr>, ()> {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![body],
     };
+    // Anything else the block does runs where it is written, which a single arm cannot keep.
+    let is_format_call = |stmt: &&Expr| matches!(&*stmt.node, ExprNode::Send { recv: Some(r), .. } if matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == format_param));
+    if !stmts.iter().all(|s| is_format_call(s)) {
+        return Err(());
+    }
     for stmt in stmts {
         let ExprNode::Send { recv: Some(r), method, args, block: arm, .. } = &*stmt.node else { continue };
         if !matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == format_param) || !matches!(method.as_str(), "html" | "any" | "all") {
@@ -159,7 +164,11 @@ fn block_html_arm(block: &Expr) -> Result<Option<Expr>, ()> {
         }
         match arm {
             Some(arm) => {
-                if let ExprNode::Lambda { body, .. } = &*arm.node {
+                if let ExprNode::Lambda { body, params, .. } = &*arm.node {
+                    // `format.html { |variant| … }` is handed a variant collector, which the body alone loses.
+                    if !params.is_empty() {
+                        return Err(());
+                    }
                     return Ok(Some(body.clone()));
                 }
                 // `&block`: the block the enclosing method was given is the arm.
