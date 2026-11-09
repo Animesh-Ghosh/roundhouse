@@ -13,27 +13,31 @@ whatever its boot reads (a database it can connect to, the environment keys
 its initializers fetch).
 
 ```sh
+APP=/absolute/path/to/app
+RH=/absolute/path/to/roundhouse
+OUT=/absolute/path/to/oracle-output
+mkdir -p "$OUT"
+
 # 1. Rails' table, from inside the app. A file, not stdout, which boot logging shares.
-cd path/to/app
-ORACLE_OUT=$PWD/../rails.txt bundle exec rails runner path/to/roundhouse/scripts/route-oracle/rails_routes.rb
+(cd "$APP" && ORACLE_OUT="$OUT/rails.txt" bundle exec rails runner "$RH/scripts/route-oracle/rails_routes.rb")
 
 # 2. roundhouse's table. Install only the gem family being worked on into a separate
 #    GEM_PATH, and move the app's `.bundle/config` aside while this runs: with
-#    BUNDLE_PATH set, roundhouse reads every gem of the bundle from source.
-G=$PWD/../source-gems
+#    BUNDLE_PATH set (in that file or the environment), roundhouse reads every gem
+#    of the bundle from source.
+G="$OUT/source-gems"
 for g in devise warden orm_adapter responders; do
-  v=$(sed -n "s/^    $g (\([^)]*\))$/\1/p" Gemfile.lock | head -1)
+  v=$(sed -n "s/^    $g (\([^)]*\))$/\1/p" "$APP/Gemfile.lock" | head -1)
   [ -n "$v" ] && gem install --install-dir "$G" --no-document --ignore-dependencies "$g" -v "$v"
 done
-mv .bundle/config .bundle/config.oracle
-cd path/to/roundhouse
-cargo build --release --bin dump_routes
-env -u GEM_HOME GEM_PATH="$G" target/release/dump_routes --continue path/to/app > ../roundhouse.txt
-mv path/to/app/.bundle/config.oracle path/to/app/.bundle/config
+(cd "$RH" && cargo build --release --bin dump_routes)
+mv "$APP/.bundle/config" "$APP/.bundle/config.oracle"
+env -u GEM_HOME -u BUNDLE_PATH GEM_PATH="$G" "$RH/target/release/dump_routes" --continue "$APP" > "$OUT/roundhouse.txt"
+mv "$APP/.bundle/config.oracle" "$APP/.bundle/config"
 
 # 3. Compare.
 ORACLE_OUT_OF_SCOPE='[Oo]mniauth|/auth/:provider|Doorkeeper::|^/oauth/' \
-  ruby scripts/route-oracle/compare.rb ../rails.txt ../roundhouse.txt
+  ruby "$RH/scripts/route-oracle/compare.rb" "$OUT/rails.txt" "$OUT/roundhouse.txt"
 ```
 
 `ORACLE_OUT_OF_SCOPE` is a regexp over `PATH ENDPOINT`. Routes that match it,

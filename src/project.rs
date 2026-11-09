@@ -5083,6 +5083,9 @@ fn ruby_family_runtime_files(
             *content = "# The rack gem's own Rack::Utils — see `project::ruby_runtime_files`.\n\
                         # The port at runtime/ruby/rack_utils.rb exists for the targets\n\
                         # that have no rack to load.\n\
+                        # Not `rack/utils` alone: a gem's middleware names `Rack::Response` (Warden's\n\
+                        # manager), which `rack` autoloads, on an entry point no Puma loaded rack for.\n\
+                        require \"rack\"\n\
                         require \"rack/utils\"\n"
                 .to_string();
         }

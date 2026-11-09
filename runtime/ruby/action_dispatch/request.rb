@@ -217,7 +217,8 @@ module ActionDispatch
 
     # Not read from `@env["rack.session"]` as Rails does: that value is untyped, and the slot keeps it a Session.
     def session
-      @session ||= ActionDispatch::Session.new
+      @session = ActionDispatch::Session.new if @session.nil?
+      @session
     end
 
     def session=(value)

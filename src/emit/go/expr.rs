@@ -2590,6 +2590,12 @@ pub(super) fn emit_send(
                 if is_known_class_method(method) {
                     return format!("{recv_s}.{go_m}()");
                 }
+                // Not every `clear`: a reader of that name is a field; the transpiled Session's (`reset_session`) is a method.
+                if method == "clear"
+                    && matches!(r.ty.as_ref().map(Ty::peel_nilable), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActionDispatch::Session")
+                {
+                    return format!("{recv_s}.{go_m}()");
+                }
                 // Not a field: the written-down `render json:` encoder is a method on every model it serializes.
                 if method == crate::lower::JSON_WRITER_METHOD
                     || method.starts_with(&format!("{}__", crate::lower::JSON_WRITER_METHOD))
@@ -3692,8 +3698,6 @@ fn is_known_class_method(name: &str) -> bool {
         // targets rely on parens. `dom_record_key` is dom_id's row-key
         // half (`push_dom_record_key_method`), same synthesis pass.
         "dom_prefix" | "dom_record_key" | "to_param"
-        // `ActionDispatch::Session#clear` (`reset_session`), a method of the transpiled Session.
-        | "clear"
         // AR::Base instance method that subclasses inherit via Go
         // embedding (`Article` embeds `*ApplicationRecord` →
         // `*ActiveRecordBase`). The 0-arg call site
