@@ -2234,6 +2234,9 @@ jobs:
       # Not separate jobs: each target's framework-tests and toolchain suites ride the compare job that already installs its toolchain (#273).
       - name: cargo test --test rust_toolchain controller identity values
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
         run: |
           python3 scripts/ci-unit-tests.py select \
             --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
@@ -2242,6 +2245,9 @@ jobs:
             --select rust_toolchain::real_blog_controller_identity_values_match_rails
       - name: cargo test --test rust_toolchain real_blog_i18n_locales_run
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
         run: |
           python3 scripts/ci-unit-tests.py select \
             --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
@@ -2250,6 +2256,9 @@ jobs:
             --select rust_toolchain::real_blog_i18n_locales_run
       - name: cargo test --test rust_toolchain real_blog_begin_rescue_runs
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
         run: |
           python3 scripts/ci-unit-tests.py select \
             --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
@@ -2258,6 +2267,9 @@ jobs:
             --select rust_toolchain::real_blog_begin_rescue_runs
       - name: cargo test --test rust_toolchain real_blog_rescue_from_runs
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
         run: |
           python3 scripts/ci-unit-tests.py select \
             --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
@@ -2266,6 +2278,9 @@ jobs:
             --select rust_toolchain::real_blog_rescue_from_runs
       - name: cargo test --test emit_and_run render json writer on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
         run: |
           python3 scripts/ci-unit-tests.py select \
             --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
@@ -2294,6 +2309,9 @@ jobs:
           retention-days: 7
       - name: cargo test --test json_builder_nested_values on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
         run: |
           python3 scripts/ci-unit-tests.py select \
             --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
@@ -2318,6 +2336,9 @@ jobs:
             --select json_builder_nested_values::nested_values_encode_on_csharp
       - name: cargo test --test truncate_separator on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
         run: |
           python3 scripts/ci-unit-tests.py select \
             --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
@@ -2502,6 +2523,9 @@ jobs:
             --select emit_and_run::render_json_record_writer_runs_on_elixir
       - name: cargo test --test emit_and_run implicit self on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
         run: |
           python3 scripts/ci-unit-tests.py select \
             --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
@@ -2510,6 +2534,9 @@ jobs:
             --select emit_and_run::model_methods_read_the_record_on_implicit_self_on_rust
       - name: cargo test --test emit_and_run controller params on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
         run: |
           python3 scripts/ci-unit-tests.py select \
             --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
@@ -2518,6 +2545,9 @@ jobs:
             --select emit_and_run::a_controller_reads_params_into_a_local_on_rust
       - name: cargo test --test emit_and_run setup fixture on rust
         if: ${{ !cancelled() && matrix.target == 'rust' }}
+        env:
+          # One target for every emitted project these steps build, so the dependency graph compiles once.
+          CARGO_BUILD_TARGET_DIR: ${{ runner.temp }}/emitted-rust-target
         run: |
           python3 scripts/ci-unit-tests.py select \
             --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
