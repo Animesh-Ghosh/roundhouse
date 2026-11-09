@@ -7945,7 +7945,7 @@ fn a_fixture_naming_a_missing_parent_fails_setup() {
             "require \"test_helper\"\n\nclass FkCheckTest < ActiveSupport::TestCase\n  test \"loads\" do\n    assert Article.count > 0\n  end\nend\n",
         )
         .run_test("test/models/fk_check_test.rb");
-    assert!(!run.success, "{}", run.stdout);
+    assert!(!run.program_succeeded(), "{}", run.stdout);
     assert!(run.stdout.contains("Foreign key violations found: comments") || run.stderr.contains("Foreign key violations found: comments"), "{}\n{}", run.stdout, run.stderr);
 }
 
@@ -18849,7 +18849,7 @@ fn a_failing_assertion_inside_a_destructured_block_stops_what_follows() {
     for (name, hits, members) in cases {
         let run = destructured_block_app(name, members).run_test("test/models/widget_test.rb");
         assert!(run.errors.is_empty(), "{name}: {:?}", run.errors);
-        assert!(!run.success, "{name}: the failing assertion passed\n{}", run.stdout);
+        assert!(!run.program_succeeded(), "{name}: the failing assertion passed\n{}", run.stdout);
         assert!(run.stdout.contains(&format!("CASE {name} HITS={hits}\n")), "{name}: {}", run.stdout);
     }
 }
