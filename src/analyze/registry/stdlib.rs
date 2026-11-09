@@ -57,6 +57,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Rails::BacktraceCleaner", &[("new", cleaner)], &[
         ("clean", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
     ]);
+    // runtime/ruby/active_support_reporters.rb's ParameterFilter. `filter`
+    // answers a Hash of what it was given, whose values are untyped.
+    let parameter_filter = class("ActiveSupport::ParameterFilter");
+    register_stdlib_class(classes, "ActiveSupport::ParameterFilter", &[("new", parameter_filter)], &[
+        ("filter", Ty::Untyped),
+        ("filter_param", Ty::Untyped),
+    ]);
     register_stdlib_class(classes, "ActiveSupport", &[
         ("event_reporter", event_reporter.clone()), ("error_reporter", error_reporter.clone()),
         ("event_reporter=", event_reporter.clone()), ("error_reporter=", error_reporter.clone()),

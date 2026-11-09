@@ -27,7 +27,7 @@ module Shop
   end
 end
 "##)
-        .write("config/initializers/filter_parameter_logging.rb", "Rails.application.config.filter_parameters += [:passw, :name]\n")
+        .write("config/initializers/filter_parameter_logging.rb", "Rails.application.config.filter_parameters += [:passw, :name, /secret/]\n")
         .write("app/controllers/application_controller.rb", r##"class ApplicationController < ActionController::API
   rescue_from ActiveRecord::RecordInvalid, with: :unprocessable
 
@@ -67,6 +67,11 @@ end
 
   def filtered
     render json: { logged: request.filtered_parameters }
+  end
+
+  def config_filtered
+    filtered = ActiveSupport::ParameterFilter.new(Rails.application.config.filter_parameters).filter(params)
+    render plain: [filtered["password"], filtered["my_secret"], filtered["city"]].join("|")
   end
 
   def invalid
@@ -109,6 +114,7 @@ end
   get "/widgets/admins", to: "widgets#admins"
   post "/widgets/staged", to: "widgets#staged"
   post "/widgets/filtered", to: "widgets#filtered"
+  get "/widgets/config_filtered", to: "widgets#config_filtered"
   post "/widgets/invalid", to: "widgets#invalid"
   get "/widgets/labels", to: "widgets#labels"
   resources :widgets, only: %i[show]
@@ -176,6 +182,10 @@ fn api_parity_round4_fixes_run_on_spinel() {
     assert_eq!(labels.body, r#"{"labels":["g2"],"loaded":false}"#, "safe-nav chains:\n{}", server.log());
     let none = server.get("/widgets/labels?name=none");
     assert_eq!(none.body, r#"{"labels":null,"loaded":false}"#, "safe-nav nil:\n{}", server.log());
+
+    // `config.filter_parameters` read in an action (Rails 8.1.4).
+    let config_filtered = server.get("/widgets/config_filtered?password=a&my_secret=b&city=c");
+    assert_eq!(config_filtered.body, "[FILTERED]|[FILTERED]|c", "config.filter_parameters:\n{}", server.log());
 
     let show = server.get("/widgets/1.json");
     assert_eq!(
