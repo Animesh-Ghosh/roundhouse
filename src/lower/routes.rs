@@ -360,6 +360,12 @@ pub fn flatten_routes_asking_guards(app: &App) -> Vec<(FlatRoute, Vec<usize>)> {
         .collect()
 }
 
+/// The routes some target dispatches: `flatten_routes` with those only the Ruby family's router asks,
+/// for what a route makes reachable (an action, its controller's require).
+pub fn flatten_routes_reachable(app: &App) -> Vec<FlatRoute> {
+    flatten_routes_asking_guards(app).into_iter().map(|(route, _)| route).collect()
+}
+
 /// Every flattened route, refused ones included — for URL-helper
 /// generation, which builds a path and never matches one.
 pub fn flatten_routes_for_helpers(app: &App) -> Vec<FlatRoute> {

@@ -8311,7 +8311,7 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     // of theirs.
     const HARDCODED: &str = "  def self.instantiate_controller(sym)\n    case sym\n    when :articles then ArticlesController.new\n    when :comments then CommentsController.new\n    else ActiveStorage::Routes.instantiate_controller(sym)\n    end\n  end";
 
-    let flat = crate::lower::flatten_routes(app);
+    let flat = crate::lower::routes::flatten_routes_reachable(app);
     let mut seen = crate::det::HashSet::default();
     let current_classes = &app.current_attribute_classes;
     let mut arms = String::new();

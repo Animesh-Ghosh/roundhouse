@@ -378,6 +378,9 @@ fn build_route_new(r: &FlatRoute, chain: Option<usize>, asks_guards: bool, class
     // tail collapses to `Any?`/a bare variadic on several strict
     // targets. Routes with no such requirement keep their existing
     // 4-/5-/6-arg shape, so unconstrained apps emit byte-identical.
+    if !seg_constraints.is_empty() {
+        args.push(lit_str(seg_constraints));
+    }
     // A guarded route's chain rides the optional 8th positional (`RouteTable.guard_allows`).
     if let Some(chain) = chain.filter(|_| asks_guards) {
         let nil = || {

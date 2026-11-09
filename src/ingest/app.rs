@@ -4475,7 +4475,7 @@ fn synthesize_template_only_actions(app: &mut App) {
     };
 
     let mut missing: BTreeSet<(crate::ident::ClassId, Symbol)> = BTreeSet::new();
-    for route in crate::lower::routes::flatten_routes(app) {
+    for route in crate::lower::routes::flatten_routes_reachable(app) {
         let Some(controller) = app.controllers.iter().find(|c| c.name == route.controller) else {
             continue;
         };
@@ -5102,7 +5102,7 @@ fn routed_actions_with_descendants(
         .collect();
     let mut out: HashMap<crate::ident::ClassId, crate::det::HashSet<crate::ident::Symbol>> =
         HashMap::default();
-    for route in crate::lower::routes::flatten_routes(app) {
+    for route in crate::lower::routes::flatten_routes_reachable(app) {
         let mut cur = Some(&route.controller);
         let mut depth = 0;
         while let Some(c) = cur {
@@ -11082,7 +11082,7 @@ fn app_relative_path(value: &str) -> Option<&str> {
 /// (`project::target_files` drops it, with a warning, for the rest).
 fn synthesize_rails_health_controller(app: &mut crate::App) {
     use super::routes::RAILS_HEALTH_CONTROLLER;
-    let routed = crate::lower::routes::flatten_routes(app)
+    let routed = crate::lower::routes::flatten_routes_reachable(app)
         .iter()
         .any(|r| r.controller.0.as_str() == RAILS_HEALTH_CONTROLLER);
     if !routed || app.controllers.iter().any(|c| c.name.0.as_str() == RAILS_HEALTH_CONTROLLER) {

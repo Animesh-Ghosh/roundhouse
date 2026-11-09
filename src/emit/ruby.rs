@@ -504,7 +504,7 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
     // Prepend require_relative headers for application_controller and
     // each unique controller used by the route table — Spinel runtime
     // loads controllers via require chain rooted at config/routes.rb.
-    let flat = crate::lower::routes::flatten_routes(app);
+    let flat = crate::lower::routes::flatten_routes_reachable(app);
     let mut header = String::new();
     use std::fmt::Write;
     let mut seen: Vec<String> = vec!["application_controller".to_string()];
@@ -674,7 +674,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_
         crate::ident::ClassId,
         crate::det::HashSet<crate::ident::Symbol>,
     > = crate::det::HashMap::default();
-    for r in crate::lower::flatten_routes(app) {
+    for r in crate::lower::routes::flatten_routes_reachable(app) {
         routed.entry(r.controller).or_default().insert(r.action);
     }
     let route_ids = crate::lower::routes::helper_id_segments(app);
