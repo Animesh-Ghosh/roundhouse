@@ -814,8 +814,10 @@ module ActionController
     # layer persists whatever the session holds after the action; an
     # emptied session means the outbound session cookie is cleared.
     # Not a fresh Session: Rails' `session.destroy` empties the request's own, which Warden's proxy holds too.
+    # Not a bare `@session.clear`: Rust borrows `self` mutably only where a field is assigned, and Go and Python read a bare name as a field.
     def reset_session
-      @session.clear
+      @session = @session.clear()
+      @session
     end
 
     # The dispatcher's seat for the inbound cookie session.

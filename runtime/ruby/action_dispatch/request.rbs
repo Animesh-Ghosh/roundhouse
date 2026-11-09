@@ -37,7 +37,7 @@ module ActionDispatch
     @path_parameters: RequestPathParameters
     @user_agent: String
     @session_options: Hash[Symbol, bool]
-    @session: Session
+    @session: Session?
     @params: Hash[String, untyped]
     @csp_ready: bool
     @content_security_policy: ContentSecurityPolicy?

@@ -3692,6 +3692,8 @@ fn is_known_class_method(name: &str) -> bool {
         // targets rely on parens. `dom_record_key` is dom_id's row-key
         // half (`push_dom_record_key_method`), same synthesis pass.
         "dom_prefix" | "dom_record_key" | "to_param"
+        // `ActionDispatch::Session#clear` (`reset_session`), a method of the transpiled Session.
+        | "clear"
         // AR::Base instance method that subclasses inherit via Go
         // embedding (`Article` embeds `*ApplicationRecord` →
         // `*ActiveRecordBase`). The 0-arg call site
