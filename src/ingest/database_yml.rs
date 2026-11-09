@@ -12,8 +12,8 @@
 //! `primary` (two-tier). The primary is the configuration named
 //! `primary`, else the environment's first. YAML anchors and merge keys
 //! are applied. Only the keys that decide identity are read: `adapter`
-//! (or the scheme of a literal `url`, and a literal `adapter` beside a
-//! computed `url`), `replica`, `database_tasks`,
+//! (or the scheme of a `url`, then a literal `adapter` beside a computed
+//! `url`), `replica`, `database_tasks`,
 //! `migrations_paths` and `schema_search_path`.
 //!
 //! Resolution is at build time, so ERB is not run. An output tag
@@ -150,14 +150,18 @@ pub(crate) fn database_configurations(text: &str, file: FileId) -> Configuration
             // A `url:` wins over the keys beside it (Rails' `UrlConfig`
             // merges the URL's hash over the configuration's).
             let adapter = match (scalar("url"), scalar("adapter")) {
-                // Not known until boot, so a literal `adapter:` beside it is what the file declares.
-                (Some(Value::String(url)), adapter) if url.contains(ERB_VALUE) => match adapter {
-                    Some(Value::String(adapter)) if !adapter.contains(ERB_VALUE) => Some(DatabaseAdapter::parse(&adapter)),
-                    _ => {
+                // The rest of the URL isn't known until boot. A scheme written out still wins, and without
+                // one a literal `adapter:` beside it is what the file declares.
+                (Some(Value::String(url)), adapter) if url.contains(ERB_VALUE) => {
+                    let declared = DatabaseAdapter::from_url(&url).or(match adapter {
+                        Some(Value::String(adapter)) if !adapter.contains(ERB_VALUE) => Some(DatabaseAdapter::parse(&adapter)),
+                        _ => None,
+                    });
+                    if declared.is_none() {
                         unresolved.push("url");
-                        None
                     }
-                },
+                    declared
+                }
                 (Some(Value::String(url)), adapter) => DatabaseAdapter::from_url(&url).or(match adapter {
                     Some(Value::String(adapter)) => Some(DatabaseAdapter::parse(&adapter)),
                     _ => None,
@@ -468,6 +472,26 @@ production:
         let read = database_configurations(yml, FileId(1));
         assert!(read.refusals.is_empty(), "{:?}", read.refusals);
         assert_eq!(shape(yml), [row("default", "primary", "postgresql", true, false, true), row("test", "primary", "postgresql", true, false, true), row("production", "primary", "postgresql", true, false, true)]);
+    }
+
+    /// The scheme is written out, and a URL's scheme wins over the keys beside it.
+    #[test]
+    fn a_literal_scheme_in_a_computed_url_names_the_adapter() {
+        for yml in [
+            "test:\n  adapter: sqlite3\n  url: postgresql://<%= ENV[\"DB_HOST\"] %>/app\n",
+            "test:\n  url: postgres://<%= ENV[\"DB_HOST\"] %>/app\n",
+        ] {
+            let read = database_configurations(yml, FileId(1));
+            assert!(read.refusals.is_empty(), "{yml}: {:?}", read.refusals);
+            assert_eq!(shape(yml), [row("test", "primary", "postgresql", true, false, true)], "{yml}");
+        }
+    }
+
+    /// Only the scheme's own characters: a tag in the scheme leaves it to the literal adapter.
+    #[test]
+    fn a_computed_scheme_falls_back_to_the_literal_adapter() {
+        let yml = "test:\n  adapter: postgresql\n  url: <%= ENV[\"DB_SCHEME\"] %>://db.example.test/app\n";
+        assert_eq!(shape(yml), [row("test", "primary", "postgresql", true, false, true)]);
     }
 
     #[test]
