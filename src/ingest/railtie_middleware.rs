@@ -146,18 +146,19 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
     // Not after every gem's: a gem's class body runs as Bundler requires it, before the app's, and its initializers after.
     let mut app_uses = Vec::new();
     let mut application_taken = Vec::new();
-    let mut app_defines = None;
+    let mut defines = None;
     for u in application_uses(vfs, dir) {
-        // Not stacked: a class neither a source gem nor the app defines (`Rack::Deflater`) stays the ledger's warning, as before.
-        let class = resolve(&u, &every_gem_defines).or_else(|| {
-            resolve(&u, app_defines.get_or_insert_with(|| {
-                let mut files = Vec::new();
-                rb_files(vfs, &dir.join("lib"), &mut files);
-                rb_files(vfs, &dir.join("app"), &mut files);
-                defined_constants(vfs, &files)
-            }))
+        // Not the gems' classes first and then the app's: Ruby tries each lexical candidate against every loaded class.
+        let defines = defines.get_or_insert_with(|| {
+            let mut files = Vec::new();
+            rb_files(vfs, &dir.join("lib"), &mut files);
+            rb_files(vfs, &dir.join("app"), &mut files);
+            let mut defines = defined_constants(vfs, &files);
+            defines.extend(every_gem_defines.iter().cloned());
+            defines
         });
-        if let Some(class) = class {
+        // Not stacked: a class neither a source gem nor the app defines (`Rack::Deflater`) stays the ledger's warning, as before.
+        if let Some(class) = resolve(&u, defines) {
             application_taken.push(u.span.start);
             app_uses.push((class, false, u.span, u.block, true));
         }
@@ -688,6 +689,20 @@ mod tests {
             ("/app/lib/gate.rb", "class Gate\n  def initialize(app)\n    @app = app\n  end\nend\n"),
         ]);
         assert_eq!(classes, ["Gem::Early", "Gate", "Gem::Late"], "{diags:?}");
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// Ruby looks `Gate` up in `Blog::Application`'s nesting first, so the app's `Blog::Gate` wins over a gem's top-level `Gate`.
+    #[test]
+    fn the_apps_use_takes_the_first_lexical_candidate_of_the_gems_and_the_apps_classes() {
+        let gem = "class Gate\n  def initialize(app)\n    @app = app\n  end\nend\n";
+        let application = "module Blog\n  class Application < Rails::Application\n    config.middleware.use Gate\n  end\nend\n";
+        let (classes, diags) = read(&[
+            ("/gem/lib/gate.rb", gem),
+            ("/app/config/application.rb", application),
+            ("/app/lib/blog/gate.rb", "module Blog\n  class Gate\n    def initialize(app)\n      @app = app\n    end\n  end\nend\n"),
+        ]);
+        assert_eq!(classes, ["Blog::Gate"], "{diags:?}");
         assert!(diags.is_empty(), "{diags:?}");
     }
 
