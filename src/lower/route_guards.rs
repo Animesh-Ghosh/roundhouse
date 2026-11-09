@@ -54,20 +54,39 @@ pub fn guard_index(entries: &[RouteSpec], guard: &Expr) -> Option<usize> {
 /// A Rack mount after the constraint's routes is chosen before the router runs
 /// (`RouteTable.rack_index`), which would pass over a route the constraint admits.
 fn precedes_a_mount(entries: &[RouteSpec], guard: &Expr) -> bool {
+    let guarded: Vec<String> = crate::lower::routes::flatten_route_entries(entries)
+        .into_iter()
+        .filter(|r| r.guards.iter().any(|g| g.span == guard.span))
+        .map(|r| r.path)
+        .collect();
     // In declaration order, through every scope: a split draw (`draw :files`) puts both in one transparent scope.
-    fn walk(entries: &[RouteSpec], guard: &Expr, seen: &mut bool) -> bool {
+    fn walk(entries: &[RouteSpec], guard: &Expr, guarded: &[String], seen: &mut bool) -> bool {
         entries.iter().any(|entry| match entry {
-            RouteSpec::RackMount { .. } => *seen,
+            RouteSpec::RackMount { path, .. } => *seen && guarded.iter().any(|route| may_reach(path, route)),
             RouteSpec::Guarded { guard: g, entries } => {
                 *seen |= g.span == guard.span;
-                walk(entries, guard, seen)
+                walk(entries, guard, guarded, seen)
             }
-            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => walk(entries, guard, seen),
-            RouteSpec::Resources { nested, .. } => walk(nested, guard, seen),
+            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => walk(entries, guard, guarded, seen),
+            RouteSpec::Resources { nested, .. } => walk(nested, guard, guarded, seen),
             _ => false,
         })
     }
-    walk(entries, guard, &mut false)
+    walk(entries, guard, &guarded, &mut false)
+}
+
+/// Whether a request for `route` can fall under the mount `prefix`: each of the prefix's
+/// segments is the route's literal one or a segment the route captures (`:id`, `*rest`).
+fn may_reach(prefix: &str, route: &str) -> bool {
+    let route: Vec<&str> = route.split('/').filter(|s| !s.is_empty()).collect();
+    for (at, part) in prefix.split('/').filter(|s| !s.is_empty()).enumerate() {
+        match route.get(at) {
+            Some(segment) if segment.starts_with('*') => return true,
+            Some(segment) if segment.starts_with(':') || segment == &part => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Whether the Ruby-family router can ask this constraint.

@@ -152,3 +152,16 @@ fn a_constraint_before_a_mount_in_the_same_drawn_file_is_refused_too() {
     assert!(flatten_routes_asking_guards(&app).is_empty(), "the guarded route is not asked");
     assert_eq!(route_guard_gaps_for_target(&app, BuildTarget::Ruby).len(), 1);
 }
+
+/// A mount whose prefix no guarded route can fall under does not refuse the constraint.
+#[test]
+fn a_constraint_before_a_mount_elsewhere_is_still_asked() {
+    let mut app = app(r#"get "/reports", to: "reports#index", constraints: ->(req) { req.subdomain == "admin" }"#);
+    app.routes.entries.push(roundhouse::dialect::RouteSpec::RackMount {
+        target: roundhouse::ClassId(roundhouse::ident::Symbol::from("StaticFiles")),
+        path: "/assets".into(),
+        span: roundhouse::span::Span::synthetic(),
+    });
+    assert_eq!(flatten_routes_asking_guards(&app).len(), 1, "the guarded route is asked");
+    assert!(route_guard_gaps_for_target(&app, BuildTarget::Ruby).is_empty());
+}
