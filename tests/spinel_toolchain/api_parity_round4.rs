@@ -74,6 +74,13 @@ end
     render plain: [filtered["password"], filtered["my_secret"], filtered["city"]].join("|")
   end
 
+  def plural_kind
+    value = params[:kind]
+    permitted = params.permit(:kind).to_h
+    from_hash = permitted[:kind]
+    render plain: value.pluralize.capitalize + "|" + from_hash.pluralize.capitalize + "|" + value.pluralize(1) + "|" + value.pluralize
+  end
+
   def invalid
     Widget.create!(name: nil)
     head :ok
@@ -115,6 +122,7 @@ end
   post "/widgets/staged", to: "widgets#staged"
   post "/widgets/filtered", to: "widgets#filtered"
   get "/widgets/config_filtered", to: "widgets#config_filtered"
+  get "/widgets/plural_kind", to: "widgets#plural_kind"
   post "/widgets/invalid", to: "widgets#invalid"
   get "/widgets/labels", to: "widgets#labels"
   resources :widgets, only: %i[show]
@@ -186,6 +194,19 @@ fn api_parity_round4_fixes_run_on_spinel() {
     // `config.filter_parameters` read in an action (Rails 8.1.4).
     let config_filtered = server.get("/widgets/config_filtered?password=a&my_secret=b&city=c");
     assert_eq!(config_filtered.body, "[FILTERED]|[FILTERED]|c", "config.filter_parameters:\n{}", server.log());
+
+    // `String#pluralize` on a request value (Rails 8.1.4).
+    for (kind, expected) in [
+        ("status", "Statuses|Statuses|status|statuses"),
+        // Rails' uncountables match at a word boundary.
+        ("big%20fish", "Big fish|Big fish|big fish|big fish"),
+        // Rails' rules keep what they capture and take the rest as written.
+        ("CHILD", "Children|Children|CHILD|Children"),
+        ("BUS", "Buses|Buses|BUS|BUses"),
+    ] {
+        let plural = server.get(&format!("/widgets/plural_kind?kind={kind}"));
+        assert_eq!(plural.body, expected, "pluralize {kind}:\n{}", server.log());
+    }
 
     let show = server.get("/widgets/1.json");
     assert_eq!(
