@@ -869,30 +869,42 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 .map(|s| format!("{}{}", ctx.name_prefix, s.as_str()))
                 .unwrap_or_else(|| format!("{}root", ctx.name_prefix));
             // A root inside `scope "admin/api/:version_handle"` still
-            // carries the scope's dynamic segments.
-            let path_params = path_ordered_params(&path, &[]);
-            out.push(FlatRoute {
-                method: HttpMethod::Get,
-                source_path: path.clone(),
-                path,
-                controller: ClassId(Symbol::from(controller_class)),
-                action: Symbol::from(action_name),
-                as_name: if ctx.helpers_enabled { helper } else { String::new() },
-                required_params: path_params.len(),
-                param_defaults: ctx.param_defaults.clone(),
-                path_params,
-                named: ctx.helpers_enabled,
-                helpers_enabled: ctx.helpers_enabled,
-                format: None,
-                required_path: None,
-                int_params: vec![],
-                constraints: vec![],
-                seg_patterns: vec![],
-                refused: ctx.guard_refusal(),
-                format_required: false,
-                mount_root: ctx.mount_path.as_deref() == Some(ctx.ns_path.as_str()),
-                guards: ctx.guards.clone(),
-            });
+            // carries the scope's dynamic segments, and one inside
+            // `scope "(/locale/:locale)"` answers each of its expansions,
+            // named once, on the longest, as an explicit route is.
+            let variants = expand_optional_paths(&path);
+            let shortest = variants.last().cloned().unwrap_or_else(|| path.clone());
+            let optional = variants.len() > 1;
+            for (i, vpath) in variants.into_iter().enumerate() {
+                let mut path_params = path_ordered_params(&vpath, &[]);
+                if i == 0 && optional {
+                    path_params = required_first(path_params, &shortest, &[]);
+                }
+                let required_params = if i == 0 && optional { path_ordered_params(&shortest, &[]).len() } else { path_params.len() };
+                let named = ctx.helpers_enabled && i == 0;
+                out.push(FlatRoute {
+                    method: HttpMethod::Get,
+                    source_path: vpath.clone(),
+                    mount_root: ctx.mount_path.as_deref() == Some(ctx.ns_path.as_str()),
+                    path: vpath,
+                    controller: ClassId(Symbol::from(controller_class.clone())),
+                    action: Symbol::from(action_name.clone()),
+                    as_name: if ctx.helpers_enabled { helper.clone() } else { String::new() },
+                    required_params,
+                    param_defaults: ctx.param_defaults.clone(),
+                    path_params,
+                    named,
+                    helpers_enabled: ctx.helpers_enabled,
+                    format: None,
+                    required_path: (i == 0 && optional).then(|| shortest.clone()),
+                    int_params: vec![],
+                    constraints: vec![],
+                    seg_patterns: vec![],
+                    refused: ctx.guard_refusal(),
+                    format_required: false,
+                    guards: ctx.guards.clone(),
+                });
+            }
         }
         RouteSpec::Resources {
             name,
@@ -902,6 +914,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             singular,
             as_name,
             controller,
+            action: to_action,
             param,
             path: path_segment,
             constraints: resource_constraints,
@@ -1131,7 +1144,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                             source_path: full_path.clone(),
                             path: vpath.clone(),
                             controller: controller_class.clone(),
-                            action: Symbol::from(action_name),
+                            action: to_action.clone().unwrap_or_else(|| Symbol::from(action_name)),
                             as_name: if ctx.helpers_enabled { as_name.clone() } else { String::new() },
                             required_params,
                             required_path: if i == 0 { required_path.clone() } else { None },
