@@ -135,30 +135,52 @@ fn guard_body(guard: &Expr) -> Option<(Symbol, Expr)> {
 
 /// Whether `expr` reads a local it doesn't bind. The guard's body moves into a generated
 /// method, where a local of the routes file isn't bound and the name would mean something else.
+/// Only a statement that always runs binds for what follows, so a name a branch assigns stays
+/// unbound after it: the assignment may not have run, and then the name was the captured local.
 fn reads_outer_local(expr: &Expr, bound: &mut Vec<Symbol>) -> bool {
     match &*expr.node {
         ExprNode::Var { name, .. } => {
             let implicit = matches!(name.as_str(), "it" | "_1" | "_2" | "_3" | "_4" | "_5" | "_6" | "_7" | "_8" | "_9");
             !implicit && !bound.contains(name)
         }
+        ExprNode::Seq { exprs } => {
+            let mut reads = false;
+            for statement in exprs {
+                reads = reads_outer_local(statement, bound) || reads;
+            }
+            reads
+        }
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
             let reads = reads_outer_local(value, bound);
             bound.push(name.clone());
             reads
         }
+        // `x += 1` and `x ||= 1` read `x` first.
+        ExprNode::OpAssign { target: LValue::Var { name, .. }, value, .. } => {
+            !bound.contains(name) || reads_outer_local(value, bound)
+        }
         ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
             let outer = bound.len();
             bound.extend(params.iter().cloned());
+            let mut reads = false;
+            // A default sees the parameters before it.
+            for param in extra_params {
+                reads = param.default.as_ref().is_some_and(|default| reads_outer_local(default, bound)) || reads;
+                bound.push(param.name.clone());
+            }
             bound.extend(rest_param.iter().cloned());
             bound.extend(block_param.iter().cloned());
-            bound.extend(extra_params.iter().map(|p| p.name.clone()));
-            let reads = reads_outer_local(body, bound);
+            reads = reads_outer_local(body, bound) || reads;
             bound.truncate(outer);
             reads
         }
         node => {
             let mut reads = false;
-            node.for_each_child(&mut |child| reads = reads_outer_local(child, bound) || reads);
+            node.for_each_child(&mut |child| {
+                let scope = bound.len();
+                reads = reads_outer_local(child, bound) || reads;
+                bound.truncate(scope);
+            });
             reads
         }
     }

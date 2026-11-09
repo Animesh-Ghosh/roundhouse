@@ -184,7 +184,16 @@ fn a_kernel_lambda_or_proc_constraint_is_asked_as_a_callable() {
 /// where it is written, like any other constraint the router can't ask.
 #[test]
 fn a_constraint_reading_a_local_of_the_routes_file_is_refused_in_place() {
-    for constraint in ["->(req) { req.path == name }", "lambda { |req| req.path == name }", "proc { |req| [name].include?(req.path) }"] {
+    for constraint in ["->(req) { req.path == name }", "lambda { |req| req.path == name }", "proc { |req| [name].include?(req.path) }",
+        // Bound only if the branch runs.
+        r#"->(req) { name = "/other" if req.path == "/other"; req.path == name }"#,
+        r#"->(req) { req.path == "/other" && (name = "/other"); req.path == name }"#,
+        // A compound assignment reads its target first.
+        r#"->(req) { name += "/x"; req.path == name }"#,
+        r#"->(req) { name ||= "/x"; req.path == name }"#,
+        // A nested default runs inside the generated method.
+        r#"->(req) { (->(x = name) { x }).call == req.path }"#,
+    ] {
         let app = app(&format!(
             r#"name = "/admin"
 get "/x", to: "a#b", as: :x, constraints: {constraint}
@@ -203,7 +212,13 @@ get "/ping", to: "pings#show""#
 /// own assignment, and a nested block's parameter.
 #[test]
 fn a_constraint_reading_only_what_it_binds_is_asked() {
-    let app = app(r#"get "/x", to: "a#b", constraints: ->(req) { prefix = "/a"; [prefix].any? { |p| req.path.start_with?(p) } }"#);
-    assert!(guard_class(&app.routes.entries).is_some());
-    assert!(!app.routes.diagnostics.iter().any(|d| d.message.contains("request constraint")), "{:#?}", app.routes.diagnostics);
+    for constraint in [
+        r#"->(req) { prefix = "/a"; [prefix].any? { |p| req.path.start_with?(p) } }"#,
+        r#"->(req) { n = 0; n += 1; n == req.path.size }"#,
+        r#"->(req) { (->(a, b = a) { b }).call(req.path) == "/x" }"#,
+    ] {
+        let app = app(&format!(r#"get "/x", to: "a#b", constraints: {constraint}"#));
+        assert!(guard_class(&app.routes.entries).is_some(), "{constraint}");
+        assert!(!app.routes.diagnostics.iter().any(|d| d.message.contains("request constraint")), "{constraint}: {:#?}", app.routes.diagnostics);
+    }
 }
