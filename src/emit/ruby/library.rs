@@ -6796,14 +6796,7 @@ fn to_s_keeping_nil(value: Expr, sig: &RecordSignals<'_>) -> Expr {
     let span = value.span;
     // A name the method doesn't already bind: the `Let` assigns in
     // the method's own scope.
-    let name = loop {
-        let n = sig.next_local.get();
-        sig.next_local.set(n + 1);
-        let candidate = Symbol::from(format!("route_segment_{n}"));
-        if sig.taken_locals.borrow_mut().insert(candidate.clone()) {
-            break candidate;
-        }
-    };
+    let name = fresh_route_segment_local(sig);
     let value_ty = value.ty.clone().unwrap_or(crate::ty::Ty::Untyped);
     let typed = |node: ExprNode, ty: crate::ty::Ty| Expr { ty: Some(ty), ..Expr::new(span, node) };
     let read = || typed(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() }, value_ty.clone());
@@ -6823,6 +6816,17 @@ fn to_s_keeping_nil(value: Expr, sig: &RecordSignals<'_>) -> Expr {
         opt_str.clone(),
     );
     typed(ExprNode::Let { id: crate::ident::VarId(0), name, value, body: check }, opt_str)
+}
+
+fn fresh_route_segment_local(sig: &RecordSignals<'_>) -> Symbol {
+    loop {
+        let n = sig.next_local.get();
+        sig.next_local.set(n + 1);
+        let candidate = Symbol::from(format!("route_segment_{n}"));
+        if sig.taken_locals.borrow_mut().insert(candidate.clone()) {
+            return candidate;
+        }
+    }
 }
 
 /// The instance method names `lc` and its ancestors (parents and
@@ -6862,6 +6866,33 @@ fn ancestry_methods(
 /// model's own `to_param` (a slug model), else its id — as text when
 /// the slot is declared `String`.
 fn project_record_arg(arg: &mut Expr, model: &str, sig: &RecordSignals<'_>, wants_str: bool) {
+    if let Some(Ty::Union { variants }) = &arg.ty {
+        if variants.contains(&Ty::Nil) {
+            let span = arg.span;
+            let value = std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
+            let value_ty = value.ty.clone().unwrap();
+            let name = fresh_route_segment_local(sig);
+            let typed = |node, ty| Expr { ty: Some(ty), ..Expr::new(span, node) };
+            let read = |ty| typed(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() }, ty);
+            let mut projected = read(value_ty.clone().strip_nil());
+            project_record_arg(&mut projected, model, sig, wants_str);
+            let result_ty = crate::analyze::union_of(projected.ty.clone().unwrap(), Ty::Nil);
+            let cond = typed(
+                ExprNode::Send { recv: Some(read(value_ty)), method: Symbol::from("nil?"), args: vec![], block: None, parenthesized: false },
+                Ty::Bool,
+            );
+            let check = typed(
+                ExprNode::If {
+                    cond,
+                    then_branch: typed(ExprNode::Lit { value: crate::expr::Literal::Nil }, Ty::Nil),
+                    else_branch: projected,
+                },
+                result_ty.clone(),
+            );
+            *arg = typed(ExprNode::Let { id: crate::ident::VarId(0), name, value, body: check }, result_ty);
+            return;
+        }
+    }
     {
         let slug = sig.slug_models.contains(model);
         let span = arg.span;
