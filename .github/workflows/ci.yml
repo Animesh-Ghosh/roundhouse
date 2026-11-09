@@ -1876,6 +1876,13 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      # Not -O2, as in spinel-framework: these tests judge behavior. `spin build` finds the spinel beside it and keeps -O2.
+      - name: Compile with spinel at -O0
+        run: |
+          mkdir -p "$RUNNER_TEMP/spinel-shim"
+          printf '#!/bin/sh\nexec "%s" -O0 "$@"\n' "$PWD/spinel-dist/spinel" > "$RUNNER_TEMP/spinel-shim/spinel"
+          chmod +x "$RUNNER_TEMP/spinel-shim/spinel"
+          echo "$RUNNER_TEMP/spinel-shim" >> "$GITHUB_PATH"
       - uses: actions/download-artifact@v8
         with:
           artifact-ids: ${{ needs.spinel-toolchain-plan.outputs.artifact-id }}
