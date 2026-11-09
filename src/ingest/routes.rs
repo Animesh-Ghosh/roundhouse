@@ -3297,9 +3297,10 @@ mod eval {
     /// A call on a local was passed over (`pages << "x"`, `pages.concat(…)`, through an alias too):
     /// no list the frame holds is known any more, so a later loop over one is a gap, not the old list.
     pub(super) fn forget_lists() {
+        // Every frame, not the top one: a loop's frame is a copy of its scope's, popped after the loop.
         FRAMES.with(|f| {
-            if let Some(top) = f.borrow_mut().last_mut() {
-                for value in top.values_mut() {
+            for frame in f.borrow_mut().iter_mut() {
+                for value in frame.values_mut() {
                     if matches!(value, RVal::List(_)) {
                         *value = RVal::Unknown;
                     }
