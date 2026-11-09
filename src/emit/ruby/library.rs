@@ -218,43 +218,49 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
         }
     }
 
-    lcs.iter()
+    // Each file is rendered on its own: the passes above did the
+    // lowering, and what a render reads is the same for every class.
+    let roots: Vec<&LibraryClass> = lcs
+        .iter()
         .filter(|lc| !is_spliced_factory(lc))
         .filter(|lc| !matches!(lc.origin, Some(LibraryClassOrigin::DataFactory { .. })))
         .filter(|lc| owner_in_this_tree(lc).is_none())
-        .flat_map(|lc| {
-            // `underscore`, not `snake_case`: a namespaced reopen
-            // (lobsters' `ActiveRecord::Base.q`, `Net::HTTP`,
-            // `ShortId::CandidateId`) nests as `active_record/base.rb` —
-            // a literal `::` in the filename breaks the emitted
-            // Makefile's dependency list.
-            let file_stem = crate::naming::underscore(lc.name.0.as_str());
-            let out_path = PathBuf::from(format!("app/models/{file_stem}.rb"));
-            let mut files = match children.get(lc.name.0.as_str()) {
-                Some(kids) => emit_library_class_with_nested(lc, kids, app, classes, &factories, out_path),
-                None => emit_library_class_pair_in(lc, app, classes, &factories, out_path),
-            };
-            for block in &data_blocks {
-                splice_data_block(&mut files, block, app, classes, &factories);
+        .collect();
+    super::par_render::map(app, classes, &roots, |&lc| {
+        // `underscore`, not `snake_case`: a namespaced reopen
+        // (lobsters' `ActiveRecord::Base.q`, `Net::HTTP`,
+        // `ShortId::CandidateId`) nests as `active_record/base.rb` —
+        // a literal `::` in the filename breaks the emitted
+        // Makefile's dependency list.
+        let file_stem = crate::naming::underscore(lc.name.0.as_str());
+        let out_path = PathBuf::from(format!("app/models/{file_stem}.rb"));
+        let mut files = match children.get(lc.name.0.as_str()) {
+            Some(kids) => emit_library_class_with_nested(lc, kids, app, classes, &factories, out_path),
+            None => emit_library_class_pair_in(lc, app, classes, &factories, out_path),
+        };
+        for block in &data_blocks {
+            splice_data_block(&mut files, block, app, classes, &factories);
+        }
+        files
+    })
+    .into_iter()
+    .flatten()
+    .fold((Vec::<EmittedFile>::new(), HashMap::<PathBuf, usize>::default()), |(mut out, mut at), file| {
+        // Not left to the tree's last-wins dedupe: a module opened in two files (rolify's `Rolify`) would lose one opening's methods.
+        match at.get(&file.path) {
+            Some(&i) if out[i].content == file.content => {}
+            Some(&i) => {
+                out[i].content.push('\n');
+                out[i].content.push_str(&file.content);
             }
-            files
-        })
-        .fold((Vec::<EmittedFile>::new(), HashMap::<PathBuf, usize>::default()), |(mut out, mut at), file| {
-            // Not left to the tree's last-wins dedupe: a module opened in two files (rolify's `Rolify`) would lose one opening's methods.
-            match at.get(&file.path) {
-                Some(&i) if out[i].content == file.content => {}
-                Some(&i) => {
-                    out[i].content.push('\n');
-                    out[i].content.push_str(&file.content);
-                }
-                None => {
-                    at.insert(file.path.clone(), out.len());
-                    out.push(file);
-                }
+            None => {
+                at.insert(file.path.clone(), out.len());
+                out.push(file);
             }
-            (out, at)
-        })
-        .0
+        }
+        (out, at)
+    })
+    .0
 }
 
 /// A class opened in several gem files (graphql-client's `Client`, in
@@ -8555,6 +8561,24 @@ fn module_adapter_preserves_parameter_declaration_facts() {
 
 thread_local! {
     static RENDERED: std::cell::RefCell<Option<Vec<LibraryClass>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Both per-reference indexes over `classes`, for a render on a worker
+/// thread (`par_render`), which starts with none installed.
+pub(super) fn install_worker_lookup_indexes<'a>(app: &'a App, classes: &'a [LibraryClass]) -> LookupIndexes<'a> {
+    install_lookup_indexes_for(app, classes)
+}
+
+/// Whether a lookup test has turned the indexes off on this thread.
+#[cfg(test)]
+pub(super) fn lookups_uncached() -> bool {
+    lookup_tests::UNCACHED.get()
+}
+
+/// Whether a [`record_rendered`] is collecting the classes rendered on
+/// this thread, which it lists in render order.
+pub(super) fn recording_rendered() -> bool {
+    RENDERED.with(|r| r.borrow().is_some())
 }
 
 pub fn record_rendered<T>(f: impl FnOnce() -> T) -> (T, Vec<LibraryClass>) {

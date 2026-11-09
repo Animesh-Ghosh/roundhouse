@@ -23,6 +23,7 @@ const SPINEL_TEST_HELPER: &str =
 
 pub(crate) mod expr;
 mod library;
+mod par_render;
 pub(crate) use library::install_lookup_indexes;
 pub(crate) use library::app_presents_time_zoned;
 mod rbs;
