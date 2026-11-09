@@ -755,29 +755,28 @@ fn extenders<'a>(app: &'a App, module: &LibraryClass) -> Vec<&'a str> {
 
 // Not every write counts: one in a method nothing calls never runs (rolify's `use_dynamic_shortcuts`).
 fn uncalled_bodies(app: &App, mention_counts: &Mentions<'_>) -> Vec<(usize, usize, usize)> {
-    let mut out = Vec::new();
-    for class in &app.library_classes {
-        for m in class.methods.iter().filter(|m| !mention_counts.mentioned(m.name.as_str())) {
-            // Not the body's own span: a multi-statement body is a synthetic Seq.
-            let mut range: Option<(crate::span::FileId, u32, u32)> = None;
-            visit(&m.body, &mut |e| {
-                if e.span.is_synthetic() {
-                    return;
-                }
-                range = Some(match range {
-                    Some((file, a, b)) if file == e.span.file => (file, a.min(e.span.start), b.max(e.span.end)),
-                    Some(other) => other,
-                    None => (e.span.file, e.span.start, e.span.end),
-                });
-            });
-            if let Some((file, a, b)) = range
-                && let Some(i) = file.0.checked_sub(1)
-            {
-                out.push((i as usize, a as usize, b as usize));
+    // The word index is asked here, on this thread; the bodies are read in parallel.
+    let uncalled: Vec<&MethodDef> =
+        app.library_classes.iter().flat_map(|class| class.methods.iter()).filter(|m| !mention_counts.mentioned(m.name.as_str())).collect();
+    crate::par::map(&uncalled, |m| {
+        // Not the body's own span: a multi-statement body is a synthetic Seq.
+        let mut range: Option<(crate::span::FileId, u32, u32)> = None;
+        visit(&m.body, &mut |e| {
+            if e.span.is_synthetic() {
+                return;
             }
-        }
-    }
-    out
+            range = Some(match range {
+                Some((file, a, b)) if file == e.span.file => (file, a.min(e.span.start), b.max(e.span.end)),
+                Some(other) => other,
+                None => (e.span.file, e.span.start, e.span.end),
+            });
+        });
+        let (file, a, b) = range?;
+        Some((file.0.checked_sub(1)? as usize, a as usize, b as usize))
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 // Not "unmentioned, so dead": Ruby and Rails call these by protocol, with no call in any source.
