@@ -20967,6 +20967,8 @@ mod warden;
 mod class_eval_string_macro;
 #[path = "emit_and_run/send_built_name.rs"]
 mod send_built_name;
+#[path = "emit_and_run/app_middleware.rs"]
+mod app_middleware;
 #[path = "support/addressable_gem.rs"]
 mod addressable_gem;
 #[path = "emit_and_run/addressable.rs"]
