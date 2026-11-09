@@ -340,6 +340,53 @@ func TestCtorOptionals(t *testing.T) {
 
 #[test]
 #[ignore]
+fn a_float_optional_of_mixed_types_takes_a_bare_integer() {
+    // A bare integer literal boxes as Go's `int`.
+    let (emitted, errors) = emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def scored(label = \"a\", ratio = 1.5, count = 7)\n    ratio\n  end\n\n",
+        )
+        .write("sig/article_scored.rbs", "class Article\n  def scored: (?String label, ?Float ratio, ?Integer count) -> Float\nend\n")
+        .emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    std::fs::write(emitted.join("app/v2/float_optional_test.go"), r#"package v2
+
+import "testing"
+
+func TestFloatOptional(t *testing.T) {
+	a := &Article{}
+	if got := a.Scored(); got != 1.5 {
+		t.Fatalf("omitted: %v", got)
+	}
+	if got := a.Scored("x", 2.5); got != 2.5 {
+		t.Fatalf("a float: %v", got)
+	}
+	if got := a.Scored("x", 2); got != 2.0 {
+		t.Fatalf("a bare integer: %v", got)
+	}
+	if got := a.Scored("x", int64(3)); got != 3.0 {
+		t.Fatalf("an int64: %v", got)
+	}
+}
+"#).expect("write probe");
+    go_mod_tidy(&emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-run", "TestFloatOptional", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore]
 fn real_blog_flash_each_yields() {
     // A yielding runtime method takes the block as a Go function.
     let (emitted, errors) = emit_and_run::real_blog().emit(roundhouse::project::BuildTarget::Go);

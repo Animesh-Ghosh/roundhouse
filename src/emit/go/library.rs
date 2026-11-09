@@ -1231,8 +1231,9 @@ fn render_params_with_unpack(m: &MethodDef) -> (String, String) {
 /// type, and the statements that bind each param as a local. Trailing
 /// params of different types make the variadic `interface{}`, and each
 /// read asserts its own type. A caller's bare integer literal boxes as
-/// `int`, so an `int64` read takes both. An explicit `nil` asserts to the
-/// zero value, the types' empty-as-absent convention.
+/// `int`, so an `int64` read takes both and a `float64` read converts it.
+/// An explicit `nil` asserts to the zero value, the types'
+/// empty-as-absent convention.
 fn optional_unpack(m: &MethodDef, split: usize, sig_tys: Option<&[Ty]>) -> (String, String) {
     let opt_ty = |j: usize| go_ty_stub(sig_tys.and_then(|tys| tys.get(split + j)));
     let trailing: Vec<String> = (0..m.params.len() - split).map(opt_ty).collect();
@@ -1250,6 +1251,8 @@ fn optional_unpack(m: &MethodDef, split: usize, sig_tys: Option<&[Ty]>) -> (Stri
             format!("{opt_name} = _opts[{j}]")
         } else if opt_go_ty == "int64" {
             format!("switch v := _opts[{j}].(type) {{ case int64: {opt_name} = v; case int: {opt_name} = int64(v) }}")
+        } else if opt_go_ty == "float64" {
+            format!("switch v := _opts[{j}].(type) {{ case float64: {opt_name} = v; case int64: {opt_name} = float64(v); case int: {opt_name} = float64(v) }}")
         } else {
             format!("{opt_name}, _ = _opts[{j}].({opt_go_ty})")
         };
