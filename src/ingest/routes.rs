@@ -483,14 +483,15 @@ fn refused_route_diagnostics(entries: &[RouteSpec], source: &[u8], file: &str) -
         let Some((param, rx)) = &route.refused else { continue };
         // At the constraint, once: every route it guards is refused for it.
         if param == crate::lower::routes::GUARD_REFUSAL {
-            if let Some(guard) = route.guards.first()
+            // One the Ruby-family router asks is refused per target instead (`route_guard_gaps_for_target`).
+            if let Some(guard) = route.guards.iter().find(|g| !crate::lower::route_guards::enforceable(g))
                 && seen_guards.insert(guard.span)
             {
                 out.push(Diagnostic::unsupported(
                     guard.span,
                     None,
                     "request constraint",
-                    "the routes it guards are not dispatched: the router matches by verb and path alone, so it would answer every request the constraint refuses; their URL helpers are still generated",
+                    "the routes it guards are not dispatched: the router cannot ask this constraint with the request, and matching by verb and path alone would answer every request it refuses; their URL helpers are still generated",
                 ));
             }
             continue;
@@ -1943,9 +1944,7 @@ fn read_param_regex_constraints<'a>(
     Ok(out)
 }
 
-/// The `constraints` keys Rails answers from the request rather than the
-/// path (`ActionDispatch::Request#host`, `#protocol`, …).
-const REQUEST_CONSTRAINT_KEYS: &[&str] = &["host", "protocol", "subdomain", "domain", "port"];
+const REQUEST_CONSTRAINT_KEYS: &[&str] = crate::lower::route_guards::REQUEST_KEYS;
 
 /// A `constraints` Hash naming a request attribute (`constraints host: …, protocol: "https://"`): Rails asks the request.
 fn request_keyed(value: &Node<'_>) -> bool {

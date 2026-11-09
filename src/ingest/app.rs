@@ -631,6 +631,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         if more.is_empty() || auto.len() >= 32 {
             app.auto_source_gems = auto.into_iter().filter(|g| app.gem_lock.as_ref().is_some_and(|l| l.source.contains(g))).collect();
             super::recurring_commands::apply(&mut app, vfs, dir)?;
+            add_route_guards(&mut app);
             return Ok(app);
         }
         // Not the superseded pass's parse errors and survey gaps as well: the next pass reports them again.
@@ -638,6 +639,16 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         super::prism::rewind(marks.1);
         auto.extend(more);
     }
+}
+
+/// The request constraints the Ruby-family router asks, as `RoundhouseRouteGuards` methods typed against the request.
+fn add_route_guards(app: &mut App) {
+    let Some((class, rbs)) = crate::lower::route_guards::guard_class(&app.routes.entries) else { return };
+    let Ok(signatures) = crate::rbs::parse_app_signatures(&rbs) else { return };
+    for (owner, methods) in signatures {
+        app.rbs_signatures.entry(owner).or_default().extend(methods);
+    }
+    app.library_classes.push(class);
 }
 
 fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[String]) -> IngestResult<App> {
@@ -4464,7 +4475,7 @@ fn synthesize_template_only_actions(app: &mut App) {
     };
 
     let mut missing: BTreeSet<(crate::ident::ClassId, Symbol)> = BTreeSet::new();
-    for route in crate::lower::routes::flatten_routes(app) {
+    for route in crate::lower::routes::flatten_routes_reachable(app) {
         let Some(controller) = app.controllers.iter().find(|c| c.name == route.controller) else {
             continue;
         };
@@ -5091,7 +5102,7 @@ fn routed_actions_with_descendants(
         .collect();
     let mut out: HashMap<crate::ident::ClassId, crate::det::HashSet<crate::ident::Symbol>> =
         HashMap::default();
-    for route in crate::lower::routes::flatten_routes(app) {
+    for route in crate::lower::routes::flatten_routes_reachable(app) {
         let mut cur = Some(&route.controller);
         let mut depth = 0;
         while let Some(c) = cur {
@@ -11071,7 +11082,7 @@ fn app_relative_path(value: &str) -> Option<&str> {
 /// (`project::target_files` drops it, with a warning, for the rest).
 fn synthesize_rails_health_controller(app: &mut crate::App) {
     use super::routes::RAILS_HEALTH_CONTROLLER;
-    let routed = crate::lower::routes::flatten_routes(app)
+    let routed = crate::lower::routes::flatten_routes_reachable(app)
         .iter()
         .any(|r| r.controller.0.as_str() == RAILS_HEALTH_CONTROLLER);
     if !routed || app.controllers.iter().any(|c| c.name.0.as_str() == RAILS_HEALTH_CONTROLLER) {
