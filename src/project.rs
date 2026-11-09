@@ -9957,7 +9957,7 @@ module GemMiddleware
       exchange = env["roundhouse.exchange"]
       raise TypeError, "no roundhouse.exchange in the Rack env" unless exchange.is_a?(Exchange)
       # Not the request's own path: a middleware above may have rewritten PATH_INFO, and Rails routes the rewritten one.
-      exchange.route(env["PATH_INFO"].to_s)
+      exchange.route(env["PATH_INFO"].to_s, env)
     end
   end
 
@@ -9971,8 +9971,12 @@ module GemMiddleware
       @body = nil
     end
 
-    def route(path)
+    def route(path, env)
       @req.path = path
+      # Rails' `request.env` is the Rack env: what a middleware above set (`env["warden"]`) is the request's.
+      env.each do |key, value|
+        @request_obj.env[key] = value unless key == "roundhouse.exchange"
+      end
       Main.dispatch_request(@req, @res, @request_obj)
       @routes_body = @res.body
       @body = [@routes_body]
