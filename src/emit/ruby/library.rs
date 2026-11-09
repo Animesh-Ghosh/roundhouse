@@ -4876,11 +4876,15 @@ fn ground_string_pluralize(expr: &mut Expr, app_defines_pluralize: bool) {
     };
 }
 
-/// A String or untyped value, possibly nilable (a Hash read nests the nil).
+/// A String or a value of no settled type, possibly nilable (a Hash read
+/// nests the nil). An element of a `params` list reads as a `ParamValue`,
+/// and a block over a list built from `permit(...).to_h` leaves its element
+/// an unresolved variable.
 fn pluralize_receiver_may_be_string(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
     match ty {
-        Ty::Str | Ty::Untyped => true,
+        Ty::Str | Ty::Untyped | Ty::Var { .. } => true,
+        Ty::Class { id, .. } => id.0.as_str() == "Roundhouse::ParamValue",
         Ty::Union { variants } => {
             variants.iter().any(|v| !matches!(v, Ty::Nil))
                 && variants.iter().all(|v| matches!(v, Ty::Nil) || pluralize_receiver_may_be_string(v))

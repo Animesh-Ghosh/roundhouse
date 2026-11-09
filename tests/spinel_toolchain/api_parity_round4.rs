@@ -81,6 +81,13 @@ end
     render plain: value.pluralize.capitalize + "|" + from_hash.pluralize.capitalize + "|" + value.pluralize(1) + "|" + value.pluralize
   end
 
+  def plural_items
+    rows = params.require(:items).map { it.permit(:category).to_h }
+    rows.each { it[:category] = it["category"].pluralize.capitalize }
+    raw = params[:items].map { it["category"].pluralize }
+    render json: { items: rows, raw: raw }
+  end
+
   def invalid
     Widget.create!(name: nil)
     head :ok
@@ -123,6 +130,7 @@ end
   post "/widgets/filtered", to: "widgets#filtered"
   get "/widgets/config_filtered", to: "widgets#config_filtered"
   get "/widgets/plural_kind", to: "widgets#plural_kind"
+  post "/widgets/plural_items", to: "widgets#plural_items"
   post "/widgets/invalid", to: "widgets#invalid"
   get "/widgets/labels", to: "widgets#labels"
   resources :widgets, only: %i[show]
@@ -207,6 +215,19 @@ fn api_parity_round4_fixes_run_on_spinel() {
         let plural = server.get(&format!("/widgets/plural_kind?kind={kind}"));
         assert_eq!(plural.body, expected, "pluralize {kind}:\n{}", server.log());
     }
+
+    // `String#pluralize` on a value read in a block over the request's list (Rails 8.1.4).
+    let plural_items = server.post(
+        "/widgets/plural_items",
+        json,
+        r#"{"items":[{"category":"status"},{"category":"big fish"},{"category":"CHILD"}]}"#,
+    );
+    assert_eq!(
+        (plural_items.status, plural_items.body.as_str()),
+        (200, r#"{"items":[{"category":"Statuses"},{"category":"Big fish"},{"category":"Children"}],"raw":["statuses","big fish","Children"]}"#),
+        "pluralize in a block:\n{}",
+        server.log()
+    );
 
     let show = server.get("/widgets/1.json");
     assert_eq!(
