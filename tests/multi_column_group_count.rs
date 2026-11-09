@@ -43,7 +43,7 @@ end
 
 const PROBE: &str = r#"
 [[1, "action", false], [1, "action", false], [1, "fyi", true],
- [2, "action", true], [2, "action", false], [nil, nil, false]].each do |recipient, kind, seen|
+ [2, "action", true], [2, "action", false], [3, "action", false], [nil, nil, false]].each do |recipient, kind, seen|
   Message.create!(recipient: recipient, kind: kind, seen: seen)
 end
 puts Message.one.map { |k, v| [k, v].inspect }.sort
