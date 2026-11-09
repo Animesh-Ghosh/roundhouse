@@ -371,6 +371,7 @@ module Main
     # Not for an asset: Rails' Static answers it above the session middleware, with no cookie verified.
     Main.restore_session(req, request_obj) unless Main.static_asset?(req.path)
     GemMiddleware.dispatch(req, res, request_obj)
+    Main.persist_session(res, request_obj)
     return nil if res.file_path.length > 0 || res.upgrading_ws
     res.headers[ActionDispatch::RequestId::HEADER] =
       request_obj.request_id.to_s
@@ -631,8 +632,6 @@ module Main
     controller.query_string = request_obj.query_string
     ActionController::Current.request = request_obj
     ActionController::Current.controller = controller
-    session_cookie = Rails.application.session_cookie_key
-    session_in = request_obj.env.fetch("roundhouse.session.in", "").to_s
     controller.assign_http_session(request_obj.session)
     # Controller-level cookie access (`cookies[:k]` reads, `cookies[:k] = v`
     # records writes surfaced as Set-Cookie below). The inbound jar is the
@@ -801,17 +800,21 @@ module Main
       res.set_cookie(cname, out_cookies[cname], copts)
       ci += 1
     end
+  end
 
-    # Session persistence: re-encode whatever the action (or a lazy
-    # CSRF token generated during the layout render above) left in the
-    # session; Set-Cookie only on change. An emptied session
-    # (reset_session) clears the cookie. Runs after the render so
-    # lazily-created tokens are captured, and on redirects too (login
-    # sets `session[:u]` then 302s).
-    # `request.session_options[:skip] = true` (lobsters'
-    # `clear_session_cookie`) leaves the cookie alone, as Rails'
-    # session middleware skips its commit.
-    session_out = controller.session.to_cookie
+  # Session persistence: re-encode whatever the action (or a lazy
+  # CSRF token generated during the layout render) left in the
+  # session; Set-Cookie only on change. An emptied session
+  # (reset_session) clears the cookie. Runs on redirects too (login
+  # sets `session[:u]` then 302s).
+  # `request.session_options[:skip] = true` (lobsters'
+  # `clear_session_cookie`) leaves the cookie alone, as Rails'
+  # session middleware skips its commit.
+  # Not at the end of `dispatch_request`: Rails commits above the gems' middleware, so what one writes or answers itself counts.
+  def self.persist_session(res, request_obj)
+    session_cookie = Rails.application.session_cookie_key
+    session_in = request_obj.env.fetch("roundhouse.session.in", "").to_s
+    session_out = request_obj.session.to_cookie
     if session_out != session_in && !request_obj.session_skip?
       if session_out == ""
         Main.clear_flash_cookie(res, session_cookie)
@@ -820,6 +823,7 @@ module Main
           ActionDispatch::Session.signed_cookie(session_out, session_cookie), request_obj.ssl?)
       end
     end
+    nil
   end
 
   # Flash cookies are HttpOnly + Path=/; the read side is server-only

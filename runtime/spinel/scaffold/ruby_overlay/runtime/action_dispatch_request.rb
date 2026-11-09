@@ -43,16 +43,18 @@ module ActionDispatch
       @params = params
       @request_parameters = {}
       @path_parameters = RequestPathParameters.new({})
-      @session_options = {}
     end
 
     # Rack's per-request session options — see the twin in
     # runtime/ruby/action_dispatch/request.rb. `:skip` is the one key
     # read: the dispatcher writes no session cookie when it is set.
-    attr_reader :session_options
+    # Not an ivar: the session commit above the gems' middleware reads Rails' `rack.session.options` from the env.
+    def session_options
+      @env["rack.session.options"] ||= {}
+    end
 
     def session_skip?
-      @session_options[:skip] == true
+      session_options[:skip] == true
     end
 
     # Not a slot as in the twin: Rails reads the Rack env's, the one Warden's proxy holds too.

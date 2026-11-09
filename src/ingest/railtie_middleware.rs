@@ -102,7 +102,7 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
                     let (mut probe_uses, mut probe_diags) = (Vec::new(), Vec::new());
                     for stmt in flatten_statements(body) {
                         read_initializer(&stmt, file_id, &lexical, &mut probe_uses, &mut probe_diags);
-                        read_class_body_use(&stmt, file_id, &lexical, &mut probe_uses, &mut probe_diags);
+                        read_class_body_use(&stmt, file_id, &lexical, false, &mut probe_uses, &mut probe_diags);
                     }
                     if probe_uses.is_empty() && probe_diags.is_empty() {
                         continue;
@@ -123,7 +123,7 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
                 }
                 for stmt in flatten_statements(body) {
                     read_initializer(&stmt, file_id, &lexical, &mut uses, &mut diags);
-                    read_class_body_use(&stmt, file_id, &lexical, &mut uses, &mut diags);
+                    read_class_body_use(&stmt, file_id, &lexical, false, &mut uses, &mut diags);
                 }
             }
         }
@@ -233,7 +233,7 @@ fn application_uses<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<Use> {
         // Not reported here: what is not stacked stays the ledger's warning, as a middleware the running app answers without.
         let mut ignored = Vec::new();
         for stmt in flatten_statements(body) {
-            read_class_body_use(&stmt, file_id, &lexical, &mut uses, &mut ignored);
+            read_class_body_use(&stmt, file_id, &lexical, true, &mut uses, &mut ignored);
         }
     }
     uses
@@ -245,11 +245,13 @@ pub(super) fn application_use_paths<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec
 }
 
 /// `config.app_middleware.use Warden::Manager do |config| … end` in an Engine's or Railtie's class
-/// body (Devise's), which Rails runs as the class loads; `config.middleware.use` alike.
-fn read_class_body_use(stmt: &Node<'_>, file: crate::span::FileId, lexical: &[String], uses: &mut Vec<Use>, diags: &mut Vec<Diagnostic>) {
+/// body (Devise's), which Rails runs as the class loads; `config.middleware.use` in the Application's.
+fn read_class_body_use(stmt: &Node<'_>, file: crate::span::FileId, lexical: &[String], application: bool, uses: &mut Vec<Use>, diags: &mut Vec<Diagnostic>) {
     let Some(call) = stmt.as_call_node() else { return };
     let on_stack = call.receiver().and_then(|r| r.as_call_node()).is_some_and(|stack| {
-        matches!(constant_id_str(&stack.name()), "app_middleware" | "middleware")
+        let name = constant_id_str(&stack.name());
+        // Not an Engine's `config.middleware`: that is the engine's own stack, which only a request routed into it runs.
+        (name == "app_middleware" || (application && name == "middleware"))
             && stack.arguments().is_none()
             && stack.receiver().and_then(|c| c.as_call_node()).is_some_and(|c| constant_id_str(&c.name()) == "config" && c.receiver().is_none())
     });
@@ -663,6 +665,15 @@ mod tests {
             super::read(&MapVfs::new(map), std::path::Path::new("/app"), &[PathBuf::from("/gem/lib"), PathBuf::from("/warden/lib")]);
         assert_eq!(classes, ["Gem::Early", "Warden::Manager", "Gem::Late"], "{diags:?}");
         assert_eq!(blocks.get("Warden::Manager").map(String::as_str), Some("{ |manager|\nmanager.default_scope = :user\n}"));
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// An Engine's own `config.middleware` runs only for a request routed into the engine, so the app's stack leaves it out.
+    #[test]
+    fn an_engines_own_middleware_is_not_the_apps() {
+        let engine = "module Gem\n  class Own\n  end\n  class Engine < ::Rails::Engine\n    config.middleware.use Own\n  end\nend\n";
+        let (classes, diags) = read(&[("/gem/lib/gem.rb", engine)]);
+        assert!(classes.is_empty(), "{classes:?}");
         assert!(diags.is_empty(), "{diags:?}");
     }
 

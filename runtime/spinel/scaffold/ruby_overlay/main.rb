@@ -379,7 +379,8 @@ module Main
     session_out = controller.session.to_cookie
     if !host_session.nil?
       env["roundhouse.session.out"] = controller.session.to_hash if session_out != session_in && !controller.request.session_skip?
-    elsif session_out != session_in && !controller.request.session_skip?
+    # Not here under `run_rack`: Rails commits above the gems' middleware (`Main.commit_session`).
+    elsif session_out != session_in && !controller.request.session_skip? && !env["roundhouse.session.above"]
       out_cookies[session_cookie] =
         session_out.empty? ? nil : ActionDispatch::Session.signed_cookie(session_out, session_cookie)
     end
@@ -473,7 +474,9 @@ module Main
     # Not restored in dispatch_core alone: Rails' session middleware sits above Warden's, which reads `rack.session`.
     Main.restore_session(env, CgiIo.parse_cookies(env["HTTP_COOKIE"].to_s))
     @gem_stack ||= GemMiddleware.wrap(->(inner_env) { Main.run_app(inner_env) })
+    env["roundhouse.session.above"] = true unless env.key?("roundhouse.session")
     status, headers, body = @gem_stack.call(env)
+    Main.commit_session(env, headers) unless env.key?("roundhouse.session")
     headers["x-request-id"] = env["action_dispatch.request_id"].to_s
     headers["x-runtime"] = ActionDispatch::Runtime.header_value(started) unless headers.key?("x-runtime")
     [status, headers, body]
@@ -502,7 +505,27 @@ module Main
       ActionDispatch::Session.new(host_session)
     end
     env["roundhouse.session.in"] = restored.to_cookie
+    # Not left to the controller's request: it holds a copy of the env, and the commit above the stack reads this Hash.
+    env["rack.session.options"] ||= {}
     env["rack.session"] = restored
+  end
+
+  def self.commit_session(env, headers)
+    session = env["rack.session"]
+    return unless session.is_a?(ActionDispatch::Session)
+    out = session.to_cookie
+    return if out == env["roundhouse.session.in"].to_s || env["rack.session.options"].to_h[:skip] == true
+    name = Rails.application.session_cookie_key
+    https = env["HTTPS"].to_s == "on" || env.fetch("HTTP_X_FORWARDED_PROTO", "").to_s.split(",").first.to_s.strip.downcase == "https"
+    line = if out.empty?
+      "#{name}=; Path=/; Max-Age=0"
+    else
+      "#{name}=#{CgiIo.url_encode(ActionDispatch::Session.signed_cookie(out, name))}; Path=/; HttpOnly; SameSite=Lax#{"; Secure" if https}"
+    end
+    key = headers.keys.find { |k| k.to_s.downcase == "set-cookie" } || "set-cookie"
+    existing = headers[key]
+    lines = existing.is_a?(Array) ? existing : existing.to_s.split("\n")
+    headers[key] = lines + [line]
   end
 
   def self.run_app(env)

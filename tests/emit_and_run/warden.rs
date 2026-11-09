@@ -92,6 +92,10 @@ key = Rails.application.session_cookie_key
 signed = ActionDispatch::Session.signed_cookie("warden.user.user.key=42", key)
 status, = hit("/dashboard", "#{key}=#{CgiIo.url_encode(signed)}")
 raise "signed in: #{status}" unless status == 200
+# The form's CSRF token is written to the session, which is committed once, above Warden.
+_, headers, = hit("/articles/new")
+session_cookies = Array(headers["set-cookie"]).select { |line| line.start_with?("#{key}=") }
+raise "session cookies: #{headers.inspect}" unless session_cookies.length == 1 && session_cookies[0].include?("HttpOnly")
 puts "warden passed"
 "##,
     );
