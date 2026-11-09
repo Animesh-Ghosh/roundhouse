@@ -2570,6 +2570,7 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
             if matches_patterns(&body) {
                 return Err("a block with a pattern match, whose patterns may bind a local it closes over".into());
             }
+            let body = fold_written(&body);
             Expr::new(span, ExprNode::Lambda {
                 params: params.clone(),
                 rest_param: None,
@@ -2580,6 +2581,27 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
             })
         }
         other => return Err(format!("a routing argument it cannot write ({})", val_kind(other))),
+    })
+}
+
+/// What writing a local in made constant: `nil.nil?`, and `true || x` (devise's `block.nil? || block.call(…)`
+/// with no block), whose right side never runs and so is no call the router has to type.
+fn fold_written(e: &Expr) -> Expr {
+    crate::lower::controller_to_library::util::map_expr(e, &|e| match &*e.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "nil?" && args.is_empty() && matches!(&*r.node, ExprNode::Lit { .. }) =>
+        {
+            let nil = matches!(&*r.node, ExprNode::Lit { value: Literal::Nil });
+            Some(Expr::new(e.span, ExprNode::Lit { value: Literal::Bool { value: nil } }))
+        }
+        ExprNode::BoolOp { op: op @ crate::expr::BoolOpKind::Or, surface, left, right } => {
+            let left = fold_written(left);
+            if matches!(&*left.node, ExprNode::Lit { value: Literal::Bool { value: true } }) {
+                return Some(left);
+            }
+            Some(Expr::new(e.span, ExprNode::BoolOp { op: *op, surface: *surface, left, right: fold_written(right) }))
+        }
+        _ => None,
     })
 }
 
