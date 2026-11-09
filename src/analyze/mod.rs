@@ -4020,10 +4020,11 @@ impl Analyzer {
         if !app.concern_spliced_actions.is_empty() {
             let _typing_concerns = crate::timings::begin("typing: concern splice");
             let origins = app.concern_spliced_actions.clone();
-            for controller in &mut app.controllers {
-                let Some(by_method) = origins.get(&controller.name) else { continue };
+            // Each controller's actions type against the registry alone, so the controllers are typed side by side.
+            parallel::map(&mut app.controllers, |controller| {
+                let Some(by_method) = origins.get(&controller.name) else { return };
                 if dirty.is_some_and(|d| !d.contains(&controller.name)) {
-                    continue;
+                    return;
                 }
                 let own_env = controller_ivar_env.get(&controller.name).cloned()
                     .unwrap_or_default();
@@ -4082,7 +4083,7 @@ impl Analyzer {
                     self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                 }
-            }
+            });
         }
         // ── Phase B″: re-type an ancestor's own methods against what its
         // ── descendants write.
@@ -4094,10 +4095,10 @@ impl Analyzer {
         // Additive as Phase B′ is: the ancestor's own binding wins.
         {
             let descendant_env = descendant_ivar_env_of(app, &controller_ivar_env);
-            for controller in &mut app.controllers {
-                let Some(from_below) = descendant_env.get(&controller.name) else { continue };
+            parallel::map(&mut app.controllers, |controller| {
+                let Some(from_below) = descendant_env.get(&controller.name) else { return };
                 if dirty.is_some_and(|d| !d.contains(&controller.name)) {
-                    continue;
+                    return;
                 }
                 let own_env = controller_ivar_env.get(&controller.name).cloned().unwrap_or_default();
                 let self_ty = Ty::Class { id: controller.name.clone(), args: vec![].into() };
@@ -4150,7 +4151,7 @@ impl Analyzer {
                     self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, None);
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                 }
-            }
+            });
         }
         // Library classes (non-model classes under app/models/): mirror
         // the per-model body typing pass on a smaller surface — no
@@ -4591,16 +4592,18 @@ impl Analyzer {
         // layout. Harvest those writes after typing the template and fold
         // them into the layout seed before layouts are typed.
         let _typing_views = crate::timings::begin("typing: views");
-        for view in &mut app.views {
-            if is_partial_view_name(&view.name) || is_layout_view_name(&view.name) {
-                continue;
-            }
-            let ivars = action_ivars_by_view
-                .get(&view.name)
-                .cloned()
-                .unwrap_or_default();
+        // The templates type side by side (each against the registry and its own seed); what each one assigns and renders is read after, one by one in view order, since the layouts' seeds and the partials' locals are merges in that order.
+        let mut actions: Vec<&mut crate::dialect::View> = app
+            .views
+            .iter_mut()
+            .filter(|view| !is_partial_view_name(&view.name) && !is_layout_view_name(&view.name))
+            .collect();
+        parallel::map(&mut actions, |view| {
+            let ivars = action_ivars_by_view.get(&view.name).cloned().unwrap_or_default();
             let view_ctx = view_ctx_for(&view.name, ivars);
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);
+        });
+        for view in actions {
             let mut assigned = HashMap::default();
             extract_ivar_assignments(&view.body, &mut assigned);
             if !assigned.is_empty() {
@@ -4647,12 +4650,12 @@ impl Analyzer {
                 .unwrap_or_default()
         };
 
-        for view in &mut app.views {
-            if !is_layout_view_name(&view.name) {
-                continue;
-            }
+        let mut layouts: Vec<&mut crate::dialect::View> = app.views.iter_mut().filter(|view| is_layout_view_name(&view.name)).collect();
+        parallel::map(&mut layouts, |view| {
             let view_ctx = view_ctx_for(&view.name, view_ivar_seed(&view.name));
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);
+        });
+        for view in layouts {
             let mut targets = Vec::new();
             extract_partial_render_sites(
                 &view.body,
@@ -4810,10 +4813,9 @@ impl Analyzer {
         // and ivar_bindings from the propagated controller context, then
         // analyze.
         let attachable_partial_bindings = crate::lower::attachable::attachable_partial_bindings(app);
-        for view in &mut app.views {
-            if !is_partial_view_name(&view.name) {
-                continue;
-            }
+        // Each partial types against the registry and the seeds above alone, so the partials are typed side by side.
+        let mut partials: Vec<&mut crate::dialect::View> = app.views.iter_mut().filter(|view| is_partial_view_name(&view.name)).collect();
+        parallel::map(&mut partials, |view| {
             let mut view_ctx = Ctx::default();
             view_ctx.in_view = true; // `yield` here renders to a String
             view_ctx.view_name = Some(view.name.clone());
@@ -4864,7 +4866,7 @@ impl Analyzer {
                 view_ctx.ivar_bindings = ivars.clone();
             }
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);
-        }
+        });
 
         // Record the render-site local types on the App. They already
         // seeded each partial's body typing above; persisting them is
@@ -5267,9 +5269,12 @@ impl Analyzer {
     fn capture_inference_sig(&self) -> InferenceSig {
         let mut instance = HashMap::with_capacity_and_hasher(self.classes.len(), Default::default());
         let mut class_methods = HashMap::with_capacity_and_hasher(self.classes.len(), Default::default());
-        for (id, cls) in &self.classes {
-            instance.insert(id.clone(), cls.instance_methods.clone());
-            class_methods.insert(id.clone(), cls.class_methods.clone());
+        // The tables are copied side by side and written in class order.
+        let classes: Vec<(&ClassId, &ClassInfo)> = self.classes.iter().collect();
+        let copies = crate::par::map_chunked(&classes, |(_, cls)| (cls.instance_methods.clone(), cls.class_methods.clone()));
+        for ((id, _), (instance_methods, class_method_table)) in classes.iter().zip(copies) {
+            instance.insert((*id).clone(), instance_methods);
+            class_methods.insert((*id).clone(), class_method_table);
         }
         InferenceSig {
             instance,
@@ -5301,17 +5306,12 @@ impl Analyzer {
         if self.classes.len() != prev.instance.len() || self.inferred_params != prev.params {
             return false;
         }
-        for (id, cls) in &self.classes {
-            match prev.instance.get(id) {
-                Some(methods) if methods == &cls.instance_methods => {}
-                _ => return false,
-            }
-            match prev.class_methods.get(id) {
-                Some(methods) if methods == &cls.class_methods => {}
-                _ => return false,
-            }
-        }
-        true
+        let classes: Vec<(&ClassId, &ClassInfo)> = self.classes.iter().collect();
+        crate::par::map_chunked(&classes, |(id, cls)| {
+            prev.instance.get(*id) == Some(&cls.instance_methods) && prev.class_methods.get(*id) == Some(&cls.class_methods)
+        })
+        .into_iter()
+        .all(|same| same)
     }
 
     /// Block-value verdicts stay on [`DirtyHints`], not [`InferenceSig`],

@@ -97,53 +97,56 @@ impl Analyzer {
         self.type_test_modules(app, &global_constants);
     }
 
+    /// Each module types against the registry alone (`&self`), so the modules are typed side by side.
     pub(super) fn type_test_modules(&self, app: &mut App, constants: &ConstScope) {
-        for module in &mut app.test_modules {
-            let mut ctx = Ctx {
-                self_ty: Some(Ty::Class {
-                    id: module.name.clone(),
-                    args: vec![].into(),
-                }),
-                constants: constants.clone(),
-                ..Ctx::default()
-            };
-            let mut own_constants = HashMap::default();
-            for (name, value) in &mut module.constants {
-                let ty = self.body_typer().analyze_expr(value, &ctx);
-                own_constants.insert(name.clone(), ty);
-                ctx.constants = constants.with_own(own_constants.clone());
-            }
-            if let Some(setup) = &mut module.setup {
-                self.body_typer().analyze_expr(setup, &ctx);
-                extract_ivar_assignments(setup, &mut ctx.ivar_bindings);
-                ctx.ivar_bindings.retain(|_, ty| !ty.is_unknown());
-            }
-            for method in &mut module.helpers {
-                let mut default_ctx = ctx.clone();
-                for index in 0..method.params.len() {
-                    let param = &mut method.params[index];
-                    if let Some(default) = &mut param.default {
-                        self.body_typer().analyze_expr(default, &default_ctx);
-                    }
-                    // Defaults see preceding parameter bindings, not later
-                    // parameters or locals from another Ruby method scope.
-                    // Re-seed after typing this default: a dependent default
-                    // must see the fresh binding, not last round's default.
-                    let name = param.name.clone();
-                    let seeded = self.seed_method_params(&ctx, &module.name, method, false);
-                    if let Some(ty) = seeded.local_bindings.get(&name) {
-                        default_ctx.local_bindings.insert(name, ty.clone());
-                    }
+        super::parallel::map(&mut app.test_modules, |module| self.type_test_module(module, constants));
+    }
+
+    fn type_test_module(&self, module: &mut crate::dialect::TestModule, constants: &ConstScope) {
+        let mut ctx = Ctx {
+            self_ty: Some(Ty::Class {
+                id: module.name.clone(),
+                args: vec![].into(),
+            }),
+            constants: constants.clone(),
+            ..Ctx::default()
+        };
+        let mut own_constants = HashMap::default();
+        for (name, value) in &mut module.constants {
+            let ty = self.body_typer().analyze_expr(value, &ctx);
+            own_constants.insert(name.clone(), ty);
+            ctx.constants = constants.with_own(own_constants.clone());
+        }
+        if let Some(setup) = &mut module.setup {
+            self.body_typer().analyze_expr(setup, &ctx);
+            extract_ivar_assignments(setup, &mut ctx.ivar_bindings);
+            ctx.ivar_bindings.retain(|_, ty| !ty.is_unknown());
+        }
+        for method in &mut module.helpers {
+            let mut default_ctx = ctx.clone();
+            for index in 0..method.params.len() {
+                let param = &mut method.params[index];
+                if let Some(default) = &mut param.default {
+                    self.body_typer().analyze_expr(default, &default_ctx);
                 }
-                let method_ctx = self.seed_method_params(&ctx, &module.name, method, false);
-                self.body_typer()
-                    .analyze_expr(&mut method.body, &method_ctx);
+                // Defaults see preceding parameter bindings, not later
+                // parameters or locals from another Ruby method scope.
+                // Re-seed after typing this default: a dependent default
+                // must see the fresh binding, not last round's default.
+                let name = param.name.clone();
+                let seeded = self.seed_method_params(&ctx, &module.name, method, false);
+                if let Some(ty) = seeded.local_bindings.get(&name) {
+                    default_ctx.local_bindings.insert(name, ty.clone());
+                }
             }
-            for test in &mut module.tests {
-                // Setup's ivars survive, its locals do not. Keep bare source
-                // calls bare for the existing keyword-forwarding lowerer.
-                self.body_typer().analyze_expr(&mut test.body, &ctx);
-            }
+            let method_ctx = self.seed_method_params(&ctx, &module.name, method, false);
+            self.body_typer()
+                .analyze_expr(&mut method.body, &method_ctx);
+        }
+        for test in &mut module.tests {
+            // Setup's ivars survive, its locals do not. Keep bare source
+            // calls bare for the existing keyword-forwarding lowerer.
+            self.body_typer().analyze_expr(&mut test.body, &ctx);
         }
     }
 }
