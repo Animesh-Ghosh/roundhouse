@@ -2773,20 +2773,38 @@ jobs:
   # assets aren't built (the DOM diff compares asset tags, not files —
   # see scripts/compare's jruby branch).
   compare-jruby:
-    needs: [generate-fixture, plan]
+    # Waits for builds, as compare-ruby does: compiling Roundhouse here took two builds (the test profile
+    # for the bind suites, release for `bin/rh transpile jruby`), about 11 of this job's 14 minutes.
+    needs: [generate-fixture, plan, unit-build, build-roundhouse]
     if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'compare-jruby') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # The archive embeds the producer's checkout and target paths.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
     steps:
       - uses: actions/checkout@v7
+      # tools/compare (scripts/compare's HTTP differ) is still built here.
       - uses: ./.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-nextest
       - uses: actions/download-artifact@v8
         with:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - *stage-roundhouse-debug-bin
+      - name: Download current-run test bundle
+        uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.unit-build.outputs.unit-test-artifact-id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/unit-tests
       # JRuby 10 requires Java 21+ (it refuses to boot on older JDKs).
       # setup-ruby provisions JRuby but not the JDK, so pin Java first.
       - uses: actions/setup-java@v6
@@ -2822,7 +2840,11 @@ jobs:
           jruby -S gem install jdbc-sqlite3 --no-document
           jruby tests/param_binds_jruby.rb
           jruby tests/support/jdbc_value_semantics.rb
-          cargo test --locked --test param_binds_values --test param_binds_cleanup jruby -- --ignored --nocapture
+          python3 scripts/ci-unit-tests.py select \
+            --archive "$RUNNER_TEMP/unit-tests/unit-tests.tar.zst" \
+            --inventory "$RUNNER_TEMP/unit-tests/inventory.json" \
+            --report "$RUNNER_TEMP/compare-jruby/selection.json" \
+            --select param_binds_values:jruby --select param_binds_cleanup:jruby
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.MRI_RUBY }}
@@ -2843,8 +2865,9 @@ jobs:
   spinel-compare:
     name: spinel-compare (blog)
     # Advisory unless ci:spinel focus hardens CORE (spinel-advisory=false).
-    needs: [generate-fixture, spinel-build, plan]
-    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-compare') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' }}
+    # build-roundhouse's binary emits: `bin/rh transpile spinel` otherwise compiled a release Roundhouse, about 4 minutes.
+    needs: [generate-fixture, spinel-build, build-roundhouse, plan]
+    if: ${{ !cancelled() && contains(fromJSON(needs.plan.outputs.jobs), 'spinel-compare') && needs.generate-fixture.result == 'success' && needs.spinel-build.outputs.artifact-id != '' && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
     outputs: *advisory-outputs
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -2867,6 +2890,11 @@ jobs:
         run: |
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - *stage-roundhouse-debug-bin
       - name: Install libsqlite3-dev + libjemalloc-dev
         timeout-minutes: 8
         run: |
