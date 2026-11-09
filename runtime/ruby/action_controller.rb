@@ -9,6 +9,8 @@ require_relative "action_controller/instance_config"
 # `ActionController::API`, the base an API app's ApplicationController
 # names: Base under the API name.
 require_relative "action_controller/api"
+# `ActionView::Rendering`, which Base includes as Rails' does.
+require_relative "action_controller/view_rendering"
 # Per-request context statics (Current.request / .controller) + the
 # controller's `request` accessor — a reopen file outside the strict-
 # target tables (base.rb transpiles everywhere; a Request-typed field

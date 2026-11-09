@@ -1157,6 +1157,8 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("silenced", Ty::Bool), ("silenced=", Ty::Bool),
     ]);
     register_stdlib_class(classes, "ActiveSupport::Deprecation::DeprecatedConstantAccessor", &[], &[]);
+    // `runtime/ruby/action_controller/view_rendering.rb`: the module ActionController::Base includes.
+    register_stdlib_class(classes, "ActionView::Rendering", &[], &[]);
     register_stdlib_class(classes, crate::analyze::indifferent::CLASS, &[], &[]);
     // Not answered here beyond `new`: the dispatch arm for `ActiveSupport::StringInquirer` types its predicates and String surface.
     register_stdlib_class(classes, "ActiveSupport::StringInquirer", &[("new", Ty::Str)], &[]);
