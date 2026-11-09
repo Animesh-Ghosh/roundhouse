@@ -167,6 +167,10 @@ fn the_spinel_adapter_sends_the_response_the_middleware_returns() {
 module Tep
   def self.str_hash = {{}}
 end
+module ActionDispatch
+  class Session
+  end
+end
 Res = Struct.new(:status, :headers, :body, :file_path, :streaming, :set_cookies, :header_fields)
 Req = Struct.new(:verb, :path, :raw_query, :remote_host, :http_version, :req_headers, :raw_body)
 ReqObj = Struct.new(:request_id, :env, :session)

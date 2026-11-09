@@ -9994,6 +9994,8 @@ module GemMiddleware
       # Rails' `request.env` is the Rack env: what a middleware above set (`env["warden"]`) is the request's.
       env.each do |key, value|
         @request_obj.env[key] = value unless key == "roundhouse.exchange"
+        # Not left at the restored one: a middleware above may have put another session in its place.
+        @request_obj.session = value if key == "rack.session" && value.is_a?(ActionDispatch::Session)
       end
       Main.dispatch_request(@req, @res, @request_obj)
       @routes_body = @res.body

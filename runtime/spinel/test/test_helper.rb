@@ -2470,6 +2470,8 @@ module RequestDispatch
       @__routed = true
       @__rack_env = env
       env.each { |k, v| asked.env[k] = v }
+      # Not left at the test's own: a middleware above may have put another session in its place.
+      @__session = asked.session = env["rack.session"] if env["rack.session"].is_a?(ActionDispatch::Session)
       matched = RouteTable.match_asking(
         method, match_path, [RouteTable.root] + RouteTable.table + ActiveStorage::Routes.table, asked
       )

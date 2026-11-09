@@ -40,8 +40,9 @@ ORACLE_OUT_OF_SCOPE='[Oo]mniauth|/auth/:provider|Doorkeeper::|^/oauth/' \
   ruby "$RH/scripts/route-oracle/compare.rb" "$OUT/rails.txt" "$OUT/roundhouse.txt"
 ```
 
-`ORACLE_OUT_OF_SCOPE` is a regexp over `PATH ENDPOINT`. Routes that match it,
-on both sides, are counted apart. Use it for gems that are not read from
+`ORACLE_OUT_OF_SCOPE` is a regexp over `PATH ENDPOINT`. Routes that match it
+are left out on both sides; the printed "out of scope" count is Rails' routes
+only. Use it for gems that are not read from
 source yet, so their routes do not show up as differences.
 
 ## Reading the result

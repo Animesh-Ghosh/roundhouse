@@ -306,7 +306,7 @@ fn apply_pattern_name_dispatch(app: &mut App, registry: &HashMap<ClassId, ClassI
                 .unknown_calls
                 .iter()
                 .filter_map(|e| match &*e.node {
-                    ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "extend" => Some(args.clone()),
+                    ExprNode::Send { recv: None, method, args, .. } if matches!(method.as_str(), "extend" | "prepend") => Some(args.clone()),
                     _ => None,
                 })
                 .flatten()
@@ -320,6 +320,34 @@ fn apply_pattern_name_dispatch(app: &mut App, registry: &HashMap<ClassId, ClassI
         })
         .collect();
     let leaf = |id: &ClassId| id.0.as_str().rsplit("::").next().unwrap_or("").to_string();
+    // What a model or a controller includes, extends, prepends or inherits, by its last name.
+    let live_users: Vec<String> = {
+        fn named(e: &Expr, out: &mut Vec<String>) {
+            if let ExprNode::Send { recv: None, method, args, .. } = &*e.node
+                && matches!(method.as_str(), "include" | "extend" | "prepend")
+            {
+                for a in args {
+                    if let ExprNode::Const { path } = &*a.node && let Some(l) = path.last() {
+                        out.push(l.as_str().to_string());
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for m in &app.models {
+            if let Some(p) = &m.parent { out.push(leaf(p)); }
+            for item in &m.body {
+                if let ModelBodyItem::Unknown { expr, .. } = item { named(expr, &mut out); }
+            }
+        }
+        for c in &app.controllers {
+            if let Some(p) = &c.parent { out.push(leaf(p)); }
+            for item in &c.body {
+                if let ControllerBodyItem::Unknown { expr, .. } = item { named(expr, &mut out); }
+            }
+        }
+        out
+    };
     // Not by name alone: an `include Hooks` written inside `module Warden` names `Warden::Hooks`.
     let same = |a: &ClassId, b: &ClassId| a == b || a.0.as_str().ends_with(&format!("::{}", b.0.as_str())) || b.0.as_str().ends_with(&format!("::{}", a.0.as_str()));
     // The names on `side` of each class a call from `owner` may be answered by: (the owner's own lineage, the others).
@@ -337,23 +365,40 @@ fn apply_pattern_name_dispatch(app: &mut App, registry: &HashMap<ClassId, ClassI
             i += 1;
         }
         for id in &lineage {
-            for (name, _, _, _, _, methods) in &classes {
+            for (name, is_module, _, _, _, methods) in &classes {
                 if !same(name, id) { continue; }
                 for (m, class_side, params) in methods {
-                    // A module's instance method answers on the class side of a class that extends it.
-                    if (*class_side == side || !class_side) && matches(m.as_str()) && !own.iter().any(|(n, _)| n == m) {
+                    // Not a class's instance method on its class side: only a module's answers there, once a class extends it.
+                    let answers = *class_side == side || (side && !class_side && *is_module);
+                    if answers && matches(m.as_str()) && !own.iter().any(|(n, _)| n == m) {
                         own.push((m.clone(), params.clone()));
                     }
                 }
             }
         }
+        // Not only direct users: a module's includer may itself be a module, and a class's subclass has its own subclasses.
+        let mut users: Vec<ClassId> = vec![owner.clone()];
+        let mut i = 0;
+        while i < users.len() && users.len() < 256 {
+            let used = users[i].clone();
+            for (name, _, includes, parent, extends, _) in &classes {
+                let user = includes.iter().any(|inc| same(inc, &used)) || extends.iter().any(|e| *e == leaf(&used)) || parent.as_ref().is_some_and(|p| same(p, &used));
+                if user && !users.iter().any(|u| same(u, name)) {
+                    users.push(name.clone());
+                }
+            }
+            i += 1;
+        }
         let mut others = Vec::new();
-        for (_, _, includes, parent, extends, methods) in &classes {
-            let user = includes.iter().any(|i| same(i, owner)) || extends.iter().any(|e| *e == leaf(owner)) || parent.as_ref().is_some_and(|p| same(p, owner));
-            if !user { continue; }
+        for (name, _, _, _, _, methods) in &classes {
+            if !users[1..].iter().any(|u| same(u, name)) { continue; }
             for (m, _, _) in methods {
                 if matches(m.as_str()) && !own.iter().any(|(n, _)| n == m) { others.push(m.clone()); }
             }
+        }
+        // Not answered here when a model or controller takes it in: their methods live in bodies this does not read.
+        if users.iter().any(|u| live_users.iter().any(|l| *l == leaf(u))) {
+            others.push(Symbol::from("<a model or controller>"));
         }
         (own, others)
     };
