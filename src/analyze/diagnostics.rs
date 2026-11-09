@@ -1165,7 +1165,10 @@ fn route_guard_untyped_sends(app: &App) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for class in app.library_classes.iter().filter(|c| c.name.0.as_str() == crate::lower::route_guards::GUARD_CLASS) {
         for method in &class.methods {
-            visit(&method.body, &mut out);
+            // One per constraint, its first such call: the rest follow from the same value.
+            let mut found = Vec::new();
+            visit(&method.body, &mut found);
+            out.extend(found.into_iter().next());
         }
     }
     out

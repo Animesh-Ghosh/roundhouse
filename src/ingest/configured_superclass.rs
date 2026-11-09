@@ -2532,8 +2532,63 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
             entries: entries.iter().map(|(k, v)| Ok((to_expr(k, span)?, to_expr(v, span)?))).collect::<Res<_>>()?,
             kwargs: false,
         }),
-        _ => return Err("a routing argument it cannot write".into()),
+        // `constraints(lambda { |request| … })` (devise's `authenticate`): the lambda, with each local it
+        // closes over written in as its value; one it cannot write, or `self`, is no routing argument.
+        // The block it closed over is the one a `yield` inside would run; a body with none does not need it.
+        Val::Proc { params, rest: None, body, locals, block, .. } if block.is_none() || !yields(body) => {
+            let unwritable = std::cell::RefCell::new(None::<String>);
+            let body = crate::lower::controller_to_library::util::map_expr(body, &|e| match &*e.node {
+                ExprNode::Var { name, .. } if !params.contains(name) => {
+                    let value = locals.get(name)?;
+                    match to_expr(value, e.span) {
+                        Ok(written) => Some(written),
+                        Err(why) => {
+                            unwritable.borrow_mut().get_or_insert(format!("{why} (`{}` in a block)", name.as_str()));
+                            None
+                        }
+                    }
+                }
+                ExprNode::SelfRef => {
+                    unwritable.borrow_mut().get_or_insert_with(|| "a block that reads `self`".into());
+                    None
+                }
+                _ => None,
+            });
+            if let Some(why) = unwritable.into_inner() {
+                return Err(why);
+            }
+            Expr::new(span, ExprNode::Lambda {
+                params: params.clone(),
+                rest_param: None,
+                extra_params: Vec::new(),
+                block_param: None,
+                body,
+                block_style: Default::default(),
+            })
+        }
+        other => return Err(format!("a routing argument it cannot write ({})", val_kind(other))),
     })
+}
+
+fn yields(e: &Expr) -> bool {
+    let mut found = matches!(&*e.node, ExprNode::Yield { .. });
+    e.node.for_each_child(&mut |c| found |= yields(c));
+    found
+}
+
+fn val_kind(v: &Val) -> &'static str {
+    match v {
+        Val::Proc { rest: Some(_), .. } => "a block with a rest parameter",
+        Val::Proc { block: Some(_), .. } => "a block that takes a block",
+        Val::Proc { .. } => "a block",
+        Val::Obj(_) => "an object",
+        Val::Regex(_) => "a regexp",
+        Val::Unknown => "a value it does not model",
+        Val::Router => "the mapper",
+        Val::Merger { .. } => "a with_options target",
+        Val::Defaulted { .. } => "a Hash with a default",
+        _ => "a value",
+    }
 }
 
 /// The routes a gem's routing method draws (`use_doorkeeper do … end`), run with the mapper as the
