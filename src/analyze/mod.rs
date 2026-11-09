@@ -6341,9 +6341,8 @@ impl Analyzer {
             let rest = params_by_method.get(key).and_then(|shape| shape.slots.iter().position(|(_, kind)| matches!(kind, ParamKind::Rest)));
             rest.filter(|r| i >= *r).unwrap_or(i)
         };
-        let guessed_refs: Vec<&SendSite> = guessed.iter().collect();
         let mut guessed_open = BTreeSet::new();
-        let guessed = self.param_observations(&guessed_refs, params_by_method, defined, &mut guessed_open);
+        let guessed = self.call_observations(&guessed, params_by_method, defined, &mut guessed_open);
         let extra: Vec<(ParamKey, Vec<Ty>)> = {
             let typed: BTreeSet<(&ParamKey, usize)> = observations
                 .iter()
@@ -6352,18 +6351,34 @@ impl Analyzer {
                 .flat_map(|(key, tys)| tys.iter().enumerate().filter(|(_, t)| !t.is_unknown()).map(move |(i, _)| (key, slot(key, i))))
                 .collect();
             open.extend(guessed_open.into_iter().filter(|(key, i)| typed.contains(&(key, slot(key, *i)))));
-            guessed
-                .into_iter()
-                .map(|(key, tys)| {
-                    let tys = tys
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, t)| if typed.contains(&(&key, slot(&key, i))) { t } else { Ty::Var { var: NO_EVIDENCE } })
-                        .collect();
-                    (key, tys)
-                })
-                .collect()
+            // A guessed observation that repeats one already kept is
+            // dropped: the fold joins them, and a join is idempotent. Most
+            // are the same few calls with every slot masked, once per class.
+            let mut extra: Vec<(ParamKey, Vec<Ty>)> = Vec::new();
+            let mut kept: HashMap<u64, Vec<usize>> = HashMap::default();
+            for (key, tys) in guessed {
+                let tys: Vec<Ty> = tys
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, t)| if typed.contains(&(&key, slot(&key, i))) { t } else { Ty::Var { var: NO_EVIDENCE } })
+                    .collect();
+                let fingerprint = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = rustc_hash::FxHasher::default();
+                    key.hash(&mut h);
+                    tys.iter().for_each(|t| t.eq_fingerprint().hash(&mut h));
+                    h.finish()
+                };
+                let bucket = kept.entry(fingerprint).or_default();
+                if bucket.iter().any(|&i| extra[i].0 == key && extra[i].1 == tys) {
+                    continue;
+                }
+                bucket.push(extra.len());
+                extra.push((key, tys));
+            }
+            extra
         };
+        observations.reserve(extra.len());
         observations.extend(extra);
         self.site_cache = cache;
         self.retyped_since_unify = Some(crate::det::HashSet::default());
@@ -6447,17 +6462,30 @@ impl Analyzer {
         defined: &BTreeSet<ParamKey>,
         open: &mut BTreeSet<(ParamKey, usize)>,
     ) -> Vec<(ParamKey, Vec<Ty>)> {
+        let calls: Vec<(&ClassId, &SendSite)> = sites.iter().map(|&site| (&site.0, site)).collect();
+        self.call_observations(&calls, params_by_method, defined, open)
+    }
+
+    /// [`Self::param_observations`] of each site read as a call of the
+    /// class beside it, whatever class the site itself names.
+    fn call_observations(
+        &self,
+        sites: &[(&ClassId, &SendSite)],
+        params_by_method: &HashMap<ParamKey, ParamShape>,
+        defined: &BTreeSet<ParamKey>,
+        open: &mut BTreeSet<(ParamKey, usize)>,
+    ) -> Vec<(ParamKey, Vec<Ty>)> {
         const CHUNK: usize = 4096;
         if sites.len() <= CHUNK || crate::par::workers_for(sites.len() / CHUNK + 1) == 1 {
             return self.param_observations_of(sites, params_by_method, defined, open);
         }
-        let chunks: Vec<&[&SendSite]> = sites.chunks(CHUNK).collect();
+        let chunks: Vec<&[(&ClassId, &SendSite)]> = sites.chunks(CHUNK).collect();
         let parts = crate::par::map(&chunks, |chunk| {
             let mut part_open = BTreeSet::new();
             let obs = self.param_observations_of(chunk, params_by_method, defined, &mut part_open);
             (obs, part_open)
         });
-        let mut observations = Vec::new();
+        let mut observations = Vec::with_capacity(parts.iter().map(|(obs, _)| obs.len()).sum());
         for (obs, part_open) in parts {
             observations.extend(obs);
             open.extend(part_open);
@@ -6469,14 +6497,14 @@ impl Analyzer {
     /// a `def` of the app.
     fn param_observations_of(
         &self,
-        sites: &[&SendSite],
+        sites: &[(&ClassId, &SendSite)],
         params_by_method: &HashMap<ParamKey, ParamShape>,
         defined: &BTreeSet<ParamKey>,
         open: &mut BTreeSet<(ParamKey, usize)>,
     ) -> Vec<(ParamKey, Vec<Ty>)> {
         let mut placed: HashMap<(&ClassId, &Symbol, SiteRecv), Option<ParamKey>> = HashMap::default();
         let mut observations = Vec::new();
-        for (class_id, method, arg_tys, kw_tys, recv) in sites.iter().copied() {
+        for &(class_id, (_, method, arg_tys, kw_tys, recv)) in sites {
             let key = placed
                 .entry((class_id, method, *recv))
                 .or_insert_with(|| self.param_key(defined, class_id.clone(), method.clone(), *recv))
@@ -8563,7 +8591,7 @@ fn unknown_receiver() -> ClassId {
 /// are joined, and a join is idempotent, so a repeat adds nothing; the
 /// first of each is kept, in site order, so the rows come out in the
 /// same order too.
-fn guessed_receiver_sites(unknown: &[&SendSite], app: &App) -> Vec<SendSite> {
+fn guessed_receiver_sites<'a>(unknown: &[&'a SendSite], app: &'a App) -> Vec<(&'a ClassId, &'a SendSite)> {
     if unknown.is_empty() || !app.pins_unresolved_params {
         return Vec::new();
     }
@@ -8574,17 +8602,21 @@ fn guessed_receiver_sites(unknown: &[&SendSite], app: &App) -> Vec<SendSite> {
         }
     }
     let mut seen: HashMap<(&Symbol, SiteRecv, u64), Vec<&SendSite>> = HashMap::default();
-    let mut guessed = Vec::new();
-    for site in unknown {
+    let mut kept: Vec<(&Vec<&ClassId>, &SendSite)> = Vec::new();
+    for &site in unknown {
         let Some(classes) = defining.get(&site.1) else { continue };
         let bucket = seen.entry((&site.1, site.4, site_shape_hash(site))).or_default();
         if bucket.iter().any(|kept| kept.2 == site.2 && kept.3 == site.3) {
             continue;
         }
         bucket.push(site);
-        for class in classes {
-            guessed.push(((*class).clone(), site.1.clone(), site.2.clone(), site.3.clone(), site.4));
-        }
+        kept.push((classes, site));
+    }
+    // The site itself, read as a call of each class: a copy of its
+    // arguments per class was most of a round's time on a large app.
+    let mut guessed = Vec::with_capacity(kept.iter().map(|(classes, _)| classes.len()).sum());
+    for (classes, site) in kept {
+        guessed.extend(classes.iter().map(|&class| (class, site)));
     }
     guessed
 }
@@ -11810,7 +11842,7 @@ mod guessed_receiver_site_tests {
         ];
         let refs: Vec<&SendSite> = sites.iter().collect();
         let got: Vec<(String, Vec<Ty>, SiteRecv)> =
-            guessed_receiver_sites(&refs, &app).into_iter().map(|(class, _, args, _, recv)| (class.0.as_str().to_string(), args, recv)).collect();
+            guessed_receiver_sites(&refs, &app).into_iter().map(|(class, site)| (class.0.as_str().to_string(), site.2.clone(), site.4)).collect();
         let row = |class: &str, ty: Ty, recv: SiteRecv| (class.to_string(), vec![ty], recv);
         assert_eq!(
             got,

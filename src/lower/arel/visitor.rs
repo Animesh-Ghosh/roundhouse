@@ -42,6 +42,7 @@ struct Bind {
 /// One shaped-read site gets one id so `__rh_value_0` from two reads in
 /// the same method cannot collide under Spinel's pinned local types.
 fn next_read_id() -> usize {
+    DRAWN_HERE.with(|n| n.set(n.get() + 1));
     NEXT_READ_ID.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -56,8 +57,21 @@ pub(crate) fn read_ids_taken() -> usize {
     NEXT_READ_ID.load(Ordering::Relaxed)
 }
 
+/// A skip moves the counter on in lowering order as a draw does, so it
+/// counts as drawn here too.
 pub(crate) fn skip_read_ids(count: usize) {
+    DRAWN_HERE.with(|n| n.set(n.get() + count));
     NEXT_READ_ID.fetch_add(count, Ordering::Relaxed);
+}
+
+thread_local! {
+    static DRAWN_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Read ids drawn on this thread. Work handed to a worker thread must
+/// draw none: the ids follow the order reads are lowered in.
+pub(crate) fn read_ids_drawn_here() -> usize {
+    DRAWN_HERE.with(std::cell::Cell::get)
 }
 
 fn bind_local(kind: &str, i: usize, read_id: usize) -> Symbol {

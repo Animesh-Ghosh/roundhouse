@@ -833,6 +833,7 @@ fn diagnose_head(app: &App) -> Vec<Diagnostic> {
     // A support file the class ingest left out, at what failed it.
     out.extend(app.ingest_drops.iter().map(|drop| Diagnostic::ingest_unsupported(drop.span, drop.message.clone())));
     out.extend(conditional_declarations_reopened(app));
+    out.extend(unsettled_conditional_writes(app));
     // Constructor refusals must also reach executable class constants and
     // parameter defaults, which the ordinary method diagnostic policy omits.
     fn collect_storage_constructors(expr: &Expr, out: &mut Vec<Diagnostic>) {
@@ -1772,6 +1773,36 @@ fn diagnose_expr_in(expr: &Expr, out: &mut Vec<Diagnostic>, value_used: bool) {
         | ExprNode::Defined { .. }
         | ExprNode::SelfRef => {}
     }
+}
+
+/// A write through the class's own writer in a load-time conditional whose
+/// branch is not settled at compile time: the emitted conditional selects
+/// methods only, so the write would run in no branch.
+fn unsettled_conditional_writes(app: &App) -> Vec<Diagnostic> {
+    fn writes<'a>(conditional: &'a crate::dialect::ConditionalDefinitions, out: &mut Vec<&'a Expr>) {
+        for arm in &conditional.arms {
+            out.extend(arm.statements.iter());
+            for nested in &arm.nested {
+                writes(nested, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for lc in &app.library_classes {
+        for conditional in &lc.conditional_definitions {
+            let mut found = Vec::new();
+            writes(conditional, &mut found);
+            for write in found {
+                out.push(Diagnostic::unsupported(
+                    write.span,
+                    None,
+                    "load-time conditional",
+                    "a class setting written in a load-time conditional whose branch is not known when compiling is not modeled".to_string(),
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// A class or module declared in a load-time conditional that another
