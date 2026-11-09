@@ -40,3 +40,15 @@ fn a_probe_of_the_classic_autoloader_takes_the_rails_7_arm() {
     run.assert_passes();
     assert!(run.stdout.contains("dependencies probe passed"), "{}", run.stdout);
 }
+
+const LATE_PROBE: &str = "class LateProbe\n  if respond_to?(:ready)\n    def self.kind\n      :early\n    end\n  else\n    def self.kind\n      :late\n    end\n  end\n\n  def self.ready\n    true\n  end\nend\n";
+
+/// A class method the body defines further down is not there when the conditional runs, so the `else` arm is Ruby's.
+#[test]
+fn a_class_method_defined_below_the_conditional_does_not_answer_it() {
+    let run = emit_and_run::real_blog()
+        .write("app/models/late_probe.rb", LATE_PROBE)
+        .run_ruby("raise LateProbe.kind.inspect unless LateProbe.kind == :late\nputs \"late probe passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("late probe passed"), "{}", run.stdout);
+}

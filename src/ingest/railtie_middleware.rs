@@ -534,8 +534,9 @@ fn rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The receiver of `coll.each do … end` (or `each_value`/`each_key`/`each_pair`), when it is a call chain rooted at a constant.
-fn each_collection<'p>(stmt: &Node<'p>) -> Option<Node<'p>> {
+/// The receiver of `coll.each do … end` (or `each_value`/`each_key`/`each_pair`), when it is a call chain rooted at
+/// a constant, with that constant's source.
+fn each_collection<'p>(stmt: &Node<'p>) -> Option<(Node<'p>, String)> {
     let call = stmt.as_call_node()?;
     if !matches!(constant_id_str(&call.name()), "each" | "each_value" | "each_key" | "each_pair") || call.arguments().is_some() {
         return None;
@@ -545,7 +546,9 @@ fn each_collection<'p>(stmt: &Node<'p>) -> Option<Node<'p>> {
     let mut root = recv.as_call_node()?;
     loop {
         match root.receiver() {
-            Some(r) if r.as_constant_read_node().is_some() || r.as_constant_path_node().is_some() => return Some(recv),
+            Some(r) if r.as_constant_read_node().is_some() || r.as_constant_path_node().is_some() => {
+                return Some((recv, String::from_utf8_lossy(r.location().as_slice()).into_owned()));
+            }
             Some(r) => root = r.as_call_node()?,
             None => return None,
         }
@@ -586,7 +589,9 @@ fn read_initializer(
         })
     });
     let Some(body) = block.body() else { return };
-    for inner in flatten_statements(body) {
+    let statements = flatten_statements(body);
+    for (at, inner) in statements.iter().enumerate() {
+        let inner = inner.clone();
         let loc = inner.location();
         let span = Span { file, start: loc.start_offset() as u32, end: loc.end_offset() as u32 };
         let direct = inner.as_call_node().filter(|c| {
@@ -602,7 +607,11 @@ fn read_initializer(
                     "railtie middleware",
                     "a middleware inserted under a condition or inside another statement: only a plain `app.middleware.use(Klass)` is put on the emitted stack".to_string(),
                 );
-                match each_collection(&inner).and_then(|c| super::expr::ingest_expr(&c, path).ok()) {
+                // Not evaluated past an earlier statement of the block that names its root: that one may fill it first.
+                let collection = each_collection(&inner).filter(|(_, root)| {
+                    !statements[..at].iter().any(|before| String::from_utf8_lossy(before.location().as_slice()).contains(root.as_str()))
+                });
+                match collection.and_then(|(c, _)| super::expr::ingest_expr(&c, path).ok()) {
                     Some(collection) => loops.push((collection, refusal)),
                     None => diags.push(refusal),
                 }
@@ -654,6 +663,22 @@ mod tests {
         let map = files.iter().map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec())).collect();
         let stack = super::read(&MapVfs::new(map), std::path::Path::new("/app"), &[PathBuf::from("/gem/lib")]);
         (stack.classes, stack.diags.iter().map(|d| d.message.clone()).collect())
+    }
+
+    /// A loop over a collection is left to the app's settings to decide (`loops`), unless an earlier
+    /// statement of the same initializer names its root and may fill it first.
+    #[test]
+    fn an_initializer_loop_is_deferred_unless_the_block_names_its_collection_first() {
+        let deferred = railtie("    initializer \"gem.each\" do |app|\n      Gem.items.each do |item|\n        app.middleware.use(Middleware)\n      end\n    end");
+        let map = [("/gem/lib/gem.rb", ENTRY), ("/gem/lib/gem/railtie.rb", deferred.as_str())].iter().map(|(p, t)| (PathBuf::from(p), t.as_bytes().to_vec())).collect();
+        let stack = super::read(&MapVfs::new(map), std::path::Path::new("/app"), &[PathBuf::from("/gem/lib")]);
+        assert_eq!((stack.loops.len(), stack.diags.len()), (1, 0), "{:?}", stack.diags);
+
+        let filled = railtie("    initializer \"gem.each\" do |app|\n      Gem.items << :one\n      Gem.items.each do |item|\n        app.middleware.use(Middleware)\n      end\n    end");
+        let map = [("/gem/lib/gem.rb", ENTRY), ("/gem/lib/gem/railtie.rb", filled.as_str())].iter().map(|(p, t)| (PathBuf::from(p), t.as_bytes().to_vec())).collect();
+        let stack = super::read(&MapVfs::new(map), std::path::Path::new("/app"), &[PathBuf::from("/gem/lib")]);
+        assert!(stack.loops.is_empty(), "{:?}", stack.loops.len());
+        assert!(stack.diags.iter().any(|d| d.message.contains("inserted under a condition")), "{:?}", stack.diags);
     }
 
     /// Devise's engine: a class-body `config.app_middleware.use` of another source gem's class, with
