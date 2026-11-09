@@ -7945,7 +7945,7 @@ fn a_fixture_naming_a_missing_parent_fails_setup() {
             "require \"test_helper\"\n\nclass FkCheckTest < ActiveSupport::TestCase\n  test \"loads\" do\n    assert Article.count > 0\n  end\nend\n",
         )
         .run_test("test/models/fk_check_test.rb");
-    assert!(!run.success, "{}", run.stdout);
+    assert!(!run.program_succeeded(), "{}", run.stdout);
     assert!(run.stdout.contains("Foreign key violations found: comments") || run.stderr.contains("Foreign key violations found: comments"), "{}\n{}", run.stdout, run.stderr);
 }
 
@@ -18849,7 +18849,7 @@ fn a_failing_assertion_inside_a_destructured_block_stops_what_follows() {
     for (name, hits, members) in cases {
         let run = destructured_block_app(name, members).run_test("test/models/widget_test.rb");
         assert!(run.errors.is_empty(), "{name}: {:?}", run.errors);
-        assert!(!run.success, "{name}: the failing assertion passed\n{}", run.stdout);
+        assert!(!run.program_succeeded(), "{name}: the failing assertion passed\n{}", run.stdout);
         assert!(run.stdout.contains(&format!("CASE {name} HITS={hits}\n")), "{name}: {}", run.stdout);
     }
 }
@@ -20961,6 +20961,12 @@ mod controller_surface;
 mod rack_attack;
 #[path = "emit_and_run/devise.rs"]
 mod devise;
+#[path = "emit_and_run/warden.rs"]
+mod warden;
+#[path = "emit_and_run/class_eval_string_macro.rs"]
+mod class_eval_string_macro;
+#[path = "emit_and_run/send_built_name.rs"]
+mod send_built_name;
 #[path = "support/addressable_gem.rs"]
 mod addressable_gem;
 #[path = "emit_and_run/addressable.rs"]

@@ -790,9 +790,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("time_fragment", Ty::Str),
         ("written", Ty::Str),
     ], &[]);
-    // `Rack::Utils` — the two encoding-negotiation functions, ported
-    // into `runtime/ruby/rack_utils.rb` (the rack gem's own on the ruby
-    // family). ONLY that surface, the IPAddr rule. A pair is
+    // `Rack::Utils` — the two encoding-negotiation functions and
+    // `unescape_path`, ported into `runtime/ruby/rack_utils.rb` (the rack
+    // gem's own on the ruby family). ONLY that surface, the IPAddr rule. A pair is
     // `[name, quality]`; the name is nil for an empty header part.
     let q_pair = Ty::Tuple {
         elems: vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }, Ty::Float].into(),
@@ -800,6 +800,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Rack::Utils", &[
         ("q_values", Ty::Array { elem: std::sync::Arc::new(q_pair) }),
         ("select_best_encoding", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+        ("unescape_path", Ty::Str),
     ], &[]);
     // `Rack::Utils::HTTP_STATUS_CODES` — the status-code-to-reason-phrase
     // table every app can reach for (`Rack::Utils::HTTP_STATUS_CODES

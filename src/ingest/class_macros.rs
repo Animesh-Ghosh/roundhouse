@@ -370,8 +370,18 @@ pub(crate) fn expand_class_macros(app: &mut App, sources: &[SourceFile], mention
                     })
                     .collect();
                 // Not a plain class's to carry: what a model's expansion places in its body.
-                if slots.len() != run.out.len() || !run.evaluated.is_empty() || !run.aliases.is_empty() || !run.extended.is_empty() || !run.class_attrs.is_empty() {
+                if slots.len() != run.out.len() || !run.aliases.is_empty() || !run.extended.is_empty() || !run.class_attrs.is_empty() {
                     return Err("it does more than define methods".to_string());
+                }
+                // A String it `class_eval`s that only defines methods: those `def`s are the class's.
+                for code in std::mem::take(&mut run.evaluated) {
+                    let items = replay_text(&code, &lc.name, &mut indexmap::IndexMap::new()).ok_or("it `class_eval`s a String this cannot read")?;
+                    for item in items {
+                        let ModelBodyItem::Method { method, .. } = item else {
+                            return Err("it `class_eval`s a String that does more than define methods".to_string());
+                        };
+                        run.methods.push(method);
+                    }
                 }
                 for m in &run.methods {
                     let key = (m.name.clone(), m.receiver);
@@ -1106,10 +1116,16 @@ fn reaches_definition(name: &Symbol, table: &HashMap<Symbol, MethodDef>, depth: 
             && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
         {
             found |= matches!(method.as_str(), "define_method" | "define_singleton_method")
+                // Warden's `hash_accessor`: a String `class_eval`ed on the class defines its `def`s.
+                || (matches!(method.as_str(), "class_eval" | "module_eval") && class_evals_a_string(e))
                 || (method != name && table.contains_key(method) && reaches_definition(method, table, depth + 1));
         }
     });
     found
+}
+
+fn class_evals_a_string(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Send { args, block: None, .. } if args.first().is_some_and(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Str { .. } } | ExprNode::StringInterp { .. })))
 }
 
 fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {
