@@ -55,12 +55,12 @@ fn rewrite_element_calls(expr: &mut Expr, item: &Symbol) {
         return;
     }
     expr.node.for_each_child_mut(&mut |c| rewrite_element_calls(c, item));
-    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *expr.node else { return };
+    let ExprNode::Send { recv: Some(r), method, args, block, .. } = &mut *expr.node else { return };
     if !matches!(&*r.node, ExprNode::Var { name, .. } if name == item) {
         return;
     }
     match method.as_str() {
-        "permit" | "expect" => {
+        "permit" | "expect" if block.is_none() => {
             if let Some(mut new) = element_filter(expr) {
                 new.ty = expr.ty.clone();
                 *expr = new;

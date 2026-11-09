@@ -72,7 +72,7 @@ end
   end
 
   def element_reads
-    render json: { rows: params.require(:list).map { |item| [item[:name], item["name"], item.key?(:name)] } }
+    render json: { rows: params.require(:list).map { |item| [item[:name], item["name"], item.key?(:name), item.fetch(:price) { 0 }] } }
   end
 
   def show
@@ -183,7 +183,7 @@ fn api_parity_round3_fixes_run_on_spinel() {
     let nested = server.request("POST", "/widgets/permit_rows", &json_ct, r#"{"list":[{"name":{"deep":1}}]}"#);
     assert_eq!((nested.status, nested.body.as_str()), (200, r#"{"rows":[{}]}"#), "nested value:\n{}", server.log());
     let reads = server.request("POST", "/widgets/element_reads", &json_ct, rows);
-    assert_eq!((reads.status, reads.body.as_str()), (200, r#"{"rows":[["a","a",true],["b","b",true]]}"#), "element reads:\n{}", server.log());
+    assert_eq!((reads.status, reads.body.as_str()), (200, r#"{"rows":[["a","a",true,3],["b","b",true,0]]}"#), "element reads:\n{}", server.log());
 
     let up = server.get("/up.json");
     assert!(

@@ -34,6 +34,10 @@ const CONTROLLER: &str = r#"class ItemsController < ActionController::API
     render json: { rows: params.require(:list).map { |item| [item[:name], item["name"], item.key?(:name), item.fetch(:price, 0)] } }
   end
 
+  def fetch_block
+    render json: { rows: params.require(:list).map { |item| item.fetch(:price) { 0 } } }
+  end
+
   def shadowed
     render json: { rows: params.require(:list).map { |item| [1].map { |item| item + 1 } } }
   end
@@ -98,6 +102,11 @@ class ItemsControllerTest < ActionDispatch::IntegrationTest
     assert_equal({ rows: [["a", "a", true, 3], ["b", "b", true, 0]] }.to_json, response.body)
   end
 
+  test "fetch with a block finds the value" do
+    post "/items/fetch_block", params: ROWS, as: :json
+    assert_equal({ rows: [3, 0] }.to_json, response.body)
+  end
+
   test "a nested block's own parameter is left alone" do
     post "/items/shadowed", params: ROWS, as: :json
     assert_equal({ rows: [[2], [2]] }.to_json, response.body)
@@ -107,7 +116,7 @@ end
 
 #[test]
 fn elements_of_a_required_list_answer_as_rails_does() {
-    let routes: String = ["permit_only", "expect_permit", "implicit_it", "expect_value", "nested_filter", "element_reads", "shadowed"]
+    let routes: String = ["permit_only", "expect_permit", "implicit_it", "expect_value", "nested_filter", "element_reads", "fetch_block", "shadowed"]
         .iter()
         .map(|a| format!("  post \"/items/{a}\", to: \"items#{a}\"\n"))
         .collect();
