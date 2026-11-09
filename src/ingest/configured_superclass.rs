@@ -2539,7 +2539,7 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
             // A nested block that binds a name the outer one closes over: its reads are its own, which
             // a substitution by name would replace.
             if let Some(name) = rebound(body).into_iter().find(|n| locals.contains_key(n) && !params.contains(n)) {
-                return Err(format!("a block whose inner block rebinds `{}`, a local it closes over", name.as_str()));
+                return Err(format!("a block that rebinds `{}`, a local it closes over", name.as_str()));
             }
             let unwritable = std::cell::RefCell::new(None::<String>);
             let body = crate::lower::controller_to_library::util::map_expr(body, &|e| match &*e.node {
@@ -2575,13 +2575,19 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
     })
 }
 
-/// The names nested blocks in `e` bind as parameters.
+/// The names `e` binds: nested blocks' parameters and the locals it assigns, either of which makes a
+/// read of that name something other than the value the outer block closed over.
 fn rebound(e: &Expr) -> Vec<Symbol> {
     let mut out = Vec::new();
     if let ExprNode::Lambda { params, rest_param, block_param, .. } = &*e.node {
         out.extend(params.iter().cloned());
         out.extend(rest_param.iter().cloned());
         out.extend(block_param.iter().cloned());
+    }
+    if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, .. }
+    | ExprNode::OpAssign { target: crate::expr::LValue::Var { name, .. }, .. } = &*e.node
+    {
+        out.push(name.clone());
     }
     e.node.for_each_child(&mut |c| out.extend(rebound(c)));
     out
