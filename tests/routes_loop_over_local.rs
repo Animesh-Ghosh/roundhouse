@@ -83,3 +83,33 @@ fn a_list_changed_in_a_drawn_file_leaves_the_callers_list_alone() {
     let paths: Vec<String> = flatten_routes(&app).into_iter().map(|r| r.path).collect();
     assert_eq!(paths, ["/welcome"], "{paths:?}");
 }
+
+/// A loop body that assigns a local its scope already holds (`pages = %w[faq]`) changes the scope's
+/// local, as in Ruby, so a later loop over it draws the new list.
+#[test]
+fn an_assignment_inside_a_loop_reaches_the_enclosing_local() {
+    let drawn = routes(
+        r#"pages = %w[welcome]
+%w[once].each do |step|
+  pages = %w[faq]
+end
+pages.each do |page|
+  get page, controller: "pages", action: page
+end"#,
+    );
+    assert_eq!(drawn, [("/faq".to_string(), "PagesController#faq".to_string())], "{drawn:?}");
+}
+
+/// The block parameter shadows a scope local of the same name, which the loop leaves as it was.
+#[test]
+fn a_block_parameter_does_not_overwrite_the_scope_local_it_shadows() {
+    let drawn = routes(
+        r#"page = "home"
+%w[a b].each do |page|
+  get page, controller: "pages", action: page
+end
+get page, controller: "pages", action: page"#,
+    );
+    let paths: Vec<&str> = drawn.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(paths, ["/a", "/b", "/home"], "{drawn:?}");
+}

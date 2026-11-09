@@ -2133,6 +2133,8 @@ fn ingest_literal_each(
     // silently half-worked instead of being a located gap on every
     // iteration (rubys/roundhouse#1027 review).
     let mut entries = Vec::new();
+    // The block parameter shadows a local of the same name; popping the body's frame must not write it back.
+    let shadowed = eval::get(&param);
     for element in elements {
         let Some(body) = block.body() else { break };
         eval::push_inherited_frame();
@@ -2141,6 +2143,9 @@ fn ingest_literal_each(
             ingest_route_body(body, file, parent, cx)
         });
         eval::pop_frame();
+        if let Some(outer) = &shadowed {
+            eval::bind(&param, outer.clone());
+        }
         entries.extend(walked?);
     }
     Ok(entries)
@@ -3285,11 +3290,19 @@ mod eval {
     }
 
     pub(super) fn pop_frame() {
+        let copy = INHERITED.with(|i| i.borrow_mut().pop()).unwrap_or(false);
         FRAMES.with(|f| {
-            f.borrow_mut().pop();
-        });
-        INHERITED.with(|i| {
-            i.borrow_mut().pop();
+            let mut frames = f.borrow_mut();
+            let Some(popped) = frames.pop() else { return };
+            // A loop body's assignment to a local its scope already has is the scope's, as in Ruby;
+            // one of its own (a new name) ends with the body.
+            if copy && let Some(outer) = frames.last_mut() {
+                for (name, value) in popped {
+                    if let Some(slot) = outer.get_mut(&name) {
+                        *slot = value;
+                    }
+                }
+            }
         });
     }
 
@@ -3319,6 +3332,10 @@ mod eval {
                 }
             }
         });
+    }
+
+    pub(super) fn get(name: &str) -> Option<RVal> {
+        lookup(name)
     }
 
     fn lookup(name: &str) -> Option<RVal> {
