@@ -194,7 +194,30 @@ pub(super) fn merge_route_files(files: Vec<FileRoutes>) -> RouteTable {
 /// `Rails.application.routes.draw` / `prepend` / `append` blocks, since a
 /// `Engine.routes.draw` is the engine's own route set (composed at its
 /// mount).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn ingest_route_file(
+    app_file: bool,
+    source: &[u8],
+    file: &str,
+    draws: &HashMap<String, (Vec<u8>, String)>,
+    block_wrappers: &HashSet<String>,
+    engine_routes: &HashMap<String, EngineRouteSource>,
+    engine_refusals: &HashMap<String, String>,
+    rack_apps: &RackAppTargets,
+    helper_sources: &OnceCell<Vec<RouteHelperSource>>,
+    load_helper_sources: &dyn Fn() -> Vec<RouteHelperSource>,
+) -> IngestResult<FileRoutes> {
+    // The file's own locals (`pages_actions = %w[…].freeze`): with no frame, `eval::bind` kept nothing a later loop could read.
+    eval::push_frame();
+    let out = ingest_route_file_in_frame(
+        app_file, source, file, draws, block_wrappers, engine_routes, engine_refusals, rack_apps, helper_sources, load_helper_sources,
+    );
+    eval::pop_frame();
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_route_file_in_frame(
     app_file: bool,
     source: &[u8],
     file: &str,
@@ -2051,7 +2074,6 @@ fn literal_each_elements(call: &ruby_prism::CallNode<'_>) -> Option<Vec<eval::RV
     if constant_id_str(&call.name()) != "each" || call.arguments().is_some() {
         return None;
     }
-    let array = call.receiver()?.as_array_node()?;
     let block = call.block()?.as_block_node()?;
     let params = block.parameters()?.as_block_parameters_node()?.parameters()?;
     if params.requireds().iter().count() != 1
@@ -2065,16 +2087,11 @@ fn literal_each_elements(call: &ruby_prism::CallNode<'_>) -> Option<Vec<eval::RV
         return None;
     }
     params.requireds().iter().next()?.as_required_parameter_node()?;
-    array
-        .elements()
-        .iter()
-        .map(|el| {
-            if el.as_string_node().is_none() && el.as_symbol_node().is_none() {
-                return None;
-            }
-            eval::value(&el)
-        })
-        .collect()
+    // A literal, a `.freeze` of one, or a local holding either (forem's `pages_actions = %w[…].freeze`).
+    match eval::value(&call.receiver()?)? {
+        eval::RVal::List(elements) => Some(elements),
+        _ => None,
+    }
 }
 
 /// Walk the block of a `literal_each_elements` loop once per element.
@@ -3237,6 +3254,8 @@ mod eval {
         Sym(String),
         Nil,
         Hash(Vec<(String, RVal)>),
+        /// `%w[welcome editor_guide]`, and a local or `.freeze` of one: what a route loop walks.
+        List(Vec<RVal>),
         Unknown,
     }
 
@@ -3295,6 +3314,22 @@ mod eval {
         }
         if node.as_nil_node().is_some() {
             return Some(RVal::Nil);
+        }
+        if let Some(array) = node.as_array_node() {
+            return array
+                .elements()
+                .iter()
+                .map(|el| (el.as_string_node().is_some() || el.as_symbol_node().is_some()).then(|| value(&el)).flatten())
+                .collect::<Option<Vec<_>>>()
+                .map(RVal::List);
+        }
+        if let Some(call) = node.as_call_node()
+            && constant_id_str(&call.name()) == "freeze"
+            && call.arguments().is_none()
+            && call.block().is_none()
+            && let Some(recv) = call.receiver()
+        {
+            return value(&recv);
         }
         if let Some(read) = node.as_local_variable_read_node() {
             return lookup(constant_id_str(&read.name()));
