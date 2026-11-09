@@ -178,3 +178,32 @@ fn a_kernel_lambda_or_proc_constraint_is_asked_as_a_callable() {
         assert!(!body.contains("matches?"), "{form}: {body}");
     }
 }
+
+/// A constraint that reads a local of the routes file can't move into the
+/// generated guard method, where that local isn't bound. It is refused
+/// where it is written, like any other constraint the router can't ask.
+#[test]
+fn a_constraint_reading_a_local_of_the_routes_file_is_refused_in_place() {
+    for constraint in ["->(req) { req.path == name }", "lambda { |req| req.path == name }", "proc { |req| [name].include?(req.path) }"] {
+        let app = app(&format!(
+            r#"name = "/admin"
+get "/x", to: "a#b", as: :x, constraints: {constraint}
+get "/ping", to: "pings#show""#
+        ));
+        let flat = flatten_routes(&app);
+        let dispatched: Vec<&str> = flat.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(dispatched, ["/ping"], "{constraint}: {dispatched:?}");
+        assert!(flatten_routes_for_helpers(&app).iter().any(|r| r.as_name == "x"), "{constraint}");
+        let error = app.routes.diagnostics.iter().find(|d| d.message.contains("request constraint")).expect("located refusal");
+        assert!(!error.span.is_synthetic(), "{error:?}");
+    }
+}
+
+/// What the constraint binds itself stays askable: its parameter, its
+/// own assignment, and a nested block's parameter.
+#[test]
+fn a_constraint_reading_only_what_it_binds_is_asked() {
+    let app = app(r#"get "/x", to: "a#b", constraints: ->(req) { prefix = "/a"; [prefix].any? { |p| req.path.start_with?(p) } }"#);
+    assert!(guard_class(&app.routes.entries).is_some());
+    assert!(!app.routes.diagnostics.iter().any(|d| d.message.contains("request constraint")), "{:#?}", app.routes.diagnostics);
+}

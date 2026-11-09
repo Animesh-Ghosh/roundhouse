@@ -10,7 +10,7 @@
 //! routes instead (`route_guard_gaps_for_target`).
 
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Param, RouteSpec};
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 
@@ -111,7 +111,7 @@ fn guard_body(guard: &Expr) -> Option<(Symbol, Expr)> {
     match &*callable.node {
         ExprNode::Lit { value: crate::expr::Literal::Nil } => None,
         ExprNode::Lambda { params, rest_param: None, extra_params, block_param: None, body, .. }
-            if params.len() <= 1 && extra_params.is_empty() =>
+            if params.len() <= 1 && extra_params.is_empty() && !reads_outer_local(body, &mut params.clone()) =>
         {
             Some((params.first().cloned().unwrap_or(request), body.clone()))
         }
@@ -130,6 +130,37 @@ fn guard_body(guard: &Expr) -> Option<(Symbol, Expr)> {
             Some((request, body))
         }
         _ => Some((request.clone(), send(guard.span, Some(guard.clone()), "matches?", vec![var(guard.span, &request)]))),
+    }
+}
+
+/// Whether `expr` reads a local it doesn't bind. The guard's body moves into a generated
+/// method, where a local of the routes file isn't bound and the name would mean something else.
+fn reads_outer_local(expr: &Expr, bound: &mut Vec<Symbol>) -> bool {
+    match &*expr.node {
+        ExprNode::Var { name, .. } => {
+            let implicit = matches!(name.as_str(), "it" | "_1" | "_2" | "_3" | "_4" | "_5" | "_6" | "_7" | "_8" | "_9");
+            !implicit && !bound.contains(name)
+        }
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            let reads = reads_outer_local(value, bound);
+            bound.push(name.clone());
+            reads
+        }
+        ExprNode::Lambda { params, rest_param, extra_params, block_param, body, .. } => {
+            let outer = bound.len();
+            bound.extend(params.iter().cloned());
+            bound.extend(rest_param.iter().cloned());
+            bound.extend(block_param.iter().cloned());
+            bound.extend(extra_params.iter().map(|p| p.name.clone()));
+            let reads = reads_outer_local(body, bound);
+            bound.truncate(outer);
+            reads
+        }
+        node => {
+            let mut reads = false;
+            node.for_each_child(&mut |child| reads = reads_outer_local(child, bound) || reads);
+            reads
+        }
     }
 }
 
