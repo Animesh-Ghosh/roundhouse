@@ -5588,19 +5588,21 @@ impl Analyzer {
     /// method forwarding its block to a sibling that is one becomes one
     /// a round later, as its callee's verdict lands.
     fn harvest_block_value_methods(&mut self, app: &App) {
-        let mut found: Vec<(ClassId, Symbol)> = Vec::new();
-        for model in &app.models {
-            for method in model.methods() {
-                let bp = method.block_param.as_ref().map(|p| &p.name);
-                if self.returns_block_value(&model.name, &method.name, &method.body, bp) {
-                    found.push((model.name.clone(), method.name.clone()));
-                }
-            }
-        }
         // Verdicts read last round's registry and are written below, so
-        // each class is read in parallel and collected in source order.
+        // each model, class and controller is read in parallel and
+        // collected in source order.
         let this = &*self;
-        let verdicts = parallel::map_ref(&app.library_classes, |lc| {
+        let models = parallel::map_ref(&app.models, |model| {
+            model
+                .methods()
+                .filter(|method| {
+                    let bp = method.block_param.as_ref().map(|p| &p.name);
+                    this.returns_block_value(&model.name, &method.name, &method.body, bp)
+                })
+                .map(|method| (model.name.clone(), method.name.clone()))
+                .collect::<Vec<_>>()
+        });
+        let classes = parallel::map_ref(&app.library_classes, |lc| {
             lc.methods
                 .iter()
                 .filter(|method| {
@@ -5610,19 +5612,14 @@ impl Analyzer {
                 .map(|method| (lc.name.clone(), method.name.clone()))
                 .collect::<Vec<_>>()
         });
-        found.extend(verdicts.into_iter().flatten());
-        for controller in &app.controllers {
-            for action in controller.actions() {
-                if self.returns_block_value(
-                    &controller.name,
-                    &action.name,
-                    &action.body,
-                    action.block_param.as_ref(),
-                ) {
-                    found.push((controller.name.clone(), action.name.clone()));
-                }
-            }
-        }
+        let controllers = parallel::map_ref(&app.controllers, |controller| {
+            controller
+                .actions()
+                .filter(|action| this.returns_block_value(&controller.name, &action.name, &action.body, action.block_param.as_ref()))
+                .map(|action| (controller.name.clone(), action.name.clone()))
+                .collect::<Vec<_>>()
+        });
+        let mut found: Vec<(ClassId, Symbol)> = models.into_iter().chain(classes).chain(controllers).flatten().collect();
         for info in self.classes.values_mut() {
             info.block_value_methods.clear();
         }
