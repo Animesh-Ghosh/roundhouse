@@ -12,7 +12,8 @@
 //! `primary` (two-tier). The primary is the configuration named
 //! `primary`, else the environment's first. YAML anchors and merge keys
 //! are applied. Only the keys that decide identity are read: `adapter`
-//! (or the scheme of a literal `url`), `replica`, `database_tasks`,
+//! (or the scheme of a literal `url`, and a literal `adapter` beside a
+//! computed `url`), `replica`, `database_tasks`,
 //! `migrations_paths` and `schema_search_path`.
 //!
 //! Resolution is at build time, so ERB is not run. An output tag
@@ -149,10 +150,14 @@ pub(crate) fn database_configurations(text: &str, file: FileId) -> Configuration
             // A `url:` wins over the keys beside it (Rails' `UrlConfig`
             // merges the URL's hash over the configuration's).
             let adapter = match (scalar("url"), scalar("adapter")) {
-                (Some(Value::String(url)), _) if url.contains(ERB_VALUE) => {
-                    unresolved.push("url");
-                    None
-                }
+                // Not known until boot, so a literal `adapter:` beside it is what the file declares.
+                (Some(Value::String(url)), adapter) if url.contains(ERB_VALUE) => match adapter {
+                    Some(Value::String(adapter)) if !adapter.contains(ERB_VALUE) => Some(DatabaseAdapter::parse(&adapter)),
+                    _ => {
+                        unresolved.push("url");
+                        None
+                    }
+                },
                 (Some(Value::String(url)), adapter) => DatabaseAdapter::from_url(&url).or(match adapter {
                     Some(Value::String(adapter)) => Some(DatabaseAdapter::parse(&adapter)),
                     _ => None,
@@ -455,6 +460,25 @@ production:
 
     /// An environment that is only a URL string is that URL's
     /// configuration, as Rails builds it; a computed one is a warning.
+    /// `url: <%= ENV["DATABASE_URL"] %>` beside `adapter: postgresql`: the URL isn't known at build time, and the
+    /// literal adapter is what the file says it runs on.
+    #[test]
+    fn a_literal_adapter_beside_a_computed_url_names_the_adapter() {
+        let yml = "default: &default\n  adapter: postgresql\n  url: <%= ENV[\"DATABASE_URL\"] %>\ntest:\n  <<: *default\nproduction:\n  primary:\n    <<: *default\n";
+        let read = database_configurations(yml, FileId(1));
+        assert!(read.refusals.is_empty(), "{:?}", read.refusals);
+        assert_eq!(shape(yml), [row("default", "primary", "postgresql", true, false, true), row("test", "primary", "postgresql", true, false, true), row("production", "primary", "postgresql", true, false, true)]);
+    }
+
+    #[test]
+    fn a_computed_url_with_no_literal_adapter_stays_out() {
+        for (yml, keys) in [("test:\n  url: <%= ENV[\"DATABASE_URL\"] %>\n", vec!["`url`"]), ("test:\n  adapter: <%= ENV[\"ADAPTER\"] %>\n  url: <%= ENV[\"DATABASE_URL\"] %>\n", vec!["`adapter`", "`url`"])] {
+            let read = database_configurations(yml, FileId(1));
+            assert!(read.databases.is_empty(), "{yml}");
+            assert!(read.refusals.iter().any(|r| keys.iter().all(|key| r.detail.contains(key))), "{yml}: {:?}", read.refusals);
+        }
+    }
+
     #[test]
     fn an_environment_given_as_a_url_string_is_its_configuration() {
         let yml = "production: postgres://db.example.test/app\nstaging: <%= ENV[\"DATABASE_URL\"] %>\n";
