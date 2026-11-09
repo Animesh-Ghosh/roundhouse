@@ -97,5 +97,5 @@ puts "ok"
         .collect();
     reported.sort();
     assert_eq!(reported, ["deprecation", "deprecation", "join", "join"], "{:#?}", run.errors);
-    assert!(run.success, "{}\n{}", run.stdout, run.stderr);
+    assert!(run.program_succeeded(), "the expected errors aside, the emitted program failed in {}\n=== stdout ===\n{}\n=== stderr ===\n{}", run.emitted.display(), run.stdout, run.stderr);
 }

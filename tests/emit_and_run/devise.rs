@@ -141,3 +141,23 @@ fn devise_for_a_subclass_draws_its_superclasss_modules() {
     assert!(routes.contains(r#"Route.new("GET", "/admin/password/new", :devise__passwords, :new)"#), "{routes}");
     assert!(helpers.contains("def self.new_admin_session_path"), "{helpers}");
 }
+
+/// Devise's engine stacks Warden's `Warden::Manager` (`config.app_middleware.use Warden::Manager do
+/// |config| … end`), so a request carries `env["warden"]` as in Rails; the block configures it.
+#[test]
+fn devise_puts_warden_on_the_middleware_stack_with_its_configuring_block() {
+    let (tree, errors) = app(":database_authenticatable", "  devise_for :users\n").emit(BuildTarget::Ruby);
+    let stack = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    assert!(stack.contains("Warden::Manager.new(app) { |config|\nDevise.warden_config = config\n}"), "{stack}\n{errors:#?}");
+}
+
+/// `authenticated :user` with no block: Devise's `block.nil? || block.call(…)` is `true` once the
+/// block is written in, so the constraint asks only the Warden proxy Devise's engine stacks.
+#[test]
+fn devise_authenticated_asks_the_warden_proxy_its_engine_stacks() {
+    let (tree, errors) = app(":database_authenticatable", "  devise_for :users\n  authenticated :user do\n    get \"/dash\", to: \"articles#index\"\n  end\n")
+        .emit(BuildTarget::Ruby);
+    assert!(!errors.iter().any(|e| e.contains("request constraint")), "{errors:#?}");
+    let guards = std::fs::read_to_string(tree.join("app/models/roundhouse_route_guards.rb")).expect("guards");
+    assert!(guards.contains("request.env[\"warden\"].send(:authenticate?, scope: :user) && true"), "{guards}");
+}

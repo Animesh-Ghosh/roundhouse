@@ -124,6 +124,10 @@ pub(super) fn candidates<V: Vfs + ?Sized>(app: &App, vfs: &V, dir: &Path) -> Vec
     for path in &app.boot_gem_constants {
         named.insert((path.clone(), false));
     }
+    // The app's own `config.middleware.use Warden::Manager`: the gem's class runs on the emitted stack.
+    for path in super::railtie_middleware::application_use_paths(vfs, dir) {
+        named.insert((path, false));
+    }
     for (path, from_gem) in &named {
         consider(path, *from_gem);
     }
