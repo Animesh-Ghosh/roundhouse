@@ -3693,6 +3693,13 @@ fn ingest_explicit_route(
             if path.is_none() {
                 path = Some(s);
             }
+        } else if arg.as_interpolated_string_node().is_some() && path.is_none() {
+            // Not left pathless: that drew the route at its scope's own path, where forem's
+            // `get "/#{ENV.fetch(…)}/:placement_area"` took every `/:username/:slug`.
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!("{} route path is not a literal string", format!("{method:?}").to_lowercase()),
+            });
         } else if arg.as_symbol_node().is_some() && path.is_none() && to.is_none() {
             // Positional SYMBOL arg — the same shortcut in the other
             // spelling: `member do get :doff end` is identical to
@@ -4192,6 +4199,7 @@ fn ingest_resources_route(
     let mut except: Vec<Symbol> = Vec::new();
     let mut as_name: Option<Symbol> = None;
     let mut controller: Option<String> = None;
+    let mut to_action: Option<Symbol> = None;
     let mut module: Option<String> = None;
     let mut param: Option<Symbol> = None;
     let mut path: Option<String> = None;
@@ -4265,6 +4273,17 @@ fn ingest_resources_route(
                 // pointed five routes at `MessagesController`, which
                 // answers them with the human HTML flow.
                 "controller" => controller = rname(&value),
+                "to" => {
+                    let target = string_value(&value).and_then(|to| to.split_once('#').map(|(c, a)| (c.to_string(), a.to_string())));
+                    let Some((to_controller, action)) = target else {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!("resources :{name_str} `to:` is not a literal \"controller#action\""),
+                        });
+                    };
+                    controller = Some(to_controller);
+                    to_action = Some(Symbol::from(action));
+                }
                 "module" => {
                     module = Some(rname(&value).ok_or_else(|| IngestError::Unsupported {
                         file: file.into(),
@@ -4401,6 +4420,7 @@ fn ingest_resources_route(
         singular,
         as_name,
         controller,
+        action: to_action,
         param,
         path,
         constraints,

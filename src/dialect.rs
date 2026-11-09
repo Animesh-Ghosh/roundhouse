@@ -2212,6 +2212,10 @@ pub enum RouteSpec {
         /// still `message`/`messages`; only the class changes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<String>,
+        /// `to: "trends#articles"`: the action every route of the resource dispatches to, with
+        /// `controller` taking the part before `#`, as Rails passes `to:` to each route.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<Symbol>,
         /// `resources :tasks, param: :task_id` — the name of the
         /// member segment. Rails binds `/tasks/:task_id` instead of
         /// `/tasks/:id`, and the controller reads `params[:task_id]`;
