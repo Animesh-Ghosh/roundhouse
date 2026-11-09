@@ -208,6 +208,49 @@ fn roda_ignores_a_read_it_does_not_emit() {
     }
 }
 
+/// A query in a writer's receiver or argument compares against the column,
+/// so a String label still folds to the stored value (activerecord 8.1.4
+/// finds the row by its label).
+#[test]
+fn a_query_around_a_writer_folds_its_string_label() {
+    state_app()
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n",
+            "class Article < ApplicationRecord\n  def raw_state\n    state_before_type_cast\n  end\n\n  def self.retitle_draft(text)\n    where.not(state: \"published\").first.update(title: text)\n  end\n\n  def tally_drafts\n    update(title: self.class.where(state: \"draft\").count.to_s)\n  end\n\n")
+        .edit("app/models/comment.rb", "class Comment < ApplicationRecord\n",
+            "class Comment < ApplicationRecord\n  def self.retitle_draft(text)\n    Article.where(state: \"draft\").where(title: \"old\").first.update(title: text)\n  end\n\n  def self.copy_draft\n    Article.create!(title: Article.where(state: \"draft\").where(title: \"new\").first.title, body: \"a body long enough\", state: :published)\n  end\n\n")
+        .write("test/models/article_query_test.rb", r#"require "test_helper"
+
+class ArticleQueryTest < ActiveSupport::TestCase
+  ATTRS = { body: "A body long enough to validate." }
+
+  test "a query in a writer's receiver finds the row" do
+    Article.create!(ATTRS.merge(title: "pub", state: :published))
+    draft = Article.create!(ATTRS.merge(title: "old", state: :draft))
+    Article.retitle_draft("new")
+    assert_equal "new", draft.reload.title
+  end
+
+  test "a query in a writer's argument finds the row" do
+    published = Article.create!(ATTRS.merge(title: "pub", state: :published))
+    Article.create!(ATTRS.merge(title: "old", state: :draft))
+    published.tally_drafts
+    assert_equal "1", published.reload.title
+  end
+
+  test "another model's query around a writer finds the row" do
+    Article.create!(ATTRS.merge(title: "pub", state: :published))
+    draft = Article.create!(ATTRS.merge(title: "old", state: :draft))
+    Comment.retitle_draft("new")
+    assert_equal "new", draft.reload.title
+    copy = Comment.copy_draft
+    assert_equal "new", copy.title
+  end
+end
+"#)
+        .run_test("test/models/article_query_test.rb")
+        .assert_passes();
+}
+
 /// A read in a body Roda does convert is still refused.
 #[test]
 fn roda_refuses_a_read_in_a_controller_or_a_view() {

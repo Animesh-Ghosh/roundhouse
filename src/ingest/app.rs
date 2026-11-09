@@ -8230,7 +8230,23 @@ fn map_enum_labels(app: &mut App) {
     /// Rewrite every hash entry in this subtree whose key names a column
     /// in `table` and whose value is a label of that column.
     fn map_in_subtree(expr: &mut Expr, table: &EnumTable, kept: &BTreeSet<Symbol>, in_writer: bool) {
-        let in_writer = in_writer || is_writer(expr);
+        if let ExprNode::Send { recv, method, args, block, .. } = &mut *expr.node {
+            // Only a writer's own arguments, through the `merge` a double
+            // splat desugars to, are assigned. A query in its receiver or
+            // inside an argument compares against the column.
+            let writer = crate::lower::ENUM_WRITER_METHODS.contains(&method.as_str());
+            let merged = in_writer && matches!(method.as_str(), "merge" | "merge!" | "reverse_merge" | "reverse_merge!");
+            if let Some(recv) = recv {
+                map_in_subtree(recv, table, kept, merged);
+            }
+            for arg in args.iter_mut() {
+                map_in_subtree(arg, table, kept, writer || merged);
+            }
+            if let Some(block) = block {
+                map_in_subtree(block, table, kept, false);
+            }
+            return;
+        }
         expr.node.for_each_child_mut(&mut |child| map_in_subtree(child, table, kept, in_writer));
         let ExprNode::Hash { entries, .. } = &mut *expr.node else { return };
         for (key, value) in entries.iter_mut() {
