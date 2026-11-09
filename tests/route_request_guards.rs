@@ -110,3 +110,20 @@ get "/files/:name", to: "files#index", constraints: { name: /[a-z]+/ }"#,
     assert!(source.contains(&format!(r#"Route.new("GET", "/files/:name", :files, :show, nil, "", {requirement}, 0)"#)), "{source}");
     assert!(source.contains(&format!(r#"Route.new("GET", "/files/:name", :files, :index, nil, "", {requirement})"#)), "{source}");
 }
+
+/// A Rack mount after a guarded route is chosen before the router asks the constraint
+/// (`RouteTable.rack_index`): the Ruby family refuses that route too, with an error at the constraint.
+#[test]
+fn a_constraint_before_a_rack_mount_is_refused_on_the_ruby_family_too() {
+    let mut app = app(r#"get "/files/:name", to: "files#show", constraints: ->(req) { req.subdomain == "cdn" }"#);
+    app.routes.entries.push(roundhouse::dialect::RouteSpec::RackMount {
+        target: roundhouse::ClassId(roundhouse::ident::Symbol::from("StaticFiles")),
+        path: "/files".into(),
+        span: roundhouse::span::Span::synthetic(),
+    });
+    assert!(flatten_routes_asking_guards(&app).is_empty(), "the guarded route is not asked");
+    let errors = route_guard_gaps_for_target(&app, BuildTarget::Spinel);
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(errors[0].message.contains("Rack mount"), "{errors:#?}");
+    assert!(route_guard_gaps_for_target(&app, BuildTarget::Blog).is_empty());
+}

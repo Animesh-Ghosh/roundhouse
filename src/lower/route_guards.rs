@@ -43,9 +43,27 @@ pub fn guards(entries: &[RouteSpec]) -> Vec<&Expr> {
     out
 }
 
-/// The guard's position among `guards`, when its method can be written.
+/// The guard's position among `guards`, when its method can be written and the router asks it.
 pub fn guard_index(entries: &[RouteSpec], guard: &Expr) -> Option<usize> {
+    if precedes_a_mount(entries, guard) {
+        return None;
+    }
     guards(entries).iter().position(|g| g.span == guard.span).filter(|_| guard_body(guard).is_some())
+}
+
+/// A Rack mount after the constraint's routes is chosen before the router runs
+/// (`RouteTable.rack_index`), which would pass over a route the constraint admits.
+fn precedes_a_mount(entries: &[RouteSpec], guard: &Expr) -> bool {
+    fn has_mount(entries: &[RouteSpec]) -> bool {
+        entries.iter().any(|e| match e {
+            RouteSpec::RackMount { .. } => true,
+            RouteSpec::Scope { entries, .. } | RouteSpec::Exclusive { entries } => has_mount(entries),
+            _ => false,
+        })
+    }
+    entries.iter().enumerate().any(|(at, entry)| {
+        guards(std::slice::from_ref(entry)).iter().any(|g| g.span == guard.span) && has_mount(&entries[at + 1..])
+    })
 }
 
 /// Whether the Ruby-family router can ask this constraint.
@@ -145,19 +163,22 @@ pub fn guard_class(entries: &[RouteSpec]) -> Option<(LibraryClass, String)> {
 /// where it is written: its routes are refused, as the ingest refuses one no router can ask.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn route_guard_gaps_for_target(app: &crate::App, target: crate::build_target::BuildTarget) -> Vec<crate::diagnostic::Diagnostic> {
-    if target.asks_route_guards() {
+    let entries = &app.routes.entries;
+    if target == crate::build_target::BuildTarget::Blog {
         return Vec::new();
     }
-    guards(&app.routes.entries)
+    guards(entries)
         .into_iter()
         .filter(|guard| enforceable(guard))
-        .map(|guard| {
-            crate::diagnostic::Diagnostic::unsupported(
-                guard.span,
-                Some(Symbol::from(target.as_str())),
-                "request constraint",
-                "the routes it guards are not dispatched: this target's router matches by verb and path alone, so it would answer every request the constraint refuses; their URL helpers are still generated",
-            )
+        .filter_map(|guard| {
+            let detail = if !target.asks_route_guards() {
+                "the routes it guards are not dispatched: this target's router matches by verb and path alone, so it would answer every request the constraint refuses; their URL helpers are still generated"
+            } else if precedes_a_mount(entries, guard) {
+                "the routes it guards are not dispatched: a Rack mount after them is chosen before the router asks the constraint, so it would take a request the constraint admits; their URL helpers are still generated"
+            } else {
+                return None;
+            };
+            Some(crate::diagnostic::Diagnostic::unsupported(guard.span, Some(Symbol::from(target.as_str())), "request constraint", detail))
         })
         .collect()
 }
