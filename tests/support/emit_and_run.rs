@@ -243,10 +243,15 @@ impl Overlay {
             panic!("spinel bundle collect: recorded, not run");
         }
         // Not the bundled run's failure as the test's: another case's added method or route rides in that build, so it is judged again alone.
-        if let Some(run) = bundle::run_shared(&self, script, flags).filter(|run| run.success) {
+        let shared = bundle::run_shared(&self, script, flags).filter(|run| run.success);
+        // Nor the bundle's errors as the case's: the group is checked merged, where another case's
+        // added method can answer a call this one leaves unresolved. A case with errors of its own
+        // runs alone, so its `Run` carries them and the program is its own.
+        let (emitted, errors) = self.emit_tree(BuildTarget::Spinel);
+        if let Some(run) = shared.filter(|_| errors.is_empty()) {
+            remove_scratch(&emitted);
             return run;
         }
-        let (emitted, errors) = self.emit_tree(BuildTarget::Spinel);
         std::fs::write(emitted.join("contract.rb"), format!("require_relative \"boot\"\n{script}"))
             .expect("write native consumer");
         compile_and_run_contract(emitted, errors, flags).expecting_completion()
@@ -378,11 +383,13 @@ impl Overlay {
             bundle::record(&dir, &self, "", &[bundle::HTTP]);
             panic!("spinel bundle collect: recorded, not run");
         }
-        if let Some(tree) = bundle::http_shared(&self) {
-            return Emitted(tree);
-        }
+        let shared = bundle::http_shared(&self).map(Emitted);
+        // The case's own errors, not the merged group's, which another case's added method can clear.
         let (tree, errors) = self.emit(BuildTarget::Spinel);
         assert!(errors.is_empty(), "analysis/emission errors:\n{}", errors.join("\n"));
+        if let Some(shared) = shared {
+            return shared;
+        }
         bundle::spin_build(&tree).unwrap_or_else(|log| panic!("`spin build blog` failed in {}\n{log}", tree.display()));
         tree
     }
