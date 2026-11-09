@@ -248,9 +248,12 @@ module ActiveStorage
     @attachment_id: Integer
     @blob: ActiveStorage::Blob?
     @variations: Array[ActiveStorage::Variation]
+    # The blob that `attach` keeps for a record that is not saved yet.
+    @staged: ActiveStorage::Blob?
     def initialize: (String record_type, Integer record_id, String name, Array[ActiveStorage::Variation] variations) -> void
     def variations: () -> Array[ActiveStorage::Variation]
     def record_id: () -> Integer
+    def take_staged: () -> ActiveStorage::Blob?
     def load_row: () -> nil
     def _preload_row: (Integer attachment_id, ActiveStorage::Blob? blob) -> nil
     def attached?: () -> bool

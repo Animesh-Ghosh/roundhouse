@@ -1152,10 +1152,16 @@ pub fn attachment_loaded_name(attr: &Symbol) -> Symbol {
 /// ```ruby
 /// def avatar=(value)
 ///   @avatar_pending = ActiveStorage::Blob.from_attachable(value)
+///   @avatar_cache = nil
 ///   nil
 /// end
 ///
 /// def _save_avatar_attachment       # folded into after_save
+///   cached = @avatar_cache
+///   if !cached.nil?
+///     staged = cached.take_staged
+///     @avatar_pending = staged if !staged.nil?
+///   end
 ///   pending = @avatar_pending
 ///   if pending.nil?
 ///     nil
@@ -1173,6 +1179,12 @@ pub fn attachment_loaded_name(attr: &Symbol) -> Symbol {
 /// point it at — a create assigns before the insert. Same shape as
 /// `has_rich_text`'s `_save_rich_text_<attr>`, for the same reason.
 ///
+/// `avatar.attach(…)` on a record that is not saved yet is the same
+/// change: the proxy stages the blob (`Attached#take_staged`), and the
+/// save takes it. The last change before the save wins, as in Rails:
+/// the writer drops the cached proxy and the blob it staged, and a
+/// blob staged after the writer replaces the pending one.
+///
 /// `value` is `untyped` on purpose: what arrives is whatever the
 /// params tree or the caller held — an `UploadedFile`, a `Blob`, a
 /// signed id String, the bare filename a non-multipart form posts —
@@ -1184,6 +1196,9 @@ fn push_writer_and_save(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symb
     let pending = Symbol::from(format!("{}_pending", attr.as_str()));
     let value = Symbol::from("value");
     let local = Symbol::from("pending");
+    let cache = Symbol::from(format!("{}_cache", attr.as_str()));
+    let cached = Symbol::from("cached");
+    let staged = Symbol::from("staged");
     let var = |name: &Symbol| syn(ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() });
     let ivar = |name: &Symbol| syn(ExprNode::Ivar { name: name.clone() });
     let nil_lit = || syn(ExprNode::Lit { value: Literal::Nil });
@@ -1207,6 +1222,10 @@ fn push_writer_and_save(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symb
                 syn(ExprNode::Assign {
                     target: crate::expr::LValue::Ivar { name: pending.clone() },
                     value: coerce,
+                }),
+                syn(ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar { name: cache.clone() },
+                    value: nil_lit(),
                 }),
                 nil_lit(),
             ],
@@ -1237,6 +1256,60 @@ fn push_writer_and_save(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symb
         Vec::new(),
         syn(ExprNode::Seq {
             exprs: vec![
+                syn(ExprNode::Assign {
+                    target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: cached.clone() },
+                    value: ivar(&cache),
+                }),
+                syn(ExprNode::If {
+                    cond: syn(ExprNode::Send {
+                        recv: Some(syn(ExprNode::Send {
+                            recv: Some(var(&cached)),
+                            method: Symbol::from("nil?"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        })),
+                        method: Symbol::from("!"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    }),
+                    then_branch: syn(ExprNode::Seq {
+                        exprs: vec![
+                            syn(ExprNode::Assign {
+                                target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: staged.clone() },
+                                value: syn(ExprNode::Send {
+                                    recv: Some(var(&cached)),
+                                    method: Symbol::from("take_staged"),
+                                    args: vec![],
+                                    block: None,
+                                    parenthesized: false,
+                                }),
+                            }),
+                            syn(ExprNode::If {
+                                cond: syn(ExprNode::Send {
+                        recv: Some(syn(ExprNode::Send {
+                            recv: Some(var(&staged)),
+                            method: Symbol::from("nil?"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        })),
+                        method: Symbol::from("!"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    }),
+                                then_branch: syn(ExprNode::Assign {
+                                    target: crate::expr::LValue::Ivar { name: pending.clone() },
+                                    value: var(&staged),
+                                }),
+                                else_branch: nil_lit(),
+                            }),
+                        ],
+                    }),
+                    else_branch: nil_lit(),
+                }),
                 syn(ExprNode::Assign {
                     target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: local.clone() },
                     value: ivar(&pending),

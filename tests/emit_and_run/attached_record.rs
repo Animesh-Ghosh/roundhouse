@@ -52,6 +52,7 @@ fn app() -> emit_and_run::Overlay {
             "app/models/doc.rb",
             r#"class Doc < ApplicationRecord
   has_one_attached :file
+  has_many_attached :uploads
 
   validate :file_is_small
 
@@ -100,6 +101,55 @@ fn app() -> emit_and_run::Overlay {
     doc.reload
     doc.save!
     doc
+  end
+
+  def self.attach_before_save
+    doc = new(name: "attach before save")
+    doc.file.attach("hello-bytes", "cover.png", "image/png")
+    raise "count before save #{attachment_count}" unless attachment_count == 0
+    raise "not attached before save" unless doc.file.attached?
+    doc.save!
+    doc
+  end
+
+  def self.attach_through_a_held_proxy
+    doc = new(name: "held proxy")
+    attachment = doc.file
+    attachment.attach("held-bytes", "held.png", "image/png")
+    doc.save!
+    doc
+  end
+
+  def self.assign_then_attach_before_save
+    doc = new(name: "assign then attach")
+    File.write("first.bin", "first-bytes")
+    File.open("first.bin", "rb") do |io|
+      doc.file = { io: io, filename: "first.png" }
+    end
+    doc.file.attach("second-bytes", "second.png", "image/png")
+    doc.save!
+    doc
+  end
+
+  def self.attach_then_assign_before_save
+    doc = new(name: "attach then assign")
+    doc.file.attach("first-bytes", "first.png", "image/png")
+    File.write("second.bin", "second-bytes")
+    File.open("second.bin", "rb") do |io|
+      doc.file = { io: io, filename: "second.png" }
+    end
+    doc.save!
+    doc
+  end
+
+  def self.attach_many_before_save
+    doc = new(name: "many before save")
+    doc.uploads.attach("many-bytes", "many.png", "image/png")
+    doc
+  end
+
+  def self.found_filename(id)
+    find(id).file.filename.to_s
   end
 
   private
@@ -191,6 +241,78 @@ doc = Doc.create!(name: "plain")
 Doc.assign_then_reload_then_save(doc)
 raise "count #{Doc.attachment_count}: the dropped upload was saved" unless Doc.attachment_count == 0
 puts "reload pending passed"
+"##,
+        )
+        .assert_passes();
+}
+
+/// Rails' `attach` on a record that is not saved keeps the file until
+/// `save`, and `save` writes it under the new id. Dontfile's
+/// `PageTest` attaches to `Page.new` and then saves.
+#[test]
+fn attach_before_save_is_written_by_save() {
+    app()
+        .run_ruby(
+            r##"
+doc = Doc.attach_before_save
+ids = Doc.attachment_record_ids
+raise "record ids #{ids.inspect}, expected [#{doc.id}]" unless ids == [doc.id]
+raise "not attached after save" unless doc.file.attached?
+raise "a found copy sees no file" unless Doc.found_attached?(doc.id)
+puts "attach before save passed"
+"##,
+        )
+        .assert_passes();
+}
+
+/// The same through a proxy held in a local variable.
+#[test]
+fn attach_through_a_held_proxy_before_save_is_written_by_save() {
+    app()
+        .run_ruby(
+            r##"
+doc = Doc.attach_through_a_held_proxy
+ids = Doc.attachment_record_ids
+raise "record ids #{ids.inspect}, expected [#{doc.id}]" unless ids == [doc.id]
+raise "filename #{Doc.found_filename(doc.id)}" unless Doc.found_filename(doc.id) == "held.png"
+puts "held proxy passed"
+"##,
+        )
+        .assert_passes();
+}
+
+/// Before `save`, the last of `file=` and `attach` wins, as in Rails.
+#[test]
+fn the_last_change_before_save_wins() {
+    app()
+        .run_ruby(
+            r##"
+first = Doc.assign_then_attach_before_save
+raise "assign then attach kept #{Doc.found_filename(first.id)}" unless Doc.found_filename(first.id) == "second.png"
+second = Doc.attach_then_assign_before_save
+raise "attach then assign kept #{Doc.found_filename(second.id)}" unless Doc.found_filename(second.id) == "second.png"
+raise "count #{Doc.attachment_count}" unless Doc.attachment_count == 2
+puts "last change passed"
+"##,
+        )
+        .assert_passes();
+}
+
+/// `has_many_attached` keeps no changes for a record that is not saved
+/// yet. It refuses the attach instead of writing a row for record 0.
+#[test]
+fn many_attach_before_save_is_refused() {
+    app()
+        .run_ruby(
+            r##"
+begin
+  Doc.attach_many_before_save
+  raise "the attach was not refused"
+rescue RuntimeError => e
+  raise "message: #{e.message}" unless e.message.include?("not saved")
+end
+raise "count #{Doc.attachment_count}" unless Doc.attachment_count == 0
+puts "many refused passed"
 "##,
         )
         .assert_passes();
