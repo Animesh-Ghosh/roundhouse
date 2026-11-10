@@ -255,6 +255,29 @@ puts "respond_with api passed"
     assert!(run.stdout.contains("respond_with api passed"), "{}", run.stdout);
 }
 
+/// `require: false` keeps jbuilder's railtie from running, so the API controller renders no views.
+#[test]
+fn respond_with_on_an_api_controller_when_jbuilder_is_not_required() {
+    let run = emit_and_run::real_blog()
+        .remove("app/views/articles/index.json.jbuilder")
+        .remove("app/views/articles/show.json.jbuilder")
+        .remove("app/views/articles/_article.json.jbuilder")
+        .edit("Gemfile", "gem \"jbuilder\"\n", "gem \"jbuilder\", require: false\n")
+        .write("app/controllers/bare_gadgets_controller.rb", API_CONTROLLER)
+        .edit("config/routes.rb", "  root \"articles#index\"\n", &format!("  root \"articles#index\"\n{API_ROUTES}"))
+        .run_ruby(
+            r##"
+env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => "/b/show", "QUERY_STRING" => "", "REMOTE_ADDR" => "127.0.0.1",
+        "HTTP_HOST" => "localhost", "rack.input" => StringIO.new(""), "HTTP_ACCEPT" => "*/*" }
+status, _, body = Main.run_rack(env)
+raise "got #{[status, body.join].inspect}" unless status == 200 && body.join == " "
+puts "respond_with api unrequired passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("respond_with api unrequired passed"), "{}", run.stdout);
+}
+
 /// An app that bundles jbuilder renders views on `ActionController::API` even with no `.jbuilder` file of its
 /// own: a bare `*/*` gets the json answers and errors their 422, as on `ActionController::Base`.
 #[test]

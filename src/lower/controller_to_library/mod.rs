@@ -295,8 +295,9 @@ pub struct LowerControllerOptions<'a> {
     /// for every controller. Read only when the tree
     /// `FormatBreadth::wraps_json_params`.
     pub wrap_parameters_by_default: bool,
-    /// The app bundles jbuilder (its `Gemfile.lock`), so `ActionController::API` renders views: jbuilder's
-    /// railtie includes `ActionView::Rendering` there. `None` without a lockfile: any `.jbuilder` view answers.
+    /// The app bundles jbuilder (its `Gemfile.lock`, and not `require: false` in its Gemfile), so
+    /// `ActionController::API` renders views: jbuilder's railtie includes `ActionView::Rendering` there.
+    /// `None` without a lockfile: any `.jbuilder` view answers.
     pub jbuilder_loaded: Option<bool>,
     /// `App::concern_spliced_actions`: per controller, the methods the
     /// ingest copied in from included modules. They count as defined
