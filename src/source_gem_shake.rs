@@ -259,6 +259,8 @@ struct Gems<'a> {
     sinks: HashSet<&'a str>,
     /// The gem classes an app class includes, extends or inherits, and their ancestors.
     app_mixins: HashSet<String>,
+    /// The models and controllers, which are no library class: their parent and what they mix in, as written.
+    app_classes: HashMap<String, (Option<String>, Vec<String>)>,
 }
 
 impl<'a> Gems<'a> {
@@ -307,20 +309,18 @@ impl<'a> Gems<'a> {
                 }
             }
         }
-        let mut gems = Gems { names, entries, defined, owners, sinks, app_mixins: HashSet::default() };
+        let app_classes = Self::app_classes_of(app);
+        let mut gems = Gems { names, entries, defined, owners, sinks, app_mixins: HashSet::default(), app_classes };
         gems.app_mixins = gems.mixed_into_the_app(app);
         Some(gems)
     }
 
-    fn mixed_into_the_app(&self, app: &App) -> HashSet<String> {
-        let mut direct: Vec<(Option<String>, String)> = Vec::new();
-        for c in app.library_classes.iter().filter(|c| !self.is_gem(c)) {
-            let owner = Some(c.name.0.to_string());
-            direct.extend(c.includes.iter().chain(c.parent.iter()).map(|m| (owner.clone(), m.0.to_string())));
-        }
+    /// Each model's and controller's parent and the modules it mixes in (a model macro's too), as written.
+    fn app_classes_of(app: &App) -> HashMap<String, (Option<String>, Vec<String>)> {
+        let mut out: HashMap<String, (Option<String>, Vec<String>)> = HashMap::default();
         for m in &app.models {
-            let owner = Some(m.name.0.to_string());
-            direct.extend(m.parent.iter().map(|p| (owner.clone(), p.0.to_string())));
+            let entry = out.entry(m.name.0.to_string()).or_default();
+            entry.0 = m.parent.as_ref().map(|p| p.0.to_string());
             for item in &m.body {
                 if let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item
                     && let ExprNode::Send { recv: None, method, args, .. } = &*expr.node
@@ -328,22 +328,29 @@ impl<'a> Gems<'a> {
                 {
                     for a in args {
                         if let ExprNode::Const { path } = &*a.node {
-                            direct.push((owner.clone(), path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::")));
+                            entry.1.push(path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::"));
                         }
                     }
                 }
             }
         }
-        direct.extend(app.macro_includes.iter().map(|(model, m)| (Some(model.0.to_string()), m.0.to_string())));
-        for c in &app.controllers {
-            let owner = Some(c.name.0.to_string());
-            direct.extend(c.parent.iter().map(|p| (owner.clone(), p.0.to_string())));
-            direct.extend(crate::analyze::controller_includes(c).into_iter().map(|m| (owner.clone(), m.0.to_string())));
+        for (model, m) in &app.macro_includes {
+            out.entry(model.0.to_string()).or_default().1.push(m.0.to_string());
         }
+        for c in &app.controllers {
+            let entry = out.entry(c.name.0.to_string()).or_default();
+            entry.0 = c.parent.as_ref().map(|p| p.0.to_string());
+            entry.1.extend(crate::analyze::controller_includes(c).into_iter().map(|m| m.0.to_string()));
+        }
+        out
+    }
+
+    fn mixed_into_the_app(&self, app: &App) -> HashSet<String> {
         let mut out = HashSet::default();
-        for (owner, name) in direct {
-            if let Some(resolved) = self.resolve(owner.as_deref(), &name) {
-                out.extend(self.ancestors(&resolved));
+        let owners = app.library_classes.iter().filter(|c| !self.is_gem(c)).map(|c| c.name.0.to_string()).chain(self.app_classes.keys().cloned());
+        for owner in owners.collect::<Vec<_>>() {
+            for a in self.ancestors(&owner).into_iter().skip(1) {
+                out.insert(a);
             }
         }
         out
@@ -378,17 +385,18 @@ impl<'a> Gems<'a> {
     }
 
     fn parent_of(&self, name: &str) -> Option<String> {
-        self.entries.get(name)?.iter().find_map(|c| c.parent.as_ref()).and_then(|p| self.resolve(Some(name), p.0.as_str()))
+        let Some(entries) = self.entries.get(name) else {
+            let written = self.app_classes.get(name)?.0.as_deref()?;
+            return self.resolve(Some(name), written).or_else(|| self.app_classes.contains_key(written).then(|| written.to_string()));
+        };
+        entries.iter().find_map(|c| c.parent.as_ref()).and_then(|p| self.resolve(Some(name), p.0.as_str()))
     }
 
     fn includes_of(&self, name: &str) -> Vec<String> {
-        self.entries
-            .get(name)
-            .into_iter()
-            .flatten()
-            .flat_map(|c| c.includes.iter())
-            .filter_map(|m| self.resolve(Some(name), m.0.as_str()))
-            .collect()
+        let Some(entries) = self.entries.get(name) else {
+            return self.app_classes.get(name).into_iter().flat_map(|(_, mixins)| mixins.iter()).filter_map(|m| self.resolve(Some(name), m)).collect();
+        };
+        entries.iter().flat_map(|c| c.includes.iter()).filter_map(|m| self.resolve(Some(name), m.0.as_str())).collect()
     }
 
     /// The modules a class body `extend`s: their instance methods are the class's own class methods.
@@ -523,6 +531,9 @@ impl<'a> Gems<'a> {
         for block in app.gem_middleware_blocks.values() {
             calls.extend(called_names(block).into_iter().map(|name| (Target::Any, name)));
         }
+        // Loaded where the app mixes them in; and the models and controllers, so a module's call on `self` reaches them.
+        live.extend(self.app_mixins.iter().filter(|m| self.names.contains(*m)).cloned());
+        live.extend(self.app_classes.keys().cloned());
         (calls, consts, live)
     }
 
