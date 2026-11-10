@@ -49,6 +49,14 @@ pub(super) fn responders_with_behavior(classes: &[crate::dialect::LibraryClass])
         .collect()
 }
 
+/// What every controller's `respond_with` lowering needs from the whole app.
+pub(super) struct Responders {
+    /// `responders_with_behavior`.
+    pub with_behavior: crate::det::HashSet<String>,
+    /// jbuilder is loaded, so `ActionController::API` renders views too (its railtie includes `ActionView::Rendering`).
+    pub jbuilder_loaded: bool,
+}
+
 /// Is `responder` a constant naming one of `with_behavior`?
 pub(super) fn names_responder_with_behavior(responder: &Expr, with_behavior: &crate::det::HashSet<String>) -> bool {
     let ExprNode::Const { path } = &*responder.node else { return false };
@@ -59,6 +67,15 @@ pub(super) fn names_responder_with_behavior(responder: &Expr, with_behavior: &cr
 /// The class-level `respond_to` of `controller`'s chain, root first, as declared.
 /// `Some(true)` when it is html alone; `None` for no declaration or one this cannot read.
 pub(super) fn html_only_declared(chain: &[&Controller]) -> Option<bool> {
+    declared_formats(chain).map(|formats| formats.iter().all(|f| f == "html"))
+}
+
+/// `Some(true)` when the chain's class-level `respond_to` is json alone.
+pub(super) fn json_only_declared(chain: &[&Controller]) -> Option<bool> {
+    declared_formats(chain).map(|formats| formats.iter().all(|f| f == "json"))
+}
+
+fn declared_formats(chain: &[&Controller]) -> Option<Vec<String>> {
     let mut formats: Vec<String> = Vec::new();
     let mut declared = false;
     for controller in chain.iter().rev() {
@@ -96,7 +113,7 @@ pub(super) fn html_only_declared(chain: &[&Controller]) -> Option<bool> {
     if !declared {
         return None;
     }
-    Some(formats.iter().all(|f| f == "html"))
+    Some(formats)
 }
 
 /// Facts about the enclosing action a `respond_with` needs.
@@ -107,6 +124,10 @@ pub(super) struct Facts<'a> {
     pub has_template: bool,
     /// What `responder` reads in this chain, for its statuses: `self.responder = EXPR`.
     pub responder: Option<&'a Expr>,
+    /// The chain declares json alone: the Responder's `to_format` path, not the navigational one.
+    pub json: bool,
+    /// The controller renders views (`ActionView::Rendering`: `ActionController::Base`, or `API` with jbuilder loaded).
+    pub view_rendering: bool,
 }
 
 fn sym(s: &str, span: Span) -> Expr {
@@ -198,6 +219,9 @@ fn block_html_arm(block: &Expr) -> Result<Option<Expr>, ()> {
 /// `respond_with` rewritten to the navigational response, or `None` for a shape this does not read
 /// (it stays as written, and Spinel refuses it there).
 fn lower_call(call_expr: &Expr, facts: &Facts<'_>) -> Option<Expr> {
+    if facts.json {
+        return lower_json_call(call_expr, facts);
+    }
     let span = call_expr.span;
     let ExprNode::Send { recv, method, args, block, .. } = &*call_expr.node else { return None };
     if method.as_str() != "respond_with" || !recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) {
@@ -373,6 +397,152 @@ fn lower_call(call_expr: &Expr, facts: &Facts<'_>) -> Option<Expr> {
         cond(request_is("get", span), missing, unless_get, span)
     };
     stmts.push(response);
+    Some(Expr::new(span, ExprNode::Seq { exprs: stmts }))
+}
+
+/// `respond_with` in a controller whose formats are json alone: the Responder's `to_format`.
+///
+/// - A bare `Accept: */*` with no explicit format: the json path where views render; without them
+///   (`ActionController::API`, no jbuilder) a blank body with the call's status, location and options.
+/// - Not a json request: the block's html arm for html, else `ActionController::UnknownFormat` (406).
+/// - Errors on a non-GET request: `render json: { errors: resource.errors }, status: :unprocessable_entity`,
+///   with the errors keyed by attribute (`Base#errors_json`).
+/// - A json template for the action: render it (`default_render`).
+/// - Otherwise `api_behavior`: GET renders the resource as json, POST renders it with 201 and the
+///   location, and any other verb answers 204. A controller that renders views keeps the location
+///   there too, because Rails sets it before the template lookup fails.
+///
+/// A call outside a routed action, in a controller that renders views, stays: `default_render` would look up the
+/// calling action's template. Only a literal options Hash is read; `action:`, `render:`, `responder:` and `allow_other_host:` leave
+/// the call standing, as do several resources, a computed options Hash and a block with another arm.
+fn lower_json_call(call_expr: &Expr, facts: &Facts<'_>) -> Option<Expr> {
+    let span = call_expr.span;
+    let ExprNode::Send { recv, method, args, block, .. } = &*call_expr.node else { return None };
+    if method.as_str() != "respond_with" || !recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) {
+        return None;
+    }
+    let html_arm = match block {
+        Some(block) => Some(block_html_arm(block).ok()??),
+        None => None,
+    };
+    let mut args: Vec<Expr> = args.clone();
+    let options = match args.last().map(|a| &*a.node) {
+        Some(ExprNode::Hash { .. }) if args.len() > 1 => args.pop(),
+        Some(ExprNode::Send { .. }) if args.len() > 1 => return None,
+        _ => None,
+    };
+    let mut location = None;
+    let mut user_status = None;
+    let mut rest: Vec<(Expr, Expr)> = Vec::new();
+    if let Some(options) = &options {
+        let ExprNode::Hash { entries, .. } = &*options.node else { return None };
+        for (k, v) in entries {
+            let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else { return None };
+            match value.as_str() {
+                "location" if !matches!(&*v.node, ExprNode::Lambda { .. }) => location = Some(v.clone()),
+                "status" => user_status = Some(v.clone()),
+                "location" | "action" | "render" | "responder" | "allow_other_host" | "json" => return None,
+                _ => rest.push((k.clone(), v.clone())),
+            }
+        }
+    }
+    if args.len() != 1 || matches!(&*args[0].node, ExprNode::Splat { .. }) {
+        return None;
+    }
+    let resource_expr = args[0].clone();
+    let resource_is_empty_hash = matches!(&*resource_expr.node, ExprNode::Hash { entries, .. } if entries.is_empty());
+    // `api_location` without `location:` is the resource's own url.
+    let location_fallback = match &*resource_expr.node {
+        ExprNode::Ivar { .. } if location.is_none() => Some(resource_expr.clone()),
+        _ => None,
+    };
+
+    let mut stmts = vec![assign("__rh_resource", resource_expr, span)];
+    let location_read = location.map(|l| {
+        stmts.push(assign("__rh_location", l, span));
+        var("__rh_location", span)
+    });
+    let has_errors = (!resource_is_empty_hash).then(|| {
+        let responds = call(Some(var("__rh_resource", span)), "respond_to?", vec![sym("errors", span)], span);
+        let empty = call(Some(call(Some(var("__rh_resource", span)), "errors", vec![], span)), "empty?", vec![], span);
+        let not_empty = Expr::new(span, ExprNode::Send { recv: Some(empty), method: Symbol::from("!"), args: vec![], block: None, parenthesized: false });
+        and(responds, not_empty, span)
+    });
+    let not_get = Expr::new(span, ExprNode::Send { recv: Some(request_is("get", span)), method: Symbol::from("!"), args: vec![], block: None, parenthesized: false });
+
+    // `render(json: …)` / `render(:action, …)` with the call's options carried over.
+    let render_with = |first: Option<Expr>, body: Option<(&str, Expr)>, status: Option<Expr>, location: Option<Expr>| {
+        let mut entries: Vec<(Expr, Expr)> = Vec::new();
+        if let Some((key, value)) = body {
+            entries.push((sym(key, span), value));
+        }
+        if let Some(s) = status {
+            entries.push((sym("status", span), s));
+        }
+        if let Some(l) = location {
+            entries.push((sym("location", span), l));
+        }
+        entries.extend(rest.iter().cloned());
+        let mut args: Vec<Expr> = first.into_iter().collect();
+        if !entries.is_empty() {
+            args.push(kwargs(entries, span));
+        }
+        call(None, "render", args, span)
+    };
+    let resource = || var("__rh_resource", span);
+    let get_branch = render_with(None, Some(("json", resource())), user_status.clone(), location_read.clone());
+    let post_location = location_read.clone().or(location_fallback);
+    let Some(post_location) = post_location else { return None };
+    let post_branch = render_with(None, Some(("json", resource())), Some(user_status.clone().unwrap_or_else(|| sym("created", span))), Some(post_location));
+    let mut head_args = vec![sym("no_content", span)];
+    if facts.view_rendering && let Some(l) = &location_read {
+        head_args.push(kwargs(vec![(sym("location", span), l.clone())], span));
+    }
+    let other_branch = call(None, "head", head_args, span);
+    let api_behavior = cond(request_is("get", span), get_branch, cond(request_is("post", span), post_branch, other_branch, span), span);
+    // `default_render` looks up the calling action's template, which a method no route reaches can't name.
+    if facts.action.is_none() && facts.view_rendering {
+        return None;
+    }
+    // `default_render`: the action's json template, given the call's options.
+    let rendered = match (facts.action, facts.has_template && facts.view_rendering) {
+        (Some(action), true) => render_with(Some(sym(action, span)), None, user_status.clone(), location_read.clone()),
+        _ => api_behavior,
+    };
+    let json_path = match has_errors {
+        Some(errors) => {
+            // `errors_json`, as `errors_index` writes a `render json:` errors read: Rails renders `errors.as_json`,
+            // keyed by attribute. That pass runs before this one, so it never sees this Hash.
+            let body = Expr::new(span, ExprNode::Hash { entries: vec![(sym("errors", span), call(Some(resource()), "errors_json", vec![], span))], kwargs: false });
+            // `display_errors` renders the errors and the status alone, none of the call's options.
+            let display_errors = call(
+                None,
+                "render",
+                vec![kwargs(vec![(sym("json", span), body), (sym("status", span), sym("unprocessable_entity", span))], span)],
+                span,
+            );
+            cond(and(not_get, errors, span), display_errors, rendered, span)
+        }
+        None => rendered,
+    };
+    let unknown = Expr::new(span, ExprNode::Raise { value: Expr::new(span, ExprNode::Const { path: vec![Symbol::from("ActionController"), Symbol::from("UnknownFormat")] }) });
+    let format_is = |f: &str| call(Some(call(Some(call(None, "request", vec![], span)), "format", vec![], span)), &format!("{f}?"), vec![], span);
+    let otherwise = match html_arm {
+        Some(arm) => cond(format_is("html"), arm, unknown, span),
+        None => unknown,
+    };
+    // A bare `Accept: */*` with no explicit format (`params[:format]`) negotiates to the first declared format, json.
+    // Where views render that is the json path. `ActionController::API` without them renders a blank body
+    // with the call's status, location and options instead.
+    let format_param = call(Some(call(None, "params", vec![], span)), "[]", vec![sym("format", span)], span);
+    let any_format = and(call(None, "accepts_any_format", vec![], span), call(Some(call(Some(format_param), "to_s", vec![], span)), "empty?", vec![], span), span);
+    let negotiated = if facts.view_rendering {
+        cond(or(format_is("json"), any_format, span), json_path, otherwise, span)
+    } else {
+        let blank = render_with(None, Some(("plain", Expr::new(span, ExprNode::Lit { value: Literal::Str { value: " ".into() } }))), user_status.clone(), location_read.clone());
+        cond(format_is("json"), json_path, cond(any_format, blank, otherwise, span), span)
+    };
+    stmts.push(negotiated);
     Some(Expr::new(span, ExprNode::Seq { exprs: stmts }))
 }
 

@@ -696,6 +696,11 @@ module Main
       res.status = 422
       res.body = "<h1>422 Unprocessable Content</h1>"
       return
+    rescue ActionController::UnknownFormat
+      # Rails' rescue_responses answer it with 406; the default app ships no public/406.html, so the body is empty.
+      res.status = 406
+      res.body = ""
+      return
     end
 
     socket = request_obj.env["roundhouse.websocket"]
