@@ -326,6 +326,9 @@ module Main
     rescue ActiveRecord::RecordInvalid, ActiveRecord::RecordNotSaved, ActionController::InvalidAuthenticityToken
       # Not a 500: Rails' rescue_responses answer these with 422.
       return [422, "<h1>422 Unprocessable Content</h1>", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
+    rescue ActionController::UnknownFormat
+      # Rails' rescue_responses answer it with 406; the default app ships no public/406.html, so the body is empty.
+      return [406, "", "text/html; charset=utf-8", nil, {}, {}, {}, {}, {}]
     end
 
     # Dispatch on status, not on @location nil-ness: redirect_to

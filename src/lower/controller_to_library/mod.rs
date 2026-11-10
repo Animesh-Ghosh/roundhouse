@@ -340,7 +340,10 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // `permit(*helper)` with a helper answering a literal Symbol list is
     // the same permit written inline; inline it before anything reads
     // the permit lists (`permit_splat`).
-    let responders_with_behavior = respond_with::responders_with_behavior(library_classes);
+    let responders_with_behavior = respond_with::Responders {
+        with_behavior: respond_with::responders_with_behavior(library_classes),
+        jbuilder_loaded: views.iter().any(|v| v.jbuilder),
+    };
     let inlined = self::permit_splat::inline_permit_splats(controllers);
     let controllers: &[Controller] = inlined.as_deref().unwrap_or(controllers);
     // Scan source-shape action bodies for `permit(...)` declarations.
@@ -709,7 +712,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         None,
         None,
         None,
-        &crate::det::HashSet::default(),
+        &respond_with::Responders { with_behavior: crate::det::HashSet::default(), jbuilder_loaded: false },
     );
     methods.extend(collect_attr_accessor_methods(controller));
     apply_alias_methods(controller, &mut methods);
@@ -1162,7 +1165,7 @@ fn build_methods(
     // Rails' ParamsWrapper for this controller, when its requests get one.
     wrapper: Option<&self::params_wrapper::WrapperSpec>,
     action_check: Option<&crate::det::HashSet<Symbol>>,
-    responders_with_behavior: &crate::det::HashSet<String>,
+    responders_with_behavior: &respond_with::Responders,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = controller.class_methods().cloned().collect();
 
@@ -3206,7 +3209,7 @@ fn action_to_method(
     inferred_params: Option<&crate::det::HashMap<(ClassId, Symbol), Vec<Ty>>>,
     deferred_renders: &crate::det::HashSet<Symbol>,
     deferred_out: &mut crate::det::HashMap<Symbol, Expr>,
-    responders_with_behavior: &crate::det::HashSet<String>,
+    responders_with_behavior: &respond_with::Responders,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     // Required positionals, optionals (so `def get_from_cache(opts = {})`
@@ -3280,10 +3283,22 @@ fn action_to_method(
     });
     // Past `ancestor_chain`'s depth a further ancestor may declare other formats.
     let chain_complete = !chain.last().and_then(|c| c.parent.as_ref()).is_some_and(|p| all_controllers_for_params.iter().any(|c| &c.name == p));
-    let responder_keeps_defaults = !responder_expr.is_some_and(|r| respond_with::names_responder_with_behavior(r, responders_with_behavior));
-    let respond_with_body = (chain_complete && responder_keeps_defaults && respond_with::html_only_declared(&chain) == Some(true)).then(|| {
-        let has_template = chain.iter().any(|c| views_module_name(c).is_some_and(|m| view_ivars.contains_key(&(m, a.name.as_str().to_string()))));
-        respond_with::lower(&a.body, &respond_with::Facts { action: is_public.then_some(a.name.as_str()), has_template, responder: responder_expr })
+    let responder_keeps_defaults = !responder_expr.is_some_and(|r| respond_with::names_responder_with_behavior(r, &responders_with_behavior.with_behavior));
+    let html_only = respond_with::html_only_declared(&chain) == Some(true);
+    let json_only = respond_with::json_only_declared(&chain) == Some(true);
+    let respond_with_body = (chain_complete && responder_keeps_defaults && (html_only || json_only)).then(|| {
+        let has_template = if json_only {
+            json_actions.contains(&a.name)
+        } else {
+            chain.iter().any(|c| views_module_name(c).is_some_and(|m| view_ivars.contains_key(&(m, a.name.as_str().to_string()))))
+        };
+        // The chain's root: an app controller's parent the app does not define.
+        let on_api = chain.last().and_then(|c| c.parent.as_ref()).is_some_and(|p| p.0.as_str().trim_start_matches("::") == "ActionController::API");
+        let view_rendering = !on_api || responders_with_behavior.jbuilder_loaded;
+        respond_with::lower(
+            &a.body,
+            &respond_with::Facts { action: is_public.then_some(a.name.as_str()), has_template, responder: responder_expr, json: json_only, view_rendering },
+        )
     });
     let (body, deferred_tail) = lower_action_body(
         respond_with_body.as_ref().unwrap_or(&a.body),
