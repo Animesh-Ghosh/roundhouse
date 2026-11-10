@@ -210,6 +210,7 @@ pub fn demote_unreached_gem_errors(app: &App, diags: &mut [crate::diagnostic::Di
             unreached.extend(c.constants.iter().map(|(_, v)| v.span).filter(|s| !s.is_synthetic()));
         }
     }
+    unreached.extend(app.views.iter().filter(|v| gems.unreached_action_view(v.name.as_str(), &reached)).map(|v| v.body.span).filter(|s| !s.is_synthetic()));
     // Not only library classes: a gem's controller no route dispatches to runs no action either.
     let unrouted = crate::ingest::unreachable_views::unrouted_gem_controllers(app);
     for c in app.controllers.iter().filter(|c| unrouted.contains(c.name.0.as_str())) {
@@ -356,6 +357,17 @@ impl<'a> Gems<'a> {
         out
     }
 
+    /// A template of a gem class's action no call reaches, by Rails' `<class path>/<action>` (Devise's
+    /// `devise/mailer/unlock_instructions` where no model is `:lockable`).
+    fn unreached_action_view(&self, view: &str, reached: &Reached) -> bool {
+        let Some((dir, action)) = view.rsplit_once('/') else { return false };
+        self.names.iter().any(|c| {
+            crate::naming::underscore(c) == dir
+                && self.defined.contains(&(c.as_str(), false, action))
+                && !reached.methods.contains(&(c.clone(), false, action.to_string()))
+        })
+    }
+
     fn is_gem(&self, c: &LibraryClass) -> bool {
         self.names.contains(c.name.0.as_str())
     }
@@ -441,9 +453,31 @@ impl<'a> Gems<'a> {
         if !side {
             return None;
         }
+        // A mailer answers `Mailer.welcome(user)` with its instance action, as ActionMailer's `method_missing` does.
+        if self.inherits_action_mailer(c)
+            && let Some(owner) = ancestors.iter().find(|a| self.defined.contains(&(a.as_str(), false, method)))
+        {
+            return Some((owner.clone(), false, method.to_string()));
+        }
         ancestors.iter().flat_map(|a| self.extends_of(a)).flat_map(|e| self.ancestors(&e))
             .find(|b| self.defined.contains(&(b.as_str(), false, method)))
             .map(|b| (b, false, method.to_string()))
+    }
+
+    fn inherits_action_mailer(&self, c: &str) -> bool {
+        let mut current = c.to_string();
+        for _ in 0..32 {
+            let written = self.entries.get(current.as_str()).and_then(|e| e.iter().find_map(|lc| lc.parent.clone()));
+            let Some(written) = written else { return false };
+            if written.0.as_str().trim_start_matches("::") == "ActionMailer::Base" {
+                return true;
+            }
+            match self.resolve(Some(&current), written.0.as_str()) {
+                Some(next) => current = next,
+                None => return false,
+            }
+        }
+        false
     }
 
     /// Method resolution order, as Ruby looks a method up: the class, its modules, then its parent's.
@@ -534,6 +568,12 @@ impl<'a> Gems<'a> {
         for m in &app.models {
             if let Some(p) = &m.parent {
                 consts.push((None, p.0.to_string()));
+            }
+            // What the record runs as it saves: `after_update :send_email_changed_notification` names a method of its own.
+            for item in &m.body {
+                if let crate::dialect::ModelBodyItem::Callback { callback, .. } = item {
+                    calls.extend(callback.targets.iter().map(|t| (Target::Virtual(m.name.0.to_string(), false), t.to_string())));
+                }
             }
         }
         // Not only the app's code: the stack builds each middleware (`Warden::Manager.new(app) { … }`) and calls it.
@@ -674,8 +714,10 @@ impl<'a> Gems<'a> {
                 keep
             });
         }
+        let views_before = trimmed.views.len();
+        trimmed.views.retain(|v| !self.unreached_action_view(v.name.as_str(), reached));
         let after: usize = trimmed.library_classes.iter().map(|c| c.methods.len() + 1).sum();
-        (after != before || copies_dropped > 0).then_some(trimmed)
+        (after != before || copies_dropped > 0 || trimmed.views.len() != views_before).then_some(trimmed)
     }
 }
 
@@ -974,14 +1016,16 @@ impl<'a> Scan<'a> {
                 }
             }
         }
-        // What the send passes on, for a method of the name it may reach that calls by a parameter's name.
+        // What the send passes on, for a method of the name it may reach that calls by a parameter's name. Not to every
+        // sink when the name comes from the callers and the receiver is of no known type: Devise's
+        // `devise_mailer.send(notification, self, *args)` would hand its splat to every sink of every gem.
         let sinks: Vec<&str> = self.gems.map(|g| g.sinks.iter().copied().filter(|sink| match &names {
             Some(names) => names.iter().any(|n| match n {
                 Name::Exact(e) => e == sink,
                 Name::Built(prefix, suffix) => built_matches(sink, &format!("{prefix}\u{1}{suffix}")),
             }),
             None => g.may_answer(target, sink),
-        } || (from_callers && g.may_answer(target, sink))).collect()).unwrap_or_default();
+        } || (from_callers && !matches!(target, Target::Any) && g.may_answer(target, sink))).collect()).unwrap_or_default();
         for sink in sinks {
             self.pass(sink, Some(rest));
         }

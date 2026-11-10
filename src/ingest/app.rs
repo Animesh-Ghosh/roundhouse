@@ -1305,6 +1305,15 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                             }
                         }
                     }
+                    // Not a gem's `lib/` alone: its `app/` holds them too (devise's `if defined?(ActionMailer)
+                    // class Devise::Mailer …`), which no program loads but Rails' autoload.
+                    let in_gem_app = path_gems.iter().any(|gem| entry.starts_with(gem.join("app")));
+                    if in_gem_app && !gem_libs.iter().any(|lib| entry.starts_with(lib)) {
+                        if let Ok(branched) = super::library_class::ingest_file_branch_classes(&source, &path_str) {
+                            let branched: Vec<_> = branched.into_iter().filter(|m| !classes.iter().any(|c| c.name == m.name)).collect();
+                            classes.extend(branched);
+                        }
+                    }
                     if gem_libs.iter().any(|lib| entry.starts_with(lib)) {
                         let (branched, branch_aliases) = super::inherited_alias::capturing(|| {
                             super::library_class::ingest_file_branch_classes(&source, &path_str)
