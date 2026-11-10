@@ -148,6 +148,8 @@ mod gem_mailer_reach;
 mod helper_method_splat;
 #[path = "emit_and_run/constant_branches.rs"]
 mod constant_branches;
+#[path = "emit_and_run/defined_method_query.rs"]
+mod defined_method_query;
 #[path = "emit_and_run/metal_subclass.rs"]
 mod metal_subclass;
 #[path = "emit_and_run/boot_with_options.rs"]

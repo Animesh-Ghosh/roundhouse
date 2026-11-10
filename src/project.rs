@@ -2416,6 +2416,11 @@ fn report_native_ruby_syntax(app: &App, target: BuildTarget) {
             ExprNode::Defined { operand }
                 if target == BuildTarget::Spinel && !load_time
                     && matches!(&*operand.node, ExprNode::Ivar { .. }) => None,
+            // `defined?(recv.m)` in a method (Devise's `defined?(context.routes)`): Spinel answers "method" where recv
+            // answers a public `m`, and nil where evaluating recv raises, as CRuby does.
+            ExprNode::Defined { operand }
+                if target == BuildTarget::Spinel && !load_time
+                    && matches!(&*operand.node, ExprNode::Send { recv: Some(_), args, block: None, .. } if args.is_empty()) => None,
             ExprNode::Defined { .. } => Some("runtime defined? query"),
             // A `define_method` block's `&block`, kept by ingest: only the Ruby emitter (Spinel's and Roda's too) binds it.
             ExprNode::Lambda { block_param: Some(_), .. } if !matches!(target, BuildTarget::Spinel | BuildTarget::Roda) => {
