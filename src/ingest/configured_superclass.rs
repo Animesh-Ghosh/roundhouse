@@ -374,6 +374,10 @@ struct Eval<'a> {
     consts: HashMap<String, Val>,
     /// Methods a `class_eval` string defined, by class, the latest last.
     evaled: HashMap<String, Vec<MethodDef>>,
+    /// `mod.singleton_class.attr_accessor(:x)`: the class, the name and which of reader and writer.
+    singleton_attrs: Vec<(String, String, &'static str)>,
+    /// A statement it could not run was passed over: what it did is not all known.
+    passed_over: bool,
     /// What the drawing left out, and why (`gem_hooks::omits_on_failure`).
     omitted: Vec<String>,
 }
@@ -410,7 +414,7 @@ const SCOPE_KEYS: &[&str] = &["path", "as", "module", "constraints", "defaults",
 impl<'a> Eval<'a> {
     fn new(app: &'a App) -> Self {
         let known = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
-        Eval { classes: &app.library_classes, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default(), evaled: HashMap::default(), omitted: Vec::new() }
+        Eval { classes: &app.library_classes, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default(), evaled: HashMap::default(), singleton_attrs: Vec::new(), passed_over: false, omitted: Vec::new() }
     }
 
     /// The constant `expr` names once the initializers that call on its root have run.
@@ -510,6 +514,7 @@ impl<'a> Eval<'a> {
                 let Some(writes) = confined.or_else(|| self.may_write_with(e, &owner, side, &mut HashSet::default(), &frame.locals)) else {
                     return Err(format!("{why}, in a statement whose writes are not known"));
                 };
+                self.passed_over = true;
                 for tag in &writes {
                     self.make_unsure(tag);
                 }
@@ -1096,6 +1101,37 @@ impl<'a> Eval<'a> {
                 _ => unreachable!(),
             }
             return Ok(answer);
+        }
+        if let Val::Class(c) = &this {
+            if method == "singleton_class" && argv.is_empty() && blk.is_none() {
+                return Ok(Val::Class(format!("#<Class:{c}>")));
+            }
+            if let Some(owner) = c.strip_prefix("#<Class:").and_then(|r| r.strip_suffix('>'))
+                && let kind @ ("attr_accessor" | "attr_reader" | "attr_writer") = method
+            {
+                for a in &argv {
+                    let Val::Sym(name) = a else { return Err(format!("`{kind}` of other than a Symbol")) };
+                    let kind = match kind {
+                        "attr_accessor" => "accessor",
+                        "attr_reader" => "reader",
+                        _ => "writer",
+                    };
+                    self.singleton_attrs.push((owner.to_string(), name.clone(), kind));
+                }
+                return Ok(Val::Nil);
+            }
+            let attr = |name: &str, want: &str| self.singleton_attrs.iter().any(|(o, n, k)| o == c && n == name && (*k == "accessor" || *k == want));
+            if let Some(name) = method.strip_suffix('=')
+                && let [v] = argv.as_slice()
+                && attr(name, "writer")
+            {
+                let v = v.clone();
+                self.set_ivar(&this, name, v.clone())?;
+                return Ok(v);
+            }
+            if argv.is_empty() && attr(method, "reader") {
+                return Ok(self.ivar(&this, method).unwrap_or(Val::Nil));
+            }
         }
         // A method the program defines answers before anything built in.
         if let Some((def, scope)) = self.lookup(&this, method) {
@@ -2350,23 +2386,27 @@ fn without_deferred_bodies(e: &Expr) -> Expr {
 
 /// Source made only of method definitions (and blank lines), as a `class_eval` string of them is.
 fn only_defs(code: &str) -> bool {
-    let mut depth = 0usize;
-    for line in code.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
-        if depth == 0 && !line.starts_with("def ") {
-            return false;
-        }
-        if line.starts_with("def ") && !line.contains(';') {
-            depth += 1;
-        } else if line == "end" {
-            depth = depth.checked_sub(1).unwrap_or(usize::MAX);
-            if depth == usize::MAX {
-                return false;
-            }
-        } else if depth == 1 && line.starts_with("def ") {
-            return false;
+    // Not a line count of `def` and `end`: an `if … end` inside a method closed it early (devise's `Models.config`).
+    let result = ruby_prism::parse(code.as_bytes());
+    if result.errors().next().is_some() {
+        return false;
+    }
+    let node = result.node();
+    let Some(program) = node.as_program_node() else { return false };
+    struct Nested(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Nested {
+        fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {
+            self.0 = true;
         }
     }
-    depth == 0
+    program.statements().body().iter().all(|stmt| {
+        let Some(def) = stmt.as_def_node() else { return false };
+        let mut nested = Nested(false);
+        if let Some(body) = def.body() {
+            ruby_prism::Visit::visit(&mut nested, &body);
+        }
+        !nested.0
+    })
 }
 
 /// What holds the object a receiver reads, through any `[key]` (`@routes[:a]`, `URL_HELPERS[key]`): its ivar, or its constant by last segment.
@@ -2728,6 +2768,215 @@ pub(super) fn fold_middleware_loops<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &
             app.gem_middleware_refusals.push(refusal);
         }
     }
+}
+
+/// A class body's call of another module's method handed the class itself (devise's
+/// `Devise::Models.config(self, :pepper, :stretches)` in each module's `ClassMethods`), whose body
+/// defines on it with `class_eval` strings. Ruby runs the call as the body loads; here it runs once on
+/// the evaluation's heap, and what it left on that class (its singleton accessors, their values, the
+/// methods its strings define) becomes the class's own in place of the call. A call that passed a
+/// statement over, or changed anything but that class, stays as it was.
+pub(super) fn expand_load_time_definers(app: &mut App, sources: &[crate::span::SourceFile]) -> Vec<(ClassId, Span)> {
+    struct Expansion {
+        class: usize,
+        call: usize,
+        methods: Vec<MethodDef>,
+        ivars: Vec<Expr>,
+    }
+    let mut found: Vec<Expansion> = Vec::new();
+    let mut carried: Vec<(ClassId, Span)> = Vec::new();
+    let mut definers: HashSet<(String, String)> = HashSet::default();
+    let mut kept: HashSet<(String, String)> = HashSet::default();
+    for (i, lc) in app.library_classes.iter().enumerate() {
+        let owner = lc.name.0.to_string();
+        for (j, call) in lc.unknown_calls.iter().enumerate() {
+            let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*call.node else { continue };
+            let ExprNode::Const { path } = &*recv.node else { continue };
+            if !args.iter().any(|a| matches!(&*a.node, ExprNode::SelfRef)) {
+                continue;
+            }
+            let written = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+            let mut scope = Some(owner.as_str());
+            let mut target = None;
+            while let Some(s) = scope {
+                let candidate = format!("{s}::{written}");
+                if app.library_classes.iter().any(|c| c.name.0.as_str() == candidate) {
+                    target = Some(candidate);
+                    break;
+                }
+                scope = s.rsplit_once("::").map(|(outer, _)| outer);
+            }
+            let target = target.unwrap_or(written);
+            let Some(def) = app.library_classes.iter().filter(|c| c.name.0.as_str() == target).flat_map(|c| c.methods.iter()).find(|m| m.receiver == MethodReceiver::Class && m.name == *method) else {
+                continue;
+            };
+            let mut evals = false;
+            visit(&def.body, &mut |e| {
+                if let ExprNode::Send { method, .. } = &*e.node
+                    && matches!(method.as_str(), "class_eval" | "module_eval")
+                {
+                    evals = true;
+                }
+            });
+            if !evals {
+                continue;
+            }
+            let key = (target.clone(), method.to_string());
+            definers.insert(key.clone());
+            let mut eval = Eval::new(app);
+            let mut frame = Frame { this: Val::Class(owner.clone()), locals: HashMap::default(), block: None, scope: Some(owner.clone()) };
+            let ran = eval.value(call, &mut frame).is_ok()
+                && !eval.passed_over
+                && eval.unsure.is_empty()
+                && eval.cvars.is_empty()
+                && eval.written.keys().all(|(h, _)| matches!(h, Holder::Class(c) if *c == owner))
+                && eval.evaled.keys().all(|c| *c == owner)
+                && eval.singleton_attrs.iter().all(|(c, _, _)| *c == owner);
+            let in_class_methods = within_class_methods(sources, call.span);
+            let expansion = ran.then(|| expand_into(&owner, &eval, in_class_methods)).flatten();
+            match expansion {
+                Some((mut methods, ivars)) => {
+                    // Not the `class_eval` string's own positions, which every accessor's copy shares: one place per method, at the call.
+                    for (k, m) in methods.iter_mut().enumerate() {
+                        m.name_span = Span { file: call.span.file, start: call.span.start + k as u32, end: call.span.end };
+                    }
+                    if in_class_methods {
+                        carried.extend(methods.iter().map(|m| (lc.name.clone(), m.name_span)));
+                    }
+                    found.push(Expansion { class: i, call: j, methods, ivars })
+                }
+                None => {
+                    kept.insert(key);
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| (b.class, b.call).cmp(&(a.class, a.call)));
+    for e in found {
+        let lc = &mut app.library_classes[e.class];
+        lc.unknown_calls.remove(e.call);
+        lc.methods.extend(e.methods);
+        lc.class_ivar_initializers.extend(e.ivars);
+    }
+    // Not the definer's own body once no call is left to run it: it is never reached.
+    for (owner, name) in definers.iter().filter(|k| !kept.contains(*k)) {
+        let last = owner.rsplit("::").next().unwrap_or(owner);
+        let calls_it = |e: &Expr, own: bool| {
+            let mut hit = false;
+            visit(e, &mut |x| {
+                if let ExprNode::Send { recv, method, .. } = &*x.node
+                    && method.as_str() == name.as_str()
+                {
+                    hit |= match recv.as_ref().map(|r| &*r.node) {
+                        None | Some(ExprNode::SelfRef) => own,
+                        Some(ExprNode::Const { path }) => path.last().is_some_and(|p| p.as_str() == last),
+                        // Not a call on a value whose class is unknown here: it may be the module itself.
+                        Some(_) => false,
+                    };
+                }
+            });
+            hit
+        };
+        let called = app.library_classes.iter().any(|lc| {
+            let own = lc.name.0.as_str() == owner.as_str();
+            lc.methods.iter().filter(|m| !(own && m.receiver == MethodReceiver::Class && m.name.as_str() == name.as_str())).any(|m| calls_it(&m.body, own))
+                || lc.unknown_calls.iter().any(|c| calls_it(c, own))
+        }) || app.models.iter().any(|m| m.methods().any(|d| calls_it(&d.body, false)));
+        if called {
+            continue;
+        }
+        for lc in app.library_classes.iter_mut().filter(|lc| lc.name.0.as_str() == owner.as_str()) {
+            for m in lc.methods.iter_mut().filter(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == name.as_str()) {
+                fn unreached(e: &mut Expr) {
+                    e.decisions |= crate::expr::UNCALLED_DEFINER;
+                    e.node.for_each_child_mut(&mut unreached);
+                }
+                unreached(&mut m.body);
+            }
+        }
+    }
+    carried
+}
+
+/// What the evaluation left on `owner`, as the source Ruby would have: singleton accessors as class
+/// methods over the class's own instance variables, each set one's value, the `class_eval`ed methods.
+fn expand_into(owner: &str, eval: &Eval<'_>, in_class_methods: bool) -> Option<(Vec<MethodDef>, Vec<Expr>)> {
+    let class = ClassId(Symbol::from(owner));
+    // In `module ClassMethods`, which ingest folds into its module's class side: `self` is that module, so what
+    // its strings define is the includer's class methods, and the module's own singleton accessors have no home here.
+    if in_class_methods {
+        let mut methods = eval.evaled.get(owner).cloned().unwrap_or_default();
+        for m in &mut methods {
+            m.receiver = MethodReceiver::Class;
+        }
+        return Some((methods, Vec::new()));
+    }
+    let mut source = String::new();
+    for (_, name, kind) in &eval.singleton_attrs {
+        if matches!(*kind, "accessor" | "reader") {
+            source.push_str(&format!("def self.{name}\n  @{name}\nend\n"));
+        }
+        if matches!(*kind, "accessor" | "writer") {
+            source.push_str(&format!("def self.{name}=(value)\n  @{name} = value\nend\n"));
+        }
+    }
+    let parsed = super::prism::parse_silent(source.as_bytes());
+    let node = parsed.node();
+    let mut methods = Vec::new();
+    for statement in node.as_program_node()?.statements().body().iter() {
+        let def = statement.as_def_node()?;
+        let (read, _) = super::prism::scope(|| super::library_class::ingest_library_method(&def, &class, "<load-time definer>"));
+        methods.push(read.ok()?);
+    }
+    methods.extend(eval.evaled.get(owner).cloned().unwrap_or_default());
+    let mut ivars = Vec::new();
+    let mut set: Vec<(&String, &Val)> = eval.class_ivars.iter().filter(|((c, _), _)| c == owner).map(|((_, n), v)| (n, v)).collect();
+    set.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, value) in set {
+        let text = format!("@{name} = {}\n", ruby_literal(value)?);
+        let parsed = super::prism::parse_silent(text.as_bytes());
+        let node = parsed.node();
+        let statement = node.as_program_node()?.statements().body().iter().next()?;
+        ivars.push(super::expr::ingest_expr(&statement, "<load-time definer>").ok()?);
+    }
+    Some((methods, ivars))
+}
+
+/// Whether `span` lies in the body of a `module ClassMethods` of its file.
+fn within_class_methods(sources: &[crate::span::SourceFile], span: Span) -> bool {
+    let Some(source) = (span.file.0 as usize).checked_sub(1).and_then(|i| sources.get(i)) else { return false };
+    struct Find {
+        at: usize,
+        hit: bool,
+    }
+    impl<'pr> ruby_prism::Visit<'pr> for Find {
+        fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+            let loc = node.location();
+            if super::prism_api::PrismLocation::start_offset(&loc) <= self.at
+                && self.at < super::prism_api::PrismLocation::end_offset(&loc)
+                && super::util::module_name_path(node).as_deref() == Some(&["ClassMethods".to_string()])
+            {
+                self.hit = true;
+            }
+            ruby_prism::visit_module_node(self, node);
+        }
+    }
+    let result = ruby_prism::parse(source.text.as_bytes());
+    let mut find = Find { at: span.start as usize, hit: false };
+    ruby_prism::Visit::visit(&mut find, &result.node());
+    find.hit
+}
+
+fn ruby_literal(v: &Val) -> Option<String> {
+    Some(match v {
+        Val::Nil => "nil".into(),
+        Val::Bool(b) => b.to_string(),
+        Val::Int(i) => i.to_string(),
+        Val::Str(s) => format!("{s:?}"),
+        Val::Sym(s) if s.chars().all(|c| c.is_alphanumeric() || c == '_') => format!(":{s}"),
+        Val::Array(items) => format!("[{}]", items.iter().map(ruby_literal).collect::<Option<Vec<_>>>()?.join(", ")),
+        _ => return None,
+    })
 }
 
 pub(super) fn initializers_of<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path::PathBuf]) -> Vec<Expr> {
