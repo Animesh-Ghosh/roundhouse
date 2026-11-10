@@ -3609,12 +3609,14 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     // framework view helper; only these need the ancestry lookup above.
     // Read from the whole app, not this run's slice: a controller's untyped
     // receiver can be a model or a library class. A helper's `pluralize` is
-    // called bare, so a receiver never reaches one.
+    // called bare, so a receiver never reaches one. The index names one
+    // module per method, so a second helper defining it is only in
+    // `app.helper_modules`.
     let app_defines_pluralize = app.models.iter().any(|m| m.methods().any(|d| d.name.as_str() == "pluralize"))
         || lcs
             .iter()
             .chain(app.library_classes.iter())
-            .filter(|lc| !helper_modules.contains(&lc.name))
+            .filter(|lc| !helper_modules.contains(&lc.name) && !app.helper_modules.contains(&lc.name))
             .any(|lc| lc.methods.iter().any(|m| m.name.as_str() == "pluralize"));
     let app_framework_helper_names: BTreeSet<String> = app
         .models

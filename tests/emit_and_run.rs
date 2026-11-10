@@ -11130,6 +11130,28 @@ puts "ok"
         .assert_passes();
 }
 
+/// Two helpers define it, and each name indexes only one of them.
+#[test]
+fn two_helpers_pluralize_leave_an_untyped_controller_call_lowered() {
+    an_untyped_pluralize_receiver_app()
+        .write(
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n  def pluralize(count, word)\n    \"custom\"\n  end\nend\n",
+        )
+        .write(
+            "app/helpers/other_helper.rb",
+            "module OtherHelper\n  def pluralize(count, word)\n    \"other\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"require_relative "app/controllers/probes_controller"
+out = ProbesController.allocate.tag_of("status")
+raise "helper took the call: #{out}" unless out == "statuses"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
 /// The same inside the helper module that defines it (Rails 8.1.4 answers
 /// `statuses` from `word.pluralize` there).
 #[test]
