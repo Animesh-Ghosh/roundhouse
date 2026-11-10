@@ -84,8 +84,10 @@ pub(super) fn expand(app: &mut App) {
 /// that includes the module declares it, as if written in its own body.
 /// A block may also give the attributes their values, by `self.name =`
 /// or by a call of one of the Concern's class methods that only does that
-/// (responders' `self.responder = …` and `clear_respond_to`). Anything
-/// else in it keeps the block as it was.
+/// (responders' `self.responder = …` and `clear_respond_to`). Such a
+/// value becomes a seed, so it may not read the class, whose other seeds
+/// have no order against it. Anything else in the block, or an includer
+/// with its own class method of the called name, keeps the block as it was.
 fn expand_included_blocks(app: &mut App) {
     let names: Vec<String> = app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()).collect();
     for mi in 0..app.library_classes.len() {
@@ -113,7 +115,7 @@ fn expand_included_blocks(app: &mut App) {
             }
             let mut writes = Vec::new();
             for stmt in stmts.iter().filter(|stmt| class_attribute(stmt).is_none()) {
-                if !block_writes(stmt, module, &decls, &mut writes) {
+                if !block_writes(stmt, module, &app.library_classes, &decls, &mut writes) {
                     return None;
                 }
             }
@@ -176,7 +178,13 @@ fn expand_included_blocks(app: &mut App) {
 
 /// `stmt` read as writes to the block's declared attributes, appended
 /// to `out` in the order they run. False for anything else.
-fn block_writes(stmt: &Expr, module: &crate::dialect::LibraryClass, decls: &[Decl], out: &mut Vec<(Symbol, Expr)>) -> bool {
+fn block_writes(
+    stmt: &Expr,
+    module: &crate::dialect::LibraryClass,
+    classes: &[crate::dialect::LibraryClass],
+    decls: &[Decl],
+    out: &mut Vec<(Symbol, Expr)>,
+) -> bool {
     if let Some(write) = attribute_write(stmt, decls) {
         out.push(write);
         return true;
@@ -192,6 +200,13 @@ fn block_writes(stmt: &Expr, module: &crate::dialect::LibraryClass, decls: &[Dec
     else {
         return false;
     };
+    // Ruby answers with a class's own method ahead of the Concern's. Any class's, not only an includer's: the splice has not settled who includes what through other modules.
+    let shadowed = classes.iter().filter(|c| !c.is_module).flat_map(|c| c.methods.iter()).any(|m| {
+        &m.name == method && matches!(m.receiver, MethodReceiver::Class) && m.name_span != called.name_span
+    });
+    if shadowed {
+        return false;
+    }
     let body: Vec<&Expr> = match &*called.body.node {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![&called.body],
@@ -209,7 +224,17 @@ fn attribute_write(e: &Expr, decls: &[Decl]) -> Option<(Symbol, Expr)> {
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*e.node else { return None };
     let name = Symbol::from(method.as_str().strip_suffix('=')?);
     let [value] = args.as_slice() else { return None };
-    (matches!(&*recv.node, ExprNode::SelfRef) && decls.iter().any(|d| d.names.contains(&name))).then(|| (name, value.clone()))
+    (matches!(&*recv.node, ExprNode::SelfRef) && decls.iter().any(|d| d.names.contains(&name)) && !reads_the_class(value))
+        .then(|| (name, value.clone()))
+}
+
+fn reads_the_class(e: &Expr) -> bool {
+    if matches!(&*e.node, ExprNode::SelfRef | ExprNode::Ivar { .. } | ExprNode::Send { recv: None, .. }) {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| found = found || reads_the_class(c));
+    found
 }
 
 /// A bare read of one of the Concern's own constants, spelled from the top so it still names it in the includer.

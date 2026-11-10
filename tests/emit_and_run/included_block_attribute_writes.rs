@@ -74,3 +74,26 @@ fn a_block_doing_anything_else_is_left_alone() {
     let source = std::fs::read_to_string(emitted.join("app/models/listing.rb")).expect("listing.rb emitted");
     assert!(!source.contains("def self.page_size"), "the block's other statement was dropped:\n{source}");
 }
+
+// Ruby calls the includer's own class method, so the Concern's body says nothing about what the block writes.
+#[test]
+fn an_includer_with_its_own_method_keeps_the_block() {
+    let (emitted, _errors) = app(CONCERN)
+        .write("app/models/listing.rb", "class Listing\n  def self.reset_unit\n    self.unit = \"rows\"\n  end\n\n  include Sized\nend\n")
+        .emit(BuildTarget::Spinel);
+    let source = std::fs::read_to_string(emitted.join("app/models/listing.rb")).expect("listing.rb emitted");
+    assert!(!source.contains("def self.page_size"), "the includer's own method was bypassed:\n{source}");
+}
+
+// A seed has no order against the others, so a value may not depend on one.
+#[test]
+fn a_written_value_that_reads_the_class_keeps_the_block() {
+    for write in ["self.page_size = self.unit", "self.page_size = unit", "self.page_size = @unit"] {
+        let concern = format!(
+            "module Sized\n  extend ActiveSupport::Concern\n\n  included do\n    class_attribute :page_size, :unit\n    self.unit = 7\n    {write}\n  end\nend\n"
+        );
+        let (emitted, _errors) = app(&concern).emit(BuildTarget::Spinel);
+        let source = std::fs::read_to_string(emitted.join("app/models/listing.rb")).expect("listing.rb emitted");
+        assert!(!source.contains("def self.page_size"), "{write} was seeded out of order:\n{source}");
+    }
+}
