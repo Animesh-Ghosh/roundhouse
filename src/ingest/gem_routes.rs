@@ -87,6 +87,17 @@ pub(super) fn expand<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path
         app.gem_route_gaps.extend(gaps);
     }
     app.routes.entries = entries;
+    // After the initializers, as Rails loads the routes after them.
+    for boot in super::configured_superclass::take_boot_calls() {
+        match boot {
+            Ok(expr) => app.boot_program.push(expr),
+            Err(why) => {
+                let mut gap = crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "routing method boot state", why);
+                gap.severity = crate::diagnostic::Severity::Warning;
+                app.gem_route_gaps.push(gap);
+            }
+        }
+    }
     write_devise_url_helpers(app, devise);
     if !failed {
         consume_installs(app);
