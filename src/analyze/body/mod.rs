@@ -1246,6 +1246,14 @@ impl<'a> BodyTyper<'a> {
     }
 
     fn constant_predicate(&self, cond: &mut Expr, ctx: &Ctx) -> Option<bool> {
+        // `devise_mapping.lockable? && resource_class.unlock_strategy_enabled?(:email)`: Ruby never evaluates the right.
+        if let ExprNode::BoolOp { left, op, right, .. } = &mut *cond.node {
+            let short = matches!(op, crate::expr::BoolOpKind::Or);
+            return match self.constant_predicate(left, ctx)? {
+                answer if answer == short => Some(short),
+                _ => self.constant_predicate(right, ctx),
+            };
+        }
         let predicates = self.constant_predicates?;
         let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *cond.node else { return None };
         // `x.try(:m)` on a class nothing in whose chain answers `m` is nil (Devise's mailer views'

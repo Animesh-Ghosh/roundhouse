@@ -144,6 +144,8 @@ mod gem_file_statements;
 mod uncalled_config_writers;
 #[path = "emit_and_run/gem_mailer_reach.rs"]
 mod gem_mailer_reach;
+#[path = "emit_and_run/helper_method_splat.rs"]
+mod helper_method_splat;
 #[path = "emit_and_run/constant_branches.rs"]
 mod constant_branches;
 #[path = "emit_and_run/metal_subclass.rs"]

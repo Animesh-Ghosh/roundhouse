@@ -247,6 +247,11 @@ pub(super) fn devise_mapping_types(app: &mut App) {
             variants: many.iter().map(|m| crate::ty::Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from(m.as_str())), args: vec![].into() }).collect::<Vec<_>>().into(),
         },
     };
+    // `DeviseController#resource` is `instance_variable_get(:"@#{resource_name}")`, the ivar a devise model's name spells.
+    app.rbs_signatures
+        .entry(crate::ident::ClassId(crate::ident::Symbol::from("DeviseController")))
+        .or_default()
+        .insert(crate::ident::Symbol::from("resource"), crate::ty::Ty::Fn { params: Vec::new().into(), block: None, ret: record.clone().into(), effects: Default::default() });
     if let Some(mailer) = app.library_classes.iter().find(|c| c.name.0.as_str() == "Devise::Mailer") {
         let param = |name: &crate::ident::Symbol, ty: crate::ty::Ty, optional: bool| crate::ty::Param {
             name: name.clone(),

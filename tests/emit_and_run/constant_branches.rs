@@ -2,7 +2,8 @@
 //!
 //! - A predicate whose body is a literal, and whose name nothing else defines, answers that constant, so `if
 //!   x.beta?` takes one branch and the other, typed, would report what never runs (Devise's
-//!   `if devise_mapping.validatable?` over a model that is not `:validatable`).
+//!   `if devise_mapping.validatable?` over a model that is not `:validatable`), and so does an `&&` or `||` its
+//!   left settles (`devise_mapping.lockable? && resource_class.unlock_strategy_enabled?(:email)`).
 //! - `x.try(:m)` on a class nothing in whose chain answers `m` is nil, so its `if` takes the `else` (Devise's
 //!   `@resource.try(:unconfirmed_email?)` on a model that is not `:confirmable`).
 //! - `instance_variable_set` answers the value it sets.
@@ -14,6 +15,10 @@ use super::emit_and_run;
 const FLAGS: &str = r#"class Flags
   def beta?
     false
+  end
+
+  def stable?
+    true
   end
 end
 "#;
@@ -29,6 +34,20 @@ const MODEL: &str = r#"class Article < ApplicationRecord
 
   def self.release_of_default
     release(Flags.new)
+  end
+
+  def self.gated(flags)
+    if flags.beta? && flags.preview_build.ready?
+      flags.preview_build
+    elsif flags.beta? || flags.stable?
+      "stable"
+    else
+      "none"
+    end
+  end
+
+  def self.gated_of_default
+    gated(Flags.new)
   end
 
   def self.pending(flags)
@@ -49,6 +68,7 @@ const MODEL: &str = r#"class Article < ApplicationRecord
 const STAMPED: &str = "  def self.stamped\n    @stamp = instance_variable_set(:@stamped_at, \"now\")\n    @stamp.upcase\n  end\n\n";
 
 const SCRIPT: &str = r#"raise "release #{Article.release_of_default.inspect}" unless Article.release_of_default == "stable"
+raise "gated #{Article.gated_of_default.inspect}" unless Article.gated_of_default == "stable"
 raise "pending #{Article.pending_of_default.inspect}" unless Article.pending_of_default == "none pending"
 puts "constant branches passed"
 "#;

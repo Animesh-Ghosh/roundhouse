@@ -5169,17 +5169,43 @@ pub enum ClassKind {
 pub fn ingest_helper_method_names(source: &[u8]) -> Vec<Symbol> {
     struct HelperMethodVisitor {
         names: Vec<Symbol>,
+        /// Locals bound to a literal list of names, as Devise's `helpers = %w(resource …)` before `helper_method(*helpers)`.
+        lists: HashMap<String, Vec<Symbol>>,
+    }
+
+    fn literal_name(node: &ruby_prism::Node<'_>) -> Option<Symbol> {
+        if let Some(sym) = node.as_symbol_node() {
+            return Some(Symbol::from(String::from_utf8_lossy(sym.unescaped()).as_ref()));
+        }
+        node.as_string_node().map(|s| Symbol::from(String::from_utf8_lossy(s.unescaped()).as_ref()))
     }
 
     impl<'pr> ruby_prism::Visit<'pr> for HelperMethodVisitor {
+        fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+            let name = constant_id_str(&node.name()).to_string();
+            let list = node.value().as_array_node().and_then(|a| a.elements().iter().map(|e| literal_name(&e)).collect::<Option<Vec<_>>>());
+            match list {
+                Some(list) => {
+                    self.lists.insert(name, list);
+                }
+                None => {
+                    self.lists.remove(&name);
+                }
+            }
+            ruby_prism::visit_local_variable_write_node(self, node);
+        }
+
         fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
             if node.receiver().is_none() && constant_id_str(&node.name()) == "helper_method" {
                 if let Some(args) = node.arguments() {
                     for arg in args.arguments().iter() {
-                        if let Some(sym) = arg.as_symbol_node() {
-                            self.names.push(Symbol::from(
-                                String::from_utf8_lossy(sym.unescaped()).as_ref(),
-                            ));
+                        if let Some(name) = literal_name(&arg) {
+                            self.names.push(name);
+                        } else if let Some(splat) = arg.as_splat_node()
+                            && let Some(local) = splat.expression().and_then(|e| e.as_local_variable_read_node())
+                            && let Some(list) = self.lists.get(constant_id_str(&local.name()))
+                        {
+                            self.names.extend(list.iter().cloned());
                         }
                     }
                 }
@@ -5189,7 +5215,7 @@ pub fn ingest_helper_method_names(source: &[u8]) -> Vec<Symbol> {
     }
 
     let result = parse(source);
-    let mut visitor = HelperMethodVisitor { names: Vec::new() };
+    let mut visitor = HelperMethodVisitor { names: Vec::new(), lists: HashMap::default() };
     ruby_prism::Visit::visit(&mut visitor, &result.node());
     visitor.names
 }
