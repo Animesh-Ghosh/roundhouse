@@ -300,7 +300,8 @@ puts "first place kept"
 fn devise_generated_url_helpers_take_a_record_as_written() {
     let (tree, _) = app(":database_authenticatable", "  devise_for :users\n")
         .write("app/controllers/gadgets_controller.rb", "class GadgetsController < ApplicationController\n  def show\n    @user = User.new\n    @path = new_session_path(@user)\n    @url = new_session_url(@user)\n  end\nend\n")
-        .write("app/views/gadgets/show.html.erb", "<%= new_session_path(@user) %>\n")
+        .write("app/views/gadgets/show.html.erb", "<%= new_session_path(@user) %>\n<%= render \"row\", user: @user %>\n")
+        .write("app/views/gadgets/_row.html.erb", "<%= link_to \"in\", new_session_path(user) %>\n")
         .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"gadget\", to: \"gadgets#show\"\n")
         .emit(BuildTarget::Spinel);
     let controller = std::fs::read_to_string(tree.join("app/controllers/gadgets_controller.rb")).expect("controller");
@@ -308,6 +309,8 @@ fn devise_generated_url_helpers_take_a_record_as_written() {
     assert!(!controller.contains("@user.id"), "{controller}");
     let view = std::fs::read_to_string(tree.join("app/views/gadgets/show.rb")).expect("view");
     assert!(!view.contains(".id"), "{view}");
+    let partial = std::fs::read_to_string(tree.join("app/views/gadgets/_row.rb")).expect("partial");
+    assert!(partial.contains("RouteHelpers.new_session_path(user)"), "{partial}");
 }
 
 /// Without a `define_method` by a computed name left for Spinel to refuse: the generator's bodies are written out.
