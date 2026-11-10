@@ -82,8 +82,10 @@ pub(super) fn expand(app: &mut App) {
 /// default: 1000 end` (mission_control-jobs' `ActiveJob::Querying`, which
 /// an on_load hook includes into `ActiveJob::Base`): each library class
 /// that includes the module declares it, as if written in its own body.
-/// Only a block of declarations alone; anything else in it keeps the
-/// block as it was.
+/// A block may also give the attributes their values, by `self.name =`
+/// or by a call of one of the Concern's class methods that only does that
+/// (responders' `self.responder = …` and `clear_respond_to`). Anything
+/// else in it keeps the block as it was.
 fn expand_included_blocks(app: &mut App) {
     let names: Vec<String> = app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()).collect();
     for mi in 0..app.library_classes.len() {
@@ -91,7 +93,7 @@ fn expand_included_blocks(app: &mut App) {
         if !module.is_module || module.origin.is_some() {
             continue;
         }
-        let Some((ci, decls)) = module.unknown_calls.iter().enumerate().find_map(|(ci, call)| {
+        let Some((ci, decls, writes)) = module.unknown_calls.iter().enumerate().find_map(|(ci, call)| {
             let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*call.node else { return None };
             if method.as_str() != "included" || !args.is_empty() {
                 return None;
@@ -104,11 +106,18 @@ fn expand_included_blocks(app: &mut App) {
                 ExprNode::Seq { exprs } => exprs.iter().collect(),
                 _ => vec![body],
             };
-            let decls: Option<Vec<Decl>> = stmts
-                .iter()
-                .map(|stmt| declaration(stmt, None).filter(|d| matches!(d.kind, Kind::ClassAttribute { .. })))
-                .collect();
-            decls.filter(|d| !d.is_empty()).map(|d| (ci, d))
+            let class_attribute = |stmt: &Expr| declaration(stmt, None).filter(|d| matches!(d.kind, Kind::ClassAttribute { .. }));
+            let decls: Vec<Decl> = stmts.iter().filter_map(|stmt| class_attribute(stmt)).collect();
+            if decls.is_empty() {
+                return None;
+            }
+            let mut writes = Vec::new();
+            for stmt in stmts.iter().filter(|stmt| class_attribute(stmt).is_none()) {
+                if !block_writes(stmt, module, &decls, &mut writes) {
+                    return None;
+                }
+            }
+            Some((ci, decls, writes))
         }) else {
             continue;
         };
@@ -119,6 +128,10 @@ fn expand_included_blocks(app: &mut App) {
             if let Some(default) = &mut decl.default {
                 qualify_constants(default, &module_name, &own_consts);
             }
+        }
+        let mut writes = writes;
+        for (_, value) in &mut writes {
+            qualify_constants(value, &module_name, &own_consts);
         }
         // The block runs in the class that finally includes it, through any modules between.
         let mut holders: Vec<String> = vec![module_name.clone()];
@@ -153,12 +166,50 @@ fn expand_included_blocks(app: &mut App) {
             let mut added = Vec::new();
             for decl in &decls {
                 added.extend(methods(&lc.name, Some("superclass"), &lc.methods, &added, decl, decl.span));
-                lc.class_ivar_initializers.extend(class_body_seeds(decl));
+                lc.class_ivar_initializers.extend(seeds_with_writes(decl, &writes));
             }
             lc.methods.splice(0..0, added);
         }
         app.library_classes[mi].unknown_calls.remove(ci);
     }
+}
+
+/// `stmt` read as writes to the block's declared attributes, appended
+/// to `out` in the order they run. False for anything else.
+fn block_writes(stmt: &Expr, module: &crate::dialect::LibraryClass, decls: &[Decl], out: &mut Vec<(Symbol, Expr)>) -> bool {
+    if let Some(write) = attribute_write(stmt, decls) {
+        out.push(write);
+        return true;
+    }
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*stmt.node else { return false };
+    if !args.is_empty() {
+        return false;
+    }
+    let Some(called) = module
+        .methods
+        .iter()
+        .find(|m| &m.name == method && matches!(m.receiver, MethodReceiver::Class) && m.params.is_empty())
+    else {
+        return false;
+    };
+    let body: Vec<&Expr> = match &*called.body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![&called.body],
+    };
+    // All of the method or none of it: a partly read body would drop what it does besides.
+    let Some(writes) = body.iter().map(|e| attribute_write(e, decls)).collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    out.extend(writes);
+    true
+}
+
+/// `self.name = value` for a name one of `decls` declares.
+fn attribute_write(e: &Expr, decls: &[Decl]) -> Option<(Symbol, Expr)> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*e.node else { return None };
+    let name = Symbol::from(method.as_str().strip_suffix('=')?);
+    let [value] = args.as_slice() else { return None };
+    (matches!(&*recv.node, ExprNode::SelfRef) && decls.iter().any(|d| d.names.contains(&name))).then(|| (name, value.clone()))
 }
 
 /// A bare read of one of the Concern's own constants, spelled from the top so it still names it in the includer.
@@ -636,6 +687,21 @@ fn class_body_seeds(decl: &Decl) -> Vec<Expr> {
         out.push(ivar(name.as_str().to_string(), value));
     }
     out
+}
+
+/// [`class_body_seeds`], with the value the block last wrote to a name
+/// in place of the declaration's own: one Ivar seed per name, so its
+/// type is the written value's alone.
+fn seeds_with_writes(decl: &Decl, writes: &[(Symbol, Expr)]) -> Vec<Expr> {
+    let mut seeds = class_body_seeds(decl);
+    for seed in &mut seeds {
+        if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &mut *seed.node
+            && let Some((_, written)) = writes.iter().rev().find(|(n, _)| n == name)
+        {
+            *value = written.clone();
+        }
+    }
+    seeds
 }
 
 /// What the hook's declaration does to `base` once its defs exist.
