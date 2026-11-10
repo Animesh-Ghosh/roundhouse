@@ -22103,3 +22103,5 @@ mod boot_base_mixins;
 mod array_grep_extract_options;
 #[path = "emit_and_run/load_time_string_definer.rs"]
 mod load_time_string_definer;
+#[path = "emit_and_run/mime_extension_lookup.rs"]
+mod mime_extension_lookup;
