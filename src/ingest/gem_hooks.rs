@@ -128,6 +128,12 @@ fn devise_calls(app: &App) -> Vec<(&str, &[Expr])> {
             }
         }
     }
+    // Not only the calls still standing: one whose body's mixins took its place (`configured_superclass::expand_model_mixin_macros`) declared the modules too.
+    for (class, call) in &app.expanded_macro_calls {
+        if let Some(args) = is_devise(call) {
+            out.push((class.0.as_str(), args));
+        }
+    }
     out
 }
 
@@ -176,6 +182,16 @@ pub(super) fn omits_statement_on_failure(known: &HashSet<String>, statement: &Ex
     }
     (crate::emit::ruby::emit_expr(cond).starts_with("defined?(::OmniAuth)") && crate::emit::ruby::emit_expr(statement).contains("DeviseTokenAuth.omniauth_prefix"))
         .then_some("mount_devise_token_auth_for: the OmniAuth routes are not drawn: one redirects through a block that builds its URL per request")
+}
+
+/// What a gem's module answers about a model, where the answer is the Rails the compiler takes rather than the model:
+/// devise's `Devise::Orm.active_record_51?(model)` picks its dirty-tracking methods by ActiveRecord's version,
+/// and every Rails the compiler takes (7.0 on) is past 5.1.
+pub(super) fn module_answer(facts: &Facts, class: &str, method: &str, argv: &[Val]) -> Option<Val> {
+    match (class.trim_start_matches("::"), method, argv) {
+        ("Devise::Orm", "active_record?" | "active_record_51?", [Val::Class(model)]) if facts.devise_models.contains_key(model.trim_start_matches("::")) => Some(Val::Bool(true)),
+        _ => None,
+    }
 }
 
 /// What a class outside the library classes (a model) answers that a gem's macro gave it.

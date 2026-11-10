@@ -3054,6 +3054,7 @@ end
     // `User::Avatar`. The passes above leave both as written.
     super::written_names::resolve(&mut app, &sources, &const_resolver.for_sources(&sources));
     // Before the concern splices: what a `ClassMethods` body's call defines is copied onto the includers with the rest.
+    super::configured_superclass::expand_model_mixin_macros(vfs, dir, &path_gems, &mut app);
     for (owner, span) in super::configured_superclass::expand_load_time_definers(&mut app, &sources) {
         if let Some(carrier) = concern_class_method_spans.iter_mut().find(|c| c.owner == owner) {
             carrier.methods.push(span);

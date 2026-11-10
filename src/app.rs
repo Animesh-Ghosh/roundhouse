@@ -410,6 +410,14 @@ pub struct App {
     /// (not a seeded `include` set on every model).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub load_hook_class_macros: Vec<ClassId>,
+    /// The modules a model macro's body includes into the model (devise's
+    /// `devise :database_authenticatable`), written in the call's place
+    /// (`configured_superclass::expand_model_mixin_macros`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub macro_includes: Vec<(ClassId, ClassId)>,
+    /// The model macro calls those includes took the place of, as written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expanded_macro_calls: Vec<(ClassId, crate::expr::Expr)>,
     /// Modules `extend`ed inside `ActiveSupport.on_load(:active_record)`:
     /// their instance methods are class-method macros on every model.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1331,6 +1339,8 @@ impl App {
             pending_attachment_on_load: Vec::new(),
             load_hook_class_macros: Vec::new(),
             load_hook_extended_macros: Vec::new(),
+            macro_includes: Vec::new(),
+            expanded_macro_calls: Vec::new(),
             spliced_class_methods: Default::default(),
             time_tag_calls: Vec::new(),
             partial_local_types: HashMap::default(),
