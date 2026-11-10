@@ -96,6 +96,11 @@ const CONTROLLER: &str = r#"class GadgetsController < ApplicationController
     respond_with(@article) { |format| format.html { |variant| render plain: "variant-arm" } }
   end
 
+  def blk_argument
+    @article = Article.new
+    respond_with(@article) { |format| format.any(:json, other_formats.first); format.html { render plain: "argument-arm" } }
+  end
+
   def blk_statement
     @article = Article.new
     respond_with(@article) { |format| @seen = "before"; format.html { render plain: @seen.to_s } }
@@ -171,6 +176,7 @@ const ROUTES: &str = r#"  get "g/new", to: "gadgets#new"
   post "g/blk_unread", to: "gadgets#blk_unread"
   post "g/blk_variant", to: "gadgets#blk_variant"
   post "g/blk_statement", to: "gadgets#blk_statement"
+  post "g/blk_argument", to: "gadgets#blk_argument"
   post "g/computed", to: "gadgets#computed"
   post "g/ordered", to: "gadgets#ordered"
   post "g/computed_location", to: "gadgets#computed_location"
@@ -231,7 +237,7 @@ end
   raise "#{verb} #{path}?#{query}: got #{got.inspect}, want #{[status, location, body].inspect}" unless ok
 end
 # Not modeled: these must fail, not answer with a response Rails wouldn't give.
-["/g/computed_location", "/g/several", "/g/blk_unread", "/g/blk_variant", "/g/blk_statement"].each do |path|
+["/g/computed_location", "/g/several", "/g/blk_unread", "/g/blk_variant", "/g/blk_statement", "/g/blk_argument"].each do |path|
   got = begin
     hit("POST", path)
   rescue ArgumentError, NoMethodError, NameError

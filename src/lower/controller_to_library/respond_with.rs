@@ -136,8 +136,13 @@ fn block_html_arm(block: &Expr) -> Result<Option<Expr>, ()> {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
         _ => vec![body],
     };
-    // Anything else the block does runs where it is written, which a single arm cannot keep.
-    let is_format_call = |stmt: &&Expr| matches!(&*stmt.node, ExprNode::Send { recv: Some(r), .. } if matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == format_param));
+    // Anything else the block does runs where it is written, which a single arm cannot keep: a statement, or a computed argument.
+    let plain_format_arg = |a: &Expr| match &*a.node {
+        ExprNode::Lit { .. } => true,
+        ExprNode::Splat { value } => matches!(&*value.node, ExprNode::Send { recv: None, .. }),
+        _ => false,
+    };
+    let is_format_call = |stmt: &&Expr| matches!(&*stmt.node, ExprNode::Send { recv: Some(r), args, .. } if matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == format_param) && args.iter().all(plain_format_arg));
     if !stmts.iter().all(|s| is_format_call(s)) {
         return Err(());
     }
