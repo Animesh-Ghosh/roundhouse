@@ -1,8 +1,7 @@
 //! devise's `Devise::Models.config(self, :pepper, :stretches)`: a module's method handed the class
 //! body's `self` defines on it with `class << mod; attr_accessor …; end` and `class_eval` strings.
 //! Ruby runs it as the body loads; the methods it defines are the class's own, in `module
-//! ClassMethods` the includer's class methods. (A module that holds no method of its own is not
-//! ingested as one yet, so these each hold one.)
+//! ClassMethods` the includer's class methods. `Tunable` and `Plain` hold nothing but the call.
 
 use super::emit_and_run;
 
@@ -35,20 +34,12 @@ const TUNABLE: &str = r#"module Tunable
 
   module ClassMethods
     SettingsKit.config(self, :pepper, :stretches)
-
-    def tunable?
-      true
-    end
   end
 end
 "#;
 
 const PLAIN: &str = r#"module Plain
   SettingsKit.config(self, :mode)
-
-  def plain?
-    true
-  end
 end
 "#;
 
