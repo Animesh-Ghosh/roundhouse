@@ -319,8 +319,20 @@ impl<'a> Gems<'a> {
             .filter(|s| !s.is_synthetic())
             .collect();
         let in_dead = |span: &crate::span::Span| dead.iter().any(|d| d.file == span.file && d.start <= span.start && span.end <= d.end);
+        // Not every body in a gem's files: what a file runs as it loads (`ingest::gem_load_program`) and its `app/` controllers are no library class's, so the walk never reads them.
+        let mut walked: HashMap<FileId, Vec<(u32, u32)>> = HashMap::default();
+        for c in app.library_classes.iter().filter(|c| self.is_gem(c)) {
+            let spans = c.methods.iter().map(|m| m.body.span)
+                .chain(c.constants.iter().map(|(_, v)| v.span))
+                .chain(c.unknown_calls.iter().map(|e| e.span))
+                .chain(c.class_ivar_initializers.iter().map(|e| e.span));
+            for span in spans.filter(|s| !s.is_synthetic()) {
+                walked.entry(span.file).or_default().push((span.start, span.end));
+            }
+        }
+        let in_walked = |span: &crate::span::Span| walked.get(&span.file).is_some_and(|w| w.iter().any(|(start, end)| *start <= span.start && span.end <= *end));
         crate::lower::for_each_emit_body_ref(app, &mut |e| {
-            if (e.span.file.0 == 0 || !mounted(app, e.span.file)) && !in_dead(&e.span) {
+            if (e.span.file.0 == 0 || !mounted(app, e.span.file) || !in_walked(&e.span)) && !in_dead(&e.span) {
                 scan(e, &mut s);
             }
         });

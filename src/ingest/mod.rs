@@ -75,6 +75,7 @@ mod active_model_super;
 mod queue_adapter_reader;
 mod library_concern_items;
 mod unreached_gem_modules;
+mod gem_load_program;
 pub(crate) mod puma_boot;
 pub mod allow_browser;
 pub mod app;

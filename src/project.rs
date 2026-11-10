@@ -3355,6 +3355,7 @@ fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
         })
     };
     trimmed.file_programs.retain(|p| !mounted_path(&p.source));
+    trimmed.boot_program.retain(|s| !app.gem_load_statements.contains(&s.span));
     trimmed.boot_gem_entries.retain(|e| !mounted_path(e));
     if let Some(lock) = trimmed.gem_lock.as_mut() {
         lock.source.retain(|gem| !app.auto_source_gems.contains(gem));
@@ -5471,7 +5472,7 @@ fn ruby_family_runtime_files(
     // gets the block exactly once; this is the ruby family's turn, and
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
-    apply_boot_program(&mut files, app);
+    apply_boot_program(&mut files, app, RequireTarget::RubyFamily);
     // Overlay boot replaced the spinel boot, so the flags written into
     // that file in `spinel_files` are gone. Write them again here.
     apply_environment_flags(&mut files, app);
@@ -6003,7 +6004,7 @@ fn program_steps<'a>(items: &'a [crate::app::ProgramItem], depth: usize, out: &m
 
 /// `require "x"` from a gem file: the file of that feature under the
 /// requiring gem's lib/, then any gem's.
-fn resolve_gem_require(known: &crate::det::HashSet<String>, from: &str, feature: &str, relative: bool) -> Option<String> {
+pub(crate) fn resolve_gem_require(known: &crate::det::HashSet<String>, from: &str, feature: &str, relative: bool) -> Option<String> {
     let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
     if relative {
         let dir = std::path::Path::new(from).parent()?;
@@ -6086,7 +6087,7 @@ fn all_program_items(items: &[crate::app::ProgramItem]) -> Vec<&crate::app::Prog
 }
 
 /// A path with `.` and `..` segments folded, as a require resolves it.
-fn normalize_source(path: &str) -> String {
+pub(crate) fn normalize_source(path: &str) -> String {
     let mut out: Vec<&str> = Vec::new();
     for segment in path.split('/') {
         match segment {
@@ -7954,8 +7955,20 @@ fn apply_environment_flags(files: &mut [(String, String)], app: &App) {
 /// The app's own initializer statements (`ingest::boot_program`), as
 /// top-level Ruby in `config/initializers.rb`, loaded last by `boot.rb`:
 /// Rails runs an initializer once the app's classes are loadable.
-fn apply_boot_program(files: &mut Vec<(String, String)>, app: &App) {
-    if app.boot_program.is_empty() {
+fn apply_boot_program(files: &mut Vec<(String, String)>, app: &App, target: RequireTarget) {
+    let ruby_family = matches!(target, RequireTarget::RubyFamily);
+    let statements: Vec<&crate::expr::Expr> =
+        app.boot_program.iter().filter(|s| !ruby_family || !app.gem_load_statements.contains(&s.span)).collect();
+    if statements.is_empty() {
+        // Not left as the spinel tree wrote it: the ruby family's tree starts from that one.
+        if !app.boot_program.is_empty() {
+            files.retain(|(p, _)| p != "config/initializers.rb");
+            for (path, content) in files.iter_mut() {
+                if path == "boot.rb" {
+                    *content = content.replace("\nrequire_relative \"config/initializers\"\n", "");
+                }
+            }
+        }
         return;
     }
     let mut src = String::from(
@@ -7963,7 +7976,7 @@ fn apply_boot_program(files: &mut Vec<(String, String)>, app: &App) {
          # The app's own statements from config/initializers/ (generated — see\n\
          # ingest::boot_program), in Rails' load order.\n",
     );
-    for stmt in &app.boot_program {
+    for stmt in statements {
         src.push_str(&crate::emit::ruby::expr::emit_expr(stmt));
         src.push('\n');
     }
@@ -10819,7 +10832,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_models_aggregator(&mut files, app);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
-    apply_boot_program(&mut files, app);
+    apply_boot_program(&mut files, app, RequireTarget::Spinel);
     apply_environment_flags(&mut files, app);
     apply_app_requires(&mut files, app, RequireTarget::Spinel);
     apply_puma_boot_hooks(&mut files, app, RequireTarget::Spinel)?;

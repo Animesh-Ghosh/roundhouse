@@ -3360,6 +3360,7 @@ end
     super::body_statements::mark(&mut app);
     report_unmodelled_records(&app);
     super::unreached_gem_modules::drop(&mut app, dir);
+    super::gem_load_program::carry(&mut app);
     super::interpolated_renders::expand(&mut app);
     super::controller_delegates::expand(&mut app);
     super::active_model_super::rewrite(&mut app);
