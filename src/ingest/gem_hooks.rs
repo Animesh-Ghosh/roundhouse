@@ -206,10 +206,26 @@ pub(super) fn devise_mapping_types(app: &mut App) {
     if !writes {
         return;
     }
-    let mut models: Vec<String> = Facts::of(app).devise_models.keys().cloned().collect();
+    let facts = Facts::of(app);
+    let mut models: Vec<String> = facts.devise_models.keys().cloned().collect();
     models.sort();
     if models.is_empty() {
         return;
+    }
+    // `Mapping#validatable?` is `self.modules.include?(:validatable)`, and a mapping's modules are its model's: where every
+    // devise model answers alike, so does every mapping, as a constant the analysis can take a branch on.
+    let all: Vec<&Vec<String>> = facts.devise_models.values().collect();
+    // Not where a model's modules are not all named (`devise :database_authenticatable, *extra`).
+    let named = models.iter().all(|m| !facts.devise_configured.get(m).is_some_and(|set| set.contains("*")));
+    for lc in app.library_classes.iter_mut().filter(|c| named && c.name.0.as_str() == "Devise::Mapping") {
+        for m in lc.methods.iter_mut().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.params.is_empty()) {
+            let Some(module) = includes_module(&m.body) else { continue };
+            let having = all.iter().filter(|modules| modules.iter().any(|x| x == &module)).count();
+            if having == 0 || having == all.len() {
+                let span = m.body.span;
+                m.body = Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: having > 0 } });
+            }
+        }
     }
     app.rack_env_writes.insert("devise.mapping".to_string(), "Devise::Mapping".to_string());
     let class_of = |m: &str| crate::ty::Ty::Class {
@@ -224,7 +240,64 @@ pub(super) fn devise_mapping_types(app: &mut App) {
     app.rbs_signatures
         .entry(crate::ident::ClassId(crate::ident::Symbol::from("Devise::Mapping")))
         .or_default()
-        .insert(crate::ident::Symbol::from("to"), signature);
+        .entry(crate::ident::Symbol::from("to"))
+        .or_insert(signature);
+    // The mailer's actions are sent by name (`devise_mailer.send(notification, self, *args)` in `send_devise_notification`),
+    // which no call site types: the record is a devise model's, the token a String, as Devise's modules pass them.
+    let record = match models.as_slice() {
+        [one] => crate::ty::Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from(one.as_str())), args: vec![].into() },
+        many => crate::ty::Ty::Union {
+            variants: many.iter().map(|m| crate::ty::Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from(m.as_str())), args: vec![].into() }).collect::<Vec<_>>().into(),
+        },
+    };
+    // `DeviseController#resource` is `instance_variable_get(:"@#{resource_name}")`, the ivar a devise model's name spells.
+    app.rbs_signatures
+        .entry(crate::ident::ClassId(crate::ident::Symbol::from("DeviseController")))
+        .or_default()
+        .entry(crate::ident::Symbol::from("resource"))
+        .or_insert(crate::ty::Ty::Fn { params: Vec::new().into(), block: None, ret: record.clone().into(), effects: Default::default() });
+    if let Some(mailer) = app.library_classes.iter().find(|c| c.name.0.as_str() == "Devise::Mailer") {
+        let param = |name: &crate::ident::Symbol, ty: crate::ty::Ty, optional: bool| crate::ty::Param {
+            name: name.clone(),
+            ty: std::sync::Arc::new(ty),
+            kind: if optional { crate::ty::ParamKind::Optional } else { crate::ty::ParamKind::Required },
+        };
+        let mut actions = Vec::new();
+        for m in mailer.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+            let params: Vec<crate::ty::Param> = m.params.iter().map(|p| match p.name.as_str() {
+                "record" => param(&p.name, record.clone(), p.default.is_some()),
+                "token" => param(&p.name, crate::ty::Ty::Str, p.default.is_some()),
+                _ => param(&p.name, crate::ty::Ty::Untyped, p.default.is_some()),
+            }).collect();
+            if m.params.first().is_some_and(|p| p.name.as_str() == "record") {
+                actions.push((m.name.clone(), crate::ty::Ty::Fn { params: params.into(), block: None, ret: crate::ty::Ty::Untyped.into(), effects: Default::default() }));
+            }
+        }
+        let table = app.rbs_signatures.entry(crate::ident::ClassId(crate::ident::Symbol::from("Devise::Mailer"))).or_default();
+        for (name, sig) in actions {
+            table.entry(name).or_insert(sig);
+        }
+    }
+}
+
+/// `:x` of a `self.modules.include?(:x)` body.
+fn includes_module(body: &Expr) -> Option<String> {
+    let body = match &*body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        _ => body,
+    };
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*body.node else { return None };
+    let ExprNode::Send { recv: inner, method: modules, args: none, .. } = &*r.node else { return None };
+    if method.as_str() != "include?" || modules.as_str() != "modules" || !none.is_empty() || !inner.as_ref().is_none_or(|i| matches!(&*i.node, ExprNode::SelfRef)) {
+        return None;
+    }
+    match args.as_slice() {
+        [a] => match &*a.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some(value.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// What a gem's module answers about a model, where the answer is the Rails the compiler takes rather than the model:

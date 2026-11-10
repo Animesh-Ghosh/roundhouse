@@ -1527,6 +1527,15 @@ impl<'a> BodyTyper<'a> {
         // `m` on the receiver's class (walking its parents and mixins);
         // otherwise the gradual answer stands — silence about a method
         // is not a claim that the class lacks it.
+        // Kernel#instance_variable_set answers the value it sets (Devise's `@resource = instance_variable_set("@#{name}", record)`).
+        if method.as_str() == "instance_variable_set"
+            && let [_, value] = args
+            && let Some(ty) = value.ty.clone().filter(|t| !t.is_open())
+            // Not a receiver whose chain defines its own.
+            && !matches!(recv_ty, Some(Ty::Class { id, .. }) if self.chain_defines(id, method))
+        {
+            return ty;
+        }
         if matches!(method.as_str(), "try" | "try!") {
             // A nullable receiver (`@user.try(:username)` with `@user:
             // User?`) answers the same: `nil.try` is nil, already in the

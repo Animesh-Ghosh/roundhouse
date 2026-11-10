@@ -198,6 +198,8 @@ pub struct Analyzer {
     data_factories: HashMap<crate::span::Span, Ty>,
     /// Opt-in source analysis; the emit pipeline never registers these facts.
     class_factories: HashMap<crate::span::Span, Ty>,
+    /// [`constant_predicates`] of the app.
+    constant_predicates: HashMap<(ClassId, Symbol), bool>,
     /// Registered Data factories that use the generated initializer, so
     /// `.new` call-site types do not manufacture a source `initialize`.
     data_factories_without_custom_initialize: HashSet<ClassId>,
@@ -227,6 +229,9 @@ pub struct Analyzer {
     /// trees' shape, which typing does not change, and Phase B asked for
     /// it on every typing pass.
     written_ivars: Option<Option<BTreeSet<Symbol>>>,
+    /// Per model and library class, the ivars its instance side and its class side write, and its parent
+    /// ([`class_ivar_writes`]).
+    class_ivar_writes: Option<ClassIvarWrites>,
     /// Each class-owned unification work item's send sites and the
     /// targets it calls, as the last unification collected them. A
     /// site is read off its body's stamped types, so a body no typing
@@ -1403,6 +1408,7 @@ impl Analyzer {
             typed_constants: IdentityHashMap::default(),
             data_factories,
             class_factories: HashMap::default(),
+            constant_predicates: constant_predicates(app),
             data_factories_without_custom_initialize,
             view_seeds: None,
             callers_by_target: HashMap::default(),
@@ -1411,6 +1417,7 @@ impl Analyzer {
             fixpoint_checks: fixpoint_check::Checks::default(),
             settle: oscillation::Settle::default(),
             written_ivars: None,
+            class_ivar_writes: None,
             site_cache: Vec::new(),
             retyped_since_unify: None,
             settled_constants: None,
@@ -1432,7 +1439,7 @@ impl Analyzer {
             .with_open_classes(&self.open_classes)
             .with_typed_constants(&self.typed_constants)
             .with_data_factories(&self.data_factories);
-        let typer = typer.with_class_factories(&self.class_factories);
+        let typer = typer.with_class_factories(&self.class_factories).with_constant_predicates(&self.constant_predicates);
         if self.source_indexed { typer.with_const_resolver(self.const_resolver.clone()) } else { typer }
     }
 
@@ -1505,6 +1512,7 @@ impl Analyzer {
         self.fixpoint_checks = fixpoint_check::Checks::start();
         self.settle = oscillation::Settle::default();
         self.written_ivars = None;
+        self.class_ivar_writes = class_ivar_writes(app);
         self.site_cache = Vec::new();
         self.retyped_since_unify = None;
         self.settled_constants = None;
@@ -4338,7 +4346,21 @@ impl Analyzer {
             retyped.extend(mailers_needing_retype.iter().cloned());
         }
         let mut mailer_params_by_view: HashMap<Symbol, Ty> = HashMap::default();
+        // A mailer whose `mail` looks its template up renders one named after its action under another directory too
+        // (Devise's scoped `users/mailer/confirmation_instructions`).
+        let looking_up = crate::lower::mailer_templates::lookup_dirs(app);
 
+        // A mailer's modules write its ivars too: Devise's `devise_mail` sets `@resource` and `@email` from
+        // `Devise::Mailers::Helpers`, which its templates read. As last typed: the fixpoint reruns this.
+        // A module's reopenings are one module: each declaration adds its writes and includes.
+        let mut module_ivars: HashMap<ClassId, (HashMap<Symbol, Ty>, Vec<ClassId>)> = HashMap::default();
+        for c in app.library_classes.iter().filter(|c| c.is_module) {
+            let (found, includes) = module_ivars.entry(c.name.clone()).or_default();
+            for m in c.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+                extract_ivar_assignments(&m.body, found);
+            }
+            includes.extend(c.includes.iter().filter(|i| !includes.contains(i)).cloned().collect::<Vec<_>>());
+        }
         let _typing_library = crate::timings::begin("typing: library");
         // Preserve each mailer's registry write before its original position.
         let mut start = 0;
@@ -4411,6 +4433,27 @@ impl Analyzer {
             for method in &lc.methods {
                 extract_ivar_assignments(&method.body, &mut flow_ivars);
             }
+            if mailer_names.contains(&lc_name) {
+                let mut pending: Vec<ClassId> = lc.includes.clone();
+                let mut seen: crate::det::HashSet<ClassId> = crate::det::HashSet::default();
+                while let Some(m) = pending.pop() {
+                    if !seen.insert(m.clone()) {
+                        continue;
+                    }
+                    for (name, (found, includes)) in module_ivars.iter().filter(|(n, _)| **n == m || n.0.as_str().ends_with(&format!("::{}", m.0.as_str()))) {
+                        let _ = name;
+                        // Every included module's write is a value the ivar can hold.
+                        for (k, v) in found {
+                            let joined = match flow_ivars.get(k) {
+                                Some(have) => crate::analyze::body::union_of(have.clone(), v.clone()),
+                                None => v.clone(),
+                            };
+                            flow_ivars.insert(k.clone(), joined);
+                        }
+                        pending.extend(includes.iter().cloned());
+                    }
+                }
+            }
             // A CONTROLLER CONCERN's ivars are the includer's. Its
             // methods run on the controller and read what the
             // controller's filters set, so the module's own body is
@@ -4480,6 +4523,23 @@ impl Analyzer {
                     }
                     let view_name = Symbol::from(format!("{prefix}/{}", method.name.as_str()).as_str());
                     let params = mailer_with_params.get(&lc_name).map(|row| Ty::Record { row: row.clone() });
+                    if let Some((dirs, actions)) = looking_up.get(lc_name.0.as_str()) {
+                        // Only the templates the lookup can reach (`LookupDirs`): named after this action, or after a
+                        // name the code spells, which any action can pass as `template_name:`.
+                        let reached = |n: &Symbol| n.as_str().rsplit_once('/').is_some_and(|(dir, name)| dirs.admits_template(dir, name, actions));
+                        let others: Vec<Symbol> = app
+                            .views
+                            .iter()
+                            .map(|v| v.name.clone())
+                            .filter(|n| *n != view_name && reached(n))
+                            .filter(|n| n.as_str().rsplit_once('/').is_some_and(|(dir, name)| !name.starts_with('_') && !dir.starts_with("layouts") && (name == method.name.as_str() || !actions.iter().any(|a| a == name))))
+                            .collect::<crate::det::HashSet<_>>()
+                            .into_iter()
+                            .collect();
+                        for other in others.iter() {
+                            views.push((other.clone(), params.clone(), ivars.clone()));
+                        }
+                    }
                     views.push((view_name, params, ivars));
                 }
             }
@@ -5175,6 +5235,21 @@ impl Analyzer {
         }
         if let Some(bp) = &method.block_param {
             ctx.local_bindings.insert(bp.name.clone(), captured_block_ty());
+        }
+        // Not left unresolved: Ruby reads an ivar nothing writes as nil, as an action's (`app_written_ivars`). Only what
+        // could write this object's: its own class's side, its parents' and subclasses', and any module's
+        // (Devise's `Models.config` readers on `User`, whose writers nothing calls).
+        if let Some(writes) = &self.class_ivar_writes
+            && writes.classes.contains_key(class_id)
+        {
+            let side = matches!(method.receiver, crate::dialect::MethodReceiver::Class);
+            let mut reads = BTreeSet::new();
+            collect_ivar_reads(&method.body, &mut reads);
+            for name in reads {
+                if !name.as_str().starts_with('_') && !ctx.ivar_bindings.contains_key(&name) && !writes.may_write(class_id, side, &name) {
+                    ctx.ivar_bindings.insert(name, Ty::Nil);
+                }
+            }
         }
         let rebound = body::rebound_locals(&method.body);
         ctx.call_site_params = method.params.iter()
@@ -7735,6 +7810,171 @@ fn app_written_ivars(app: &App) -> Option<BTreeSet<Symbol>> {
         }
     }
     (!dynamic).then_some(out)
+}
+
+/// Each instance method whose body is a literal `true` or `false`, takes nothing, and has a name no other method of the
+/// app defines (so no subclass or other receiver answers it otherwise).
+fn constant_predicates(app: &App) -> HashMap<(ClassId, Symbol), bool> {
+    let mut defs: HashMap<Symbol, usize> = HashMap::default();
+    for m in app.library_classes.iter().flat_map(|c| c.methods.iter()).chain(app.models.iter().flat_map(|m| m.methods())) {
+        *defs.entry(m.name.clone()).or_default() += 1;
+    }
+    let mut out = HashMap::default();
+    for c in &app.library_classes {
+        for m in c.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.params.is_empty()) {
+            let body = match &*m.body.node {
+                ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+                _ => &m.body,
+            };
+            if let ExprNode::Lit { value: Literal::Bool { value } } = &*body.node
+                && defs.get(&m.name) == Some(&1)
+                && !crate::emit::audit::OBJECT_METHODS.contains(&m.name.as_str())
+            {
+                out.insert((c.name.clone(), m.name.clone()), *value);
+            }
+        }
+    }
+    out
+}
+
+#[derive(Default)]
+pub(crate) struct ClassIvarEntry {
+    instance: BTreeSet<Symbol>,
+    class: BTreeSet<Symbol>,
+    parent: Option<ClassId>,
+    /// A computed `instance_variable_set` in it, or in a module it mixes in: any ivar.
+    any: bool,
+    mixins: Vec<ClassId>,
+}
+
+pub(crate) struct ClassIvarWrites {
+    classes: HashMap<ClassId, ClassIvarEntry>,
+    /// What any module writes, on either side: a module's methods write whichever object mixes it in.
+    modules: BTreeSet<Symbol>,
+    /// The modules with a computed `instance_variable_set`.
+    dynamic_modules: BTreeSet<ClassId>,
+}
+
+impl ClassIvarWrites {
+    fn may_write(&self, class: &ClassId, class_side: bool, name: &Symbol) -> bool {
+        if self.modules.contains(name) {
+            return true;
+        }
+        let ancestors = |c: &ClassId| {
+            let mut out = vec![c.clone()];
+            while let Some(p) = out.last().and_then(|c| self.classes.get(c)).and_then(|e| e.parent.clone()) {
+                if out.contains(&p) || out.len() > 64 {
+                    break;
+                }
+                out.push(p);
+            }
+            out
+        };
+        let own = ancestors(class);
+        // A parent outside the index (ActiveRecord::Base) writes its instances' ivars (`@destroyed`); its class side is
+        // the app's to configure.
+        if !class_side && own.last().and_then(|c| self.classes.get(c)).and_then(|e| e.parent.as_ref()).is_some_and(|p| !self.classes.contains_key(p) && p.0.as_str() != "Object") {
+            return true;
+        }
+        self.classes.iter().any(|(c, e)| {
+            (own.contains(c) || ancestors(c).contains(class))
+                && (e.any
+                    || e.mixins.iter().any(|m| self.dynamic_modules.contains(m))
+                    || if class_side { e.class.contains(name) } else { e.instance.contains(name) })
+        })
+    }
+}
+
+fn class_ivar_writes(app: &App) -> Option<ClassIvarWrites> {
+    fn walk(e: &Expr, out: &mut BTreeSet<Symbol>, dynamic: &mut bool) {
+        match &*e.node {
+            ExprNode::Assign { target: LValue::Ivar { name }, .. } | ExprNode::OpAssign { target: LValue::Ivar { name }, .. } => {
+                out.insert(name.clone());
+            }
+            ExprNode::MultiAssign { targets, .. } => {
+                out.extend(targets.iter().filter_map(|t| match t {
+                    LValue::Ivar { name } => Some(name.clone()),
+                    _ => None,
+                }));
+            }
+            ExprNode::Send { method, args, .. } if method.as_str() == "instance_variable_set" => match args.first().map(|a| &*a.node) {
+                Some(ExprNode::Lit { value: Literal::Str { value } }) => {
+                    out.insert(Symbol::from(value.trim_start_matches('@')));
+                }
+                Some(ExprNode::Lit { value: Literal::Sym { value } }) => {
+                    out.insert(Symbol::from(value.as_str().trim_start_matches('@')));
+                }
+                _ => *dynamic = true,
+            },
+            ExprNode::Send { method, args, .. } if matches!(method.as_str(), "attr_writer" | "attr_accessor") => {
+                out.extend(args.iter().filter_map(|a| match &*a.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+                    _ => None,
+                }));
+            }
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| walk(c, out, dynamic));
+    }
+    let mut classes: HashMap<ClassId, ClassIvarEntry> = HashMap::default();
+    let mut modules = BTreeSet::new();
+    let mut dynamic_modules = BTreeSet::new();
+    for lc in &app.library_classes {
+        if lc.is_module {
+            let mut dynamic = false;
+            for m in &lc.methods {
+                walk(&m.body, &mut modules, &mut dynamic);
+            }
+            if dynamic {
+                dynamic_modules.insert(lc.name.clone());
+            }
+            continue;
+        }
+        let entry = classes.entry(lc.name.clone()).or_default();
+        entry.parent = entry.parent.clone().or_else(|| lc.parent.clone());
+        entry.mixins.extend(lc.includes.iter().cloned());
+        let mut dynamic = false;
+        for m in &lc.methods {
+            let side = if m.receiver == crate::dialect::MethodReceiver::Class { &mut entry.class } else { &mut entry.instance };
+            walk(&m.body, side, &mut dynamic);
+        }
+        for e in lc.unknown_calls.iter().chain(&lc.class_ivar_initializers).chain(lc.constants.iter().map(|(_, v)| v)) {
+            walk(e, &mut entry.class, &mut dynamic);
+        }
+        entry.any |= dynamic;
+    }
+    for model in &app.models {
+        let entry = classes.entry(model.name.clone()).or_default();
+        entry.parent = entry.parent.clone().or_else(|| model.parent.clone());
+        let mut dynamic = false;
+        for item in &model.body {
+            match item {
+                crate::dialect::ModelBodyItem::Method { method: m, .. } => {
+                    let side = if m.receiver == crate::dialect::MethodReceiver::Class { &mut entry.class } else { &mut entry.instance };
+                    walk(&m.body, side, &mut dynamic);
+                }
+                crate::dialect::ModelBodyItem::Unknown { expr, .. } => {
+                    walk(expr, &mut entry.class, &mut dynamic);
+                    if let ExprNode::Send { recv: None, method, args, .. } = &*expr.node
+                        && matches!(method.as_str(), "include" | "extend" | "prepend")
+                    {
+                        entry.mixins.extend(args.iter().filter_map(|a| match &*a.node {
+                            ExprNode::Const { path } => Some(ClassId(Symbol::from(
+                                path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::"),
+                            ))),
+                            _ => None,
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+        entry.any |= dynamic;
+    }
+    for (model, m) in &app.macro_includes {
+        classes.entry(model.clone()).or_default().mixins.push(m.clone());
+    }
+    Some(ClassIvarWrites { classes, modules, dynamic_modules })
 }
 
 fn collect_ivar_reads(e: &Expr, out: &mut BTreeSet<Symbol>) {
@@ -11982,7 +12222,7 @@ impl Analyzer {
     /// is measured on a copy. Destructured without `..`, so a new field has
     /// to be listed here; `Copy` fields own no heap.
     pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
-        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, defaulted_param_slots, source_gem_classes, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
+        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, defaulted_param_slots, source_gem_classes, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, constant_predicates, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, class_ivar_writes, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
         let mut freed: Vec<(&str, i64)> = vec![
             ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
             ("module_self_types", crate::memory_census::freed_by(|| drop(module_self_types))),
@@ -12008,6 +12248,7 @@ impl Analyzer {
             ("typed_constants", crate::memory_census::freed_by(|| drop(typed_constants))),
             ("data_factories", crate::memory_census::freed_by(|| drop(data_factories))),
             ("class_factories", crate::memory_census::freed_by(|| drop(class_factories))),
+            ("constant_predicates", crate::memory_census::freed_by(|| drop(constant_predicates))),
             ("data_factories_without_custom_initialize", crate::memory_census::freed_by(|| drop(data_factories_without_custom_initialize))),
             ("view_seeds", crate::memory_census::freed_by(|| drop(view_seeds))),
             ("callers_by_target", crate::memory_census::freed_by(|| drop(callers_by_target))),
@@ -12016,6 +12257,7 @@ impl Analyzer {
             ("fixpoint_checks", crate::memory_census::freed_by(|| drop(fixpoint_checks))),
             ("settle", crate::memory_census::freed_by(|| drop(settle))),
             ("written_ivars", crate::memory_census::freed_by(|| drop(written_ivars))),
+            ("class_ivar_writes", crate::memory_census::freed_by(|| drop(class_ivar_writes))),
             ("site_cache", crate::memory_census::freed_by(|| drop(site_cache))),
             ("retyped_since_unify", crate::memory_census::freed_by(|| drop(retyped_since_unify))),
             ("settled_constants", crate::memory_census::freed_by(|| drop(settled_constants))),
