@@ -11060,6 +11060,94 @@ puts "ok"
         .assert_passes();
 }
 
+/// `row.pluralize` on a receiver of no settled type, in a controller. An
+/// app class outside the controllers that defines `pluralize` owns the
+/// call (Rails 8.1.4 dispatches to it).
+fn an_untyped_pluralize_receiver_app() -> emit_and_run::Overlay {
+    emit_and_run::real_blog().write(
+        "app/controllers/probes_controller.rb",
+        r#"class ProbesController < ApplicationController
+  def tag_of(row)
+    row.pluralize
+  end
+end
+"#,
+    )
+}
+
+#[test]
+fn a_library_class_pluralize_owns_an_untyped_controller_call() {
+    an_untyped_pluralize_receiver_app()
+        .write("app/models/label.rb", "class Label\n  def pluralize\n    \"custom\"\n  end\nend\n")
+        .run_ruby(
+            r#"require_relative "app/controllers/probes_controller"
+raise "library class override lost" unless ProbesController.allocate.tag_of(Label.new) == "custom"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+#[test]
+fn a_model_pluralize_owns_an_untyped_controller_call() {
+    an_untyped_pluralize_receiver_app()
+        .write(
+            "app/models/comment.rb",
+            r#"class Comment < ApplicationRecord
+  belongs_to :article
+  validates :body, presence: true
+
+  def pluralize
+    "custom"
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r#"require_relative "app/controllers/probes_controller"
+raise "model override lost" unless ProbesController.allocate.tag_of(Comment.new) == "custom"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Only a String has `pluralize` (Rails 8.1.4 raises NoMethodError on a number).
+#[test]
+fn a_number_raises_in_an_untyped_controller_call() {
+    an_untyped_pluralize_receiver_app()
+        .run_ruby(
+            r#"require_relative "app/controllers/probes_controller"
+begin
+  out = ProbesController.allocate.tag_of(5)
+  raise "answered: #{out}"
+rescue NoMethodError => e
+  raise e.message unless e.message == "undefined method 'pluralize' for an instance of Integer"
+end
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
+/// A helper's `pluralize(count, word)` is not what `row.pluralize` reaches.
+#[test]
+fn a_helper_pluralize_leaves_an_untyped_controller_call_lowered() {
+    an_untyped_pluralize_receiver_app()
+        .write(
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n  def pluralize(count, word)\n    \"custom\"\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"require_relative "app/controllers/probes_controller"
+out = ProbesController.allocate.tag_of("status")
+raise "helper took the call: #{out}" unless out == "statuses"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
 #[test]
 fn an_app_tag_helper_override_owns_helper_and_view_calls() {
     emit_and_run::real_blog()

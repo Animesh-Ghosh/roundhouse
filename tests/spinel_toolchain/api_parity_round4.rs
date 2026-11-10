@@ -229,6 +229,10 @@ fn api_parity_round4_fixes_run_on_spinel() {
         server.log()
     );
 
+    // A numeric value has no `pluralize` (Rails 8.1.4 answers 500).
+    let numeric = server.post("/widgets/plural_items", json, r#"{"items":[{"category":5}]}"#);
+    assert_eq!(numeric.status, 500, "pluralize on a number: {}\n{}", numeric.body, server.log());
+
     let show = server.get("/widgets/1.json");
     assert_eq!(
         show.body,
