@@ -391,14 +391,136 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+use super::prism_api::PrismLocation;
+
+/// `begin require "feature" … rescue LoadError … end` at a file's top level, where the tree provides
+/// the feature: the file as Ruby runs it, the `begin` side alone. The rest is blanked byte for byte, so
+/// every span still points into the file as written.
+fn loaded_begins(text: &str, provided: &dyn Fn(&str) -> bool) -> Option<String> {
+    let result = ruby_prism::parse(text.as_bytes());
+    let program = result.node();
+    let program = program.as_program_node()?;
+    let mut blanks: Vec<(usize, usize)> = Vec::new();
+    for stmt in program.statements().body().iter() {
+        let Some(begin) = stmt.as_begin_node() else { continue };
+        let (Some(body), Some(rescue)) = (begin.statements(), begin.rescue_clause()) else { continue };
+        if begin.else_clause().is_some() || begin.ensure_clause().is_some() || rescue.subsequent().is_some() {
+            continue;
+        }
+        let exceptions: Vec<_> = rescue.exceptions().iter().collect();
+        let [only] = exceptions.as_slice() else { continue };
+        if super::util::constant_path_of(only).is_none_or(|p| p.join("::") != "LoadError") || rescue.reference().is_some() {
+            continue;
+        }
+        // Not when a later statement loads a file too: its LoadError would take the fallback.
+        if body.body().iter().skip(1).any(|stmt| loads_files(&stmt)) {
+            continue;
+        }
+        let Some(first) = body.body().iter().next() else { continue };
+        let Some(call) = first.as_call_node() else { continue };
+        if call.receiver().is_some() || super::util::constant_id_str(&call.name()) != "require" {
+            continue;
+        }
+        let args: Vec<_> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+        let [arg] = args.as_slice() else { continue };
+        let Some(feature) = arg.as_string_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned()) else { continue };
+        if !provided(&feature) {
+            continue;
+        }
+        let start = begin.location().start_offset();
+        blanks.push((start, start + "begin".len()));
+        blanks.push((rescue.location().start_offset(), begin.location().end_offset()));
+    }
+    if blanks.is_empty() {
+        return None;
+    }
+    let mut bytes = text.as_bytes().to_vec();
+    for (from, to) in blanks {
+        for b in &mut bytes[from..to] {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn loads_files(node: &ruby_prism::Node<'_>) -> bool {
+    struct Find(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Find {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if node.receiver().is_none() && matches!(super::util::constant_id_str(&node.name()).as_ref(), "require" | "require_relative" | "load" | "autoload") {
+                self.0 = true;
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    let mut find = Find(false);
+    ruby_prism::Visit::visit(&mut find, node);
+    find.0
+}
+
 pub(super) struct MountVfs<'a, V: Vfs + ?Sized> {
     pub inner: &'a V,
     pub gems: &'a [SourceGem],
+    /// The installed Rails frameworks' `lib/` dirs, by the feature root each answers (`active_support`).
+    pub framework_libs: &'a [(String, PathBuf)],
+}
+
+/// Framework features every Rails the compiler takes (7.0 on) ships, for a tree whose gem roots hold no
+/// installed framework to look in: `constant_accessor` is Active Support's since 5.1.
+const EVERY_RAILS_FEATURES: &[&str] = &["active_support/deprecation/constant_accessor"];
+
+/// The `lib/` of each Rails framework the lock resolves and a gem root holds: a framework feature
+/// is provided when its file is there (`active_support/deprecation/constant_accessor.rb`).
+pub(super) fn framework_libs<V: Vfs + ?Sized>(vfs: &V, dir: &Path, lock: Option<&Lockfile>) -> Vec<(String, PathBuf)> {
+    const FRAMEWORKS: &[(&str, &[&str])] = &[
+        ("activesupport", &["active_support"]),
+        ("activemodel", &["active_model"]),
+        ("activerecord", &["active_record", "arel"]),
+        ("actionpack", &["action_controller", "action_dispatch", "abstract_controller", "action_pack"]),
+        ("actionview", &["action_view"]),
+        ("activejob", &["active_job"]),
+        ("actionmailer", &["action_mailer"]),
+        ("actioncable", &["action_cable"]),
+        ("activestorage", &["active_storage"]),
+        ("actiontext", &["action_text"]),
+        ("actionmailbox", &["action_mailbox"]),
+        ("railties", &["rails"]),
+    ];
+    let Some(lock) = lock else { return Vec::new() };
+    let roots = crate::i18n::gems::gem_roots(vfs, dir);
+    let mut out = Vec::new();
+    for (gem, features) in FRAMEWORKS {
+        let Some(version) = lock.version_of(gem) else { continue };
+        let Some(installed) = crate::i18n::gems::installed_gem(vfs, &roots, gem, version) else { continue };
+        for feature in *features {
+            out.push((feature.to_string(), installed.join("lib")));
+        }
+    }
+    out
 }
 
 impl<V: Vfs + ?Sized> MountVfs<'_, V> {
     fn mounted(&self, path: &Path) -> Option<(&SourceGem, PathBuf)> {
         self.gems.iter().find_map(|gem| path.strip_prefix(&gem.mount).ok().map(|rel| (gem, rel.to_path_buf())))
+    }
+
+    fn as_loaded(&self, text: String) -> String {
+        if !text.contains("LoadError") {
+            return text;
+        }
+        // Not a gem's own file: what it requires in turn may be absent, and Ruby would take the fallback then.
+        let provided = |feature: &str| {
+            let feature = feature.trim_end_matches(".rb");
+            let root = feature.split('/').next().unwrap_or(feature);
+            let mut libs = self.framework_libs.iter().filter(|(r, _)| r == root).peekable();
+            if libs.peek().is_none() {
+                return EVERY_RAILS_FEATURES.contains(&feature);
+            }
+            libs.any(|(_, lib)| self.inner.exists(&lib.join(format!("{feature}.rb"))))
+        };
+        loaded_begins(&text, &provided).unwrap_or(text)
     }
 
     fn file(&self, path: &Path) -> io::Result<PathBuf> {
@@ -412,11 +534,22 @@ impl<V: Vfs + ?Sized> MountVfs<'_, V> {
 
 impl<V: Vfs + ?Sized> Vfs for MountVfs<'_, V> {
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        self.inner.read(&self.file(path)?)
+        let bytes = self.inner.read(&self.file(path)?)?;
+        if self.mounted(path).is_none() || path.extension().is_none_or(|e| e != "rb") {
+            return Ok(bytes);
+        }
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(self.as_loaded(text).into_bytes()),
+            Err(err) => Ok(err.into_bytes()),
+        }
     }
 
     fn read_to_string(&self, path: &Path) -> io::Result<String> {
-        self.inner.read_to_string(&self.file(path)?)
+        let text = self.inner.read_to_string(&self.file(path)?)?;
+        if self.mounted(path).is_none() {
+            return Ok(text);
+        }
+        Ok(self.as_loaded(text))
     }
 
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
@@ -685,5 +818,19 @@ mod tests {
         assert!(!files(0).iter().any(|f| f.contains("linked") || f.contains("secret")), "{:?}", files(0));
         assert_eq!(files(1), vec!["lib/plain.rb"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_load_error_fallback_is_blanked_where_the_feature_is_provided() {
+        let text = "begin\n  require \"active_support/x\"\n  A = 1\nrescue LoadError\n  A = 2\nend\n";
+        let loaded = super::loaded_begins(text, &|f| f == "active_support/x").expect("rewritten");
+        assert_eq!(loaded.len(), text.len());
+        assert!(loaded.contains("A = 1") && !loaded.contains("A = 2") && !loaded.contains("rescue"), "{loaded}");
+        assert_eq!(loaded.lines().count(), text.lines().count());
+        assert!(super::loaded_begins(text, &|_| false).is_none());
+        // Not a rescue of more than LoadError, nor one that keeps the error: the fallback can run for another reason.
+        assert!(super::loaded_begins(&text.replace("rescue LoadError", "rescue LoadError, NameError"), &|_| true).is_none());
+        assert!(super::loaded_begins(&text.replace("rescue LoadError", "rescue LoadError => e"), &|_| true).is_none());
+        assert!(super::loaded_begins(&text.replace("  A = 1\n", "  require \"optional\"\n"), &|_| true).is_none());
     }
 }

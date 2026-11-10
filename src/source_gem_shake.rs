@@ -499,8 +499,6 @@ impl Walk<'_, '_> {
     }
 
     fn call(&mut self, call: Call) {
-        if std::env::var("RH_DBG").is_ok() && call.1 == "build" { eprintln!("DBG call build {:?}", match &call.0 { Target::Any => "any".to_string(), Target::Virtual(c, s) => format!("virt {c:?} {s}"), Target::Super(c, s) => format!("super {c} {s}") }); }
-
         if self.calls.insert(call.clone()) {
             self.new_calls.push(call);
         }
