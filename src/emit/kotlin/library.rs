@@ -179,10 +179,12 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         // emit's class constants. `lazy` (synchronized) rather than an
         // eager `val`, so no object's initializer depends on the order in
         // which the JVM happens to load ViewHelpers and Importmap. Views
-        // only: a runtime module's constants are already emitted at file
-        // scope by the runtime-unit path.
+        // only (`Views::<Dir>`, and the bare `Views` a top-level template
+        // lowers to): a runtime module's constants are already emitted at
+        // file scope by the runtime-unit path.
+        let view_name = lc.name.0.as_str();
         let view_constants: &[(crate::ident::Symbol, Expr)] =
-            if lc.name.0.as_str().starts_with("Views::") { &lc.constants } else { &[] };
+            if view_name == "Views" || view_name.starts_with("Views::") { &lc.constants } else { &[] };
         for (name, value) in view_constants {
             out.push_str(&format!("    val {} by lazy {{ {} }}\n", name.as_str(), emit_expr(value)));
         }

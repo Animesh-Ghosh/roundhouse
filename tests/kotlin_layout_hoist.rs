@@ -41,6 +41,26 @@ fn the_kotlin_layout_reads_its_static_head_tags_from_lazy_constants() {
     }
 }
 
+/// A template at the top of `app/views/` lowers to the bare `Views`
+/// module, not a `Views::<Dir>` one; its hoisted constant must still be
+/// declared on the object, or the reference to it does not compile
+/// (CodeRabbit on #2022).
+#[test]
+fn a_top_level_templates_hoisted_constant_is_declared() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write("app/views/about.html.erb", "<%= stylesheet_link_tag \"about\" %>\n")
+        .emit(BuildTarget::Kotlin);
+    assert!(errors.is_empty(), "{errors:?}");
+    let views = std::fs::read_to_string(emitted.join("src/main/kotlin/app/views/Views.kt"))
+        .expect("the top-level template's `Views` object");
+    assert!(views.contains("object Views {"), "{views}");
+    let reference = views.find("io.append(HOISTED_STYLESHEET_LINK_TAG_ABOUT)").expect("the hoisted stylesheet link");
+    assert!(
+        views[..reference].contains("val HOISTED_STYLESHEET_LINK_TAG_ABOUT by lazy { ViewHelpers.stylesheetLinkTag(\"about\""),
+        "referenced but not declared:\n{views}"
+    );
+}
+
 /// Only a view module's constants are rendered on its object: a runtime
 /// module's constants are already file-scope `val`s, and a second copy
 /// on the object would shadow them.
