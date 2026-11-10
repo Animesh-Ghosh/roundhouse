@@ -140,6 +140,8 @@ mod source_gem_autoload;
 mod source_gem_load_order;
 #[path = "emit_and_run/gem_file_statements.rs"]
 mod gem_file_statements;
+#[path = "emit_and_run/boot_with_options.rs"]
+mod boot_with_options;
 #[path = "emit_and_run/unresolved_param_rbs.rs"]
 mod unresolved_param_rbs;
 #[path = "emit_and_run/declared_sig_rbs.rs"]

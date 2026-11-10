@@ -3368,6 +3368,7 @@ end
     super::container_specialize::specialize(&mut app);
     super::unreachable_views::mark(&mut app);
     mime_extension_lookups(&mut app);
+    super::option_merger::expand(&mut app);
     for d in crate::controller_layout::diagnostics(&app.controllers, &app.views) {
         super::prism::push(d);
     }
