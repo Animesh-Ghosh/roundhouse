@@ -3607,8 +3607,17 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     let view_ivars = view_assigned_ivars(app);
     // Instance-method names the app defines anywhere that collide with a
     // framework view helper; only these need the ancestry lookup above.
-    let app_defines_pluralize =
-        lcs.iter().any(|lc| lc.methods.iter().any(|m| m.name.as_str() == "pluralize"));
+    // Read from the whole app, not this run's slice: a controller's untyped
+    // receiver can be a model or a library class. A helper's `pluralize` is
+    // called bare, so a receiver never reaches one. The index names one
+    // module per method, so a second helper defining it is only in
+    // `app.helper_modules`.
+    let app_defines_pluralize = app.models.iter().any(|m| m.methods().any(|d| d.name.as_str() == "pluralize"))
+        || lcs
+            .iter()
+            .chain(app.library_classes.iter())
+            .filter(|lc| !helper_modules.contains(&lc.name) && !app.helper_modules.contains(&lc.name))
+            .any(|lc| lc.methods.iter().any(|m| m.name.as_str() == "pluralize"));
     let app_framework_helper_names: BTreeSet<String> = app
         .models
         .iter()
@@ -4876,11 +4885,15 @@ fn ground_string_pluralize(expr: &mut Expr, app_defines_pluralize: bool) {
     };
 }
 
-/// A String or untyped value, possibly nilable (a Hash read nests the nil).
+/// A String or a value of no settled type, possibly nilable (a Hash read
+/// nests the nil). An element of a `params` list reads as a `ParamValue`,
+/// and a block over a list built from `permit(...).to_h` leaves its element
+/// an unresolved variable.
 fn pluralize_receiver_may_be_string(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
     match ty {
-        Ty::Str | Ty::Untyped => true,
+        Ty::Str | Ty::Untyped | Ty::Var { .. } => true,
+        Ty::Class { id, .. } => id.0.as_str() == "Roundhouse::ParamValue",
         Ty::Union { variants } => {
             variants.iter().any(|v| !matches!(v, Ty::Nil))
                 && variants.iter().all(|v| matches!(v, Ty::Nil) || pluralize_receiver_may_be_string(v))

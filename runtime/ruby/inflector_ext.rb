@@ -31,6 +31,7 @@ module Inflector
   # String method does.
   def self.pluralize_word(word, count)
     raise NoMethodError, "undefined method 'pluralize' for nil" if word.nil?
+    raise NoMethodError, "undefined method 'pluralize' for an instance of #{word.class}" unless word.is_a?(String)
     s = word.to_s
     return s if count == 1 || s.empty?
     d = s.downcase
