@@ -546,6 +546,8 @@ pub struct BodyTyper<'a> {
     typed_constants: Option<&'a IdentityHashMap<DeclarationId, Ty>>,
     data_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
     class_factories: Option<&'a HashMap<crate::span::Span, Ty>>,
+    /// Instance methods whose body is a literal `true` or `false` and whose name nothing else defines.
+    constant_predicates: Option<&'a HashMap<(ClassId, Symbol), bool>>,
     /// Methods whose value is an ActiveSupport inquirer (see
     /// [`crate::analyze::inquiry`]); empty for the bare constructor,
     /// which the runtime-source typer and tests use.
@@ -697,6 +699,7 @@ impl<'a> BodyTyper<'a> {
             typed_constants: None,
             data_factories: None,
             class_factories: None,
+            constant_predicates: None,
             inquirers: None,
             i18n: None,
             helper_modules: None,
@@ -873,6 +876,11 @@ impl<'a> BodyTyper<'a> {
         self
     }
 
+    pub(super) fn with_constant_predicates(mut self, predicates: &'a HashMap<(ClassId, Symbol), bool>) -> Self {
+        self.constant_predicates = Some(predicates);
+        self
+    }
+
     /// Name the app's inquirer-returning methods, so their predicates
     /// type as Bool instead of failing dispatch on `Str`.
     pub fn with_inquirers(
@@ -908,6 +916,14 @@ impl<'a> BodyTyper<'a> {
             && self.superclass_never_responds(cond, ctx)
         {
             *expr = else_branch.clone();
+        }
+        // `if devise_mapping.validatable?` over a predicate that answers one constant: Ruby takes one branch, and the
+        // other, typed, would report what never runs.
+        if let ExprNode::If { cond, .. } = &mut *expr.node
+            && let Some(answer) = self.constant_predicate(cond, ctx)
+            && let ExprNode::If { then_branch, else_branch, .. } = &*expr.node
+        {
+            *expr = if answer { then_branch.clone() } else { else_branch.clone() };
         }
         // A direct self receiver keeps main's lookup type and identity evidence.
         let ty = if receiver && matches!(&*expr.node, ExprNode::SelfRef) {
@@ -1226,6 +1242,22 @@ impl<'a> BodyTyper<'a> {
             // class, unless the app overrides `new` on them.
             ExprNode::Send { recv: Some(r), method, .. } => self.class_factory_receiver(r, method, ctx),
             _ => false,
+        }
+    }
+
+    fn constant_predicate(&self, cond: &mut Expr, ctx: &Ctx) -> Option<bool> {
+        let predicates = self.constant_predicates?;
+        let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *cond.node else { return None };
+        if !args.is_empty() {
+            return None;
+        }
+        self.analyze_expr(r, ctx);
+        match r.ty.as_ref().map(Ty::peel_nilable) {
+            Some(Ty::Class { id, .. }) => predicates.get(&(id.clone(), method.clone())).copied(),
+            // A receiver of no known type (a view's `devise_mapping`, a stateful `helper_method`): the one definition of
+            // the name is the only one that can answer it, as any other receiver raises NoMethodError.
+            None | Some(Ty::Var { .. } | Ty::Untyped) => predicates.iter().find(|((_, m), _)| m == method).map(|(_, v)| *v),
+            _ => None,
         }
     }
 

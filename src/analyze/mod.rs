@@ -198,6 +198,8 @@ pub struct Analyzer {
     data_factories: HashMap<crate::span::Span, Ty>,
     /// Opt-in source analysis; the emit pipeline never registers these facts.
     class_factories: HashMap<crate::span::Span, Ty>,
+    /// [`constant_predicates`] of the app.
+    constant_predicates: HashMap<(ClassId, Symbol), bool>,
     /// Registered Data factories that use the generated initializer, so
     /// `.new` call-site types do not manufacture a source `initialize`.
     data_factories_without_custom_initialize: HashSet<ClassId>,
@@ -1406,6 +1408,7 @@ impl Analyzer {
             typed_constants: IdentityHashMap::default(),
             data_factories,
             class_factories: HashMap::default(),
+            constant_predicates: constant_predicates(app),
             data_factories_without_custom_initialize,
             view_seeds: None,
             callers_by_target: HashMap::default(),
@@ -1436,7 +1439,7 @@ impl Analyzer {
             .with_open_classes(&self.open_classes)
             .with_typed_constants(&self.typed_constants)
             .with_data_factories(&self.data_factories);
-        let typer = typer.with_class_factories(&self.class_factories);
+        let typer = typer.with_class_factories(&self.class_factories).with_constant_predicates(&self.constant_predicates);
         if self.source_indexed { typer.with_const_resolver(self.const_resolver.clone()) } else { typer }
     }
 
@@ -7757,6 +7760,31 @@ fn app_written_ivars(app: &App) -> Option<BTreeSet<Symbol>> {
     (!dynamic).then_some(out)
 }
 
+/// Each instance method whose body is a literal `true` or `false`, takes nothing, and has a name no other method of the
+/// app defines (so no subclass or other receiver answers it otherwise).
+fn constant_predicates(app: &App) -> HashMap<(ClassId, Symbol), bool> {
+    let mut defs: HashMap<Symbol, usize> = HashMap::default();
+    for m in app.library_classes.iter().flat_map(|c| c.methods.iter()).chain(app.models.iter().flat_map(|m| m.methods())) {
+        *defs.entry(m.name.clone()).or_default() += 1;
+    }
+    let mut out = HashMap::default();
+    for c in &app.library_classes {
+        for m in c.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.params.is_empty()) {
+            let body = match &*m.body.node {
+                ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+                _ => &m.body,
+            };
+            if let ExprNode::Lit { value: Literal::Bool { value } } = &*body.node
+                && defs.get(&m.name) == Some(&1)
+                && !crate::emit::audit::OBJECT_METHODS.contains(&m.name.as_str())
+            {
+                out.insert((c.name.clone(), m.name.clone()), *value);
+            }
+        }
+    }
+    out
+}
+
 #[derive(Default)]
 pub(crate) struct ClassIvarEntry {
     instance: BTreeSet<Symbol>,
@@ -12137,7 +12165,7 @@ impl Analyzer {
     /// is measured on a copy. Destructured without `..`, so a new field has
     /// to be listed here; `Copy` fields own no heap.
     pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
-        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, defaulted_param_slots, source_gem_classes, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, class_ivar_writes, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
+        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, defaulted_param_slots, source_gem_classes, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, constant_predicates, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, class_ivar_writes, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
         let mut freed: Vec<(&str, i64)> = vec![
             ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
             ("module_self_types", crate::memory_census::freed_by(|| drop(module_self_types))),
@@ -12163,6 +12191,7 @@ impl Analyzer {
             ("typed_constants", crate::memory_census::freed_by(|| drop(typed_constants))),
             ("data_factories", crate::memory_census::freed_by(|| drop(data_factories))),
             ("class_factories", crate::memory_census::freed_by(|| drop(class_factories))),
+            ("constant_predicates", crate::memory_census::freed_by(|| drop(constant_predicates))),
             ("data_factories_without_custom_initialize", crate::memory_census::freed_by(|| drop(data_factories_without_custom_initialize))),
             ("view_seeds", crate::memory_census::freed_by(|| drop(view_seeds))),
             ("callers_by_target", crate::memory_census::freed_by(|| drop(callers_by_target))),

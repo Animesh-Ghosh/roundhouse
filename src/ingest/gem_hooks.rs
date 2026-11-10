@@ -206,10 +206,24 @@ pub(super) fn devise_mapping_types(app: &mut App) {
     if !writes {
         return;
     }
-    let mut models: Vec<String> = Facts::of(app).devise_models.keys().cloned().collect();
+    let facts = Facts::of(app);
+    let mut models: Vec<String> = facts.devise_models.keys().cloned().collect();
     models.sort();
     if models.is_empty() {
         return;
+    }
+    // `Mapping#validatable?` is `self.modules.include?(:validatable)`, and a mapping's modules are its model's: where every
+    // devise model answers alike, so does every mapping, as a constant the analysis can take a branch on.
+    let all: Vec<&Vec<String>> = facts.devise_models.values().collect();
+    for lc in app.library_classes.iter_mut().filter(|c| c.name.0.as_str() == "Devise::Mapping") {
+        for m in lc.methods.iter_mut().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.params.is_empty()) {
+            let Some(module) = includes_module(&m.body) else { continue };
+            let having = all.iter().filter(|modules| modules.iter().any(|x| x == &module)).count();
+            if having == 0 || having == all.len() {
+                let span = m.body.span;
+                m.body = Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: having > 0 } });
+            }
+        }
     }
     app.rack_env_writes.insert("devise.mapping".to_string(), "Devise::Mapping".to_string());
     let class_of = |m: &str| crate::ty::Ty::Class {
@@ -225,6 +239,26 @@ pub(super) fn devise_mapping_types(app: &mut App) {
         .entry(crate::ident::ClassId(crate::ident::Symbol::from("Devise::Mapping")))
         .or_default()
         .insert(crate::ident::Symbol::from("to"), signature);
+}
+
+/// `:x` of a `self.modules.include?(:x)` body.
+fn includes_module(body: &Expr) -> Option<String> {
+    let body = match &*body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        _ => body,
+    };
+    let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*body.node else { return None };
+    let ExprNode::Send { recv: inner, method: modules, args: none, .. } = &*r.node else { return None };
+    if method.as_str() != "include?" || modules.as_str() != "modules" || !none.is_empty() || !inner.as_ref().is_none_or(|i| matches!(&*i.node, ExprNode::SelfRef)) {
+        return None;
+    }
+    match args.as_slice() {
+        [a] => match &*a.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some(value.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// What a gem's module answers about a model, where the answer is the Rails the compiler takes rather than the model:

@@ -386,3 +386,21 @@ fn a_devise_controller_no_route_reaches_is_left_out() {
     let (tree, _) = app(":database_authenticatable, :recoverable", "  devise_for :users\n").emit(BuildTarget::Spinel);
     assert!(tree.join("app/controllers/devise/passwords_controller.rb").exists());
 }
+
+/// What the app's mappings answer alike is a constant: no model here is `:validatable` or `:omniauthable`, so
+/// `if devise_mapping.validatable?` and the shared links' `if devise_mapping.omniauthable?` take their `else`, and
+/// what only those branches call (`resource_class.password_length`, `OmniAuth::Utils`) is not reported. The mailer
+/// the gem's `app/` declares inside `if defined?(ActionMailer)` is in the tree (`Devise.mailer` names it by a string),
+/// with the action `after_update :send_email_changed_notification` sends.
+#[test]
+fn devise_answers_its_mappings_modules_and_leaves_out_what_no_model_uses() {
+    let (tree, errors) = app(":database_authenticatable", "  devise_for :users\n").emit(BuildTarget::Spinel);
+    for absent in ["password_length", "OmniAuth::Utils", "confirmation_instructions", "unlock_instructions"] {
+        assert!(!errors.iter().any(|e| e.contains(absent)), "{absent}: {errors:#?}");
+    }
+    let mut files = Vec::new();
+    all_files(&tree, &tree, &mut files);
+    let has = |needle: &str| files.iter().any(|f| f.to_string_lossy().contains(needle));
+    assert!(has("devise/mailer"), "the gem's mailer: {files:#?}");
+    assert!(has("email_changed"), "an action DatabaseAuthenticatable's callback sends: {files:#?}");
+}

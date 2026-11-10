@@ -53,6 +53,9 @@ const DYNAMIC: &str = "\u{0}send ";
 const PARAM: &str = "\u{0}param ";
 /// What a call site passes as a positional argument of a method a [`PARAM`] is of: the method, the index (`*` for every one) and the [`Name::encode`]d argument follow.
 const ARG: &str = "\u{0}arg ";
+/// A call of the method that follows that passes a block (`*`: of a name not known), `Class\u{1}name` when its
+/// receiver is of a known class.
+const BLOCK: &str = "\u{0}block ";
 
 /// What a name built at run time is known to be.
 #[derive(Clone, PartialEq, Debug)]
@@ -203,6 +206,8 @@ pub fn demote_unreached_gem_errors(app: &App, diags: &mut [crate::diagnostic::Di
                     || reached.methods.contains(&(owner.to_string(), m.receiver == MethodReceiver::Class, m.name.to_string())));
             if !kept && !m.body.span.is_synthetic() {
                 unreached.push(m.body.span);
+            } else if !reached.may_pass_block(&gems, owner, m.name.as_str()) {
+                block_given_branches(&m.body, &mut unreached);
             }
         }
         if !class_reached {
@@ -228,6 +233,42 @@ pub fn demote_unreached_gem_errors(app: &App, diags: &mut [crate::diagnostic::Di
 struct Reached {
     classes: HashSet<String>,
     methods: HashSet<MethodKey>,
+    /// The method names a reached call passes a block to ([`BLOCK`]).
+    blocks: HashSet<String>,
+}
+
+impl Reached {
+    /// Whether a reached call may pass `owner`'s `method` a block.
+    fn may_pass_block(&self, gems: &Gems<'_>, owner: &str, method: &str) -> bool {
+        self.blocks.iter().any(|b| match b.split_once('\u{1}') {
+            Some((c, m)) => (m == method || m == "*") && (gems.ancestors(c).iter().any(|a| a == owner) || gems.ancestors(owner).iter().any(|a| a == c)),
+            None => b == method || b == "*",
+        })
+    }
+}
+
+/// The then-branches of `x if block_given?` in a body no call passes a block to.
+fn block_given_branches(body: &Expr, out: &mut Vec<crate::span::Span>) {
+    if let ExprNode::If { cond, then_branch, .. } = &*body.node
+        && is_block_given(cond)
+    {
+        out.push(then_branch.span);
+    }
+    body.node.for_each_child(&mut |c| block_given_branches(c, out));
+}
+
+fn is_block_given(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, .. } if method.as_str() == "block_given?" && args.is_empty())
+}
+
+/// `x if block_given?` as its else-branch, in a body no call passes a block to.
+fn drop_block_given(e: &mut Expr) {
+    e.node.for_each_child_mut(&mut drop_block_given);
+    if let ExprNode::If { cond, else_branch, .. } = &*e.node
+        && is_block_given(cond)
+    {
+        *e = else_branch.clone();
+    }
 }
 
 fn mounted(app: &App, file: FileId) -> bool {
@@ -583,6 +624,7 @@ impl<'a> Gems<'a> {
         // Not parsed: the block is Ruby source, so every name called on something in it is reached on any receiver.
         for block in app.gem_middleware_blocks.values() {
             for name in called_names(block) {
+                calls.push((Target::Any, format!("{BLOCK}{name}")));
                 // Not parsed, so what it passes is not known either.
                 if self.sinks.contains(name.as_str()) {
                     calls.push((Target::Any, format!("{ARG}{name}\u{1}*\u{1}?")));
@@ -675,14 +717,22 @@ impl<'a> Gems<'a> {
         }
         walk.consts = consts;
         walk.run();
-        Reached { classes: walk.classes, methods: walk.methods }
+        let blocks = walk.calls.iter().filter_map(|(_, m)| m.strip_prefix(BLOCK).map(str::to_string)).collect();
+        Reached { classes: walk.classes, methods: walk.methods, blocks }
     }
 
     fn trim(&self, app: &App, reached: &Reached) -> Option<App> {
         let mut trimmed = app.clone();
         let before: usize = trimmed.library_classes.iter().map(|c| c.methods.len() + 1).sum();
+        let mut blocks_dropped = 0usize;
         trimmed.library_classes.retain(|c| !self.is_gem(c) || reached.classes.contains(c.name.0.as_str()));
         for c in trimmed.library_classes.iter_mut().filter(|c| self.names.contains(c.name.0.as_str())) {
+            let owner_name = c.name.0.to_string();
+            for m in c.methods.iter_mut().filter(|m| !reached.may_pass_block(self, &owner_name, m.name.as_str())) {
+                let before = m.body.clone();
+                drop_block_given(&mut m.body);
+                blocks_dropped += usize::from(m.body != before);
+            }
             let owner = c.name.0.to_string();
             c.methods.retain(|m| {
                 // Not one ingest proved never runs (`absence_guards`' gated classes), `initialize` included: no instance is made.
@@ -717,7 +767,7 @@ impl<'a> Gems<'a> {
         let views_before = trimmed.views.len();
         trimmed.views.retain(|v| !self.unreached_action_view(v.name.as_str(), reached));
         let after: usize = trimmed.library_classes.iter().map(|c| c.methods.len() + 1).sum();
-        (after != before || copies_dropped > 0 || trimmed.views.len() != views_before).then_some(trimmed)
+        (after != before || copies_dropped > 0 || blocks_dropped > 0 || trimmed.views.len() != views_before).then_some(trimmed)
     }
 }
 
@@ -879,6 +929,9 @@ impl Walk<'_, '_> {
 
     fn answer_call(&mut self, (target, method): Call) {
         let gems = self.gems;
+        if method.starts_with(BLOCK) {
+            return;
+        }
         if let Some((m, i, _)) = method.strip_prefix(PARAM).and_then(passed_key) {
             let key = (m.to_string(), i.to_string());
             let passed: Vec<String> = [&key, &(key.0.clone(), "*".to_string())].into_iter().flat_map(|k| self.passed.get(k).cloned().unwrap_or_default()).collect();
@@ -1193,7 +1246,15 @@ fn scan(e: &Expr, s: &mut Scan<'_>) {
             let name = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
             s.consts.push((s.context.map(|c| c.0.to_string()), name));
         }
-        ExprNode::Send { recv, method, args, .. } => {
+        // A gem class named by a string, as `constantize` takes one (Devise's `@@mailer = "Devise::Mailer"`).
+        ExprNode::Lit { value: Literal::Str { value } }
+            if value.starts_with(|c: char| c.is_ascii_uppercase())
+                && value.chars().all(|c| c.is_ascii_alphanumeric() || c == ':')
+                && s.gems.is_some_and(|g| g.known(value.trim_start_matches("::"))) =>
+        {
+            s.consts.push((None, value.trim_start_matches("::").to_string()));
+        }
+        ExprNode::Send { recv, method, args, block, .. } => {
             let target = match recv {
                 None => s.context.map_or(Target::Any, |(c, side, _)| Target::Virtual(c.to_string(), side)),
                 Some(r) => match &*r.node {
@@ -1227,7 +1288,43 @@ fn scan(e: &Expr, s: &mut Scan<'_>) {
             };
             let by_name = matches!(method.as_str(), "send" | "public_send" | "__send__" | "method" | "public_method" | "respond_to?" | "instance_method");
             s.calls.push((target.clone(), method.as_str().to_string()));
+            if block.is_some() {
+                let on = match &target {
+                    Target::Virtual(c, _) if !c.starts_with('\u{0}') => Some(c.clone()),
+                    _ => None,
+                };
+                let named: Vec<String> = match args.first().map(|a| &*a.node) {
+                    _ if !matches!(method.as_str(), "send" | "public_send" | "__send__") => vec![method.as_str().to_string()],
+                    Some(ExprNode::Lit { value: Literal::Sym { value } }) => vec![value.as_str().to_string()],
+                    // Not every method's when the receiver's class is known: one of its lineage's (`Class\u{1}*`).
+                    _ => vec!["*".to_string()],
+                };
+                let named: Vec<String> = match &on {
+                    Some(c) => named.into_iter().map(|n| format!("{c}\u{1}{n}")).collect(),
+                    None => named,
+                };
+                s.calls.extend(named.into_iter().map(|n| (Target::Any, format!("{BLOCK}{n}"))));
+            }
             s.pass(method.as_str(), Some(args));
+            // `after_update :send_email_changed_notification, if: :send_email_changed_notification?` in a class body
+            // (a concern's `included do` too) names methods of its instances that the framework runs.
+            let callback = method.as_str().starts_with("before_") || method.as_str().starts_with("after_")
+                || method.as_str().starts_with("around_") || matches!(method.as_str(), "validate" | "validates_each");
+            if callback && recv.is_none() && let Some((c, _, _)) = s.context {
+                let mut named = Vec::new();
+                for a in args {
+                    match &*a.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => named.push(value.to_string()),
+                        ExprNode::Hash { entries, .. } => named.extend(entries.iter().filter_map(|(k, v)| match (&*k.node, &*v.node) {
+                            (ExprNode::Lit { value: Literal::Sym { value: key } }, ExprNode::Lit { value: Literal::Sym { value } })
+                                if matches!(key.as_str(), "if" | "unless") => Some(value.to_string()),
+                            _ => None,
+                        })),
+                        _ => {}
+                    }
+                }
+                s.calls.extend(named.into_iter().map(|n| (Target::Virtual(c.to_string(), false), n)));
+            }
             // `send(:name)`: a call by a name held as a Symbol.
             match args.first().map(|a| &*a.node) {
                 Some(ExprNode::Lit { value: Literal::Sym { value } }) if by_name => {
@@ -1254,13 +1351,16 @@ fn scan(e: &Expr, s: &mut Scan<'_>) {
                 },
             };
             s.calls.push((target, name.as_str().to_string()));
-            // Called later with arguments no site here passes (`items.each(&method(:deliver))`).
+            // Called later with arguments no site here passes (`items.each(&method(:deliver))`), a block among them.
             s.pass(name.as_str(), None);
+            s.calls.push((Target::Any, format!("{BLOCK}{name}")));
         }
         ExprNode::Super { args } => {
             if let Some((c, side, m)) = s.context {
                 s.calls.push((Target::Super(c.to_string(), side), m.to_string()));
                 s.pass(m, args.as_deref());
+                // A bare `super` hands on the block the method was given.
+                s.calls.push((Target::Any, format!("{BLOCK}{m}")));
             }
         }
         _ => {}
@@ -1431,7 +1531,8 @@ mod tests {
                 break;
             }
         }
-        Reached { classes: live_classes, methods: live_methods }
+        let blocks = calls.iter().filter_map(|(_, m)| m.strip_prefix(BLOCK).map(str::to_string)).collect();
+        Reached { classes: live_classes, methods: live_methods, blocks }
     }
 
     const GEMS: &str = "vendor/bundle/ruby/3.4.0/gems";

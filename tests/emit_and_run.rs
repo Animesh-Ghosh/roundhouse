@@ -144,6 +144,8 @@ mod gem_file_statements;
 mod uncalled_config_writers;
 #[path = "emit_and_run/gem_mailer_reach.rs"]
 mod gem_mailer_reach;
+#[path = "emit_and_run/constant_branches.rs"]
+mod constant_branches;
 #[path = "emit_and_run/boot_with_options.rs"]
 mod boot_with_options;
 #[path = "emit_and_run/class_param_or_assign.rs"]
