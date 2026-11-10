@@ -6,6 +6,7 @@
 //!   left settles (`devise_mapping.lockable? && resource_class.unlock_strategy_enabled?(:email)`).
 //! - `x.try(:m)` on a class nothing in whose chain answers `m` is nil, so its `if` takes the `else` (Devise's
 //!   `@resource.try(:unconfirmed_email?)` on a model that is not `:confirmable`).
+//!   In a template the branch it takes renders in the `if`'s place (Devise's `email_changed` mail).
 //! - `instance_variable_set` answers the value it sets.
 //! - A gem method no reached call passes a block to never takes its `x if block_given?` (Warden's `Strategies.add`,
 //!   called with the strategy class alone once the `update` nothing calls is left out).
@@ -144,4 +145,31 @@ fn a_gem_method_no_call_passes_a_block_leaves_its_block_given_branch_out() {
     let run = installed().run_spinel("raise \"run\" unless Article.kind_run == \"plain\"\nputs \"block_given passed\"\n");
     run.assert_passes();
     assert!(run.stdout.contains("block_given passed"), "{}", run.stdout);
+}
+
+const NOTE_CONTROLLER: &str = "class NotesController < ApplicationController\n  def show\n    @article = Article.first\n  end\nend\n";
+
+const NOTE_VIEW: &str = "<p>Note</p>\n<% if @article.try(:archived?) %>\n  <p>Archived <%= @article.archived_at %></p>\n<% else %>\n  <p>Live <%= @article.title %></p>\n<% end %>\n";
+
+const NOTE_TEST: &str = r#"require "test_helper"
+
+class NotesControllerTest < ActionDispatch::IntegrationTest
+  test "the branch a settled try takes renders" do
+    get "/note"
+    assert_response :success
+    assert_includes response.body, "Live #{Article.first.title}"
+    assert_not_includes response.body, "Archived"
+  end
+end
+"#;
+
+#[test]
+fn a_settled_try_in_a_template_renders_the_branch_it_takes() {
+    emit_and_run::real_blog()
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/note\", to: \"notes#show\"\n")
+        .write("app/controllers/notes_controller.rb", NOTE_CONTROLLER)
+        .write("app/views/notes/show.html.erb", NOTE_VIEW)
+        .write("test/controllers/notes_controller_test.rb", NOTE_TEST)
+        .run_test("test/controllers/notes_controller_test.rb")
+        .assert_passes();
 }

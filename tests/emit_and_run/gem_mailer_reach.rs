@@ -3,7 +3,8 @@
 //! through a model callback (`after_save :notify_saved`) of a module the model includes; the template of an
 //! action nothing calls is left out of the Spinel tree with the action (`source_gem_shake`). The template reads
 //! an ivar a module of the mailer sets, as Devise's `Devise::Mailers::Helpers#initialize_from_record` sets
-//! `@resource` with `instance_variable_set`: typed, though the module's `mail` is not rendered yet.
+//! `@resource` with `instance_variable_set`. The module's `mail` renders the template the calling action's name
+//! finds, or the first of its `template_path` directories holds, as Devise's `devise_mail` passes them.
 
 use roundhouse::project::BuildTarget;
 
@@ -20,18 +21,20 @@ fn installed() -> emit_and_run::Overlay {
         .write(&format!("{GEMS}/lib/notices/engine.rb"), "module Notices\n  class Engine < ::Rails::Engine\n  end\nend\n")
         .write(
             &format!("{GEMS}/lib/notices/notifiable.rb"),
-            "module Notices\n  module Notifiable\n    extend ActiveSupport::Concern\n\n    included do\n      after_save :notify_saved\n    end\n\n    def notify_saved\n      Notices::Mailer.saved(title).deliver_now\n    end\n  end\nend\n",
+            "module Notices\n  module Notifiable\n    extend ActiveSupport::Concern\n\n    included do\n      after_save :notify_saved\n    end\n\n    def notify_saved\n      Notices::Mailer.saved(title).deliver_now\n      Notices::Mailer.renamed(title).deliver_now\n    end\n  end\nend\n",
         )
         .write(
             &format!("{GEMS}/lib/notices/mailers.rb"),
-            "module Notices\n  module Mailers\n    def notify(title, action)\n      @title = instance_variable_set(\"@#{action}_title\", title)\n      mail(to: \"a@example.com\", subject: action.to_s)\n    end\n  end\nend\n",
+            "module Notices\n  module Mailers\n    def notify(title, action, dirs = nil)\n      @title = instance_variable_set(\"@#{action}_title\", title)\n      headers = { to: \"a@example.com\", subject: action.to_s }\n      headers[:template_path] = dirs if dirs\n      mail(headers)\n    end\n  end\nend\n",
         )
         .write(
             &format!("{GEMS}/app/mailers/notices/mailer.rb"),
-            "if defined?(ActionMailer)\n  class Notices::Mailer < ActionMailer::Base\n    include Notices::Mailers\n\n    def saved(title)\n      notify(title, :saved)\n    end\n\n    def removed(title)\n      notify(title, :removed)\n    end\n  end\nend\n",
+            "if defined?(ActionMailer)\n  class Notices::Mailer < ActionMailer::Base\n    include Notices::Mailers\n\n    def saved(title)\n      notify(title, :saved)\n    end\n\n    def removed(title)\n      notify(title, :removed)\n    end\n\n    def renamed(title)\n      notify(title, :renamed, [\"notices/missing\", \"notices/scoped\"])\n    end\n  end\nend\n",
         )
         .write(&format!("{GEMS}/app/views/notices/mailer/saved.text.erb"), "Saved <%= @title %>\n")
         .write(&format!("{GEMS}/app/views/notices/mailer/removed.text.erb"), "Removed <%= @title %>\n")
+        .write(&format!("{GEMS}/app/views/notices/mailer/renamed.text.erb"), "Renamed by default <%= @title %>\n")
+        .write(&format!("{GEMS}/app/views/notices/scoped/renamed.text.erb"), "Renamed <%= @title %>\n")
         .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  include Notices::Notifiable\n\n")
 }
 
@@ -60,11 +63,23 @@ fn a_gem_mailer_keeps_the_action_a_callback_reaches_and_drops_the_other() {
     assert!(!mentions("Removed "), "the unreached action's template");
 }
 
-/// Not sent empty: the `mail` its module calls renders the template of the action that calls it, which the
-/// template rewrite (`lower::mailer_templates`) does not pick, so the call is reported, as Devise's `devise_mail`.
+const SCRIPT: &str = r#"Article.create!(title: "Hello", body: "a body long enough")
+sent = ActionMailer::Base.deliveries
+raise "sent #{sent.size}" unless sent.size == 2
+saved = sent[0]
+raise "saved #{saved.body.to_s.inspect}" unless saved.body.to_s.include?("Saved Hello")
+raise "subject #{saved.subject.inspect}" unless saved.subject == "saved"
+renamed = sent[1]
+raise "renamed #{renamed.body.to_s.inspect}" unless renamed.body.to_s.include?("Renamed Hello") && !renamed.body.to_s.include?("by default")
+puts "module mail passed"
+"#;
+
+/// The `mail` its module calls renders the template of the action that calls it, or the one its `template_path`
+/// finds first. Spinel only: the Ruby tree requires the gem itself.
 #[test]
-fn a_mail_in_a_mailers_module_is_reported() {
-    let (_, errors) = installed().emit(BuildTarget::Spinel);
-    assert!(errors.iter().any(|e| e.contains("`mail` in a module a mailer includes")), "{errors:#?}");
-    assert!(!errors.iter().any(|e| e.contains("has no known type")), "the template's ivars: {errors:#?}");
+#[ignore = "requires the Spinel toolchain"]
+fn a_mail_in_a_mailers_module_renders_the_template_its_lookup_finds_natively() {
+    let run = installed().run_spinel_with_db(SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("module mail passed"), "{}", run.stdout);
 }

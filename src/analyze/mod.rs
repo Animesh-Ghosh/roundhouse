@@ -4346,6 +4346,21 @@ impl Analyzer {
             retyped.extend(mailers_needing_retype.iter().cloned());
         }
         let mut mailer_params_by_view: HashMap<Symbol, Ty> = HashMap::default();
+        // A mailer whose `mail` looks its template up renders one named after its action under another directory too
+        // (Devise's scoped `users/mailer/confirmation_instructions`).
+        let looking_up = crate::lower::mailer_templates::looking_up_mailers(app);
+        let mut elsewhere: HashMap<String, Vec<Symbol>> = HashMap::default();
+        for v in &app.views {
+            if let Some((dir, action)) = v.name.as_str().rsplit_once('/')
+                && !action.starts_with('_')
+                && !dir.starts_with("layouts")
+            {
+                let names = elsewhere.entry(action.to_string()).or_default();
+                if !names.contains(&v.name) {
+                    names.push(v.name.clone());
+                }
+            }
+        }
 
         // A mailer's modules write its ivars too: Devise's `devise_mail` sets `@resource` and `@email` from
         // `Devise::Mailers::Helpers`, which its templates read. As last typed: the fixpoint reruns this.
@@ -4518,6 +4533,11 @@ impl Analyzer {
                     }
                     let view_name = Symbol::from(format!("{prefix}/{}", method.name.as_str()).as_str());
                     let params = mailer_with_params.get(&lc_name).map(|row| Ty::Record { row: row.clone() });
+                    if looking_up.contains(lc_name.0.as_str()) {
+                        for other in elsewhere.get(method.name.as_str()).into_iter().flatten().filter(|n| **n != view_name) {
+                            views.push((other.clone(), params.clone(), ivars.clone()));
+                        }
+                    }
                     views.push((view_name, params, ivars));
                 }
             }

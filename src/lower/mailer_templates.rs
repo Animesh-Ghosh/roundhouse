@@ -12,9 +12,18 @@
 //!        Views::Layouts.mailer_text(Views::UserMailer.welcome_text(@user), nil, nil),
 //!        Views::Layouts.mailer(Views::UserMailer.welcome(@user), nil, nil))
 //!
+//! A `mail` whose template is chosen when it runs, by `template_name:` /
+//! `template_path:` or by the action that calls a module's `mail` (Devise's
+//! `devise_mail`), calls the mailer's `__mail_rendered(headers)`, which
+//! looks the template up as ActionMailer does: under each `template_path`
+//! in turn (the mailer's own directory by default), the first holding
+//! `template_name` (the action's name by default), its formats as parts.
+//! The templates it can find are the mailer's own and, under any other
+//! directory, the ones named after its actions.
+//!
 //! What it does not model is reported rather than sent empty: a `mail`
-//! with a `format` block, `template_name:` / `template_path:`, an action
-//! with no template and no `body:`, and a `default` given a Proc.
+//! with a `format` block, an action with no template and no `body:`, and
+//! a `default` given a Proc.
 
 use std::collections::BTreeSet;
 use crate::det::HashMap;
@@ -55,6 +64,8 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
     let has_view = |name: &str, format: &str| views.iter().any(|(n, f, _)| n == name && f == format);
 
     let callbacks = callback_names(app, &mailers);
+    let (module_mail, includes_of) = module_mails(app, &mailers);
+    let mut lookups: Vec<Lookup> = Vec::new();
     for lc in app.library_classes.iter_mut() {
         let class = lc.name.0.as_str().to_string();
         if !mailers.contains(&class) {
@@ -65,6 +76,7 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
         let layout = layout.unwrap_or_else(|| implied_layout(&chain, &has_view));
         let dir = view_dir(&class);
         let module = crate::naming::camelize_path(&dir);
+        let looked_up = std::cell::Cell::new(includes_of.get(&class).is_some_and(|inc| inc.iter().any(|m| module_mail.contains(m))));
         for m in lc.methods.iter_mut() {
             if m.receiver != crate::dialect::MethodReceiver::Instance || m.name.as_str() == "initialize" {
                 continue;
@@ -86,30 +98,94 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
                 views: &views,
                 defaults: &defaults,
                 callback: callbacks.contains(&action),
+                looked_up: &looked_up,
             };
             rewrite(&mut m.body, &site, &mut diags);
         }
-    }
-    // Not rendered and not silently sent empty: a `mail` in a module a mailer includes builds the message of
-    // whichever action calls it, a template this pass does not pick (Devise's `devise_mail`).
-    let mut pending: Vec<String> = app.library_classes.iter().filter(|lc| mailers.contains(lc.name.0.as_str())).flat_map(|lc| lc.includes.iter().map(|m| m.0.to_string())).collect();
-    let mut included: BTreeSet<String> = BTreeSet::new();
-    while let Some(m) = pending.pop() {
-        for module in app.library_classes.iter().filter(|c| c.is_module && (c.name.0.as_str() == m || c.name.0.as_str().ends_with(&format!("::{m}")))) {
-            if included.insert(module.name.0.to_string()) {
-                pending.extend(module.includes.iter().map(|i| i.0.to_string()));
+        if looked_up.get() {
+            // `action_name`, the template a lookup without `template_name` finds, is set only by a callback chain.
+            for m in lc.methods.iter_mut().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() != "initialize") {
+                let action = crate::ingest::mailer_callbacks::action_of(m.name.as_str()).to_string();
+                let span = m.body.span;
+                let called = send(None, "__called", vec![str_lit(span, &action)], span);
+                let body = std::mem::replace(&mut m.body, nil(span));
+                let exprs = match *body.node {
+                    ExprNode::Seq { exprs } => std::iter::once(called).chain(exprs).collect(),
+                    other => vec![called, Expr { node: Box::new(other), ..body }],
+                };
+                m.body = Expr::new(span, ExprNode::Seq { exprs });
             }
+            let actions: Vec<String> = lc
+                .methods
+                .iter()
+                .filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.name.as_str() != "initialize")
+                .map(|m| crate::ingest::mailer_callbacks::action_of(m.name.as_str()).to_string())
+                .collect();
+            lookups.push(Lookup { class, dir, layout, defaults, actions });
         }
     }
-    for module in app.library_classes.iter().filter(|c| included.contains(c.name.0.as_str())) {
-        for m in &module.methods {
-            report_module_mail(&m.body, &mut diags);
+    for lc in app.library_classes.iter_mut().filter(|lc| module_mail.contains(lc.name.0.as_str())) {
+        for m in lc.methods.iter_mut() {
+            looked_up_mail(&mut m.body, &mut diags);
+        }
+    }
+    for lookup in lookups {
+        let method = synthesize_lookup(&lookup, &views, &contracts, &closures, &mut diags);
+        if let Some(method) = method
+            && let Some(lc) = app.library_classes.iter_mut().find(|lc| lc.name.0.as_str() == lookup.class)
+        {
+            lc.methods.push(method);
         }
     }
     // A parent's `default` is read for each mailer under it: report it once.
     let mut seen = crate::det::HashSet::default();
     diags.retain(|d| seen.insert((d.span.file, d.span.start, d.span.end, d.message.clone())));
     diags
+}
+
+/// The modules with a `mail` among those mailers include, and each mailer's included modules, transitively.
+fn module_mails(app: &App, mailers: &BTreeSet<String>) -> (BTreeSet<String>, HashMap<String, BTreeSet<String>>) {
+    let mut module_mail: BTreeSet<String> = BTreeSet::new();
+    let mut includes_of: HashMap<String, BTreeSet<String>> = HashMap::default();
+    for lc in app.library_classes.iter().filter(|lc| mailers.contains(lc.name.0.as_str())) {
+        let mut pending: Vec<String> = lc.includes.iter().map(|m| m.0.to_string()).collect();
+        let mut included: BTreeSet<String> = BTreeSet::new();
+        while let Some(m) = pending.pop() {
+            for module in app.library_classes.iter().filter(|c| c.is_module && (c.name.0.as_str() == m || c.name.0.as_str().ends_with(&format!("::{m}")))) {
+                if included.insert(module.name.0.to_string()) {
+                    pending.extend(module.includes.iter().map(|i| i.0.to_string()));
+                    if module.methods.iter().any(|m| calls_mail(&m.body)) {
+                        module_mail.insert(module.name.0.to_string());
+                    }
+                }
+            }
+        }
+        includes_of.insert(lc.name.0.as_str().to_string(), included);
+    }
+    (module_mail, includes_of)
+}
+
+/// The mailers whose `mail` looks its template up when it runs, so a template named after one of their actions
+/// under another directory is theirs to render (`__mail_rendered`).
+pub(crate) fn looking_up_mailers(app: &App) -> BTreeSet<String> {
+    fn template_opts(e: &Expr) -> bool {
+        let mut found = matches!(&*e.node, ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "mail"
+            && args.first().is_some_and(|a| matches!(&*a.node, ExprNode::Hash { entries, .. } if entries.iter().any(|(k, _)|
+                matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if matches!(value.as_str(), "template_name" | "template_path"))))));
+        e.node.for_each_child(&mut |c| found |= template_opts(c));
+        found
+    }
+    let mailers = super::mailer_class_side::mailer_names(app);
+    let (module_mail, includes_of) = module_mails(app, &mailers);
+    app.library_classes
+        .iter()
+        .filter(|lc| mailers.contains(lc.name.0.as_str()))
+        .filter(|lc| {
+            includes_of.get(lc.name.0.as_str()).is_some_and(|inc| inc.iter().any(|m| module_mail.contains(m)))
+                || lc.methods.iter().any(|m| template_opts(&m.body))
+        })
+        .map(|lc| lc.name.0.as_str().to_string())
+        .collect()
 }
 
 struct Site<'a> {
@@ -124,6 +200,137 @@ struct Site<'a> {
     views: &'a [(String, String, bool)],
     defaults: &'a [(Expr, Expr)],
     callback: bool,
+    /// Set where a `mail` here calls `__mail_rendered`.
+    looked_up: &'a std::cell::Cell<bool>,
+}
+
+/// A mailer whose `mail` chooses its template when it runs.
+struct Lookup {
+    class: String,
+    dir: String,
+    layout: Option<String>,
+    defaults: Vec<(Expr, Expr)>,
+    actions: Vec<String>,
+}
+
+const LOOKUP: &str = "__mail_rendered";
+
+fn calls_mail(expr: &Expr) -> bool {
+    let mut found = matches!(&*expr.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "mail");
+    expr.node.for_each_child(&mut |c| found |= calls_mail(c));
+    found
+}
+
+/// A module's `mail(headers)` is the including mailer's `__mail_rendered(headers)`.
+fn looked_up_mail(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+    expr.node.for_each_child_mut(&mut |c| looked_up_mail(c, diags));
+    let ExprNode::Send { recv: None, method, args, parenthesized, .. } = &mut *expr.node else { return };
+    if method.as_str() != "mail" {
+        return;
+    }
+    if args.len() > 1 {
+        diags.push(Diagnostic::unsupported(expr.span, None, "mailer module mail", "`mail` given more than its headers is not modeled"));
+        return;
+    }
+    *method = Symbol::from(LOOKUP);
+    *parenthesized = true;
+}
+
+/// `__mail_rendered(headers)`: the template ActionMailer's lookup finds, rendered, as the mail's parts. The parts
+/// are `__rh_part_<n>` calls in the source, replaced by the view calls `view_call` builds.
+fn synthesize_lookup(
+    lookup: &Lookup,
+    views: &[(String, String, bool)],
+    contracts: &HashMap<(String, String), ViewArgs>,
+    closures: &HashMap<ViewKey, Vec<Symbol>>,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<crate::dialect::MethodDef> {
+    let mut templates: Vec<(String, String)> = Vec::new();
+    for (name, format, _) in views {
+        if format != "text" && format != "html" {
+            continue;
+        }
+        let Some((dir, action)) = name.rsplit_once('/') else { continue };
+        if action.starts_with('_') || dir.starts_with("layouts") || (dir != lookup.dir && !lookup.actions.iter().any(|a| a == action)) {
+            continue;
+        }
+        let pair = (dir.to_string(), action.to_string());
+        if !templates.contains(&pair) {
+            templates.push(pair);
+        }
+    }
+    templates.sort();
+    let has = |name: &str, format: &str| views.iter().any(|(n, f, _)| n == name && f == format);
+    let mut parts: Vec<(String, String, String)> = Vec::new();
+    let mut whens = String::new();
+    for (dir, action) in &templates {
+        let full = format!("{dir}/{action}");
+        whens.push_str(&format!("      when {full:?}\n"));
+        for format in ["text", "html"] {
+            if has(&full, format) {
+                whens.push_str(&format!("        {format} = __rh_part_{}\n", parts.len()));
+                parts.push((dir.clone(), action.clone(), format.to_string()));
+            }
+        }
+        whens.push_str("        found = true\n");
+    }
+    let cases = if whens.is_empty() { String::new() } else { format!("      case \"#{{dir}}/#{{name}}\"\n{whens}      end\n") };
+    let src = format!(
+        "class {class}\n  def {LOOKUP}(headers = {{}}, &block)\n    raise NotImplementedError, \"a block given to mail chooses its parts, which is not modeled\" if block\n    name = (headers[:template_name] || action_name).to_s\n    given = headers[:template_path]\n    dirs = given.nil? ? [{dir:?}] : (given.is_a?(Array) ? given : [given])\n    text = nil\n    html = nil\n    found = false\n    dirs.each do |dir|\n      next if found\n{cases}    end\n    raise ActionView::MissingTemplate, \"Missing template #{{name}} in #{{dirs.join(\", \")}}\" unless found\n    mail(__rh_defaults.merge(headers.reject {{ |key, _| key == :template_name || key == :template_path }}), text, html)\n  end\nend\n",
+        class = lookup.class,
+        dir = lookup.dir,
+    );
+    let (parsed, ingest_diags) = crate::ingest::prism::scope(|| crate::ingest::ingest_library_classes(src.as_bytes(), "<mailer_templates>"));
+    let mut method = match parsed {
+        Ok(classes) if ingest_diags.is_empty() => classes.into_iter().flat_map(|c| c.methods).find(|m| m.name.as_str() == LOOKUP)?,
+        _ => {
+            crate::ingest::survey::record_synthesis_failure("<mailer_templates>", &format!("the template lookup of `{}`", lookup.class), &ingest_diags);
+            diags.push(Diagnostic::unsupported(crate::span::Span::synthetic(), None, "mailer module mail", format!("the template lookup of `{}` did not build", lookup.class)));
+            return None;
+        }
+    };
+    let flag = std::cell::Cell::new(false);
+    let fill = |e: &mut Expr| {
+        fn walk(e: &mut Expr, f: &dyn Fn(&mut Expr)) {
+            e.node.for_each_child_mut(&mut |c| walk(c, f));
+            f(e);
+        }
+        walk(e, &|e: &mut Expr| {
+            let span = e.span;
+            let ExprNode::Send { recv: None, method, args, .. } = &*e.node else { return };
+            if !args.is_empty() {
+                return;
+            }
+            if method.as_str() == "__rh_defaults" {
+                *e = merged_opts(None, &lookup.defaults, span);
+                return;
+            }
+            let Some(n) = method.as_str().strip_prefix("__rh_part_").and_then(|n| n.parse::<usize>().ok()) else { return };
+            let (dir, action, format) = &parts[n];
+            let module = crate::naming::camelize_path(dir);
+            let site = Site {
+                module: &module,
+                dir,
+                action,
+                text: false,
+                html: false,
+                layout: lookup.layout.as_deref(),
+                contracts,
+                closures,
+                views,
+                defaults: &lookup.defaults,
+                callback: false,
+                looked_up: &flag,
+            };
+            let inner = view_call(&site, format, span);
+            *e = match site.layout {
+                Some(layout) => layout_call(&site, layout, format, inner, span),
+                None => inner,
+            };
+        });
+    };
+    fill(&mut method.body);
+    Some(method)
 }
 
 /// The methods a mailer's callback chain calls (`ingest::mailer_callbacks`
@@ -241,20 +448,6 @@ fn same_key(a: &Expr, b: &Expr) -> bool {
     name(a).is_some() && name(a) == name(b)
 }
 
-fn report_module_mail(expr: &Expr, diags: &mut Vec<Diagnostic>) {
-    if let ExprNode::Send { recv: None, method, .. } = &*expr.node
-        && method.as_str() == "mail"
-    {
-        diags.push(Diagnostic::unsupported(
-            expr.span,
-            None,
-            "mailer module mail",
-            "`mail` in a module a mailer includes renders the template of the action that calls it, which is not modeled; only a `mail` in the action's own body is",
-        ));
-    }
-    expr.node.for_each_child(&mut |c| report_module_mail(c, diags));
-}
-
 fn rewrite(expr: &mut Expr, site: &Site<'_>, diags: &mut Vec<Diagnostic>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, site, diags));
     let ExprNode::Send { recv: None, method, args, block, parenthesized } = &mut *expr.node else { return };
@@ -282,7 +475,9 @@ fn rewrite(expr: &mut Expr, site: &Site<'_>, diags: &mut Vec<Diagnostic>) {
         _ => Vec::new(),
     };
     if opt_keys.iter().any(|k| k == "template_name" || k == "template_path") {
-        diags.push(Diagnostic::unsupported(span, None, "mailer template option", "`template_name:` / `template_path:` choose another template, which is not modeled"));
+        *method = Symbol::from(LOOKUP);
+        *parenthesized = true;
+        site.looked_up.set(true);
         return;
     }
     let given_body = opt_keys.iter().any(|k| k == "body");
