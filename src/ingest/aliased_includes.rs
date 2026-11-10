@@ -7,11 +7,26 @@ use crate::expr::ExprNode;
 use crate::ident::{ClassId, Symbol};
 
 pub(super) fn resolve(app: &mut App) {
+    let declared: crate::det::HashSet<String> = app.library_classes.iter().map(|lc| lc.name.0.to_string()).collect();
     let mut aliases: crate::det::HashMap<String, String> = crate::det::HashMap::default();
     for lc in &app.library_classes {
         for (name, value) in &lc.constants {
             if let ExprNode::Const { path } = &*value.node {
-                let target = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+                let rooted = path.first().is_some_and(|p| p.as_str().is_empty());
+                let written = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+                // Not the name as written: Ruby looks `Inner` up under the namespaces the assignment stands in first.
+                let mut target = written.clone();
+                if !rooted {
+                    let mut scope = Some(lc.name.0.as_str());
+                    while let Some(s) = scope {
+                        let candidate = format!("{s}::{written}");
+                        if declared.contains(&candidate) {
+                            target = candidate;
+                            break;
+                        }
+                        scope = s.rsplit_once("::").map(|(outer, _)| outer);
+                    }
+                }
                 aliases.insert(format!("{}::{}", lc.name.0, name), target);
             }
         }
@@ -19,7 +34,6 @@ pub(super) fn resolve(app: &mut App) {
     if aliases.is_empty() {
         return;
     }
-    let declared: crate::det::HashSet<String> = app.library_classes.iter().map(|lc| lc.name.0.to_string()).collect();
     for lc in &mut app.library_classes {
         for included in &mut lc.includes {
             let mut name = included.0.to_string();

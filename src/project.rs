@@ -6101,7 +6101,7 @@ fn normalize_source(path: &str) -> String {
 /// A feature of the Rails frameworks (`active_support/core_ext/…`,
 /// `rails`): the runtime ports are the framework in an emitted tree, and
 /// no such file is on its load path.
-pub(crate) fn is_framework_feature(feature: &str) -> bool {
+fn is_framework_feature(feature: &str) -> bool {
     let root = feature.split('/').next().unwrap_or(feature);
     matches!(
         root,
@@ -8786,8 +8786,6 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         // `runtime/ruby/active_support_ext.rb` ships to the ruby family
         // and spinel only.
         | "ActiveSupport::JSON" | "ActiveSupport::Deprecation" | "ActiveSupport::Deprecation::DeprecatedConstantAccessor"
-        // `runtime/ruby/action_controller/view_rendering.rb`.
-        | "ActionView::Rendering"
         // The sqlite3 gem on the ruby family, `runtime/spinel/
         // sqlite3_database.rb` over the FFI on spinel; `FileUtils` is a
         // default gem / `packages/fileutils`; the Rails classes come
@@ -8854,6 +8852,8 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // The ActiveModel::Attributes writers call the same module. Flattening
     // the include is not a claim that a strict target can run the cast.
     ("ActiveSupport", "cast_string"),
+    // The deprecator's stderr line, beside it in `active_support_ext.rb`.
+    ("ActiveSupport", "deprecation_line"),
     ("ActiveSupport", "cast_integer"),
     ("ActiveSupport", "cast_float"),
     ("ActiveSupport", "cast_decimal"),

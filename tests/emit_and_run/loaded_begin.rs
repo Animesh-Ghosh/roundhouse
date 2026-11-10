@@ -36,6 +36,7 @@ end
 fn app() -> emit_and_run::Overlay {
     let fixture = roundhouse::fixtures::real_blog();
     let lock = std::fs::read_to_string(fixture.join("Gemfile.lock")).unwrap();
+    assert!(lock.contains("\n    rack (") && lock.contains("DEPENDENCIES\n"), "the fixture's Gemfile.lock changed shape");
     let lock = lock.replacen("\n    rack (", "\n    shelf (1.0.0)\n    rack (", 1).replacen("DEPENDENCIES\n", "DEPENDENCIES\n  shelf\n", 1);
     let gemfile = std::fs::read_to_string(fixture.join("Gemfile")).unwrap() + "gem \"shelf\"\n";
     emit_and_run::real_blog()

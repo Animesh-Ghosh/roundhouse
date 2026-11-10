@@ -506,6 +506,12 @@ module ActiveSupport
   # `rescue_from(ActiveSupport::MessageVerifier::InvalidSignature) {
   # head :not_found }` over an avatar URL that carries a signed id.
   #
+  # Kernel#warn, which the deprecator's own `warn` would shadow; not
+  # `Rails.log_line`, which a host logger may filter.
+  def self.deprecation_line(line)
+    warn(line)
+  end
+
   # Rails' deprecator a gem keeps for itself (`Devise.deprecator`): `warn`
   # writes Rails' line to stderr, the default behavior of a deprecator
   # the app's `config.active_support.deprecation` has not configured.
@@ -522,7 +528,7 @@ module ActiveSupport
     # Not Rails' "(called from …)" suffix: no target keeps the caller's location.
     def warn(message = nil, callstack = nil)
       return nil if @silenced
-      Rails.log_line("DEPRECATION WARNING: #{message}")
+      ActiveSupport.deprecation_line("DEPRECATION WARNING: #{message}")
       nil
     end
 

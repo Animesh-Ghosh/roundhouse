@@ -21959,5 +21959,3 @@ mod route_loop_index;
 mod deprecation;
 #[path = "emit_and_run/loaded_begin.rs"]
 mod loaded_begin;
-#[path = "emit_and_run/view_rendering.rs"]
-mod view_rendering;

@@ -698,7 +698,8 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     }
     // One walk of an unchanging tree: remember what each path answered.
     let cached_vfs = crate::vfs::CachedVfs::new(vfs);
-    let mount_vfs = super::source_gems::MountVfs { inner: &cached_vfs, gems: &source_gems };
+    let framework_libs = super::source_gems::framework_libs(vfs, dir, lock.as_ref());
+    let mount_vfs = super::source_gems::MountVfs { inner: &cached_vfs, gems: &source_gems, framework_libs: &framework_libs };
     let mut path_gems = path_gem_dirs(&mount_vfs, dir);
     path_gems.extend(source_gems.iter().map(|gem| gem.mount.clone()));
     let source_vfs = PathGemVfs::new(&mount_vfs, dir, &path_gems);
