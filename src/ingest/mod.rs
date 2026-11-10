@@ -96,6 +96,7 @@ pub mod generated_helpers;
 pub mod jbuilder;
 pub mod library_class;
 mod file_program;
+pub(crate) use file_program::{normalize_source, resolve_gem_require};
 mod glob_autoload;
 pub mod channel_callbacks;
 mod active_model_attributes;

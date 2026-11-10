@@ -19,6 +19,7 @@
 //! and don't pull this module. The target enum lives in [`crate::build_target`]
 //! so lowering and Ruby emit can name a target on wasm.
 
+use crate::ingest::{normalize_source, resolve_gem_require};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -6004,22 +6005,6 @@ fn program_steps<'a>(items: &'a [crate::app::ProgramItem], depth: usize, out: &m
 
 /// `require "x"` from a gem file: the file of that feature under the
 /// requiring gem's lib/, then any gem's.
-pub(crate) fn resolve_gem_require(known: &crate::det::HashSet<String>, from: &str, feature: &str, relative: bool) -> Option<String> {
-    let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
-    if relative {
-        let dir = std::path::Path::new(from).parent()?;
-        return Some(normalize_source(&dir.join(&file).display().to_string()));
-    }
-    let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
-    let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
-    if let Some(own) = own.filter(|p| known.contains(p)) {
-        return Some(own);
-    }
-    let suffix = format!("/lib/{file}");
-    let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
-    found.sort();
-    found.first().map(|p| p.to_string())
-}
 
 /// The model-tree anchors (`models/x`) of the classes the gem programs
 /// declare, in the order Ruby loads them: each boot gem entry as Bundler
@@ -6087,19 +6072,6 @@ fn all_program_items(items: &[crate::app::ProgramItem]) -> Vec<&crate::app::Prog
 }
 
 /// A path with `.` and `..` segments folded, as a require resolves it.
-pub(crate) fn normalize_source(path: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for segment in path.split('/') {
-        match segment {
-            "." => {}
-            ".." if out.last().is_some_and(|s| !s.is_empty() && *s != "..") => {
-                out.pop();
-            }
-            _ => out.push(segment),
-        }
-    }
-    out.join("/")
-}
 
 /// A feature of the Rails frameworks (`active_support/core_ext/…`,
 /// `rails`): the runtime ports are the framework in an emitted tree, and

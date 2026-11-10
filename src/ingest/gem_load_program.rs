@@ -30,15 +30,15 @@ use crate::expr::{Expr, ExprNode};
 
 pub(super) fn carry(app: &mut App) {
     let programs: HashMap<String, &FileProgram> =
-        app.file_programs.iter().map(|p| (crate::project::normalize_source(&p.source), p)).collect();
+        app.file_programs.iter().map(|p| (super::normalize_source(&p.source), p)).collect();
     if programs.is_empty() {
         return;
     }
-    let known: HashSet<String> = app.sources.iter().map(|f| crate::project::normalize_source(&f.path)).collect();
+    let known: HashSet<String> = app.sources.iter().map(|f| super::normalize_source(&f.path)).collect();
     let classes: HashSet<&str> = app.library_classes.iter().map(|c| c.name.0.as_str()).collect();
     let named = named_by_the_app(app, &programs);
     let mut walk = Walk { programs: &programs, known: &known, classes: &classes, named: &named, seen: HashSet::default(), lazy: Vec::new(), taken: Vec::new(), left: Vec::new() };
-    let mut roots: Vec<String> = app.boot_gem_entries.iter().map(|e| crate::project::normalize_source(e)).collect();
+    let mut roots: Vec<String> = app.boot_gem_entries.iter().map(|e| super::normalize_source(e)).collect();
     roots.reverse();
     let mut by_path: Vec<&String> = programs.keys().collect();
     by_path.sort();
@@ -72,7 +72,7 @@ fn named_by_the_app(app: &App, programs: &HashMap<String, &FileProgram>) -> Hash
         .sources
         .iter()
         .enumerate()
-        .filter(|(_, f)| programs.contains_key(&crate::project::normalize_source(&f.path)))
+        .filter(|(_, f)| programs.contains_key(&super::normalize_source(&f.path)))
         .map(|(i, _)| crate::span::FileId(i as u32 + 1))
         .collect();
     let mut named: HashSet<String> = app.macro_includes.iter().map(|(_, m)| m.0.to_string()).collect();
@@ -114,7 +114,7 @@ impl Walk<'_> {
         for item in &program.items {
             match item {
                 ProgramItem::Require { feature, relative, .. } => {
-                    if let Some(target) = crate::project::resolve_gem_require(self.known, path, feature, *relative) {
+                    if let Some(target) = super::resolve_gem_require(self.known, path, feature, *relative) {
                         self.file(&target);
                     }
                 }
@@ -123,7 +123,7 @@ impl Walk<'_> {
                     if !self.named.contains(&constant) {
                         continue;
                     }
-                    if let Some(target) = crate::project::resolve_gem_require(self.known, path, feature, false) {
+                    if let Some(target) = super::resolve_gem_require(self.known, path, feature, false) {
                         self.lazy.push(target);
                     }
                 }
