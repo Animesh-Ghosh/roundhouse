@@ -9,8 +9,8 @@
 #
 # ActionView::Rendering is the one a caller asks about by name
 # (responders' `controller.class.include? ActionView::Rendering`): Base
-# takes it through ActionView::Layouts, and API, built without views,
-# does not.
+# takes it through ActionView::Layouts, and API and Metal, built without
+# views, do not.
 module AbstractController
   module Callbacks
   end
@@ -43,6 +43,11 @@ module ActionController
   end
 
   class Metal < Base
+    # Built without views, as API is.
+    def self.include?(mod)
+      mod != ActionView::Rendering && ancestors.include?(mod)
+    end
+
     # What Rails' AbstractController::Callbacks registers, so a Metal subclass's body loads (Devise's FailureApp,
     # which the boot names). Not run: a Metal action is reached through `action(:name)`, which is not modeled.
     def self.around_action(*names, &block)

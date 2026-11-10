@@ -215,7 +215,9 @@ pub(super) fn devise_mapping_types(app: &mut App) {
     // `Mapping#validatable?` is `self.modules.include?(:validatable)`, and a mapping's modules are its model's: where every
     // devise model answers alike, so does every mapping, as a constant the analysis can take a branch on.
     let all: Vec<&Vec<String>> = facts.devise_models.values().collect();
-    for lc in app.library_classes.iter_mut().filter(|c| c.name.0.as_str() == "Devise::Mapping") {
+    // Not where a model's modules are not all named (`devise :database_authenticatable, *extra`).
+    let named = models.iter().all(|m| !facts.devise_configured.get(m).is_some_and(|set| set.contains("*")));
+    for lc in app.library_classes.iter_mut().filter(|c| named && c.name.0.as_str() == "Devise::Mapping") {
         for m in lc.methods.iter_mut().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance && m.params.is_empty()) {
             let Some(module) = includes_module(&m.body) else { continue };
             let having = all.iter().filter(|modules| modules.iter().any(|x| x == &module)).count();
@@ -238,7 +240,8 @@ pub(super) fn devise_mapping_types(app: &mut App) {
     app.rbs_signatures
         .entry(crate::ident::ClassId(crate::ident::Symbol::from("Devise::Mapping")))
         .or_default()
-        .insert(crate::ident::Symbol::from("to"), signature);
+        .entry(crate::ident::Symbol::from("to"))
+        .or_insert(signature);
     // The mailer's actions are sent by name (`devise_mailer.send(notification, self, *args)` in `send_devise_notification`),
     // which no call site types: the record is a devise model's, the token a String, as Devise's modules pass them.
     let record = match models.as_slice() {
@@ -251,7 +254,8 @@ pub(super) fn devise_mapping_types(app: &mut App) {
     app.rbs_signatures
         .entry(crate::ident::ClassId(crate::ident::Symbol::from("DeviseController")))
         .or_default()
-        .insert(crate::ident::Symbol::from("resource"), crate::ty::Ty::Fn { params: Vec::new().into(), block: None, ret: record.clone().into(), effects: Default::default() });
+        .entry(crate::ident::Symbol::from("resource"))
+        .or_insert(crate::ty::Ty::Fn { params: Vec::new().into(), block: None, ret: record.clone().into(), effects: Default::default() });
     if let Some(mailer) = app.library_classes.iter().find(|c| c.name.0.as_str() == "Devise::Mailer") {
         let param = |name: &crate::ident::Symbol, ty: crate::ty::Ty, optional: bool| crate::ty::Param {
             name: name.clone(),
@@ -271,7 +275,7 @@ pub(super) fn devise_mapping_types(app: &mut App) {
         }
         let table = app.rbs_signatures.entry(crate::ident::ClassId(crate::ident::Symbol::from("Devise::Mailer"))).or_default();
         for (name, sig) in actions {
-            table.insert(name, sig);
+            table.entry(name).or_insert(sig);
         }
     }
 }

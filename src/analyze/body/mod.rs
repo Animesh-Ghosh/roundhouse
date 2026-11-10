@@ -1265,7 +1265,8 @@ impl<'a> BodyTyper<'a> {
             let asked = asked.clone();
             self.analyze_expr(r, ctx);
             return match r.ty.as_ref().map(Ty::peel_nilable) {
-                Some(t @ Ty::Class { .. }) if self.never_responds(t, &asked) => Some(false),
+                // Not a class with a `try` of the program's in its chain: Object's is the one that answers nil.
+                Some(t @ Ty::Class { id, .. }) if self.never_responds(t, &asked) && !self.chain_defines(id, &Symbol::from("try")) => Some(false),
                 _ => None,
             };
         }
@@ -1280,13 +1281,60 @@ impl<'a> BodyTyper<'a> {
         }
         self.analyze_expr(r, ctx);
         // Not peeled of nil: a nil receiver answers NilClass's.
-        match r.ty.as_ref() {
-            Some(Ty::Class { id, .. }) => predicates.get(&(id.clone(), method.clone())).copied(),
+        let (definer, answer) = match r.ty.as_ref() {
+            Some(Ty::Class { id, .. }) => (id.clone(), *predicates.get(&(id.clone(), method.clone()))?),
             // A receiver of no known type (a view's `devise_mapping`, a stateful `helper_method`): the one definition of
             // the name is the only one that can answer it, as any other receiver raises NoMethodError.
-            None | Some(Ty::Var { .. } | Ty::Untyped) => predicates.iter().find(|((_, m), _)| m == method).map(|(_, v)| *v),
-            _ => None,
+            None | Some(Ty::Var { .. } | Ty::Untyped) => predicates.iter().find(|((_, m), _)| m == method).map(|((c, _), v)| (c.clone(), *v))?,
+            _ => return None,
+        };
+        // Nor a name another class of the registry answers (a column's `admin?`, a framework method).
+        self.only_answered_by(&definer, method).then_some(answer)
+    }
+
+    /// Whether a source definition of `method` is in `class`'s chain: itself, its parents, the modules they include.
+    fn chain_defines(&self, class: &ClassId, method: &Symbol) -> bool {
+        let classes = self.classes();
+        let mut seen: Vec<ClassId> = Vec::new();
+        let mut pending = vec![class.clone()];
+        while let Some(c) = pending.pop() {
+            if seen.contains(&c) || seen.len() > 64 {
+                continue;
+            }
+            seen.push(c.clone());
+            if let Some(info) = classes.get(&c) {
+                if info.source_instance_methods.contains(method) {
+                    return true;
+                }
+                pending.extend(info.parent.iter().cloned());
+                pending.extend(info.includes.iter().cloned());
+            }
         }
+        false
+    }
+
+    /// Whether every class that answers `method` is `definer` or takes it from `definer` (a subclass, an includer).
+    fn only_answered_by(&self, definer: &ClassId, method: &Symbol) -> bool {
+        let classes = self.classes();
+        let reaches = |start: &ClassId| {
+            let mut seen: Vec<ClassId> = Vec::new();
+            let mut pending = vec![start.clone()];
+            while let Some(c) = pending.pop() {
+                if &c == definer {
+                    return true;
+                }
+                if seen.contains(&c) || seen.len() > 64 {
+                    continue;
+                }
+                seen.push(c.clone());
+                if let Some(info) = classes.get(&c) {
+                    pending.extend(info.parent.iter().cloned());
+                    pending.extend(info.includes.iter().cloned());
+                }
+            }
+            false
+        };
+        classes.iter().all(|(id, info)| !info.instance_methods.contains_key(method) || reaches(id))
     }
 
     /// `superclass.respond_to?(:m)` on the class side of a class nothing

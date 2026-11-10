@@ -27,6 +27,7 @@ module ActionController
   end
 
   class Metal < Base
+    def self.include?: (Module mod) -> bool
     def self.around_action: (*untyped names) ?{ (untyped, untyped) -> untyped } -> nil
     def self.before_action: (*untyped names) ?{ (untyped) -> untyped } -> nil
     def self.after_action: (*untyped names) ?{ (untyped) -> untyped } -> nil

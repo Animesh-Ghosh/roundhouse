@@ -4348,7 +4348,7 @@ impl Analyzer {
         let mut mailer_params_by_view: HashMap<Symbol, Ty> = HashMap::default();
         // A mailer whose `mail` looks its template up renders one named after its action under another directory too
         // (Devise's scoped `users/mailer/confirmation_instructions`).
-        let looking_up = crate::lower::mailer_templates::looking_up_mailers(app);
+        let looking_up = crate::lower::mailer_templates::lookup_dirs(app);
         let mut elsewhere: HashMap<String, Vec<Symbol>> = HashMap::default();
         for v in &app.views {
             if let Some((dir, action)) = v.name.as_str().rsplit_once('/')
@@ -4364,18 +4364,15 @@ impl Analyzer {
 
         // A mailer's modules write its ivars too: Devise's `devise_mail` sets `@resource` and `@email` from
         // `Devise::Mailers::Helpers`, which its templates read. As last typed: the fixpoint reruns this.
-        let module_ivars: HashMap<ClassId, (HashMap<Symbol, Ty>, Vec<ClassId>)> = app
-            .library_classes
-            .iter()
-            .filter(|c| c.is_module)
-            .map(|c| {
-                let mut found = HashMap::default();
-                for m in c.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
-                    extract_ivar_assignments(&m.body, &mut found);
-                }
-                (c.name.clone(), (found, c.includes.clone()))
-            })
-            .collect();
+        // A module's reopenings are one module: each declaration adds its writes and includes.
+        let mut module_ivars: HashMap<ClassId, (HashMap<Symbol, Ty>, Vec<ClassId>)> = HashMap::default();
+        for c in app.library_classes.iter().filter(|c| c.is_module) {
+            let (found, includes) = module_ivars.entry(c.name.clone()).or_default();
+            for m in c.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+                extract_ivar_assignments(&m.body, found);
+            }
+            includes.extend(c.includes.iter().filter(|i| !includes.contains(i)).cloned().collect::<Vec<_>>());
+        }
         let _typing_library = crate::timings::begin("typing: library");
         // Preserve each mailer's registry write before its original position.
         let mut start = 0;
@@ -4457,8 +4454,13 @@ impl Analyzer {
                     }
                     for (name, (found, includes)) in module_ivars.iter().filter(|(n, _)| **n == m || n.0.as_str().ends_with(&format!("::{}", m.0.as_str()))) {
                         let _ = name;
+                        // Every included module's write is a value the ivar can hold.
                         for (k, v) in found {
-                            flow_ivars.entry(k.clone()).or_insert_with(|| v.clone());
+                            let joined = match flow_ivars.get(k) {
+                                Some(have) => crate::analyze::body::union_of(have.clone(), v.clone()),
+                                None => v.clone(),
+                            };
+                            flow_ivars.insert(k.clone(), joined);
                         }
                         pending.extend(includes.iter().cloned());
                     }
@@ -4533,8 +4535,10 @@ impl Analyzer {
                     }
                     let view_name = Symbol::from(format!("{prefix}/{}", method.name.as_str()).as_str());
                     let params = mailer_with_params.get(&lc_name).map(|row| Ty::Record { row: row.clone() });
-                    if looking_up.contains(lc_name.0.as_str()) {
-                        for other in elsewhere.get(method.name.as_str()).into_iter().flatten().filter(|n| **n != view_name) {
+                    if let Some((dirs, _)) = looking_up.get(lc_name.0.as_str()) {
+                        // Only the directories the lookup can reach (`LookupDirs`).
+                        let reached = |n: &Symbol| n.as_str().rsplit_once('/').is_some_and(|(dir, _)| dirs.admits(dir));
+                        for other in elsewhere.get(method.name.as_str()).into_iter().flatten().filter(|n| **n != view_name && reached(n)) {
                             views.push((other.clone(), params.clone(), ivars.clone()));
                         }
                     }
@@ -7869,6 +7873,11 @@ impl ClassIvarWrites {
             out
         };
         let own = ancestors(class);
+        // A parent outside the index (ActiveRecord::Base) writes its instances' ivars (`@destroyed`); its class side is
+        // the app's to configure.
+        if !class_side && own.last().and_then(|c| self.classes.get(c)).and_then(|e| e.parent.as_ref()).is_some_and(|p| !self.classes.contains_key(p) && p.0.as_str() != "Object") {
+            return true;
+        }
         self.classes.iter().any(|(c, e)| {
             (own.contains(c) || ancestors(c).contains(class))
                 && (e.any

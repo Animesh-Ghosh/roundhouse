@@ -1309,7 +1309,15 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
                     // class Devise::Mailer …`), which no program loads but Rails' autoload.
                     let in_gem_app = path_gems.iter().any(|gem| entry.starts_with(gem.join("app")));
                     if in_gem_app && !gem_libs.iter().any(|lib| entry.starts_with(lib)) {
-                        if let Ok(branched) = super::library_class::ingest_file_branch_classes(&source, &path_str) {
+                        let (branched, branch_aliases) = super::inherited_alias::capturing(|| {
+                            super::library_class::ingest_file_branch_classes(&source, &path_str)
+                        });
+                        for span in branch_aliases {
+                            if !aliases.contains(&span) {
+                                aliases.push(span);
+                            }
+                        }
+                        if let Ok(branched) = branched {
                             let branched: Vec<_> = branched.into_iter().filter(|m| !classes.iter().any(|c| c.name == m.name)).collect();
                             classes.extend(branched);
                         }
