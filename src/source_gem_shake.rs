@@ -419,6 +419,19 @@ impl<'a> Gems<'a> {
         out
     }
 
+    /// Whether a call on `target` may run a definition of `method`: one in the receiver's lineage, either way.
+    fn may_answer(&self, target: &Target, method: &str) -> bool {
+        let owners = self.owners.get(method).map(|o| o.as_slice()).unwrap_or_default();
+        match target {
+            Target::Virtual(c, _) if !c.starts_with('\u{0}') => {
+                let lineage = self.ancestors(c);
+                owners.iter().any(|o| lineage.iter().any(|a| a == o) || self.ancestors(o).contains(c))
+            }
+            Target::AppSelf => owners.iter().any(|o| self.app_mixins.contains(*o)),
+            _ => true,
+        }
+    }
+
     /// The definition a call of `method` on `c`'s `side` runs: a class method may be an instance method of a module the class extends.
     fn lookup(&self, c: &str, side: bool, method: &str) -> Option<MethodKey> {
         let ancestors = self.ancestors(c);
@@ -529,7 +542,13 @@ impl<'a> Gems<'a> {
         }
         // Not parsed: the block is Ruby source, so every name called on something in it is reached on any receiver.
         for block in app.gem_middleware_blocks.values() {
-            calls.extend(called_names(block).into_iter().map(|name| (Target::Any, name)));
+            for name in called_names(block) {
+                // Not parsed, so what it passes is not known either.
+                if self.sinks.contains(name.as_str()) {
+                    calls.push((Target::Any, format!("{ARG}{name}\u{1}*\u{1}?")));
+                }
+                calls.push((Target::Any, name));
+            }
         }
         // Loaded where the app mixes them in; and the models and controllers, so a module's call on `self` reaches them.
         live.extend(self.app_mixins.iter().filter(|m| self.names.contains(*m)).cloned());
@@ -908,9 +927,13 @@ impl<'a> Scan<'a> {
     }
 
     /// The calls `send(name)` on `target` makes by `name`.
-    fn send_by(&mut self, target: &Target, name: &Expr) {
+    fn send_by(&mut self, target: &Target, name: &Expr, rest: &[Expr]) {
         let mut names = names_of(name, &self.locals, self.gems, self.context, 2);
-        if let ExprNode::Var { name: var, .. } = &*name.node {
+        // Not a parameter's callers: Ruby calls `method_missing` and its kin with no call site to read.
+        let implicit = self.context.is_some_and(|(_, _, m)| IMPLICIT.contains(&m));
+        if let ExprNode::Var { name: var, .. } = &*name.node
+            && !implicit
+        {
             let positional = self.params.iter().filter(|p| !p.keyword && !p.forwarding).collect::<Vec<_>>();
             if let Some(i) = positional.iter().position(|p| p.name == *var && !p.rest) {
                 let reassigned = self.locals.get(var.as_str()).cloned();
@@ -929,6 +952,17 @@ impl<'a> Scan<'a> {
                 }
             }
         }
+        // What the send passes on, for a method of the name it may reach that calls by a parameter's name.
+        let sinks: Vec<&str> = self.gems.map(|g| g.sinks.iter().copied().filter(|sink| match &names {
+            Some(names) => names.iter().any(|n| match n {
+                Name::Exact(e) => e == sink,
+                Name::Built(prefix, suffix) => built_matches(sink, &format!("{prefix}\u{1}{suffix}")),
+            }),
+            None => g.may_answer(target, sink),
+        }).collect()).unwrap_or_default();
+        for sink in sinks {
+            self.pass(sink, Some(rest));
+        }
         match names {
             Some(names) => self.calls.extend(names.iter().map(|n| n.call(target))),
             None => self.calls.push((target.clone(), format!("{DYNAMIC}\u{1}"))),
@@ -945,7 +979,7 @@ impl<'a> Scan<'a> {
             return;
         };
         for (i, a) in args.iter().enumerate() {
-            if matches!(&*a.node, ExprNode::Splat { .. }) {
+            if matches!(&*a.node, ExprNode::Splat { .. } | ExprNode::ForwardArgs) {
                 self.calls.push((Target::Any, format!("{ARG}{method}\u{1}*\u{1}?")));
                 return;
             }
@@ -1022,6 +1056,11 @@ fn names_of(e: &Expr, locals: &HashMap<String, Option<Vec<Name>>>, gems: Option<
                     .map(|m| (a.clone(), &m.body))
             })?;
             let mut last = body.1;
+            // Not the tail's name alone when a `return` leaves earlier: `return :admin_home if admin?; :user_home`.
+            let returns = count_returns(last);
+            if returns > usize::from(tail_is_return(last)) {
+                return None;
+            }
             loop {
                 match &*last.node {
                     ExprNode::Seq { exprs } => last = exprs.last()?,
@@ -1033,6 +1072,21 @@ fn names_of(e: &Expr, locals: &HashMap<String, Option<Vec<Name>>>, gems: Option<
             names_of(last, &HashMap::default(), Some(gems), Some((owner.as_str(), side, "")), depth - 1)
         }
         _ => None,
+    }
+}
+
+fn count_returns(e: &Expr) -> usize {
+    let own = usize::from(matches!(&*e.node, ExprNode::Return { .. }));
+    let mut nested = 0;
+    e.node.for_each_child(&mut |c| nested += count_returns(c));
+    own + nested
+}
+
+fn tail_is_return(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Seq { exprs } => exprs.last().is_some_and(tail_is_return),
+        ExprNode::Return { .. } => true,
+        _ => false,
     }
 }
 
@@ -1123,7 +1177,7 @@ fn scan(e: &Expr, s: &mut Scan<'_>) {
                 // Not dropped as unknown: svg-graph's `init_with` reaches its option writers by `send(key.to_s + "=", value)`.
                 Some(_) if by_name && matches!(method.as_str(), "send" | "public_send" | "__send__") => {
                     let own = s.context.is_none() && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
-                    s.send_by(if own { &Target::AppSelf } else { &target }, &args[0]);
+                    s.send_by(if own { &Target::AppSelf } else { &target }, &args[0], &args[1..]);
                 }
                 _ => {}
             }
@@ -1138,6 +1192,8 @@ fn scan(e: &Expr, s: &mut Scan<'_>) {
                 },
             };
             s.calls.push((target, name.as_str().to_string()));
+            // Called later with arguments no site here passes (`items.each(&method(:deliver))`).
+            s.pass(name.as_str(), None);
         }
         ExprNode::Super { args } => {
             if let Some((c, side, m)) = s.context {
@@ -1475,15 +1531,15 @@ mod tests {
             &[("notify (1.0)", &[])],
             &[
                 ("notify-1.0/lib/notify.rb", "require \"notify/mailer\"\nrequire \"notify/sender\"\nrequire \"notify/hooks\"\nrequire \"notify/manager\"\n"),
-                ("notify-1.0/lib/notify/mailer.rb", "module Notify\n  class Mailer\n    def welcome\n      \"w\"\n    end\n\n    def goodbye\n      \"g\"\n    end\n\n    def user_path\n      \"/u\"\n    end\n\n    def admin_path\n      \"/a\"\n    end\n\n    def user_home\n      \"h\"\n    end\n  end\nend\n"),
-                ("notify-1.0/lib/notify/sender.rb", "module Notify\n  class Sender\n    def deliver(notification)\n      Mailer.new.send(notification)\n    end\n\n    def path_for(scope)\n      Mailer.new.send(\"#{scope}_path\")\n    end\n\n    def home\n      Mailer.new.send(home_name)\n    end\n\n    def home_name\n      :\"user_home\"\n    end\n  end\nend\n"),
+                ("notify-1.0/lib/notify/mailer.rb", "module Notify\n  class Mailer\n    def welcome\n      \"w\"\n    end\n\n    def goodbye\n      \"g\"\n    end\n\n    def user_path\n      \"/u\"\n    end\n\n    def admin_path\n      \"/a\"\n    end\n\n    def user_home\n      \"h\"\n    end\n\n    def alpha\n      \"a\"\n    end\n\n    def beta\n      \"b\"\n    end\n  end\n\n  class Echo\n    def hello\n      \"hi\"\n    end\n  end\nend\n"),
+                ("notify-1.0/lib/notify/sender.rb", "module Notify\n  class Sender\n    def deliver(notification)\n      Mailer.new.send(notification)\n    end\n\n    def path_for(scope)\n      Mailer.new.send(\"#{scope}_path\")\n    end\n\n    def home\n      Mailer.new.send(home_name)\n    end\n\n    def home_name\n      :\"user_home\"\n    end\n\n    def picked(flag)\n      Mailer.new.send(pick(flag))\n    end\n\n    def pick(flag)\n      return :alpha if flag\n      :beta\n    end\n\n    def relay(notification)\n      Echo.new.send(notification)\n    end\n  end\nend\n"),
                 ("notify-1.0/lib/notify/hooks.rb", "module Notify\n  module Hooks\n    def on_boot\n      \"boot\"\n    end\n\n    def on_halt\n      \"halt\"\n    end\n  end\nend\n"),
                 ("notify-1.0/lib/notify/manager.rb", "module Notify\n  class Manager\n    extend Hooks\n  end\nend\n"),
             ],
             &[(
                 "app/models/article.rb",
                 "class Article < ApplicationRecord\n",
-                "class Article < ApplicationRecord\n  def notify\n    s = Notify::Sender.new\n    [s.deliver(:welcome), s.path_for(title), s.home, Notify::Manager.on_boot]\n  end\n\n",
+                "class Article < ApplicationRecord\n  def notify\n    s = Notify::Sender.new\n    [s.deliver(:welcome), s.path_for(title), s.home, s.picked(title), [:hello].map(&s.method(:relay)), Notify::Manager.on_boot]\n  end\n\n",
             )],
         );
         let reached = reached(&app);
@@ -1493,6 +1549,11 @@ mod tests {
             ("Notify::Mailer", false, "admin_path"),
             ("Notify::Mailer", false, "user_home"),
             ("Notify::Hooks", false, "on_boot"),
+            // A `return` before the tail: either name.
+            ("Notify::Mailer", false, "alpha"),
+            ("Notify::Mailer", false, "beta"),
+            // Called through `method(:relay)`, with whatever the block yields: any name.
+            ("Notify::Echo", false, "hello"),
         ] {
             assert!(reached.methods.contains(&method(owner, class_side, name)), "{owner} {name}: {reached:#?}");
         }
