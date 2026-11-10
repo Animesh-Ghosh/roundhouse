@@ -105,10 +105,10 @@ fn drawn(overlay: emit_and_run::Overlay) -> (String, String) {
 fn devise_for_draws_the_routes_of_the_models_modules() {
     let (routes, helpers) = drawn(app(":database_authenticatable, :registerable, :recoverable", "  devise_for :users\n"));
     for route in [
-        r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#,
-        r#"Route.new("DELETE", "/users/sign_out", :devise__sessions, :destroy)"#,
-        r#"Route.new("GET", "/users/cancel", :devise__registrations, :cancel)"#,
-        r#"Route.new("PUT", "/users/password", :devise__passwords, :update)"#,
+        r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new"#,
+        r#"Route.new("DELETE", "/users/sign_out", :devise__sessions, :destroy"#,
+        r#"Route.new("GET", "/users/cancel", :devise__registrations, :cancel"#,
+        r#"Route.new("PUT", "/users/password", :devise__passwords, :update"#,
     ] {
         assert!(routes.contains(route), "{route}\n{routes}");
     }
@@ -118,11 +118,11 @@ fn devise_for_draws_the_routes_of_the_models_modules() {
     }
 
     let (routes, _) = drawn(app(":database_authenticatable", "  devise_for :users\n"));
-    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#), "{routes}");
+    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new"#), "{routes}");
     assert!(!routes.contains("registrations") && !routes.contains("passwords"), "{routes}");
 
     let (routes, _) = drawn(app(":database_authenticatable, :registerable, :recoverable", "  devise_for :users, skip: [:registrations]\n"));
-    assert!(routes.contains(r#"Route.new("GET", "/users/password/new", :devise__passwords, :new)"#), "{routes}");
+    assert!(routes.contains(r#"Route.new("GET", "/users/password/new", :devise__passwords, :new"#), "{routes}");
     assert!(!routes.contains("registrations"), "{routes}");
 }
 
@@ -135,9 +135,9 @@ fn devise_for_options_and_an_enclosing_module_are_devises() {
         "  scope module: :auth do\n    devise_for :users, path: \"account\", path_names: { sign_in: \"login\" }, controllers: { registrations: \"users/registrations\" }\n  end\n",
     ));
     for route in [
-        r#"Route.new("GET", "/account/login", :auth__sessions, :new)"#,
-        r#"Route.new("DELETE", "/account/sign_out", :auth__sessions, :destroy)"#,
-        r#"Route.new("GET", "/account/sign_up", :users__registrations, :new)"#,
+        r#"Route.new("GET", "/account/login", :auth__sessions, :new"#,
+        r#"Route.new("DELETE", "/account/sign_out", :auth__sessions, :destroy"#,
+        r#"Route.new("GET", "/account/sign_up", :users__registrations, :new"#,
     ] {
         assert!(routes.contains(route), "{route}\n{routes}");
     }
@@ -150,8 +150,8 @@ fn devise_for_a_subclass_draws_its_superclasss_modules() {
     let (routes, helpers) = drawn(
         app(":database_authenticatable, :recoverable", "  devise_for :admins, path: \"admin\"\n").write("app/models/admin.rb", "class Admin < User\nend\n"),
     );
-    assert!(routes.contains(r#"Route.new("GET", "/admin/sign_in", :devise__sessions, :new)"#), "{routes}");
-    assert!(routes.contains(r#"Route.new("GET", "/admin/password/new", :devise__passwords, :new)"#), "{routes}");
+    assert!(routes.contains(r#"Route.new("GET", "/admin/sign_in", :devise__sessions, :new"#), "{routes}");
+    assert!(routes.contains(r#"Route.new("GET", "/admin/password/new", :devise__passwords, :new"#), "{routes}");
     assert!(helpers.contains("def self.new_admin_session_path"), "{helpers}");
 }
 
@@ -210,7 +210,7 @@ fn devise_for_is_drawn_past_a_setup_block_configuring_another_object() {
             .write("lib/devise_token.rb", gem)
             .write("config/initializers/devise.rb", setup),
     );
-    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#), "{routes}");
+    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new"#), "{routes}");
     assert!(helpers.contains("def self.new_user_session_path"), "{helpers}");
 }
 
@@ -224,7 +224,7 @@ fn devise_for_knows_a_module_registered_inside_module_devise() {
             .edit("Gemfile", "gem \"devise\"\n", "gem \"devise\"\ngem \"devise-token\"\n")
             .write("vendor/bundle/ruby/3.4.0/gems/devise-token-0.1.0/lib/devise-token.rb", "module Devise\n  add_module(:token_authenticatable, strategy: :token)\nend\n"),
     );
-    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#), "{routes}");
+    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new"#), "{routes}");
 }
 
 /// A `devise` option sets that option on the model and no other: `stretches:` leaves the unlock strategy Devise's, so its unlock routes are drawn.
@@ -232,7 +232,7 @@ fn devise_for_knows_a_module_registered_inside_module_devise() {
 #[test]
 fn devise_for_reads_past_a_model_option_it_does_not_ask_about() {
     let (routes, _) = drawn(app(":database_authenticatable, :lockable, stretches: 1", "  devise_for :users\n"));
-    assert!(routes.contains(r#"Route.new("GET", "/users/unlock/new", :devise__unlocks, :new)"#), "{routes}");
+    assert!(routes.contains(r#"Route.new("GET", "/users/unlock/new", :devise__unlocks, :new"#), "{routes}");
 
     let (routes, _) = drawn(app(":database_authenticatable, :lockable, unlock_strategy: :time", "  devise_for :users\n"));
     assert!(!routes.contains("/users/unlock"), "{routes}");
