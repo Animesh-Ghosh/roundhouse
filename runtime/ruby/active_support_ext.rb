@@ -582,9 +582,11 @@ module ActiveSupport
 
   # AS `Array#extract_options!` (`lower::enumerable_ext`): the trailing
   # Hash, removed from the Array it was called on, or a new empty one.
+  # Only a plain Hash, as Rails' `Hash#extractable_options?` answers
+  # (`instance_of?(Hash)`): a subclass stays in the Array.
   def self.extract_options!(list)
     last = list.last
-    return list.pop if last.is_a?(Hash)
+    return list.pop if last.instance_of?(Hash)
     {}
   end
 

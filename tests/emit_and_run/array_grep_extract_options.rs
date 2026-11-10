@@ -9,6 +9,15 @@ const MODEL: &str = r#"
     [args, options]
   end
 
+  def self.split_names(*names)
+    options = names.extract_options!
+    [names, options]
+  end
+
+  def self.named_split
+    split_names("a", "b")
+  end
+
   def self.devise_keys(keys)
     keys.grep(/\Adevise\./)
   end
@@ -22,6 +31,8 @@ const SCRIPT: &str = r#"got = Article.split_options(:a, :b, scope: :user)
 raise got.inspect unless got == [[:a, :b], { scope: :user }]
 got = Article.split_options(:a)
 raise got.inspect unless got == [[:a], {}]
+got = Article.named_split
+raise got.inspect unless got == [["a", "b"], {}]
 keys = ["devise.mapping", "warden", "devise.skip"]
 raise Article.devise_keys(keys).inspect unless Article.devise_keys(keys) == ["devise.mapping", "devise.skip"]
 raise Article.other_keys(keys).inspect unless Article.other_keys(keys) == ["warden"]
