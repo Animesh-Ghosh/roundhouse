@@ -30,6 +30,14 @@ module Shelf
       Shelf::LOADED
     end
   end
+
+  class Crate
+    include Accessor
+
+    def self.kind
+      "crate"
+    end
+  end
 end
 "#;
 
@@ -44,7 +52,7 @@ fn app() -> emit_and_run::Overlay {
         .write("Gemfile.lock", &lock)
         .write(".bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n")
         .write("vendor/bundle/ruby/3.4.0/gems/shelf-1.0.0/lib/shelf.rb", SHELF)
-        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  def self.shelf_loaded\n    Shelf::Box.loaded\n  end\n\n")
+        .edit("app/models/article.rb", "class Article < ApplicationRecord\n", "class Article < ApplicationRecord\n  def self.shelf_loaded\n    Shelf::Box.loaded + \"/\" + Shelf::Crate.kind\n  end\n\n")
 }
 
 #[test]
@@ -59,7 +67,7 @@ fn a_gems_load_error_fallback_is_left_where_the_tree_provides_the_feature() {
 #[test]
 #[ignore = "requires the Spinel toolchain"]
 fn a_gems_load_error_fallback_is_left_natively() {
-    let run = app().run_spinel("raise Article.shelf_loaded unless Article.shelf_loaded == \"rails\"\nputs \"loaded begin passed\"\n");
+    let run = app().run_spinel("raise Article.shelf_loaded unless Article.shelf_loaded == \"rails/crate\"\nputs \"loaded begin passed\"\n");
     run.assert_passes();
     assert!(run.stdout.contains("loaded begin passed"), "{}", run.stdout);
 }

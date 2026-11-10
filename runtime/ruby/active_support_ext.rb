@@ -506,10 +506,11 @@ module ActiveSupport
   # `rescue_from(ActiveSupport::MessageVerifier::InvalidSignature) {
   # head :not_found }` over an avatar URL that carries a signed id.
   #
-  # Kernel#warn, which the deprecator's own `warn` would shadow; not
-  # `Rails.log_line`, which a host logger may filter.
+  # Not Kernel#warn, which `-W0` silences, nor `Rails.log_line`, which a
+  # host logger may filter: Rails' :stderr behavior writes the stream.
   def self.deprecation_line(line)
-    warn(line)
+    $stderr.puts(line)
+    nil
   end
 
   # Rails' deprecator a gem keeps for itself (`Devise.deprecator`): `warn`
