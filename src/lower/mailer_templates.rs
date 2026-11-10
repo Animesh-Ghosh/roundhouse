@@ -90,6 +90,22 @@ pub fn apply_mailer_templates(app: &mut App) -> Vec<Diagnostic> {
             rewrite(&mut m.body, &site, &mut diags);
         }
     }
+    // Not rendered and not silently sent empty: a `mail` in a module a mailer includes builds the message of
+    // whichever action calls it, a template this pass does not pick (Devise's `devise_mail`).
+    let mut pending: Vec<String> = app.library_classes.iter().filter(|lc| mailers.contains(lc.name.0.as_str())).flat_map(|lc| lc.includes.iter().map(|m| m.0.to_string())).collect();
+    let mut included: BTreeSet<String> = BTreeSet::new();
+    while let Some(m) = pending.pop() {
+        for module in app.library_classes.iter().filter(|c| c.is_module && (c.name.0.as_str() == m || c.name.0.as_str().ends_with(&format!("::{m}")))) {
+            if included.insert(module.name.0.to_string()) {
+                pending.extend(module.includes.iter().map(|i| i.0.to_string()));
+            }
+        }
+    }
+    for module in app.library_classes.iter().filter(|c| included.contains(c.name.0.as_str())) {
+        for m in &module.methods {
+            report_module_mail(&m.body, &mut diags);
+        }
+    }
     // A parent's `default` is read for each mailer under it: report it once.
     let mut seen = crate::det::HashSet::default();
     diags.retain(|d| seen.insert((d.span.file, d.span.start, d.span.end, d.message.clone())));
@@ -223,6 +239,20 @@ fn same_key(a: &Expr, b: &Expr) -> bool {
         _ => None,
     };
     name(a).is_some() && name(a) == name(b)
+}
+
+fn report_module_mail(expr: &Expr, diags: &mut Vec<Diagnostic>) {
+    if let ExprNode::Send { recv: None, method, .. } = &*expr.node
+        && method.as_str() == "mail"
+    {
+        diags.push(Diagnostic::unsupported(
+            expr.span,
+            None,
+            "mailer module mail",
+            "`mail` in a module a mailer includes renders the template of the action that calls it, which is not modeled; only a `mail` in the action's own body is",
+        ));
+    }
+    expr.node.for_each_child(&mut |c| report_module_mail(c, diags));
 }
 
 fn rewrite(expr: &mut Expr, site: &Site<'_>, diags: &mut Vec<Diagnostic>) {

@@ -1248,6 +1248,19 @@ impl<'a> BodyTyper<'a> {
     fn constant_predicate(&self, cond: &mut Expr, ctx: &Ctx) -> Option<bool> {
         let predicates = self.constant_predicates?;
         let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &mut *cond.node else { return None };
+        // `x.try(:m)` on a class nothing in whose chain answers `m` is nil (Devise's mailer views'
+        // `@resource.try(:unconfirmed_email?)` on a model that is not `:confirmable`).
+        if method.as_str() == "try"
+            && let [name] = args.as_slice()
+            && let ExprNode::Lit { value: Literal::Sym { value: asked } } = &*name.node
+        {
+            let asked = asked.clone();
+            self.analyze_expr(r, ctx);
+            return match r.ty.as_ref().map(Ty::peel_nilable) {
+                Some(t @ Ty::Class { .. }) if self.never_responds(t, &asked) => Some(false),
+                _ => None,
+            };
+        }
         if !args.is_empty() {
             return None;
         }

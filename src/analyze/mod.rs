@@ -4347,6 +4347,20 @@ impl Analyzer {
         }
         let mut mailer_params_by_view: HashMap<Symbol, Ty> = HashMap::default();
 
+        // A mailer's modules write its ivars too: Devise's `devise_mail` sets `@resource` and `@email` from
+        // `Devise::Mailers::Helpers`, which its templates read. As last typed: the fixpoint reruns this.
+        let module_ivars: HashMap<ClassId, (HashMap<Symbol, Ty>, Vec<ClassId>)> = app
+            .library_classes
+            .iter()
+            .filter(|c| c.is_module)
+            .map(|c| {
+                let mut found = HashMap::default();
+                for m in c.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+                    extract_ivar_assignments(&m.body, &mut found);
+                }
+                (c.name.clone(), (found, c.includes.clone()))
+            })
+            .collect();
         let _typing_library = crate::timings::begin("typing: library");
         // Preserve each mailer's registry write before its original position.
         let mut start = 0;
@@ -4418,6 +4432,22 @@ impl Analyzer {
             let mut flow_ivars: HashMap<Symbol, Ty> = HashMap::default();
             for method in &lc.methods {
                 extract_ivar_assignments(&method.body, &mut flow_ivars);
+            }
+            if mailer_names.contains(&lc_name) {
+                let mut pending: Vec<ClassId> = lc.includes.clone();
+                let mut seen: crate::det::HashSet<ClassId> = crate::det::HashSet::default();
+                while let Some(m) = pending.pop() {
+                    if !seen.insert(m.clone()) {
+                        continue;
+                    }
+                    for (name, (found, includes)) in module_ivars.iter().filter(|(n, _)| **n == m || n.0.as_str().ends_with(&format!("::{}", m.0.as_str()))) {
+                        let _ = name;
+                        for (k, v) in found {
+                            flow_ivars.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                        pending.extend(includes.iter().cloned());
+                    }
+                }
             }
             // A CONTROLLER CONCERN's ivars are the includer's. Its
             // methods run on the controller and read what the

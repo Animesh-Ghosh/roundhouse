@@ -239,6 +239,36 @@ pub(super) fn devise_mapping_types(app: &mut App) {
         .entry(crate::ident::ClassId(crate::ident::Symbol::from("Devise::Mapping")))
         .or_default()
         .insert(crate::ident::Symbol::from("to"), signature);
+    // The mailer's actions are sent by name (`devise_mailer.send(notification, self, *args)` in `send_devise_notification`),
+    // which no call site types: the record is a devise model's, the token a String, as Devise's modules pass them.
+    let record = match models.as_slice() {
+        [one] => crate::ty::Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from(one.as_str())), args: vec![].into() },
+        many => crate::ty::Ty::Union {
+            variants: many.iter().map(|m| crate::ty::Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from(m.as_str())), args: vec![].into() }).collect::<Vec<_>>().into(),
+        },
+    };
+    if let Some(mailer) = app.library_classes.iter().find(|c| c.name.0.as_str() == "Devise::Mailer") {
+        let param = |name: &crate::ident::Symbol, ty: crate::ty::Ty, optional: bool| crate::ty::Param {
+            name: name.clone(),
+            ty: std::sync::Arc::new(ty),
+            kind: if optional { crate::ty::ParamKind::Optional } else { crate::ty::ParamKind::Required },
+        };
+        let mut actions = Vec::new();
+        for m in mailer.methods.iter().filter(|m| m.receiver == crate::dialect::MethodReceiver::Instance) {
+            let params: Vec<crate::ty::Param> = m.params.iter().map(|p| match p.name.as_str() {
+                "record" => param(&p.name, record.clone(), p.default.is_some()),
+                "token" => param(&p.name, crate::ty::Ty::Str, p.default.is_some()),
+                _ => param(&p.name, crate::ty::Ty::Untyped, p.default.is_some()),
+            }).collect();
+            if m.params.first().is_some_and(|p| p.name.as_str() == "record") {
+                actions.push((m.name.clone(), crate::ty::Ty::Fn { params: params.into(), block: None, ret: crate::ty::Ty::Untyped.into(), effects: Default::default() }));
+            }
+        }
+        let table = app.rbs_signatures.entry(crate::ident::ClassId(crate::ident::Symbol::from("Devise::Mailer"))).or_default();
+        for (name, sig) in actions {
+            table.insert(name, sig);
+        }
+    }
 }
 
 /// `:x` of a `self.modules.include?(:x)` body.

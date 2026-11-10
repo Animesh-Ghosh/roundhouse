@@ -3,6 +3,9 @@
 //! - A predicate whose body is a literal, and whose name nothing else defines, answers that constant, so `if
 //!   x.beta?` takes one branch and the other, typed, would report what never runs (Devise's
 //!   `if devise_mapping.validatable?` over a model that is not `:validatable`).
+//! - `x.try(:m)` on a class nothing in whose chain answers `m` is nil, so its `if` takes the `else` (Devise's
+//!   `@resource.try(:unconfirmed_email?)` on a model that is not `:confirmable`).
+//! - `instance_variable_set` answers the value it sets.
 //! - A gem method no reached call passes a block to never takes its `x if block_given?` (Warden's `Strategies.add`,
 //!   called with the strategy class alone once the `update` nothing calls is left out).
 
@@ -28,9 +31,25 @@ const MODEL: &str = r#"class Article < ApplicationRecord
     release(Flags.new)
   end
 
+  def self.pending(flags)
+    if flags.try(:pending_build)
+      flags.pending_build.label
+    else
+      "none pending"
+    end
+  end
+
+  def self.pending_of_default
+    pending(Flags.new)
+  end
+
 "#;
 
+// Ruby only: Spinel refuses `instance_variable_set` itself.
+const STAMPED: &str = "  def self.stamped\n    @stamp = instance_variable_set(:@stamped_at, \"now\")\n    @stamp.upcase\n  end\n\n";
+
 const SCRIPT: &str = r#"raise "release #{Article.release_of_default.inspect}" unless Article.release_of_default == "stable"
+raise "pending #{Article.pending_of_default.inspect}" unless Article.pending_of_default == "none pending"
 puts "constant branches passed"
 "#;
 
@@ -40,7 +59,9 @@ fn app() -> emit_and_run::Overlay {
 
 #[test]
 fn a_constant_predicate_takes_one_branch() {
-    let run = app().run_ruby(SCRIPT);
+    let run = app()
+        .edit("app/models/article.rb", "  def self.release_of_default\n", &format!("{STAMPED}  def self.release_of_default\n"))
+        .run_ruby(&format!("{SCRIPT}raise \"stamped\" unless Article.stamped == \"NOW\"\n"));
     run.assert_passes();
     assert!(run.stdout.contains("constant branches passed"), "{}", run.stdout);
 }
