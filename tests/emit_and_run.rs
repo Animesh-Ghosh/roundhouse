@@ -142,6 +142,8 @@ mod source_gem_load_order;
 mod gem_file_statements;
 #[path = "emit_and_run/boot_with_options.rs"]
 mod boot_with_options;
+#[path = "emit_and_run/class_param_or_assign.rs"]
+mod class_param_or_assign;
 #[path = "emit_and_run/unresolved_param_rbs.rs"]
 mod unresolved_param_rbs;
 #[path = "emit_and_run/declared_sig_rbs.rs"]
