@@ -986,10 +986,35 @@ impl<'a> Eval<'a> {
             }
             if let Some(hook) = super::gem_hooks::router_call(&self.known, self.calls.last().map(|c| (c.0.as_str(), c.1.as_str())), method, &argv) {
                 return match hook {
-                    super::gem_hooks::RouterCall::RunBlock => match &blk {
-                        Some(b) => self.call_proc(b, Vec::new(), frame),
-                        None => Ok(Val::Nil),
-                    },
+                    super::gem_hooks::RouterCall::RunBlock => {
+                        // Not recorded as a block: the routes it draws take the scope where they stand. The constraint still runs
+                        // at request time (devise's `request.env["devise.mapping"] = …`), so they are wrapped in it once drawn.
+                        let constraint = argv.first().filter(|v| matches!(v, Val::Proc { .. })).map(|p| to_expr(p, Span::synthetic()));
+                        let start = self.drawn.last().map_or(0, Vec::len);
+                        let answer = match &blk {
+                            Some(b) => self.call_proc(b, Vec::new(), frame)?,
+                            None => Val::Nil,
+                        };
+                        if let Some(Ok(mut lambda)) = constraint
+                            && let Some(level) = self.drawn.last_mut()
+                            && level.len() > start
+                        {
+                            // Not the gem file's places for its parts: a constant is resolved by where it is written, and the guard is the app's.
+                            fn synthetic(e: &mut Expr) {
+                                e.span = Span::synthetic();
+                                e.node.for_each_child_mut(&mut synthetic);
+                            }
+                            synthetic(&mut lambda);
+                            // One place per wrapped constraint: the router tells its guards apart by it.
+                            self.tick += 1;
+                            lambda.span = Span { file: crate::span::FileId(0), start: u32::MAX - self.tick as u32, end: u32::MAX - self.tick as u32 + 1 };
+                            let span = Span::synthetic();
+                            let inner: Vec<Expr> = level.drain(start..).collect();
+                            let body = Expr::new(span, ExprNode::Lambda { params: Vec::new(), rest_param: None, extra_params: Vec::new(), block_param: None, body: Expr::new(span, ExprNode::Seq { exprs: inner }), block_style: crate::expr::BlockStyle::Do });
+                            level.push(Expr::new(span, ExprNode::Send { recv: None, method: Symbol::from("constraints"), args: vec![lambda], block: Some(body), parenthesized: true }));
+                        }
+                        Ok(answer)
+                    }
                 };
             }
         }

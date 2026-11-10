@@ -99,6 +99,7 @@ pub(super) fn expand<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path
         }
     }
     write_devise_url_helpers(app, devise);
+    super::gem_hooks::devise_mapping_types(app);
     if !failed {
         consume_installs(app);
     }
@@ -162,6 +163,10 @@ fn write_devise_url_helpers(app: &mut App, draws: DeviseDraws) {
 fn place_guards(entries: &mut [RouteSpec], span: crate::span::Span) {
     fn place(e: &mut Expr, span: crate::span::Span) {
         e.span = span;
+        // Not resolved where the call stands: no `Devise` is written there, and the constant is the gem method's own.
+        if matches!(&*e.node, ExprNode::Const { .. }) {
+            e.decisions |= crate::expr::GENERATED_CONST_REF;
+        }
         e.node.for_each_child_mut(&mut |child| place(child, span));
     }
     for entry in entries {
