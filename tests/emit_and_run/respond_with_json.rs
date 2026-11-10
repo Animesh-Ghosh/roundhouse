@@ -64,10 +64,21 @@ const CONTROLLER: &str = r#"class GadgetsController < ApplicationController
     respond_with @article, action: :edit, location: "/done"
   end
 
+  def helper_call
+    answer
+  end
+
   def several
     @article = Article.new(title: "x", body: "a body long enough to pass")
     @other = Article.new(title: "y", body: "a body long enough to pass")
     respond_with @article, @other
+  end
+
+  private
+
+  def answer
+    @article = Article.new(title: "h", body: "a body long enough to pass")
+    respond_with @article
   end
 end
 "#;
@@ -85,6 +96,7 @@ const ROUTES: &str = r#"  get "g/show", to: "gadgets#show"
   post "g/typed", to: "gadgets#typed"
   post "g/act", to: "gadgets#act"
   post "g/several", to: "gadgets#several"
+  get "g/helper_call", to: "gadgets#helper_call"
 "#;
 
 #[test]
@@ -92,6 +104,7 @@ fn respond_with_answers_as_the_responder_does_for_json() {
     let run = emit_and_run::real_blog()
         .write("app/controllers/gadgets_controller.rb", CONTROLLER)
         .write("app/views/gadgets/tmpl.json.jbuilder", "json.tmpl @article.title\n")
+        .write("app/views/gadgets/helper_call.json.jbuilder", "json.helper @article.title\n")
         .edit("config/routes.rb", "  root \"articles#index\"\n", &format!("  root \"articles#index\"\n{ROUTES}"))
         .run_ruby(
             r##"
@@ -119,9 +132,15 @@ end
   ["POST",   "/g/blk",     "name=a", "json", 201, "/done", "\"title\":\"a\""],
   ["GET",    "/g/show",    "",       "html", 406, nil,     ""],
   ["POST",   "/g/blk",     "name=a", "html", 200, nil,     "custom"],
+  # A bare `*/*` with no explicit format negotiates to json; with `.html`, or with no Accept at all, it does not.
+  ["GET",    "/g/show",      "",       "any",  200, nil,     "\"title\":\"s\""],
+  ["POST",   "/g/blk",       "name=a", "any",  201, "/done", "\"title\":\"a\""],
+  ["PUT",    "/g/update",    "",       "any",  422, nil,     "{\"errors\":{\"title\":"],
+  ["GET",    "/g/show.html", "",       "any",  406, nil,     ""],
+  ["GET",    "/g/show",      "",       "none", 406, nil,     ""],
 ].each do |verb, path, query, accept, status, location, body|
   # The native dispatchers take a request's format from the path's extension, not from Accept.
-  got = hit(verb, accept == "json" ? path + ".json" : path, query, accept == "json" ? "application/json" : "text/html")
+  got = hit(verb, accept == "json" ? path + ".json" : path, query, { "json" => "application/json", "html" => "text/html", "any" => "*/*", "none" => "" }[accept])
   ok = got[0] == status && got[1].to_s.sub("http://localhost", "") == location.to_s && got[2].include?(body)
   raise "#{verb} #{path}?#{query} (#{accept}): got #{got.inspect}, want #{[status, location, body].inspect}" unless ok
 end
@@ -134,9 +153,10 @@ end
   raise "typed?#{query}: got #{[got_status, got_type].inspect}, want #{[status, type].inspect}" unless got_status == status && got_type == type
 end
 # Not modeled: these must fail, not answer with a response Rails wouldn't give.
-["/g/act", "/g/several"].each do |path|
+# A helper's `respond_with` would render the calling action's template, which the lowering can't name.
+[["POST", "/g/act"], ["POST", "/g/several"], ["GET", "/g/helper_call"]].each do |verb, path|
   got = begin
-    hit("POST", path + ".json")
+    hit(verb, path + ".json")
   rescue ArgumentError, NoMethodError, NameError
     [500]
   end
@@ -147,4 +167,69 @@ puts "respond_with json passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("respond_with json passed"), "{}", run.stdout);
+}
+
+const API_CONTROLLER: &str = r#"class BareGadgetsController < ActionController::API
+  include ActionController::MimeResponds
+  respond_to :json
+
+  def show
+    @article = Article.new(title: "s", body: "a body long enough to pass")
+    respond_with @article
+  end
+
+  def stat
+    @article = Article.new(title: "x", body: "a body long enough to pass")
+    respond_with @article, status: :accepted, location: "/done"
+  end
+
+  def update
+    @article = Article.new(title: params[:name], body: "a body long enough to pass")
+    @article.valid?
+    respond_with @article, location: "/done"
+  end
+end
+"#;
+
+const API_ROUTES: &str = r#"  get "b/show", to: "bare_gadgets#show"
+  post "b/stat", to: "bare_gadgets#stat"
+  put "b/update", to: "bare_gadgets#update"
+"#;
+
+/// `ActionController::API` without jbuilder renders no views: a 204 carries no location, and a bare `*/*`
+/// answers a blank body with the call's status and location (responders 3.2.1 under Rails 8.1.4.1).
+#[test]
+fn respond_with_on_an_api_controller_without_views() {
+    let run = emit_and_run::real_blog()
+        .remove("app/views/articles/index.json.jbuilder")
+        .remove("app/views/articles/show.json.jbuilder")
+        .remove("app/views/articles/_article.json.jbuilder")
+        .write("app/controllers/bare_gadgets_controller.rb", API_CONTROLLER)
+        .edit("config/routes.rb", "  root \"articles#index\"\n", &format!("  root \"articles#index\"\n{API_ROUTES}"))
+        .run_ruby(
+            r##"
+def hit(verb, path, query, accept)
+  env = { "REQUEST_METHOD" => verb, "PATH_INFO" => path, "QUERY_STRING" => query, "REMOTE_ADDR" => "127.0.0.1",
+          "HTTP_HOST" => "localhost", "rack.input" => StringIO.new(""), "HTTP_ACCEPT" => accept }
+  status, headers, body = Main.run_rack(env)
+  [status, (headers["location"] || headers["Location"]).to_s.sub("http://localhost", ""), body.join]
+end
+# verb, path, query, accept, status, location, body (exact when blank, else a substring)
+[
+  ["GET",  "/b/show.json",   "",       "application/json", 200, "",      "\"title\":\"s\""],
+  ["PUT",  "/b/update.json", "name=a", "application/json", 204, "",      ""],
+  ["PUT",  "/b/update.json", "",       "application/json", 422, "",      "{\"errors\":{\"title\":"],
+  ["GET",  "/b/show",        "",       "*/*",              200, "",      " "],
+  ["POST", "/b/stat",        "",       "*/*",              202, "/done", " "],
+  ["PUT",  "/b/update",      "",       "*/*",              200, "/done", " "],
+].each do |verb, path, query, accept, status, location, body|
+  got = hit(verb, path, query, accept)
+  ok = got[0] == status && got[1] == location && (body.strip.empty? ? got[2] == body : got[2].include?(body))
+  raise "#{verb} #{path}?#{query} (#{accept}): got #{got.inspect}, want #{[status, location, body].inspect}" unless ok
+end
+puts "respond_with api passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("respond_with api passed"), "{}", run.stdout);
 }
