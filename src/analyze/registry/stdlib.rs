@@ -1157,6 +1157,10 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("silenced", Ty::Bool), ("silenced=", Ty::Bool),
     ]);
     register_stdlib_class(classes, "ActiveSupport::Deprecation::DeprecatedConstantAccessor", &[], &[]);
+    // `runtime/ruby/action_controller/metal.rb`: the modules a Metal subclass includes back, which Base already holds.
+    for module in ["ActionController::UrlFor", "ActionController::Redirecting", "AbstractController::Callbacks"] {
+        register_stdlib_class(classes, module, &[], &[]);
+    }
     register_stdlib_class(classes, crate::analyze::indifferent::CLASS, &[], &[]);
     // Not answered here beyond `new`: the dispatch arm for `ActiveSupport::StringInquirer` types its predicates and String surface.
     register_stdlib_class(classes, "ActiveSupport::StringInquirer", &[("new", Ty::Str)], &[]);

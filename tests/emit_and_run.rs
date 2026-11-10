@@ -146,6 +146,8 @@ mod uncalled_config_writers;
 mod gem_mailer_reach;
 #[path = "emit_and_run/constant_branches.rs"]
 mod constant_branches;
+#[path = "emit_and_run/metal_subclass.rs"]
+mod metal_subclass;
 #[path = "emit_and_run/boot_with_options.rs"]
 mod boot_with_options;
 #[path = "emit_and_run/class_param_or_assign.rs"]

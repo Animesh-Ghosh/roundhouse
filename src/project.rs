@@ -8773,6 +8773,8 @@ fn unavailable_class_module_construct(name: &str, target: &str) -> Option<&'stat
         // `runtime/ruby/active_support_ext.rb` ships to the ruby family
         // and spinel only.
         | "ActiveSupport::JSON" | "ActiveSupport::Deprecation" | "ActiveSupport::Deprecation::DeprecatedConstantAccessor"
+        // `runtime/ruby/action_controller/metal.rb`.
+        | "ActionController::Metal" | "ActionController::UrlFor" | "ActionController::Redirecting" | "AbstractController::Callbacks"
         // The sqlite3 gem on the ruby family, `runtime/spinel/
         // sqlite3_database.rb` over the FFI on spinel; `FileUtils` is a
         // default gem / `packages/fileutils`; the Rails classes come
