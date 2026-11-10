@@ -535,6 +535,10 @@ fn transpile(
             roundhouse::diagnostic::DiagnosticKind::Unsupported {
                 construct, detail, ..
             } if construct.as_str() == "constant" => !external_roots.names_any(detail),
+            // Not this tree's: it runs the gem file's statements in the file's program (`ingest::gem_load_program`).
+            roundhouse::diagnostic::DiagnosticKind::Unsupported {
+                target: Some(only), construct, ..
+            } if only.as_str() == "spinel" && construct.as_str() == "gem file statement" => false,
             _ => true,
         });
     }

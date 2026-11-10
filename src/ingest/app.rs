@@ -3360,12 +3360,15 @@ end
     super::body_statements::mark(&mut app);
     report_unmodelled_records(&app);
     super::unreached_gem_modules::drop(&mut app, dir);
+    super::gem_load_program::carry(&mut app);
     super::interpolated_renders::expand(&mut app);
     super::controller_delegates::expand(&mut app);
     super::active_model_super::rewrite(&mut app);
     super::queue_adapter_reader::synthesize(&mut app);
     super::container_specialize::specialize(&mut app);
     super::unreachable_views::mark(&mut app);
+    mime_extension_lookups(&mut app);
+    super::option_merger::expand(&mut app);
     for d in crate::controller_layout::diagnostics(&app.controllers, &app.views) {
         super::prism::push(d);
     }
@@ -14614,3 +14617,28 @@ mod path_gem_vfs_tests {
 }
 
 
+
+/// Rails' `Mime::EXTENSION_LOOKUP[ext]` (devise's `navigational_formats`), the registered type for an extension
+/// or nil: what `Mime::Type.lookup_by_extension(ext)` answers in the runtime, which has no such table, in every body
+/// the tree emits (a `direct` route helper's too). Only that read: any other use of the table stays the unknown
+/// constant it is.
+fn mime_extension_lookups(app: &mut App) {
+    use crate::expr::{Expr, ExprNode};
+    use crate::ident::Symbol;
+    fn rewrite(e: &mut Expr) {
+        if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *e.node
+            && method.as_str() == "[]"
+            && args.len() == 1
+            && matches!(&*recv.node, ExprNode::Const { path } if path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).eq(["Mime", "EXTENSION_LOOKUP"]))
+        {
+            let span = recv.span;
+            let mut constant = Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Mime"), Symbol::from("Type")] });
+            // Not resolved where it stands: the source names `Mime::EXTENSION_LOOKUP` there, not this.
+            constant.decisions |= crate::expr::GENERATED_CONST_REF;
+            *recv = constant;
+            *method = Symbol::from("lookup_by_extension");
+        }
+        e.node.for_each_child_mut(&mut rewrite);
+    }
+    crate::lower::for_each_emit_body(app, &mut rewrite);
+}

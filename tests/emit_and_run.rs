@@ -138,6 +138,14 @@ mod gem_class_macros;
 mod source_gem_autoload;
 #[path = "emit_and_run/source_gem_load_order.rs"]
 mod source_gem_load_order;
+#[path = "emit_and_run/gem_file_statements.rs"]
+mod gem_file_statements;
+#[path = "emit_and_run/boot_with_options.rs"]
+mod boot_with_options;
+#[path = "emit_and_run/class_param_or_assign.rs"]
+mod class_param_or_assign;
+#[path = "emit_and_run/superclass_respond_to.rs"]
+mod superclass_respond_to;
 #[path = "emit_and_run/unresolved_param_rbs.rs"]
 mod unresolved_param_rbs;
 #[path = "emit_and_run/declared_sig_rbs.rs"]
@@ -22101,3 +22109,9 @@ mod controller_append_callbacks;
 mod routing_method_boot_state;
 #[path = "emit_and_run/boot_base_mixins.rs"]
 mod boot_base_mixins;
+#[path = "emit_and_run/array_grep_extract_options.rs"]
+mod array_grep_extract_options;
+#[path = "emit_and_run/load_time_string_definer.rs"]
+mod load_time_string_definer;
+#[path = "emit_and_run/mime_extension_lookup.rs"]
+mod mime_extension_lookup;

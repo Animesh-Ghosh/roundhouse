@@ -131,6 +131,11 @@ pub struct App {
     /// (`ingest::boot_program`): run at boot on the ruby family and spinel.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boot_program: Vec<Expr>,
+    /// The statements of [`App::boot_program`] that a gem file runs as it
+    /// loads (`ingest::gem_load_program`): the ruby family leaves them to
+    /// the file's program, which runs them where the file is required.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gem_load_statements: Vec<crate::span::Span>,
     /// The constants an initializer statement held by a gem not compiled
     /// from source calls (`Rack::Attack` of `Rack::Attack.throttle`):
     /// `ingest::auto_source_gems` brings that gem in, and the statement
@@ -1300,6 +1305,7 @@ impl App {
             fixtures: Vec::new(),
             seeds: None,
             boot_program: Vec::new(),
+            gem_load_statements: Vec::new(),
             boot_gem_constants: Vec::new(),
             gem_middlewares: Vec::new(),
             gem_middleware_blocks: Default::default(),

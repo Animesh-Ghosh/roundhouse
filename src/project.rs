@@ -19,6 +19,7 @@
 //! and don't pull this module. The target enum lives in [`crate::build_target`]
 //! so lowering and Ruby emit can name a target on wasm.
 
+use crate::ingest::{normalize_source, resolve_gem_require};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -2707,6 +2708,8 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (Some(_), "grapheme_clusters") if matches!(recv_ty, Some(Ty::Str)) => Some("String#grapheme_clusters"),
                 (Some(_), "truncate_bytes") if matches!(recv_ty, Some(Ty::Str)) => Some("String#truncate_bytes"),
                 (Some(_), "each_slice") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_slice"),
+                (Some(_), "grep") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#grep"),
+                (Some(_), "grep_v") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#grep_v"),
                 (Some(_), "each_cons") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_cons"),
                 (Some(_), "lazy") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#lazy"),
                 (Some(_), "with_object") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Enumerator#with_object"),
@@ -3353,6 +3356,7 @@ fn without_auto_source_gems(app: &App, target: BuildTarget) -> Option<App> {
         })
     };
     trimmed.file_programs.retain(|p| !mounted_path(&p.source));
+    trimmed.boot_program.retain(|s| !app.gem_load_statements.contains(&s.span));
     trimmed.boot_gem_entries.retain(|e| !mounted_path(e));
     if let Some(lock) = trimmed.gem_lock.as_mut() {
         lock.source.retain(|gem| !app.auto_source_gems.contains(gem));
@@ -5469,7 +5473,7 @@ fn ruby_family_runtime_files(
     // gets the block exactly once; this is the ruby family's turn, and
     // the ruby family is the one that can run the lines.
     apply_module_mixins(&mut files, app, MixinForm::ExplicitReceiver);
-    apply_boot_program(&mut files, app);
+    apply_boot_program(&mut files, app, RequireTarget::RubyFamily);
     // Overlay boot replaced the spinel boot, so the flags written into
     // that file in `spinel_files` are gone. Write them again here.
     apply_environment_flags(&mut files, app);
@@ -6001,22 +6005,6 @@ fn program_steps<'a>(items: &'a [crate::app::ProgramItem], depth: usize, out: &m
 
 /// `require "x"` from a gem file: the file of that feature under the
 /// requiring gem's lib/, then any gem's.
-fn resolve_gem_require(known: &crate::det::HashSet<String>, from: &str, feature: &str, relative: bool) -> Option<String> {
-    let file = if feature.ends_with(".rb") { feature.to_string() } else { format!("{feature}.rb") };
-    if relative {
-        let dir = std::path::Path::new(from).parent()?;
-        return Some(normalize_source(&dir.join(&file).display().to_string()));
-    }
-    let lib_of = |path: &str| path.rfind("/lib/").map(|at| path[..at + 5].to_string());
-    let own = lib_of(from).map(|lib| normalize_source(&format!("{lib}{file}")));
-    if let Some(own) = own.filter(|p| known.contains(p)) {
-        return Some(own);
-    }
-    let suffix = format!("/lib/{file}");
-    let mut found: Vec<&String> = known.iter().filter(|p| p.ends_with(&suffix)).collect();
-    found.sort();
-    found.first().map(|p| p.to_string())
-}
 
 /// The model-tree anchors (`models/x`) of the classes the gem programs
 /// declare, in the order Ruby loads them: each boot gem entry as Bundler
@@ -6084,19 +6072,6 @@ fn all_program_items(items: &[crate::app::ProgramItem]) -> Vec<&crate::app::Prog
 }
 
 /// A path with `.` and `..` segments folded, as a require resolves it.
-fn normalize_source(path: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for segment in path.split('/') {
-        match segment {
-            "." => {}
-            ".." if out.last().is_some_and(|s| !s.is_empty() && *s != "..") => {
-                out.pop();
-            }
-            _ => out.push(segment),
-        }
-    }
-    out.join("/")
-}
 
 /// A feature of the Rails frameworks (`active_support/core_ext/…`,
 /// `rails`): the runtime ports are the framework in an emitted tree, and
@@ -7952,8 +7927,20 @@ fn apply_environment_flags(files: &mut [(String, String)], app: &App) {
 /// The app's own initializer statements (`ingest::boot_program`), as
 /// top-level Ruby in `config/initializers.rb`, loaded last by `boot.rb`:
 /// Rails runs an initializer once the app's classes are loadable.
-fn apply_boot_program(files: &mut Vec<(String, String)>, app: &App) {
-    if app.boot_program.is_empty() {
+fn apply_boot_program(files: &mut Vec<(String, String)>, app: &App, target: RequireTarget) {
+    let ruby_family = matches!(target, RequireTarget::RubyFamily);
+    let statements: Vec<&crate::expr::Expr> =
+        app.boot_program.iter().filter(|s| !ruby_family || !app.gem_load_statements.contains(&s.span)).collect();
+    if statements.is_empty() {
+        // Not left as the spinel tree wrote it: the ruby family's tree starts from that one.
+        if !app.boot_program.is_empty() {
+            files.retain(|(p, _)| p != "config/initializers.rb");
+            for (path, content) in files.iter_mut() {
+                if path == "boot.rb" {
+                    *content = content.replace("\nrequire_relative \"config/initializers\"\n", "");
+                }
+            }
+        }
         return;
     }
     let mut src = String::from(
@@ -7961,7 +7948,7 @@ fn apply_boot_program(files: &mut Vec<(String, String)>, app: &App) {
          # The app's own statements from config/initializers/ (generated — see\n\
          # ingest::boot_program), in Rails' load order.\n",
     );
-    for stmt in &app.boot_program {
+    for stmt in statements {
         src.push_str(&crate::emit::ruby::expr::emit_expr(stmt));
         src.push('\n');
     }
@@ -8852,6 +8839,8 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // The ActiveModel::Attributes writers call the same module. Flattening
     // the include is not a claim that a strict target can run the cast.
     ("ActiveSupport", "cast_string"),
+    // `lower::enumerable_ext`'s `extract_options!`, beside it in `active_support_ext.rb`.
+    ("ActiveSupport", "extract_options!"),
     // The deprecator's stderr line, beside it in `active_support_ext.rb`.
     ("ActiveSupport", "deprecation_line"),
     ("ActiveSupport", "cast_integer"),
@@ -10815,7 +10804,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_models_aggregator(&mut files, app);
     apply_route_helpers_demand(&mut files);
     apply_module_mixins(&mut files, app, MixinForm::Reopen);
-    apply_boot_program(&mut files, app);
+    apply_boot_program(&mut files, app, RequireTarget::Spinel);
     apply_environment_flags(&mut files, app);
     apply_app_requires(&mut files, app, RequireTarget::Spinel);
     apply_puma_boot_hooks(&mut files, app, RequireTarget::Spinel)?;

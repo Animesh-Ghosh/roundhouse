@@ -255,6 +255,7 @@ pub fn census(stage: &str, app: &crate::App) {
         fixtures,
         seeds,
         boot_program,
+        gem_load_statements: _,
         importmap,
         engine_importmaps,
         inertia,

@@ -99,11 +99,57 @@ pub(super) fn expand<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path
         }
     }
     write_devise_url_helpers(app, devise);
+    write_load_time_evals(app);
     write_mapping_helpers(app);
     super::configured_superclass::expand_boot_base_mixins(app);
     super::gem_hooks::devise_mapping_types(app);
     if !failed {
         consume_installs(app);
+    }
+}
+
+/// What the gems' files defined by a `class_eval` string as they loaded (devise's `Mapping.add_module` gives `Devise::Mapping`
+/// its `validatable?`), as each class's own methods. A definer whose body is nothing but such strings is emptied: it still
+/// runs at boot, where a compiled tree cannot run the string, and what it would define is defined.
+fn write_load_time_evals(app: &mut App) {
+    let mut defs: std::collections::BTreeMap<String, Vec<MethodDef>> = std::collections::BTreeMap::new();
+    let mut definers: HashSet<(String, String, bool)> = HashSet::default();
+    for (by_class, by) in super::configured_superclass::take_evaled_defs() {
+        for (class, methods) in by_class {
+            let into = defs.entry(class).or_default();
+            for m in methods {
+                if !into.iter().any(|d| d.name == m.name && d.receiver == m.receiver) {
+                    into.push(m);
+                }
+            }
+        }
+        definers.extend(by);
+    }
+    for (class, methods) in defs {
+        let Some(lc) = app.library_classes.iter_mut().find(|lc| lc.name.0.as_str() == class) else { continue };
+        for m in methods {
+            if !lc.methods.iter().any(|d| d.name == m.name && d.receiver == m.receiver) {
+                lc.methods.push(m);
+            }
+        }
+    }
+    let only_string_evals = |body: &Expr| {
+        let statements: Vec<&Expr> = match &*body.node {
+            ExprNode::Seq { exprs } => exprs.iter().collect(),
+            _ => vec![body],
+        };
+        !statements.is_empty()
+            && statements.iter().all(|e| matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, .. }
+                if matches!(method.as_str(), "class_eval" | "module_eval") && args.first().is_some_and(|a| !matches!(&*a.node, ExprNode::Lit { .. }))
+                    || matches!(method.as_str(), "class_eval" | "module_eval") && args.first().is_some_and(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Str { .. } }))))
+    };
+    for (owner, name, class_side) in definers {
+        let receiver = if class_side { MethodReceiver::Class } else { MethodReceiver::Instance };
+        for lc in app.library_classes.iter_mut().filter(|lc| lc.name.0.as_str() == owner) {
+            for m in lc.methods.iter_mut().filter(|m| m.name.as_str() == name && m.receiver == receiver && only_string_evals(&m.body)) {
+                m.body = Expr::new(m.body.span, ExprNode::Lit { value: Literal::Nil });
+            }
+        }
     }
 }
 

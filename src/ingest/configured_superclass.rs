@@ -50,6 +50,14 @@ thread_local! {
     static BOOT_CALLS: RefCell<Vec<Result<Expr, String>>> = const { RefCell::new(Vec::new()) };
     /// The methods a mapping's helper definer wrote (devise's `define_helpers`), by module, and the names it made view helpers.
     static MAPPING_HELPERS: RefCell<Vec<(String, Result<(Vec<MethodDef>, Vec<String>), String>)>> = const { RefCell::new(Vec::new()) };
+    /// The methods the gems' load-time `class_eval` strings defined as the routes were drawn (devise's `Mapping.add_module`'s
+    /// `def validatable?`), by class, and the definers that ran them.
+    static EVALED_DEFS: RefCell<Vec<(HashMap<String, Vec<MethodDef>>, HashSet<(String, String, bool)>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// What the drawing evaluations' `class_eval` strings defined (`EVALED_DEFS`), since `reset`.
+pub(super) fn take_evaled_defs() -> Vec<(HashMap<String, Vec<MethodDef>>, HashSet<(String, String, bool)>)> {
+    EVALED_DEFS.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 /// The helper methods each drawn mapping defined (`MAPPING_HELPERS`), since `reset`.
@@ -68,6 +76,7 @@ pub(super) fn reset() {
     CLASS_NAMES.with(|p| p.borrow_mut().clear());
     BOOT_CALLS.with(|p| p.borrow_mut().clear());
     MAPPING_HELPERS.with(|p| p.borrow_mut().clear());
+    EVALED_DEFS.with(|p| p.borrow_mut().clear());
 }
 
 /// An association's `class_name:` written as an expression, by the declaration's span.
@@ -404,6 +413,8 @@ struct Eval<'a> {
     side_calls: Vec<(String, String, Vec<Val>)>,
     /// `helper_method` names run on a framework base in an `on_load` block: the views' too.
     helper_methods: Vec<String>,
+    /// The methods whose own `class_eval` string defined methods here: owner, name, class side.
+    evaled_by: HashSet<(String, String, bool)>,
     /// What the drawing left out, and why (`gem_hooks::omits_on_failure`).
     omitted: Vec<String>,
 }
@@ -440,7 +451,7 @@ const SCOPE_KEYS: &[&str] = &["path", "as", "module", "constraints", "defaults",
 impl<'a> Eval<'a> {
     fn new(app: &'a App) -> Self {
         let known = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
-        Eval { classes: &app.library_classes, concern_items: &app.concern_model_items, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default(), evaled: HashMap::default(), singleton_attrs: Vec::new(), passed_over: false, mixed_in: Vec::new(), hooked: HashSet::default(), side_calls: Vec::new(), helper_methods: Vec::new(), omitted: Vec::new() }
+        Eval { classes: &app.library_classes, concern_items: &app.concern_model_items, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default(), evaled: HashMap::default(), singleton_attrs: Vec::new(), passed_over: false, mixed_in: Vec::new(), hooked: HashSet::default(), side_calls: Vec::new(), helper_methods: Vec::new(), evaled_by: HashSet::default(), omitted: Vec::new() }
     }
 
     /// The constant `expr` names once the initializers that call on its root have run.
@@ -1488,6 +1499,9 @@ impl<'a> Eval<'a> {
                     defined.push(read.map_err(|_| "a `class_eval` def that does not ingest".to_string())?);
                 }
                 self.evaled.entry(c.clone()).or_default().extend(defined);
+                if let Some((owner, name, side, ..)) = self.calls.last() {
+                    self.evaled_by.insert((owner.clone(), name.clone(), *side == MethodReceiver::Class));
+                }
                 Ok(Val::Nil)
             }
             // Not a replacement holding a backslash: Ruby reads `\1` and `\&` there as back-references even for a string pattern.
@@ -2984,6 +2998,8 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
     for root in roots {
         eval.replay(initializers, root)?;
     }
+    // What the gems' files defined by a `class_eval` string as they loaded, before any routing method ran.
+    EVALED_DEFS.with(|c| c.borrow_mut().push((eval.evaled.clone(), eval.evaled_by.clone())));
     // Not what an initializer passed over may have written: the mapper the call runs on is the evaluation's own, made after them.
     eval.unsure.remove(&Holder::Router);
     eval.router.drawing = true;
