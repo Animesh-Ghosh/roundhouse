@@ -48,6 +48,13 @@ thread_local! {
     static CLASS_NAMES: RefCell<Vec<(Span, Expr)>> = const { RefCell::new(Vec::new()) };
     /// What a gem's routing method did to the gem's own state as it drew (devise's `Devise.add_mapping`), for the boot program.
     static BOOT_CALLS: RefCell<Vec<Result<Expr, String>>> = const { RefCell::new(Vec::new()) };
+    /// The methods a mapping's helper definer wrote (devise's `define_helpers`), by module, and the names it made view helpers.
+    static MAPPING_HELPERS: RefCell<Vec<(String, Vec<MethodDef>, Vec<String>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The helper methods each drawn mapping defined (`MAPPING_HELPERS`), since `reset`.
+pub(super) fn take_mapping_helpers() -> Vec<(String, Vec<MethodDef>, Vec<String>)> {
+    MAPPING_HELPERS.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 /// The routing methods' calls that changed the gems' state as Rails drew the routes, since `reset`.
@@ -60,6 +67,7 @@ pub(super) fn reset() {
     PENDING.with(|p| p.borrow_mut().clear());
     CLASS_NAMES.with(|p| p.borrow_mut().clear());
     BOOT_CALLS.with(|p| p.borrow_mut().clear());
+    MAPPING_HELPERS.with(|p| p.borrow_mut().clear());
 }
 
 /// An association's `class_name:` written as an expression, by the declaration's span.
@@ -394,6 +402,8 @@ struct Eval<'a> {
     hooked: HashSet<String>,
     /// A routing method's own calls on a gem's class that changed state: the class, the method, what it was given.
     side_calls: Vec<(String, String, Vec<Val>)>,
+    /// `helper_method` names run on a framework base in an `on_load` block: the views' too.
+    helper_methods: Vec<String>,
     /// What the drawing left out, and why (`gem_hooks::omits_on_failure`).
     omitted: Vec<String>,
 }
@@ -430,7 +440,7 @@ const SCOPE_KEYS: &[&str] = &["path", "as", "module", "constraints", "defaults",
 impl<'a> Eval<'a> {
     fn new(app: &'a App) -> Self {
         let known = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
-        Eval { classes: &app.library_classes, concern_items: &app.concern_model_items, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default(), evaled: HashMap::default(), singleton_attrs: Vec::new(), passed_over: false, mixed_in: Vec::new(), hooked: HashSet::default(), side_calls: Vec::new(), omitted: Vec::new() }
+        Eval { classes: &app.library_classes, concern_items: &app.concern_model_items, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default(), evaled: HashMap::default(), singleton_attrs: Vec::new(), passed_over: false, mixed_in: Vec::new(), hooked: HashSet::default(), side_calls: Vec::new(), helper_methods: Vec::new(), omitted: Vec::new() }
     }
 
     /// The constant `expr` names once the initializers that call on its root have run.
@@ -690,6 +700,23 @@ impl<'a> Eval<'a> {
                 // Only a constant it resolves: one it cannot may still be a gem's that is loaded without being read here.
                 ExprNode::Const { path } if self.resolves_constant(path, frame.scope.as_deref()) => Val::Str("constant".into()),
                 ExprNode::Const { .. } => return Err("a `defined?` of a constant it does not resolve".into()),
+                // `defined?(scope::Helpers)`, which ingest spells `scope.const_get(:Helpers)`: asked of the class the value is.
+                ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+                    if method.as_str() == "const_get" && args[0].decisions & crate::expr::CONST_PATH != 0 =>
+                {
+                    let owner = self.value(recv, frame)?;
+                    let name = match args.as_slice() {
+                        [a] => match &*a.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                            _ => return Err("a `defined?` of a computed constant path".into()),
+                        },
+                        _ => return Err("a `defined?` of a computed constant path".into()),
+                    };
+                    match self.dispatch(Some(recv), owner, "const_defined?", vec![Val::Sym(name)], None, frame)? {
+                        Val::Bool(true) => Val::Str("constant".into()),
+                        _ => Val::Nil,
+                    }
+                }
                 _ => return Err("a `defined?` of other than an instance variable".into()),
             },
             ExprNode::Ivar { name } => {
@@ -734,6 +761,23 @@ impl<'a> Eval<'a> {
                 // Only a constant it resolves: one it cannot may still be a gem's that is loaded without being read here.
                 ExprNode::Const { path } if self.resolves_constant(path, frame.scope.as_deref()) => Val::Str("constant".into()),
                 ExprNode::Const { .. } => return Err("a `defined?` of a constant it does not resolve".into()),
+                // `defined?(scope::Helpers)`, which ingest spells `scope.const_get(:Helpers)`: asked of the class the value is.
+                ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+                    if method.as_str() == "const_get" && operand.decisions & crate::expr::CONST_PATH != 0 =>
+                {
+                    let owner = self.value(recv, frame)?;
+                    let name = match args.as_slice() {
+                        [a] => match &*a.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                            _ => return Err("a `defined?` of a computed constant path".into()),
+                        },
+                        _ => return Err("a `defined?` of a computed constant path".into()),
+                    };
+                    match self.dispatch(Some(recv), owner, "const_defined?", vec![Val::Sym(name)], None, frame)? {
+                        Val::Bool(true) => Val::Str("constant".into()),
+                        _ => Val::Nil,
+                    }
+                }
                 _ => return Err("a `defined?` of other than an instance variable".into()),
             },
             ExprNode::Assign { target, value } => {
@@ -1164,6 +1208,34 @@ impl<'a> Eval<'a> {
                 _ => unreachable!(),
             }
             return Ok(answer);
+        }
+        // `ActiveSupport.on_load(:action_controller) { … }`: the block runs on the framework's base as it loads, with `self` that base.
+        if let (Val::Class(c), "on_load", [Val::Sym(hook)]) = (&this, method, argv.as_slice())
+            && c.trim_start_matches("::") == "ActiveSupport"
+            && let Some(base) = match hook.as_str() {
+                "action_controller" => Some("ActionController::Base"),
+                "action_view" => Some("ActionView::Base"),
+                _ => None,
+            }
+            && let Some(Val::Proc { params, body, locals, block, scope, .. }) = &blk
+            && params.is_empty()
+        {
+            let mut inner = Frame { this: Val::Class(base.to_string()), locals: (**locals).clone(), block: block.as_deref().cloned(), scope: scope.clone() };
+            self.value(body, &mut inner)?;
+            return Ok(Val::Nil);
+        }
+        if let (Val::Class(c), "respond_to?", [Val::Sym(name)]) = (&this, method, argv.as_slice())
+            && c == "ActionController::Base"
+            && matches!(name.as_str(), "helper_method" | "helper")
+        {
+            return Ok(Val::Bool(true));
+        }
+        if let (Val::Class(c), "helper_method") = (&this, method)
+            && matches!(c.as_str(), "ActionController::Base")
+            && argv.iter().all(|a| matches!(a, Val::Str(_) | Val::Sym(_)))
+        {
+            self.helper_methods.extend(argv.iter().map(|a| match a { Val::Str(t) | Val::Sym(t) => t.clone(), _ => unreachable!() }));
+            return Ok(Val::Nil);
         }
         if let Val::Class(c) = &this {
             // Not run on the heap: a class's ancestors are fixed when compiled, so what it mixes in is recorded for the caller to write.
@@ -2925,6 +2997,24 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
     for (class, method, given) in std::mem::take(&mut eval.side_calls) {
         BOOT_CALLS.with(|c| c.borrow_mut().push(boot_call(call.span, &class, &method, &given)));
     }
+    // Devise's `add_mapping` defines each mapping's controller helpers (`authenticate_user!`, `current_user`) by a `class_eval` string, which the evaluation passes over while drawing (`gem_hooks::skips`): run once per mapping here, as Rails ran it at boot.
+    if def.name.as_str() == "devise_for"
+        && eval.known.contains("Devise::Controllers::Helpers")
+        && let Some(Val::Hash(mappings)) = eval.cvars.get(&("Devise".to_string(), "@@mappings".to_string())).cloned()
+    {
+        for (_, mapping) in mappings {
+            let helpers = Val::Class("Devise::Controllers::Helpers".to_string());
+            let before = eval.helper_methods.len();
+            eval.evaled.remove("Devise::Controllers::Helpers");
+            let mut frame = Frame { this: Val::Class("Object".into()), locals: HashMap::default(), block: None, scope: None };
+            if eval.dispatch(None, helpers, "define_helpers", vec![mapping], None, &mut frame).is_ok()
+                && let Some(defs) = eval.evaled.get("Devise::Controllers::Helpers").cloned()
+            {
+                let names = eval.helper_methods[before..].to_vec();
+                MAPPING_HELPERS.with(|c| c.borrow_mut().push(("Devise::Controllers::Helpers".to_string(), defs, names)));
+            }
+        }
+    }
     let devise = (def.name.as_str() == "devise_for" && eval.known.contains("Devise")).then(|| {
         let heap = &eval.heap;
         super::gem_hooks::devise_url_facts(eval.consts.get("Devise::URL_HELPERS"), eval.cvars.get(&("Devise".to_string(), "@@mappings".to_string())), &|id, name| heap[id].ivars.get(name).cloned())
@@ -3260,6 +3350,91 @@ pub(super) fn expand_model_mixin_macros<V: Vfs + ?Sized>(vfs: &V, dir: &Path, ge
             }
         }
     }
+}
+
+/// A boot statement calling a gem's method whose body only mixes modules into the framework's bases as they load
+/// (devise's `Devise.include_helpers(Devise::Controllers)`, run from its engine's initializer:
+/// `ActiveSupport.on_load(:action_controller) { include scope::Helpers }`): Ruby's controllers all descend from
+/// `ActionController::Base`, so the modules become each root controller's own `include`s and the statement goes.
+/// One that did anything else, or passed a statement over, stays.
+pub(super) fn expand_boot_base_mixins(app: &mut App) {
+    let mut taken: Vec<usize> = Vec::new();
+    let mut controller_mixins: Vec<String> = Vec::new();
+    let mut view_helpers: Vec<String> = Vec::new();
+    for (i, stmt) in app.boot_program.iter().enumerate() {
+        let ExprNode::Send { recv: Some(recv), method, block: None, .. } = &*stmt.node else { continue };
+        let ExprNode::Const { path } = &*recv.node else { continue };
+        let class = path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+        let Some(def) = app.library_classes.iter().filter(|c| c.name.0.as_str() == class).flat_map(|c| c.methods.iter()).find(|m| m.receiver == MethodReceiver::Class && m.name == *method) else { continue };
+        let mut loads = false;
+        visit(&def.body, &mut |e| if let ExprNode::Send { method, .. } = &*e.node && method.as_str() == "on_load" { loads = true; });
+        if !loads {
+            continue;
+        }
+        let mut eval = Eval::new(app);
+        let mut frame = Frame { this: Val::Class("Object".into()), locals: HashMap::default(), block: None, scope: None };
+        let ran = eval.value(stmt, &mut frame).is_ok()
+            && !eval.passed_over
+            && eval.unsure.is_empty()
+            && eval.cvars.is_empty()
+            && eval.evaled.is_empty()
+            && eval.singleton_attrs.is_empty()
+            && eval.written.is_empty()
+            && eval.mixed_in.iter().all(|(c, kind, _)| *kind == "include" && matches!(c.as_str(), "ActionController::Base" | "ActionView::Base"));
+        if !ran {
+            continue;
+        }
+        for (base, _, module) in &eval.mixed_in {
+            let into = if base == "ActionController::Base" { &mut controller_mixins } else { &mut view_helpers };
+            if !into.contains(module) {
+                into.push(module.clone());
+            }
+        }
+        app.view_visible_controller_methods.extend(eval.helper_methods.iter().map(|n| Symbol::from(n.as_str())));
+        taken.push(i);
+    }
+    let mut expanded: Vec<(String, String)> = Vec::new();
+    for i in taken.into_iter().rev() {
+        let stmt = app.boot_program.remove(i);
+        if let ExprNode::Send { recv: Some(recv), method, .. } = &*stmt.node
+            && let ExprNode::Const { path } = &*recv.node
+        {
+            expanded.push((path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::"), method.to_string()));
+        }
+    }
+    // Not the method's own body once the boot program no longer calls it: what it did is written in.
+    for (class, method) in &expanded {
+        let still = app.boot_program.iter().any(|stmt| {
+            let mut hit = false;
+            visit(stmt, &mut |e| if let ExprNode::Send { method: m, .. } = &*e.node && m.as_str() == method { hit = true; });
+            hit
+        });
+        if still {
+            continue;
+        }
+        for lc in app.library_classes.iter_mut().filter(|lc| lc.name.0.as_str() == class) {
+            for m in lc.methods.iter_mut().filter(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == method) {
+                fn unreached(e: &mut Expr) {
+                    e.decisions |= crate::expr::UNCALLED_DEFINER;
+                    e.node.for_each_child_mut(&mut unreached);
+                }
+                unreached(&mut m.body);
+            }
+        }
+    }
+    if controller_mixins.is_empty() {
+        return;
+    }
+    for controller in app.controllers.iter_mut().filter(|c| c.parent.as_ref().is_some_and(|p| matches!(p.0.as_str().trim_start_matches("::"), "ActionController::Base" | "ActionController::API"))) {
+        for (k, module) in controller_mixins.iter().enumerate() {
+            let span = Span::synthetic();
+            let constant = Expr::new(span, ExprNode::Const { path: module.split("::").map(Symbol::from).collect() });
+            let include = Expr::new(span, ExprNode::Send { recv: None, method: Symbol::from("include"), args: vec![constant], block: None, parenthesized: false });
+            controller.body.insert(k, crate::dialect::ControllerBodyItem::Unknown { expr: include, leading_comments: Vec::new(), leading_blank_line: false });
+        }
+    }
+    // Not the views' yet: what devise's `UrlHelpers` gives them is written on RouteHelpers (`gem_routes::write_devise_url_helpers`).
+    let _ = view_helpers;
 }
 
 /// What the evaluation left on `owner`, as the source Ruby would have: singleton accessors as class

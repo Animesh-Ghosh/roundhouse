@@ -21969,3 +21969,5 @@ mod model_mixin_macro;
 mod controller_append_callbacks;
 #[path = "emit_and_run/routing_method_boot_state.rs"]
 mod routing_method_boot_state;
+#[path = "emit_and_run/boot_base_mixins.rs"]
+mod boot_base_mixins;

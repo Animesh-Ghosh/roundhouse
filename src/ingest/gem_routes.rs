@@ -99,9 +99,32 @@ pub(super) fn expand<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path
         }
     }
     write_devise_url_helpers(app, devise);
+    write_mapping_helpers(app);
+    super::configured_superclass::expand_boot_base_mixins(app);
     super::gem_hooks::devise_mapping_types(app);
     if !failed {
         consume_installs(app);
+    }
+}
+
+/// Each drawn mapping's controller helpers as its module's own methods, and the definer they came from emptied: Rails ran it at
+/// boot and `Devise.add_mapping` still calls it there, but what it would define is defined. The names it made view helpers are the views'.
+fn write_mapping_helpers(app: &mut App) {
+    let written = super::configured_superclass::take_mapping_helpers();
+    if written.is_empty() {
+        return;
+    }
+    for (module, defs, names) in written {
+        let Some(lc) = app.library_classes.iter_mut().find(|lc| lc.name.0.as_str() == module) else { continue };
+        for def in defs {
+            if !lc.methods.iter().any(|m| m.name == def.name && m.receiver == def.receiver) {
+                lc.methods.push(def);
+            }
+        }
+        for m in lc.methods.iter_mut().filter(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == "define_helpers") {
+            m.body = Expr::new(m.body.span, ExprNode::Lit { value: Literal::Nil });
+        }
+        app.view_visible_controller_methods.extend(names.into_iter().map(|n| crate::ident::Symbol::from(n.as_str())));
     }
 }
 
