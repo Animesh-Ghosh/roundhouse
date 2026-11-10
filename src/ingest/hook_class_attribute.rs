@@ -178,13 +178,15 @@ fn expand_included_blocks(app: &mut App) {
     }
 }
 
-/// Seeds run in declaration order, each name once, with a `default:` in
-/// place of a written value. Writes that follow that order and share a
-/// block with no default evaluate exactly as the block would.
+/// Seeds run in declaration order, one per declared name, with a
+/// `default:` in place of a written value. Writes that follow that order,
+/// in a block with no default and no name declared twice, evaluate
+/// exactly as the block would.
 fn seeds_run_like_the_block(decls: &[Decl], writes: &[(Symbol, Expr)]) -> bool {
     let order: Vec<&Symbol> = decls.iter().flat_map(|d| &d.names).collect();
     let position = |name: &Symbol| order.iter().position(|n| *n == name);
-    writes.is_empty() || (decls.iter().all(|d| d.default.is_none()) && writes.windows(2).all(|w| position(&w[0].0) < position(&w[1].0)))
+    let unique = order.iter().enumerate().all(|(i, name)| !order[..i].contains(name));
+    writes.is_empty() || (unique && decls.iter().all(|d| d.default.is_none()) && writes.windows(2).all(|w| position(&w[0].0) < position(&w[1].0)))
 }
 
 /// `stmt` read as writes to the block's declared attributes, appended
@@ -215,7 +217,7 @@ fn block_writes(
     let shadowed = classes.iter().filter(|c| !c.is_module).flat_map(|c| c.methods.iter()).any(|m| {
         &m.name == method && matches!(m.receiver, MethodReceiver::Class) && m.name_span != called.name_span
     });
-    if shadowed {
+    if shadowed || extended_module_defines(classes, method) {
         return false;
     }
     let body: Vec<&Expr> = match &*called.body.node {
@@ -228,6 +230,22 @@ fn block_writes(
     };
     out.extend(writes);
     true
+}
+
+/// Some class `extend`s a module with an instance method called `method`,
+/// which Ruby can reach ahead of the Concern's.
+fn extended_module_defines(classes: &[crate::dialect::LibraryClass], method: &Symbol) -> bool {
+    classes.iter().filter(|c| !c.is_module).flat_map(|c| &c.unknown_calls).any(|call| {
+        let ExprNode::Send { recv: None, method: called, args, .. } = &*call.node else { return false };
+        called.as_str() == "extend"
+            && args.iter().any(|arg| {
+                let ExprNode::Const { path } = &*arg.node else { return false };
+                let Some(last) = path.last() else { return false };
+                classes.iter().filter(|m| m.is_module && m.name.0.as_str().rsplit("::").next() == Some(last.as_str())).any(|m| {
+                    m.methods.iter().any(|d| &d.name == method && !matches!(d.receiver, MethodReceiver::Class))
+                })
+            })
+    })
 }
 
 /// `self.name = value` for a name one of `decls` declares.

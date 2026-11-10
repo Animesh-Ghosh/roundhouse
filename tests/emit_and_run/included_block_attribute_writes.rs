@@ -107,6 +107,7 @@ fn writes_a_seed_could_not_reproduce_keep_the_block() {
         ("an overwritten write", "class_attribute :page_size\n    self.page_size = Registry.note(1)\n    self.page_size = 5"),
         ("writes out of declaration order", "class_attribute :page_size, :unit\n    self.unit = Registry.note(1)\n    self.page_size = Registry.note(2)"),
         ("a write before its declaration", "self.page_size = 7\n    class_attribute :page_size"),
+        ("an attribute declared twice", "class_attribute :page_size\n    class_attribute :page_size\n    self.page_size = Registry.note(1)"),
     ]
     .into_iter()
     .filter(|(_, body)| {
@@ -145,4 +146,15 @@ fn a_method_reached_through_a_concern_keeps_the_block() {
         .emit(BuildTarget::Spinel);
     let source = std::fs::read_to_string(emitted.join("app/models/listing.rb")).expect("listing.rb emitted");
     assert!(!source.contains("def self.page_size"), "the other Concern's method was bypassed:\n{source}");
+}
+
+// An extended module's method of that name can be the one Ruby calls, depending on the order of the extends.
+#[test]
+fn an_extended_modules_method_of_that_name_keeps_the_block() {
+    let (emitted, _errors) = app(CONCERN)
+        .write("app/models/rowed.rb", "module Rowed\n  def reset_unit\n    self.unit = \"rows\"\n  end\nend\n")
+        .write("app/models/listing.rb", "class Listing\n  extend Rowed\n  include Sized\nend\n")
+        .emit(BuildTarget::Spinel);
+    let source = std::fs::read_to_string(emitted.join("app/models/listing.rb")).expect("listing.rb emitted");
+    assert!(!source.contains("def self.page_size"), "the extended module's method was bypassed:\n{source}");
 }
