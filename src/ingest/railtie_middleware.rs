@@ -151,9 +151,19 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
     // Not after every gem's: a gem's class body runs as Bundler requires it, before the app's, and its initializers after.
     let mut app_uses = Vec::new();
     let mut application_taken = Vec::new();
+    let mut defines = None;
     for u in application_uses(vfs, dir) {
-        // Not a class of a gem the app does not compile from source (`Rack::Deflater`): the ledger reports it, as before.
-        if let Some(class) = resolve(&u, &every_gem_defines) {
+        // Not the gems' classes first and then the app's: Ruby tries each lexical candidate against every loaded class.
+        let defines = defines.get_or_insert_with(|| {
+            let mut files = Vec::new();
+            rb_files(vfs, &dir.join("lib"), &mut files);
+            rb_files(vfs, &dir.join("app"), &mut files);
+            let mut defines = defined_constants(vfs, &files);
+            defines.extend(every_gem_defines.iter().cloned());
+            defines
+        });
+        // Not stacked: a class neither a source gem nor the app defines (`Rack::Deflater`) stays the ledger's warning, as before.
+        if let Some(class) = resolve(&u, defines) {
             application_taken.push(u.span.start);
             app_uses.push((class, false, u.span, u.block, true));
         }
@@ -719,6 +729,34 @@ mod tests {
             super::read(&MapVfs::new(map), std::path::Path::new("/app"), &[PathBuf::from("/gem/lib"), PathBuf::from("/warden/lib")]);
         assert_eq!(classes, ["Gem::Early", "Warden::Manager", "Gem::Late"], "{diags:?}");
         assert_eq!(blocks.get("Warden::Manager").map(String::as_str), Some("{ |manager|\nmanager.default_scope = :user\n}"));
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// The app's own `config.middleware.use` of a class in its lib/ sits where a source gem's class would.
+    #[test]
+    fn the_apps_own_use_of_its_own_class_sits_between_class_body_and_initializer_uses() {
+        let gem = "module Gem\n  class Early\n  end\n  class Late\n  end\n  class Railtie < Rails::Railtie\n    config.app_middleware.use Early\n    initializer \"gem.late\" do |app|\n      app.middleware.use(Late)\n    end\n  end\nend\n";
+        let application = "module Blog\n  class Application < Rails::Application\n    config.middleware.use Rack::Deflater\n    config.middleware.use Gate\n  end\nend\n";
+        let (classes, diags) = read(&[
+            ("/gem/lib/gem.rb", gem),
+            ("/app/config/application.rb", application),
+            ("/app/lib/gate.rb", "class Gate\n  def initialize(app)\n    @app = app\n  end\nend\n"),
+        ]);
+        assert_eq!(classes, ["Gem::Early", "Gate", "Gem::Late"], "{diags:?}");
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// Ruby looks `Gate` up in `Blog::Application`'s nesting first, so the app's `Blog::Gate` wins over a gem's top-level `Gate`.
+    #[test]
+    fn the_apps_use_takes_the_first_lexical_candidate_of_the_gems_and_the_apps_classes() {
+        let gem = "class Gate\n  def initialize(app)\n    @app = app\n  end\nend\n";
+        let application = "module Blog\n  class Application < Rails::Application\n    config.middleware.use Gate\n  end\nend\n";
+        let (classes, diags) = read(&[
+            ("/gem/lib/gate.rb", gem),
+            ("/app/config/application.rb", application),
+            ("/app/lib/blog/gate.rb", "module Blog\n  class Gate\n    def initialize(app)\n      @app = app\n    end\n  end\nend\n"),
+        ]);
+        assert_eq!(classes, ["Blog::Gate"], "{diags:?}");
         assert!(diags.is_empty(), "{diags:?}");
     }
 

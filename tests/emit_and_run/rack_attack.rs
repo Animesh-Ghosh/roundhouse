@@ -124,6 +124,15 @@ fn the_spinel_tree_stacks_the_railtie_middleware() {
     assert!(attack.contains("module StoreProxy\n    class RedisProxy < Rack::Attack::BaseProxy"), "{attack}");
 }
 
+#[test]
+fn the_app_middleware_sits_outside_the_railtie_middleware() {
+    let overlay = super::app_middleware::with_application_lines(app(), "    config.middleware.use ProbeUse\n");
+    let (tree, errors) = overlay.emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let stack = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    assert!(stack.contains("@stack ||= ProbeUse.new(Rack::Attack.new(App.new))"), "{stack}");
+}
+
 // Not through an emitted app: the ruby family loads rack's own Rack::Request, so only Spinel runs the port.
 #[test]
 fn the_spinel_rack_request_port_finds_the_client_rack_finds() {
