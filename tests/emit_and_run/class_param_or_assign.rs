@@ -1,12 +1,10 @@
-//! Warden's `Strategies.add(label, strategy = nil)`: `strategy ||=
-//! Class.new(Base)` keeps a parameter that callers pass a class a class,
-//! of no one identity, so `strategy.method_defined?(:authenticate!)` and
-//! `strategy.ancestors` ask whichever class it is. Spinel builds no class
-//! at run time and answers no Module query on one of several classes, so
-//! its emit still refuses both.
+//! Warden's `Strategies.add(label, strategy = nil)`: every caller passes
+//! the class, so the parameter is never its `nil` default and `strategy
+//! ||= Class.new(Base)` never assigns (`lower::bool_fold`); the parameter
+//! stays a class, of no one identity, so `strategy.method_defined?
+//! (:authenticate!)` and `strategy.ancestors` ask whichever class it is.
 
 use super::emit_and_run;
-use roundhouse::project::BuildTarget;
 
 const REGISTRY: &str = r#"class Registry
   class Base
@@ -54,8 +52,9 @@ fn a_class_parameter_or_assigned_a_new_class_answers_module_queries() {
 }
 
 #[test]
-fn spinel_still_refuses_a_run_time_class_and_its_module_query() {
-    let (_, errors) = app().emit(BuildTarget::Spinel);
-    assert!(errors.iter().any(|e| e.contains("`new` requires a runtime class object")), "{errors:#?}");
-    assert!(errors.iter().any(|e| e.contains("`method_defined?` on one of several classes")), "{errors:#?}");
+#[ignore = "requires the Spinel toolchain"]
+fn a_class_parameter_or_assigned_a_new_class_answers_module_queries_natively() {
+    let run = app().run_spinel(SCRIPT);
+    run.assert_passes();
+    assert!(run.stdout.contains("class parameter passed"), "{}", run.stdout);
 }

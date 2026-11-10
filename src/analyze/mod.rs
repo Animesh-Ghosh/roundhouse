@@ -130,6 +130,11 @@ pub struct Analyzer {
     /// The open slots pinned `untyped` once the restamp loop settled,
     /// under `App::pins_unresolved_params`; grows only, so it ends.
     pinned_param_slots: BTreeSet<(ParamKey, usize)>,
+    /// The slots with a default some call site leaves to it (`usize::MAX`:
+    /// a call of a method whose shape is not known). A slot no call site leaves takes only what
+    /// they pass, not its default too: Warden's `add(label, strategy =
+    /// nil)` is never called without the class. Grows only.
+    defaulted_param_slots: std::sync::Mutex<BTreeSet<(ParamKey, usize)>>,
     /// (class, method) pairs an author wrote a signature for, as opposed
     /// to a `Fn` the registry stamped from the def itself. Only in the
     /// first is an `untyped` slot a statement rather than an inference
@@ -1374,6 +1379,7 @@ impl Analyzer {
             inferred_params: HashMap::default(),
             open_param_slots: BTreeSet::new(),
             pinned_param_slots: BTreeSet::new(),
+            defaulted_param_slots: Default::default(),
             declared_signatures: app
                 .rbs_signatures
                 .iter()
@@ -2264,7 +2270,7 @@ impl Analyzer {
                         let ty = if p.rest {
                             rest_element(inferred.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default())
                         } else {
-                            param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p)
+                            param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p, self.defaulted(&key, i))
                                 .unwrap_or(Ty::Untyped)
                                 .subst_self(&owner_ty)
                         };
@@ -5122,7 +5128,7 @@ impl Analyzer {
                 let elem = rest_element(observed.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default());
                 Some(Ty::Array { elem: std::sync::Arc::new(elem) })
             } else {
-                param_ty_with_default(observed.and_then(|v| v.get(i)).cloned(), param)
+                param_ty_with_default(observed.and_then(|v| v.get(i)).cloned(), param, self.defaulted(&key, i))
             };
             let ty = prefer_declared(
                 self.declared_param_ty(class_id, &method.name, positional, &param.name),
@@ -6521,6 +6527,27 @@ impl Analyzer {
                 }
             }
             let arg_tys = Self::place_keyword_args(shape, arg_tys.clone(), kw_tys.clone());
+            {
+                let mut defaulted = self.defaulted_param_slots.lock().unwrap_or_else(|e| e.into_inner());
+                match shape {
+                    Some(shape) => {
+                        // Not a positional argument nobody typed: the join leaves it out (`open_param_slots`), the default unused.
+                        for (i, (_, kind)) in shape.slots.iter().enumerate() {
+                            let left = match kind {
+                                ParamKind::Optional => i >= positional,
+                                ParamKind::Keyword { required: false } => arg_tys.get(i).is_none_or(|t| t.is_unknown()),
+                                _ => false,
+                            };
+                            if left {
+                                defaulted.insert((key.clone(), i));
+                            }
+                        }
+                    }
+                    None => {
+                        defaulted.insert((key.clone(), usize::MAX));
+                    }
+                }
+            }
             observations.push((key, arg_tys));
         }
         observations
@@ -8549,6 +8576,12 @@ pub(crate) fn fold_param_observations(
 }
 
 impl Analyzer {
+    /// Whether some call site may leave `key`'s slot `i` to its default.
+    fn defaulted(&self, key: &ParamKey, i: usize) -> bool {
+        let defaulted = self.defaulted_param_slots.lock().unwrap_or_else(|e| e.into_inner());
+        defaulted.contains(&(key.clone(), i)) || defaulted.contains(&(key.clone(), usize::MAX))
+    }
+
     fn apply_pinned_params(&mut self) {
         for (key, i) in &self.pinned_param_slots {
             // Not a slot no caller typed: `Var` there already reads as unknown, and `untyped` would change what the untyped fallback renders.
@@ -9731,8 +9764,11 @@ fn prefer_declared(declared: Option<Ty>, observed: Option<Ty>) -> Option<Ty> {
     }
 }
 
-fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param) -> Option<Ty> {
+fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param, defaulted: bool) -> Option<Ty> {
     let observed = observed.filter(|t| !matches!(t, Ty::Var { .. }));
+    if let Some(o) = observed.as_ref().filter(|_| !defaulted) {
+        return Some(o.clone());
+    }
     let default = param
         .default
         .as_ref()
@@ -11908,7 +11944,7 @@ impl Analyzer {
     /// is measured on a copy. Destructured without `..`, so a new field has
     /// to be listed here; `Copy` fields own no heap.
     pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
-        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
+        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, defaulted_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
         let mut freed: Vec<(&str, i64)> = vec![
             ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
             ("module_self_types", crate::memory_census::freed_by(|| drop(module_self_types))),
@@ -11917,6 +11953,7 @@ impl Analyzer {
             ("inferred_params", crate::memory_census::freed_by(|| drop(inferred_params))),
             ("open_param_slots", crate::memory_census::freed_by(|| drop(open_param_slots))),
             ("pinned_param_slots", crate::memory_census::freed_by(|| drop(pinned_param_slots))),
+            ("defaulted_param_slots", crate::memory_census::freed_by(|| drop(defaulted_param_slots))),
             ("declared_signatures", crate::memory_census::freed_by(|| drop(declared_signatures))),
             ("adapter", crate::memory_census::freed_by(|| drop(adapter))),
             ("concern_folded", crate::memory_census::freed_by(|| drop(concern_folded))),
