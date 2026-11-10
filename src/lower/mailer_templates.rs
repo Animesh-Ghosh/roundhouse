@@ -17,7 +17,8 @@
 //! `devise_mail`), calls the mailer's `__mail_rendered(headers)`, which
 //! looks the template up as ActionMailer does: under each `template_path`
 //! in turn (the mailer's own directory by default), the first holding
-//! `template_name` (the action's name by default), its formats as parts.
+//! `template_name` (the action's name by default), its formats as parts;
+//! with `body:` it looks nothing up.
 //! The templates it can find are the mailer's own and, under any other
 //! directory, the ones named after its actions.
 //!
@@ -276,7 +277,7 @@ fn synthesize_lookup(
     }
     let cases = if whens.is_empty() { String::new() } else { format!("      case \"#{{dir}}/#{{name}}\"\n{whens}      end\n") };
     let src = format!(
-        "class {class}\n  def {LOOKUP}(headers = {{}}, &block)\n    raise NotImplementedError, \"a block given to mail chooses its parts, which is not modeled\" if block\n    name = (headers[:template_name] || action_name).to_s\n    given = headers[:template_path]\n    dirs = given.nil? ? [{dir:?}] : (given.is_a?(Array) ? given : [given])\n    text = nil\n    html = nil\n    found = false\n    dirs.each do |dir|\n      next if found\n{cases}    end\n    raise ActionView::MissingTemplate, \"Missing template #{{name}} in #{{dirs.join(\", \")}}\" unless found\n    mail(__rh_defaults.merge(headers.reject {{ |key, _| key == :template_name || key == :template_path }}), text, html)\n  end\nend\n",
+        "class {class}\n  def {LOOKUP}(headers = {{}}, &block)\n    raise NotImplementedError, \"a block given to mail chooses its parts, which is not modeled\" if block\n    name = (headers[:template_name] || action_name).to_s\n    given = headers[:template_path]\n    dirs = given.nil? ? [{dir:?}] : (given.is_a?(Array) ? given : [given])\n    text = nil\n    html = nil\n    found = headers.key?(:body)\n    dirs.each do |dir|\n      next if found\n{cases}    end\n    raise ActionView::MissingTemplate, \"Missing template #{{name}} in #{{dirs.join(\", \")}}\" unless found\n    mail(__rh_defaults.merge(headers.reject {{ |key, _| key == :template_name || key == :template_path }}), text, html)\n  end\nend\n",
         class = lookup.class,
         dir = lookup.dir,
     );
@@ -475,6 +476,20 @@ fn rewrite(expr: &mut Expr, site: &Site<'_>, diags: &mut Vec<Diagnostic>) {
         _ => Vec::new(),
     };
     if opt_keys.iter().any(|k| k == "template_name" || k == "template_path") {
+        // Where the headers spell the template, a missing one is ActionMailer's MissingTemplate, as a plain action's is.
+        if !opt_keys.iter().any(|k| k == "body")
+            && let Some(ExprNode::Hash { entries, .. }) = opts_node(args)
+            && let Some(paths) = spelled_template(entries, site)
+            && !paths.iter().any(|p| site.views.iter().any(|(n, f, _)| n == p && (f == "text" || f == "html")))
+        {
+            diags.push(Diagnostic::unsupported(
+                span,
+                None,
+                "mailer template",
+                format!("no `{}` template: ActionMailer raises ActionView::MissingTemplate", paths.join("` or `")),
+            ));
+            return;
+        }
         *method = Symbol::from(LOOKUP);
         *parenthesized = true;
         site.looked_up.set(true);
@@ -506,6 +521,32 @@ fn rewrite(expr: &mut Expr, site: &Site<'_>, diags: &mut Vec<Diagnostic>) {
     *args = vec![merged, text, html];
     // `mail from: …` re-spelled bare would open with `{`, which Ruby reads as a block.
     *parenthesized = true;
+}
+
+fn opts_node(args: &[Expr]) -> Option<&ExprNode> {
+    args.first().map(|a| &*a.node)
+}
+
+/// The templates literal `template_name:` / `template_path:` headers name, or None where either is computed.
+fn spelled_template(entries: &[(Expr, Expr)], site: &Site<'_>) -> Option<Vec<String>> {
+    let text = |e: &Expr| match &*e.node {
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    };
+    let get = |key: &str| entries.iter().find(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == key)).map(|(_, v)| v);
+    let name = match get("template_name") {
+        Some(v) => text(v)?,
+        None => site.action.to_string(),
+    };
+    let dirs = match get("template_path") {
+        Some(v) => match &*v.node {
+            ExprNode::Array { elements, .. } => elements.iter().map(text).collect::<Option<Vec<_>>>()?,
+            _ => vec![text(v)?],
+        },
+        None => vec![site.dir.to_string()],
+    };
+    Some(dirs.iter().map(|d| format!("{d}/{name}")).collect())
 }
 
 fn view_call(site: &Site<'_>, format: &str, span: Span) -> Expr {

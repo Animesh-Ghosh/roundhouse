@@ -53,7 +53,7 @@ fn an_unmodeled_mail_is_an_error() {
         .emit(roundhouse::project::BuildTarget::Ruby);
     // A Proc `default` is computed on the ruby family
     // (`ingest::mailer_defaults`, tests/mailer_proc_default.rs).
-    for needle in ["`mail { |format| … }`", "no `odd_mailer/missing` template", "`template_name:`"] {
+    for needle in ["`mail { |format| … }`", "no `odd_mailer/missing` template", "no `odd_mailer/other` template"] {
         assert!(errors.iter().any(|e| e.contains(needle)), "{needle}: {errors:#?}");
     }
     assert_eq!(errors.len(), 3, "{errors:#?}");

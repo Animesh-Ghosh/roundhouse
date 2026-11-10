@@ -1272,8 +1272,15 @@ impl<'a> BodyTyper<'a> {
         if !args.is_empty() {
             return None;
         }
+        // Not a name every object answers (ActiveSupport's `blank?` / `present?`): another definition can answer it.
+        if ["Object", "NilClass", "BasicObject", "Kernel"].iter().any(|c| {
+            self.classes().get(&ClassId(Symbol::from(*c))).is_some_and(|info| info.instance_methods.contains_key(method))
+        }) {
+            return None;
+        }
         self.analyze_expr(r, ctx);
-        match r.ty.as_ref().map(Ty::peel_nilable) {
+        // Not peeled of nil: a nil receiver answers NilClass's.
+        match r.ty.as_ref() {
             Some(Ty::Class { id, .. }) => predicates.get(&(id.clone(), method.clone())).copied(),
             // A receiver of no known type (a view's `devise_mapping`, a stateful `helper_method`): the one definition of
             // the name is the only one that can answer it, as any other receiver raises NoMethodError.
