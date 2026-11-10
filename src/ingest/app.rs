@@ -14610,8 +14610,9 @@ mod path_gem_vfs_tests {
 
 
 /// Rails' `Mime::EXTENSION_LOOKUP[ext]` (devise's `navigational_formats`), the registered type for an extension
-/// or nil: what `Mime::Type.lookup_by_extension(ext)` answers in the runtime, which has no such table. Only that
-/// read: any other use of the table stays the unknown constant it is.
+/// or nil: what `Mime::Type.lookup_by_extension(ext)` answers in the runtime, which has no such table, in every body
+/// the tree emits (a `direct` route helper's too). Only that read: any other use of the table stays the unknown
+/// constant it is.
 fn mime_extension_lookups(app: &mut App) {
     use crate::expr::{Expr, ExprNode};
     use crate::ident::Symbol;
@@ -14630,13 +14631,5 @@ fn mime_extension_lookups(app: &mut App) {
         }
         e.node.for_each_child_mut(&mut rewrite);
     }
-    crate::lower::for_each_hook_body(app, &mut rewrite);
-    for controller in &mut app.controllers {
-        for action in controller.actions_mut() {
-            rewrite(&mut action.body);
-        }
-    }
-    for view in &mut app.views {
-        rewrite(&mut view.body);
-    }
+    crate::lower::for_each_emit_body(app, &mut rewrite);
 }
