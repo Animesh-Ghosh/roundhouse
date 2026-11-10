@@ -13230,10 +13230,8 @@ puts "string inflections passed"
     assert!(run.stdout.contains("string inflections passed"), "{}", run.stdout);
 }
 
-/// #293: `tableize` needs Rails' plural rules, which the runtime does not
-/// carry (its `pluralize_word` keeps a word that ends in "s", where Rails
-/// answers "statuses"). It is refused at check time, not emitted onto a
-/// String no runtime reopens.
+/// #293: `tableize` has no runtime body. It is refused at check time, not
+/// emitted onto a String no runtime reopens.
 #[test]
 fn string_extensions_without_a_runtime_body_are_refused() {
     for (call, method) in [(r#""Status".tableize"#, "tableize")] {
@@ -20961,6 +20959,12 @@ mod controller_surface;
 mod rack_attack;
 #[path = "emit_and_run/devise.rs"]
 mod devise;
+#[path = "emit_and_run/warden.rs"]
+mod warden;
+#[path = "emit_and_run/class_eval_string_macro.rs"]
+mod class_eval_string_macro;
+#[path = "emit_and_run/send_built_name.rs"]
+mod send_built_name;
 #[path = "support/addressable_gem.rs"]
 mod addressable_gem;
 #[path = "emit_and_run/addressable.rs"]
@@ -21947,3 +21951,5 @@ fn join_nil_renders_as_rails() {
 }
 #[path = "emit_and_run/cable_connection_request.rs"]
 mod cable_connection_request;
+#[path = "emit_and_run/route_loop_index.rs"]
+mod route_loop_index;

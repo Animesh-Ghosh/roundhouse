@@ -4020,10 +4020,11 @@ impl Analyzer {
         if !app.concern_spliced_actions.is_empty() {
             let _typing_concerns = crate::timings::begin("typing: concern splice");
             let origins = app.concern_spliced_actions.clone();
-            for controller in &mut app.controllers {
-                let Some(by_method) = origins.get(&controller.name) else { continue };
+            // Each controller's actions type against the registry alone, so the controllers are typed side by side.
+            parallel::map(&mut app.controllers, |controller| {
+                let Some(by_method) = origins.get(&controller.name) else { return };
                 if dirty.is_some_and(|d| !d.contains(&controller.name)) {
-                    continue;
+                    return;
                 }
                 let own_env = controller_ivar_env.get(&controller.name).cloned()
                     .unwrap_or_default();
@@ -4082,7 +4083,7 @@ impl Analyzer {
                     self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                 }
-            }
+            });
         }
         // ── Phase B″: re-type an ancestor's own methods against what its
         // ── descendants write.
@@ -4094,10 +4095,10 @@ impl Analyzer {
         // Additive as Phase B′ is: the ancestor's own binding wins.
         {
             let descendant_env = descendant_ivar_env_of(app, &controller_ivar_env);
-            for controller in &mut app.controllers {
-                let Some(from_below) = descendant_env.get(&controller.name) else { continue };
+            parallel::map(&mut app.controllers, |controller| {
+                let Some(from_below) = descendant_env.get(&controller.name) else { return };
                 if dirty.is_some_and(|d| !d.contains(&controller.name)) {
-                    continue;
+                    return;
                 }
                 let own_env = controller_ivar_env.get(&controller.name).cloned().unwrap_or_default();
                 let self_ty = Ty::Class { id: controller.name.clone(), args: vec![].into() };
@@ -4150,7 +4151,7 @@ impl Analyzer {
                     self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, None);
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                 }
-            }
+            });
         }
         // Library classes (non-model classes under app/models/): mirror
         // the per-model body typing pass on a smaller surface — no
@@ -4591,16 +4592,18 @@ impl Analyzer {
         // layout. Harvest those writes after typing the template and fold
         // them into the layout seed before layouts are typed.
         let _typing_views = crate::timings::begin("typing: views");
-        for view in &mut app.views {
-            if is_partial_view_name(&view.name) || is_layout_view_name(&view.name) {
-                continue;
-            }
-            let ivars = action_ivars_by_view
-                .get(&view.name)
-                .cloned()
-                .unwrap_or_default();
+        // The templates type side by side (each against the registry and its own seed); what each one assigns and renders is read after, one by one in view order, since the layouts' seeds and the partials' locals are merges in that order.
+        let mut actions: Vec<&mut crate::dialect::View> = app
+            .views
+            .iter_mut()
+            .filter(|view| !is_partial_view_name(&view.name) && !is_layout_view_name(&view.name))
+            .collect();
+        parallel::map(&mut actions, |view| {
+            let ivars = action_ivars_by_view.get(&view.name).cloned().unwrap_or_default();
             let view_ctx = view_ctx_for(&view.name, ivars);
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);
+        });
+        for view in actions {
             let mut assigned = HashMap::default();
             extract_ivar_assignments(&view.body, &mut assigned);
             if !assigned.is_empty() {
@@ -4647,12 +4650,12 @@ impl Analyzer {
                 .unwrap_or_default()
         };
 
-        for view in &mut app.views {
-            if !is_layout_view_name(&view.name) {
-                continue;
-            }
+        let mut layouts: Vec<&mut crate::dialect::View> = app.views.iter_mut().filter(|view| is_layout_view_name(&view.name)).collect();
+        parallel::map(&mut layouts, |view| {
             let view_ctx = view_ctx_for(&view.name, view_ivar_seed(&view.name));
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);
+        });
+        for view in layouts {
             let mut targets = Vec::new();
             extract_partial_render_sites(
                 &view.body,
@@ -4810,10 +4813,9 @@ impl Analyzer {
         // and ivar_bindings from the propagated controller context, then
         // analyze.
         let attachable_partial_bindings = crate::lower::attachable::attachable_partial_bindings(app);
-        for view in &mut app.views {
-            if !is_partial_view_name(&view.name) {
-                continue;
-            }
+        // Each partial types against the registry and the seeds above alone, so the partials are typed side by side.
+        let mut partials: Vec<&mut crate::dialect::View> = app.views.iter_mut().filter(|view| is_partial_view_name(&view.name)).collect();
+        parallel::map(&mut partials, |view| {
             let mut view_ctx = Ctx::default();
             view_ctx.in_view = true; // `yield` here renders to a String
             view_ctx.view_name = Some(view.name.clone());
@@ -4864,7 +4866,7 @@ impl Analyzer {
                 view_ctx.ivar_bindings = ivars.clone();
             }
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);
-        }
+        });
 
         // Record the render-site local types on the App. They already
         // seeded each partial's body typing above; persisting them is
@@ -5267,9 +5269,12 @@ impl Analyzer {
     fn capture_inference_sig(&self) -> InferenceSig {
         let mut instance = HashMap::with_capacity_and_hasher(self.classes.len(), Default::default());
         let mut class_methods = HashMap::with_capacity_and_hasher(self.classes.len(), Default::default());
-        for (id, cls) in &self.classes {
-            instance.insert(id.clone(), cls.instance_methods.clone());
-            class_methods.insert(id.clone(), cls.class_methods.clone());
+        // The tables are copied side by side and written in class order.
+        let classes: Vec<(&ClassId, &ClassInfo)> = self.classes.iter().collect();
+        let copies = crate::par::map_chunked(&classes, |(_, cls)| (cls.instance_methods.clone(), cls.class_methods.clone()));
+        for ((id, _), (instance_methods, class_method_table)) in classes.iter().zip(copies) {
+            instance.insert((*id).clone(), instance_methods);
+            class_methods.insert((*id).clone(), class_method_table);
         }
         InferenceSig {
             instance,
@@ -5301,17 +5306,12 @@ impl Analyzer {
         if self.classes.len() != prev.instance.len() || self.inferred_params != prev.params {
             return false;
         }
-        for (id, cls) in &self.classes {
-            match prev.instance.get(id) {
-                Some(methods) if methods == &cls.instance_methods => {}
-                _ => return false,
-            }
-            match prev.class_methods.get(id) {
-                Some(methods) if methods == &cls.class_methods => {}
-                _ => return false,
-            }
-        }
-        true
+        let classes: Vec<(&ClassId, &ClassInfo)> = self.classes.iter().collect();
+        crate::par::map_chunked(&classes, |(id, cls)| {
+            prev.instance.get(*id) == Some(&cls.instance_methods) && prev.class_methods.get(*id) == Some(&cls.class_methods)
+        })
+        .into_iter()
+        .all(|same| same)
     }
 
     /// Block-value verdicts stay on [`DirtyHints`], not [`InferenceSig`],
@@ -5433,6 +5433,9 @@ impl Analyzer {
 
     fn harvest_one_model(&mut self, model: &Model) {
         let class_id = &model.name;
+        for (name, ty) in crate::lower::model_to_library::markers::readonly_attr_types(model) {
+            self.classes.entry(class_id.clone()).or_default().instance_methods.insert(name, ty);
+        }
         let scope_names: crate::det::HashSet<Symbol> =
             model.scopes().map(|s| s.name.clone()).collect();
         for method in model.methods() {
@@ -5585,19 +5588,21 @@ impl Analyzer {
     /// method forwarding its block to a sibling that is one becomes one
     /// a round later, as its callee's verdict lands.
     fn harvest_block_value_methods(&mut self, app: &App) {
-        let mut found: Vec<(ClassId, Symbol)> = Vec::new();
-        for model in &app.models {
-            for method in model.methods() {
-                let bp = method.block_param.as_ref().map(|p| &p.name);
-                if self.returns_block_value(&model.name, &method.name, &method.body, bp) {
-                    found.push((model.name.clone(), method.name.clone()));
-                }
-            }
-        }
         // Verdicts read last round's registry and are written below, so
-        // each class is read in parallel and collected in source order.
+        // each model, class and controller is read in parallel and
+        // collected in source order.
         let this = &*self;
-        let verdicts = parallel::map_ref(&app.library_classes, |lc| {
+        let models = parallel::map_ref(&app.models, |model| {
+            model
+                .methods()
+                .filter(|method| {
+                    let bp = method.block_param.as_ref().map(|p| &p.name);
+                    this.returns_block_value(&model.name, &method.name, &method.body, bp)
+                })
+                .map(|method| (model.name.clone(), method.name.clone()))
+                .collect::<Vec<_>>()
+        });
+        let classes = parallel::map_ref(&app.library_classes, |lc| {
             lc.methods
                 .iter()
                 .filter(|method| {
@@ -5607,19 +5612,14 @@ impl Analyzer {
                 .map(|method| (lc.name.clone(), method.name.clone()))
                 .collect::<Vec<_>>()
         });
-        found.extend(verdicts.into_iter().flatten());
-        for controller in &app.controllers {
-            for action in controller.actions() {
-                if self.returns_block_value(
-                    &controller.name,
-                    &action.name,
-                    &action.body,
-                    action.block_param.as_ref(),
-                ) {
-                    found.push((controller.name.clone(), action.name.clone()));
-                }
-            }
-        }
+        let controllers = parallel::map_ref(&app.controllers, |controller| {
+            controller
+                .actions()
+                .filter(|action| this.returns_block_value(&controller.name, &action.name, &action.body, action.block_param.as_ref()))
+                .map(|action| (controller.name.clone(), action.name.clone()))
+                .collect::<Vec<_>>()
+        });
+        let mut found: Vec<(ClassId, Symbol)> = models.into_iter().chain(classes).chain(controllers).flatten().collect();
         for info in self.classes.values_mut() {
             info.block_value_methods.clear();
         }
@@ -6341,9 +6341,8 @@ impl Analyzer {
             let rest = params_by_method.get(key).and_then(|shape| shape.slots.iter().position(|(_, kind)| matches!(kind, ParamKind::Rest)));
             rest.filter(|r| i >= *r).unwrap_or(i)
         };
-        let guessed_refs: Vec<&SendSite> = guessed.iter().collect();
         let mut guessed_open = BTreeSet::new();
-        let guessed = self.param_observations(&guessed_refs, params_by_method, defined, &mut guessed_open);
+        let guessed = self.call_observations(&guessed, params_by_method, defined, &mut guessed_open);
         let extra: Vec<(ParamKey, Vec<Ty>)> = {
             let typed: BTreeSet<(&ParamKey, usize)> = observations
                 .iter()
@@ -6352,18 +6351,34 @@ impl Analyzer {
                 .flat_map(|(key, tys)| tys.iter().enumerate().filter(|(_, t)| !t.is_unknown()).map(move |(i, _)| (key, slot(key, i))))
                 .collect();
             open.extend(guessed_open.into_iter().filter(|(key, i)| typed.contains(&(key, slot(key, *i)))));
-            guessed
-                .into_iter()
-                .map(|(key, tys)| {
-                    let tys = tys
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, t)| if typed.contains(&(&key, slot(&key, i))) { t } else { Ty::Var { var: NO_EVIDENCE } })
-                        .collect();
-                    (key, tys)
-                })
-                .collect()
+            // A guessed observation that repeats one already kept is
+            // dropped: the fold joins them, and a join is idempotent. Most
+            // are the same few calls with every slot masked, once per class.
+            let mut extra: Vec<(ParamKey, Vec<Ty>)> = Vec::new();
+            let mut kept: HashMap<u64, Vec<usize>> = HashMap::default();
+            for (key, tys) in guessed {
+                let tys: Vec<Ty> = tys
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, t)| if typed.contains(&(&key, slot(&key, i))) { t } else { Ty::Var { var: NO_EVIDENCE } })
+                    .collect();
+                let fingerprint = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = rustc_hash::FxHasher::default();
+                    key.hash(&mut h);
+                    tys.iter().for_each(|t| t.eq_fingerprint().hash(&mut h));
+                    h.finish()
+                };
+                let bucket = kept.entry(fingerprint).or_default();
+                if bucket.iter().any(|&i| extra[i].0 == key && extra[i].1 == tys) {
+                    continue;
+                }
+                bucket.push(extra.len());
+                extra.push((key, tys));
+            }
+            extra
         };
+        observations.reserve(extra.len());
         observations.extend(extra);
         self.site_cache = cache;
         self.retyped_since_unify = Some(crate::det::HashSet::default());
@@ -6415,8 +6430,9 @@ impl Analyzer {
                 self.collect_send_sites(body, Some(&module.name), false, helpers, &[], &mut test_sites);
             }
         }
+        let helper_names = test_module::test_helper_names(app);
         test_sites.into_iter().filter_map(|(class, method, args, kwargs, recv)| {
-            self.test_helper_owner(app, &class, &method)
+            self.test_helper_owner(&helper_names, &class, &method)
                 .map(|owner| (owner, method, args, kwargs, recv))
         }).collect()
     }
@@ -6446,17 +6462,30 @@ impl Analyzer {
         defined: &BTreeSet<ParamKey>,
         open: &mut BTreeSet<(ParamKey, usize)>,
     ) -> Vec<(ParamKey, Vec<Ty>)> {
+        let calls: Vec<(&ClassId, &SendSite)> = sites.iter().map(|&site| (&site.0, site)).collect();
+        self.call_observations(&calls, params_by_method, defined, open)
+    }
+
+    /// [`Self::param_observations`] of each site read as a call of the
+    /// class beside it, whatever class the site itself names.
+    fn call_observations(
+        &self,
+        sites: &[(&ClassId, &SendSite)],
+        params_by_method: &HashMap<ParamKey, ParamShape>,
+        defined: &BTreeSet<ParamKey>,
+        open: &mut BTreeSet<(ParamKey, usize)>,
+    ) -> Vec<(ParamKey, Vec<Ty>)> {
         const CHUNK: usize = 4096;
         if sites.len() <= CHUNK || crate::par::workers_for(sites.len() / CHUNK + 1) == 1 {
             return self.param_observations_of(sites, params_by_method, defined, open);
         }
-        let chunks: Vec<&[&SendSite]> = sites.chunks(CHUNK).collect();
+        let chunks: Vec<&[(&ClassId, &SendSite)]> = sites.chunks(CHUNK).collect();
         let parts = crate::par::map(&chunks, |chunk| {
             let mut part_open = BTreeSet::new();
             let obs = self.param_observations_of(chunk, params_by_method, defined, &mut part_open);
             (obs, part_open)
         });
-        let mut observations = Vec::new();
+        let mut observations = Vec::with_capacity(parts.iter().map(|(obs, _)| obs.len()).sum());
         for (obs, part_open) in parts {
             observations.extend(obs);
             open.extend(part_open);
@@ -6468,14 +6497,14 @@ impl Analyzer {
     /// a `def` of the app.
     fn param_observations_of(
         &self,
-        sites: &[&SendSite],
+        sites: &[(&ClassId, &SendSite)],
         params_by_method: &HashMap<ParamKey, ParamShape>,
         defined: &BTreeSet<ParamKey>,
         open: &mut BTreeSet<(ParamKey, usize)>,
     ) -> Vec<(ParamKey, Vec<Ty>)> {
         let mut placed: HashMap<(&ClassId, &Symbol, SiteRecv), Option<ParamKey>> = HashMap::default();
         let mut observations = Vec::new();
-        for (class_id, method, arg_tys, kw_tys, recv) in sites.iter().copied() {
+        for &(class_id, (_, method, arg_tys, kw_tys, recv)) in sites {
             let key = placed
                 .entry((class_id, method, *recv))
                 .or_insert_with(|| self.param_key(defined, class_id.clone(), method.clone(), *recv))
@@ -8562,7 +8591,7 @@ fn unknown_receiver() -> ClassId {
 /// are joined, and a join is idempotent, so a repeat adds nothing; the
 /// first of each is kept, in site order, so the rows come out in the
 /// same order too.
-fn guessed_receiver_sites(unknown: &[&SendSite], app: &App) -> Vec<SendSite> {
+fn guessed_receiver_sites<'a>(unknown: &[&'a SendSite], app: &'a App) -> Vec<(&'a ClassId, &'a SendSite)> {
     if unknown.is_empty() || !app.pins_unresolved_params {
         return Vec::new();
     }
@@ -8573,17 +8602,21 @@ fn guessed_receiver_sites(unknown: &[&SendSite], app: &App) -> Vec<SendSite> {
         }
     }
     let mut seen: HashMap<(&Symbol, SiteRecv, u64), Vec<&SendSite>> = HashMap::default();
-    let mut guessed = Vec::new();
-    for site in unknown {
+    let mut kept: Vec<(&Vec<&ClassId>, &SendSite)> = Vec::new();
+    for &site in unknown {
         let Some(classes) = defining.get(&site.1) else { continue };
         let bucket = seen.entry((&site.1, site.4, site_shape_hash(site))).or_default();
         if bucket.iter().any(|kept| kept.2 == site.2 && kept.3 == site.3) {
             continue;
         }
         bucket.push(site);
-        for class in classes {
-            guessed.push(((*class).clone(), site.1.clone(), site.2.clone(), site.3.clone(), site.4));
-        }
+        kept.push((classes, site));
+    }
+    // The site itself, read as a call of each class: a copy of its
+    // arguments per class was most of a round's time on a large app.
+    let mut guessed = Vec::with_capacity(kept.iter().map(|(classes, _)| classes.len()).sum());
+    for (classes, site) in kept {
+        guessed.extend(classes.iter().map(|&class| (class, site)));
     }
     guessed
 }
@@ -9099,15 +9132,15 @@ pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassIn
         }
         out
     }
-    fn hook_methods(includes: &[ClassId], hook: &str, app: &App, resolver: &ConstResolver, seen: &mut crate::det::HashSet<(ClassId, String)>) -> crate::det::HashSet<Symbol> {
-        fn body(expr: &Expr, target: &Symbol, app: &App, resolver: &ConstResolver, seen: &mut crate::det::HashSet<(ClassId, String)>) -> Option<crate::det::HashSet<Symbol>> {
+    fn hook_methods(includes: &[ClassId], hook: &str, app: &App, by_name: &crate::ingest::LibraryClassesByName, resolver: &ConstResolver, seen: &mut crate::det::HashSet<(ClassId, String)>) -> crate::det::HashSet<Symbol> {
+        fn body(expr: &Expr, target: &Symbol, app: &App, by_name: &crate::ingest::LibraryClassesByName, resolver: &ConstResolver, seen: &mut crate::det::HashSet<(ClassId, String)>) -> Option<crate::det::HashSet<Symbol>> {
             let mut methods = crate::det::HashSet::default();
             match &*expr.node {
                 ExprNode::Seq { exprs } => for expr in exprs {
-                    methods.extend(body(expr, target, app, resolver, seen)?);
+                    methods.extend(body(expr, target, app, by_name, resolver, seen)?);
                     if matches!(&*expr.node, ExprNode::Return { .. }) { break; }
                 },
-                ExprNode::Return { value } => return body(value, target, app, resolver, seen),
+                ExprNode::Return { value } => return body(value, target, app, by_name, resolver, seen),
                 ExprNode::Lit { .. } => {},
                 ExprNode::Send { recv: Some(recv), method, args, block, .. }
                     if matches!(&*recv.node, ExprNode::Var { name, .. } if name == target) => {
@@ -9120,7 +9153,7 @@ pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassIn
                             let ExprNode::Const { path } = &*arg.node else { return None };
                             modules.push(resolver.namespace(arg.span, path).cloned().unwrap_or_else(|| mixin_path_id(path)));
                         }
-                        methods.extend(hook_methods(&modules, if method.as_str() == "include" { "included" } else { "extended" }, app, resolver, seen));
+                        methods.extend(hook_methods(&modules, if method.as_str() == "include" { "included" } else { "extended" }, app, by_name, resolver, seen));
                     } else { return None; }
                 },
                 _ => return None,
@@ -9132,11 +9165,11 @@ pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassIn
             if !seen.insert((id.clone(), hook.to_owned())) { continue; }
             // A plain inclusion does not copy another module's singleton
             // hook. Follow only explicit registration on the hook target.
-            if let Some(method) = app.library_classes.iter().rev().filter(|class| &class.name == id)
+            if let Some(method) = by_name.get(id).into_iter().flatten().rev()
                 .flat_map(|class| class.methods.iter().rev())
                 .find(|method| method.receiver == MethodReceiver::Class && method.name.as_str() == hook && method.params.len() == 1)
             {
-                if let Some(installed) = body(&method.body, &method.params[0].name, app, resolver, seen) { methods.extend(installed); }
+                if let Some(installed) = body(&method.body, &method.params[0].name, app, by_name, resolver, seen) { methods.extend(installed); }
             }
         }
         methods
@@ -9146,14 +9179,15 @@ pub(crate) fn record_class_side_ownership(classes: &mut HashMap<ClassId, ClassIn
         (model.name.clone(), model_includes(model), extensions(exprs, resolver))
     }).chain(app.library_classes.iter().map(|class|
         (class.name.clone(), class.includes.clone(), extensions(class.unknown_calls.iter(), resolver))));
+    let by_name = crate::ingest::library_classes_by_name(app);
     for (id, mut includes, extensions) in declarations {
-        let mut installed = hook_methods(&includes, "included", app, resolver, &mut crate::det::HashSet::default());
-        installed.extend(hook_methods(&extensions, "extended", app, resolver, &mut crate::det::HashSet::default()));
+        let mut installed = hook_methods(&includes, "included", app, &by_name, resolver, &mut crate::det::HashSet::default());
+        installed.extend(hook_methods(&extensions, "extended", app, &by_name, resolver, &mut crate::det::HashSet::default()));
         includes.extend(extensions.iter().cloned());
         let info = classes.entry(id).or_default();
         info.class_method_extensions.extend(extensions);
         info.class_side_hook_methods.extend(installed);
-        info.unknown_class_side_hook |= crate::ingest::unconsumed_class_side_hook(&includes, app).is_some();
+        info.unknown_class_side_hook |= crate::ingest::unconsumed_class_side_hook(&includes, app, &by_name).is_some();
     }
 }
 
@@ -9872,10 +9906,15 @@ fn is_abstract_body(body: &Expr) -> bool {
 /// defines `x` on the instance side — the last in `helper :all`'s sorted
 /// order, as the view's own lookup would find it.
 fn helper_instance_index(app: &App) -> HashMap<Symbol, ClassId> {
+    // The library classes by name, once, instead of a scan of every
+    // library class per helper name.
+    let mut by_name: std::collections::HashMap<&ClassId, Vec<&crate::dialect::LibraryClass>> = std::collections::HashMap::new();
+    for lc in &app.library_classes {
+        by_name.entry(&lc.name).or_default().push(lc);
+    }
     let defines = |owner: &ClassId, name: &Symbol| {
-        app.library_classes.iter().any(|lc| {
-            &lc.name == owner
-                && lc.methods.iter().any(|m| &m.name == name && m.receiver == crate::dialect::MethodReceiver::Instance)
+        by_name.get(owner).is_some_and(|lcs| {
+            lcs.iter().any(|lc| lc.methods.iter().any(|m| &m.name == name && m.receiver == crate::dialect::MethodReceiver::Instance))
         })
     };
     // Every helper module, not only the index's owners: a module whose
@@ -11803,7 +11842,7 @@ mod guessed_receiver_site_tests {
         ];
         let refs: Vec<&SendSite> = sites.iter().collect();
         let got: Vec<(String, Vec<Ty>, SiteRecv)> =
-            guessed_receiver_sites(&refs, &app).into_iter().map(|(class, _, args, _, recv)| (class.0.as_str().to_string(), args, recv)).collect();
+            guessed_receiver_sites(&refs, &app).into_iter().map(|(class, site)| (class.0.as_str().to_string(), site.2.clone(), site.4)).collect();
         let row = |class: &str, ty: Ty, recv: SiteRecv| (class.to_string(), vec![ty], recv);
         assert_eq!(
             got,

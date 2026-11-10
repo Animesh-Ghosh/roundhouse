@@ -204,6 +204,8 @@ pub struct Ctx {
 /// Rails schema + conventions; the body-typer reads it.
 #[derive(Default, Clone)]
 pub struct ClassInfo {
+    /// `request.env[KEY]` a middleware on the stack writes (`ActionDispatch::Request` only).
+    pub env_keys: HashMap<String, Ty>,
     pub upload_array_fields: std::collections::BTreeMap<(Symbol, Vec<Symbol>, Vec<String>), std::collections::BTreeSet<Symbol>>,
     /// Kind of the indexed source declaration; never inferred from its name.
     pub is_module: bool,
@@ -2715,6 +2717,18 @@ impl<'a> BodyTyper<'a> {
                     && recv.as_ref().is_some_and(|r| !matches!(&*r.node, ExprNode::Const { .. }))
                 {
                     return Ty::Untyped;
+                }
+                // Not the env's untyped value: a middleware on the stack writes this key on every request (`env["warden"] = Proxy.new`).
+                if method.as_str() == "[]"
+                    && let (Some(receiver), [key]) = (recv.as_ref(), args.as_slice())
+                    && let ExprNode::Lit { value: crate::expr::Literal::Str { value: key } } = &*key.node
+                    && let ExprNode::Send { recv: Some(request), method: env, args: env_args, .. } = &*receiver.node
+                    && env.as_str() == "env"
+                    && env_args.is_empty()
+                    && let Some(Ty::Class { id, .. }) = request.ty.as_ref()
+                    && let Some(ty) = self.classes().get(id).and_then(|c| c.env_keys.get(key.as_str()))
+                {
+                    return ty.clone();
                 }
                 let receiver_is_instance = recv.as_ref().map_or(ctx.instance_body, |r| self.is_instance(r, ctx));
                 let instance_receiver = receiver_is_instance

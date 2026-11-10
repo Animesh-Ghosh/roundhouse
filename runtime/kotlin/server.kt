@@ -153,9 +153,10 @@ object Server {
         // crystal/rust/python servers do. `formParamMap` otherwise reads the
         // (empty) body of every GET through Jetty's request-content lock
         // (+2-4% GET throughput on the real-blog bench routes without it).
-        val contentType = ctx.contentType() ?: ""
-        if (contentType.startsWith("application/x-www-form-urlencoded") ||
-            contentType.startsWith("multipart/form-data")) {
+        // Javalin's own predicates, which match the media type
+        // case-insensitively as RFC 9110 requires and are the same test
+        // `formParamMap` uses to pick its multipart parser.
+        if (ctx.isFormUrlencoded() || ctx.isMultipartFormData()) {
             for ((k, vals) in ctx.formParamMap()) {
                 vals.firstOrNull()?.let { setParam(params, k, it) }
             }

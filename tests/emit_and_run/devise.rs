@@ -141,3 +141,76 @@ fn devise_for_a_subclass_draws_its_superclasss_modules() {
     assert!(routes.contains(r#"Route.new("GET", "/admin/password/new", :devise__passwords, :new)"#), "{routes}");
     assert!(helpers.contains("def self.new_admin_session_path"), "{helpers}");
 }
+
+/// Devise's engine stacks Warden's `Warden::Manager` (`config.app_middleware.use Warden::Manager do
+/// |config| … end`), so a request carries `env["warden"]` as in Rails; the block configures it.
+#[test]
+fn devise_puts_warden_on_the_middleware_stack_with_its_configuring_block() {
+    let (tree, errors) = app(":database_authenticatable", "  devise_for :users\n").emit(BuildTarget::Ruby);
+    let stack = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    assert!(stack.contains("Warden::Manager.new(app) { |config|\nDevise.warden_config = config\n}"), "{stack}\n{errors:#?}");
+    // Not refused: with no `config.omniauth`, the engine's loop over `Devise.omniauth_configs` inserts nothing.
+    assert!(!errors.iter().any(|e| e.contains("railtie middleware")), "{errors:#?}");
+}
+
+/// A provider the app configures is a middleware the engine's loop inserts, which the stack does not hold.
+#[test]
+fn an_omniauth_provider_keeps_the_engines_middleware_loop_refused() {
+    let (_, errors) = app(":database_authenticatable", "  devise_for :users\n")
+        .write(
+            "config/initializers/devise.rb",
+            "Devise.setup do |config|\n  config.mailer_sender = \"please-change-me@example.com\"\n  require \"devise/orm/active_record\"\n  config.omniauth :github, \"id\", \"secret\"\nend\n",
+        )
+        .emit(BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("railtie middleware") && e.contains("inserted under a condition")), "{errors:#?}");
+}
+
+/// `authenticated :user` with no block: Devise's `block.nil? || block.call(…)` is `true` once the
+/// block is written in, so the constraint asks only the Warden proxy Devise's engine stacks.
+#[test]
+fn devise_authenticated_asks_the_warden_proxy_its_engine_stacks() {
+    let (tree, errors) = app(":database_authenticatable", "  devise_for :users\n  authenticated :user do\n    get \"/dash\", to: \"articles#index\"\n  end\n")
+        .emit(BuildTarget::Ruby);
+    assert!(!errors.iter().any(|e| e.contains("request constraint")), "{errors:#?}");
+    let guards = std::fs::read_to_string(tree.join("app/models/roundhouse_route_guards.rb")).expect("guards");
+    assert!(guards.contains("request.env[\"warden\"].send(:authenticate?, scope: :user) && true"), "{guards}");
+}
+
+/// A gem's `Devise.token` (devise-jwt's `Devise.jwt` is written this way) yields a settings object of the gem's own, not `Devise`:
+/// that `Devise.setup` cannot run it leaves none of Devise's settings unsure, and the routes that read them are still drawn.
+#[test]
+fn devise_for_is_drawn_past_a_setup_block_configuring_another_object() {
+    let gem = "module Devise\n  def self.token\n    yield(Devise::Token.config)\n  end\n\n  module Token\n  end\nend\n";
+    let setup = "Devise.setup do |config|\n  config.mailer_sender = \"please-change-me@example.com\"\n  require \"devise/orm/active_record\"\n  config.token do |token|\n    token.secret = \"x\"\n  end\nend\n";
+    let (routes, helpers) = drawn(
+        app(":database_authenticatable", "  devise_for :users\n")
+            .write("lib/devise_token.rb", gem)
+            .write("config/initializers/devise.rb", setup),
+    );
+    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#), "{routes}");
+    assert!(helpers.contains("def self.new_user_session_path"), "{helpers}");
+}
+
+/// A gem can register its module with a bare `add_module` inside `module Devise` (devise-jwt does): the module is one Devise knows, as `Devise.add_module` makes it.
+#[test]
+fn devise_for_knows_a_module_registered_inside_module_devise() {
+    let (routes, _) = drawn(
+        app(":database_authenticatable, :token_authenticatable", "  devise_for :users\n")
+            .edit("Gemfile.lock", "    devise (4.9.4)\n", "    devise-token (0.1.0)\n      devise (~> 4.0)\n    devise (4.9.4)\n")
+            .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  devise-token\n")
+            .edit("Gemfile", "gem \"devise\"\n", "gem \"devise\"\ngem \"devise-token\"\n")
+            .write("vendor/bundle/ruby/3.4.0/gems/devise-token-0.1.0/lib/devise-token.rb", "module Devise\n  add_module(:token_authenticatable, strategy: :token)\nend\n"),
+    );
+    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#), "{routes}");
+}
+
+/// A `devise` option sets that option on the model and no other: `stretches:` leaves the unlock strategy Devise's, so its unlock routes are drawn.
+/// The option it does read, set on the model, is the model's own: no route is guessed from Devise's default.
+#[test]
+fn devise_for_reads_past_a_model_option_it_does_not_ask_about() {
+    let (routes, _) = drawn(app(":database_authenticatable, :lockable, stretches: 1", "  devise_for :users\n"));
+    assert!(routes.contains(r#"Route.new("GET", "/users/unlock/new", :devise__unlocks, :new)"#), "{routes}");
+
+    let (routes, _) = drawn(app(":database_authenticatable, :lockable, unlock_strategy: :time", "  devise_for :users\n"));
+    assert!(!routes.contains("/users/unlock"), "{routes}");
+}

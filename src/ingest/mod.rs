@@ -34,7 +34,7 @@ pub(crate) mod has_many_hold;
 pub(crate) mod mailer_helpers;
 pub(crate) mod class_attribute;
 mod class_configuration;
-pub(crate) use concern_accessors::unconsumed_class_side_hook;
+pub(crate) use concern_accessors::{library_classes_by_name, unconsumed_class_side_hook, LibraryClassesByName};
 mod dry_initializer;
 mod dry_struct;
 mod dry_types;

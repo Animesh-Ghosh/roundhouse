@@ -57,6 +57,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Rails::BacktraceCleaner", &[("new", cleaner)], &[
         ("clean", Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
     ]);
+    // runtime/ruby/active_support_reporters.rb's ParameterFilter. `filter`
+    // answers a Hash of what it was given, whose values are untyped.
+    let parameter_filter = class("ActiveSupport::ParameterFilter");
+    register_stdlib_class(classes, "ActiveSupport::ParameterFilter", &[("new", parameter_filter)], &[
+        ("filter", Ty::Untyped),
+        ("filter_param", Ty::Untyped),
+    ]);
     register_stdlib_class(classes, "ActiveSupport", &[
         ("event_reporter", event_reporter.clone()), ("error_reporter", error_reporter.clone()),
         ("event_reporter=", event_reporter.clone()), ("error_reporter=", error_reporter.clone()),
@@ -783,9 +790,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("time_fragment", Ty::Str),
         ("written", Ty::Str),
     ], &[]);
-    // `Rack::Utils` — the two encoding-negotiation functions, ported
-    // into `runtime/ruby/rack_utils.rb` (the rack gem's own on the ruby
-    // family). ONLY that surface, the IPAddr rule. A pair is
+    // `Rack::Utils` — the two encoding-negotiation functions and
+    // `unescape_path`, ported into `runtime/ruby/rack_utils.rb` (the rack
+    // gem's own on the ruby family). ONLY that surface, the IPAddr rule. A pair is
     // `[name, quality]`; the name is nil for an empty header part.
     let q_pair = Ty::Tuple {
         elems: vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }, Ty::Float].into(),
@@ -793,6 +800,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     register_stdlib_class(classes, "Rack::Utils", &[
         ("q_values", Ty::Array { elem: std::sync::Arc::new(q_pair) }),
         ("select_best_encoding", Ty::Union { variants: vec![Ty::Str, Ty::Nil].into() }),
+        ("unescape_path", Ty::Str),
     ], &[]);
     // `Rack::Utils::HTTP_STATUS_CODES` — the status-code-to-reason-phrase
     // table every app can reach for (`Rack::Utils::HTTP_STATUS_CODES
@@ -1246,8 +1254,13 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("symbol", Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() }),
         ("to_sym", Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() }),
         ("to_s", Ty::Str), ("to_str", Ty::Str), ("inspect", Ty::Str),
+        ("ref", Ty::Union { variants: vec![Ty::Sym, Ty::Str].into() }),
         ("hash", Ty::Int), ("==", Ty::Bool), ("eql?", Ty::Bool),
     ]);
+    // `html?`, `json?`, …: one predicate per registered symbol, as `runtime/ruby/mime.rb` spells them out.
+    for format in MIME_PREDICATES {
+        classes.entry(ClassId(Symbol::from("Mime::Type"))).or_default().instance_methods.insert(Symbol::from(format!("{format}?")), Ty::Bool);
+    }
     // `URI.parse` can return scheme-specific classes beyond HTTP/HTTPS;
     // keep it gradual while class guards recover the readers below.
     register_stdlib_class(classes, "URI", &[
@@ -1722,3 +1735,6 @@ const ERRNO_CLASSES: &[&str] = &[
     "ENOBUFS", "EISCONN", "ENOTCONN", "ETIMEDOUT", "ECONNREFUSED", "EHOSTUNREACH",
     "EALREADY", "EINPROGRESS", "ESTALE", "EDQUOT", "ECANCELED", "EOVERFLOW", "EILSEQ",
 ];
+
+/// The formats `Mime::Type` answers a predicate for (`runtime/ruby/mime.rb` SYMBOLS).
+const MIME_PREDICATES: &[&str] = &["atom", "bmp", "css", "csv", "gif", "gzip", "html", "ics", "jpeg", "js", "json", "m4a", "md", "mp3", "mp4", "mpeg", "multipart_form", "ogg", "otf", "pdf", "png", "rss", "svg", "text", "tiff", "ttf", "turbo_stream", "url_encoded_form", "vcf", "vtt", "webm", "webp", "woff", "woff2", "xml", "yaml", "zip"];

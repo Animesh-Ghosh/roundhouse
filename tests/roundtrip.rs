@@ -187,6 +187,8 @@ fn tiny_blog_round_trips() {
         boot_program: Vec::new(),
         boot_gem_constants: Vec::new(),
         gem_middlewares: Vec::new(),
+        gem_middleware_blocks: Default::default(),
+        rack_env_writes: Default::default(),
         gem_middleware_refusals: Vec::new(),
         included_hoist_conflicts: Vec::new(),
         superclass_refusals: Vec::new(),

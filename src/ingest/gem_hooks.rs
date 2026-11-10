@@ -33,26 +33,45 @@ pub(super) fn router_call(known: &HashSet<String>, caller: Option<(&str, &str)>,
 pub(super) struct Facts {
     /// Each model's `devise :a, :b` modules, by class name.
     devise_models: HashMap<String, Vec<String>>,
-    /// The models whose `devise` call also passes options (`unlock_strategy: :time`), which set that model's own config.
-    devise_configured: HashSet<String>,
+    /// The options each model's `devise` calls pass (`unlock_strategy: :time`), which set that model's own config; `*` when one cannot be named.
+    devise_configured: HashMap<String, HashSet<String>>,
 }
 
 impl Facts {
     pub(super) fn of(app: &App) -> Self {
         let parents = parents(app);
         let calls = devise_calls(app);
-        let mut devise_configured: HashSet<String> = calls
-            .iter()
-            .filter(|(_, args)| args.iter().any(|a| !matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { .. } })))
-            .map(|(class, _)| class.to_string())
-            .collect();
+        let mut own: HashMap<String, HashSet<String>> = HashMap::default();
+        for (class, args) in &calls {
+            let options = own.entry(class.to_string()).or_default();
+            for arg in args.iter() {
+                match &*arg.node {
+                    ExprNode::Lit { value: Literal::Sym { .. } } => {}
+                    ExprNode::Hash { entries, .. } => options.extend(entries.iter().map(|(key, _)| match &*key.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                        _ => "*".to_string(),
+                    })),
+                    _ => {
+                        options.insert("*".to_string());
+                    }
+                }
+            }
+        }
         // A subclass's are its parent's too (`class_attribute`): chatwoot's `SuperAdmin < User` declares none of its own.
+        let mut devise_configured = own.clone();
         for name in parents.keys() {
-            if ancestors(&parents, name).any(|a| devise_configured.contains(a)) {
-                devise_configured.insert(name.to_string());
+            for ancestor in ancestors(&parents, name) {
+                if let Some(inherited) = own.get(ancestor) {
+                    devise_configured.entry(name.to_string()).or_default().extend(inherited.iter().cloned());
+                }
             }
         }
         Facts { devise_models: devise_modules(&parents, &calls), devise_configured }
+    }
+
+    /// Whether `class`'s own `devise` calls set `option`, which then is not Devise's.
+    fn sets_option(&self, class: &str, option: &str) -> bool {
+        self.devise_configured.get(class).is_some_and(|set| set.contains(option) || set.contains("*"))
     }
 
     /// Whether `class_answer` may answer for `class`.
@@ -169,9 +188,9 @@ pub(super) fn class_answer(facts: &Facts, class: &str, method: &str, argv: &[Val
     let modules = facts.devise_models.get(class)?;
     match (method, argv) {
         // `Devise::Models::Omniauthable::ClassMethods`: the model's providers are Devise's (`config.omniauth :github`) unless its own `devise` call names them.
-        ("omniauth_providers", []) if modules.iter().any(|m| m == "omniauthable") && !facts.devise_configured.contains(class) => config("omniauth_providers").map(Ok),
+        ("omniauth_providers", []) if modules.iter().any(|m| m == "omniauthable") && !facts.sets_option(class, "omniauth_providers") => config("omniauth_providers").map(Ok),
         // `Devise::Models::Lockable::ClassMethods`: the model's `unlock_strategy` is Devise's unless its own `devise` call sets one.
-        ("unlock_strategy_enabled?", [Val::Sym(strategy)]) if modules.iter().any(|m| m == "lockable") && !facts.devise_configured.contains(class) => {
+        ("unlock_strategy_enabled?", [Val::Sym(strategy)]) if modules.iter().any(|m| m == "lockable") && !facts.sets_option(class, "unlock_strategy") => {
             let Val::Sym(set) = config("unlock_strategy")? else { return None };
             Some(Ok(Val::Bool(set == *strategy || set == "both")))
         }
@@ -228,6 +247,7 @@ pub(super) fn registers_for_later(statement: &Expr) -> bool {
 /// What a statement passed over in a gem's method may write, when the gem's own contract bounds it tighter than its calls do.
 /// `devise` are the locals that hold `Devise` itself where the statement runs; `writer` answers for a setter
 /// Devise defines: `Ok` with the class variable it writes and nothing else (`def self.prefix=(v) @@prefix = v end`), `Err` for any other.
+/// `yields_other` answers for a method Devise defines that only hands its block another object (`yields_another_object`).
 /// `None` leaves the statement to the general analysis.
 pub(super) fn confined_writes(
     known: &HashSet<String>,
@@ -235,6 +255,7 @@ pub(super) fn confined_writes(
     statement: &Expr,
     devise: &HashSet<crate::ident::Symbol>,
     writer: &dyn Fn(&str) -> Option<Result<String, ()>>,
+    yields_other: &dyn Fn(&str) -> bool,
 ) -> Option<HashSet<(String, bool, String)>> {
     // `Devise.setup do |config| … end` (`yield self`): what it runs configures Devise. An app's `if ENV[…]` around a setting leaves that setting unsure.
     let is_devise = |p: &[crate::ident::Symbol]| p.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Devise"]);
@@ -261,6 +282,7 @@ pub(super) fn confined_writes(
         devise: &'a HashSet<crate::ident::Symbol>,
         known: &'a HashSet<String>,
         writer: &'a dyn Fn(&str) -> Option<Result<String, ()>>,
+        yields_other: &'a dyn Fn(&str) -> bool,
         out: HashSet<(String, bool, String)>,
         general: bool,
         /// Locals the statement itself assigns, from what bounds it (`cas_options = {}`): calls on them reach nothing of the app's.
@@ -303,6 +325,20 @@ pub(super) fn confined_writes(
                 // Not run as the statement runs: a lambda handed to a setting (`setup: ->(env) { … }`), or the block `config.warden` keeps.
                 ExprNode::Lambda { .. } => return,
                 ExprNode::Send { recv: None, method, block: Some(_), args, .. } if args.is_empty() && matches!(method.as_str(), "lambda" | "proc") => return,
+                // Not a setting of Devise's (devise-jwt's `config.jwt do |jwt| … end`): the block runs on what it is handed, and only what it writes through `config` is Devise's.
+                ExprNode::Send { recv: Some(r), method, args, block: Some(b), .. } if self.is_devise_recv(r) && (self.yields_other)(method.as_str()) => {
+                    for a in args {
+                        self.visit(a);
+                    }
+                    match &*b.node {
+                        ExprNode::Lambda { body, params, rest_param, .. } => {
+                            self.fresh.extend(params.iter().chain(rest_param.iter()).cloned());
+                            self.visit(body);
+                        }
+                        _ => self.general = true,
+                    }
+                    return;
+                }
                 ExprNode::Send { recv: Some(r), method, args, block, .. } if self.is_devise_recv(r) => {
                     self.setting(method.as_str());
                     for a in args {
@@ -331,7 +367,7 @@ pub(super) fn confined_writes(
                     }
                     return;
                 }
-                ExprNode::Assign { target: LValue::Index { recv, .. }, .. } | ExprNode::OpAssign { target: LValue::Index { recv, .. }, .. }
+                ExprNode::Assign { target: LValue::Index { recv, .. } | LValue::Attr { recv, .. }, .. } | ExprNode::OpAssign { target: LValue::Index { recv, .. } | LValue::Attr { recv, .. }, .. }
                     if matches!(&*recv.node, ExprNode::Var { name, .. } if self.fresh.contains(name)) => {}
                 ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } if !matches!(target, LValue::Var { name, .. } if !name.as_str().starts_with("@@") && !name.as_str().starts_with('$')) => self.general = true,
                 ExprNode::Send { recv: None, method, .. } if !matches!(method.as_str(), "lambda" | "proc" | "raise" | "require" | "require_relative" | "format" | "sprintf") => self.general = true,
@@ -362,7 +398,30 @@ pub(super) fn confined_writes(
             e.node.for_each_child(&mut |c| self.visit(c));
         }
     }
-    let mut walk = Walk { devise: &devise, known, writer, out: HashSet::default(), general: false, fresh: HashSet::default() };
+    let mut walk = Walk { devise: &devise, known, writer, yields_other, out: HashSet::default(), general: false, fresh: HashSet::default() };
     walk.visit(written);
     (!walk.general).then_some(walk.out)
+}
+
+/// A bare `add_module(…)` in a `module Devise` body, as the call on `Devise` it is: a module body is otherwise the library walk's and runs nothing here.
+pub(super) fn module_body_registration(module: &str, call: &Expr) -> Option<Expr> {
+    let ExprNode::Send { recv: None, method, args, block: None, parenthesized } = &*call.node else { return None };
+    (module == "Devise" && method.as_str() == "add_module").then(|| {
+        let recv = Expr::new(call.span, ExprNode::Const { path: vec![crate::ident::Symbol::from("Devise")] });
+        Expr::new(call.span, ExprNode::Send { recv: Some(recv), method: method.clone(), args: args.clone(), block: None, parenthesized: *parenthesized })
+    })
+}
+
+/// A method body that is only `yield(Some::Constant.reader)`, as devise-jwt's `def self.jwt; yield(Devise::JWT.config); end`:
+/// it writes nothing, and its block is handed an object read off another constant, not the receiver.
+pub(super) fn yields_another_object(body: &Expr) -> bool {
+    let only = match &*body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        _ => body,
+    };
+    let ExprNode::Yield { args } = &*only.node else { return false };
+    let [arg] = args.as_slice() else { return false };
+    let ExprNode::Send { recv: Some(r), args: given, block: None, .. } = &*arg.node else { return false };
+    let ExprNode::Const { path } = &*r.node else { return false };
+    given.is_empty() && !path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).eq(["Devise"])
 }

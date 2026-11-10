@@ -249,6 +249,17 @@ fn initializer_statements<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std:
         let Some(program) = node.as_program_node() else { continue };
         for statement in program.statements().body().iter() {
             // Not a declaration: a class or module body is the library walk's, not a call that runs here.
+            // But what `module Devise` runs as it loads (devise-jwt's bare `add_module(:jwt_authenticatable, strategy: :jwt)`), the same call as a gem's top-level `Devise.add_module`.
+            if let Some(module) = statement.as_module_node()
+                && let Some(read) = module.constant_path().as_constant_read_node()
+                && let Some(body) = module.body().and_then(|b| b.as_statements_node())
+            {
+                let owner = super::util::constant_id_str(&read.name()).to_string();
+                for inner in body.body().iter().filter(|s| s.as_call_node().is_some()) {
+                    let (read, _) = super::prism::scope(|| super::expr::ingest_expr(&inner, &name));
+                    out.extend(read.ok().and_then(|call| super::gem_hooks::module_body_registration(&owner, &call)));
+                }
+            }
             if statement.as_class_node().is_some() || statement.as_module_node().is_some() || statement.as_call_node().is_some_and(|c| matches!(super::util::constant_id_str(&c.name()), "require" | "require_relative" | "autoload")) {
                 continue;
             }
@@ -494,7 +505,8 @@ impl<'a> Eval<'a> {
                         _ => Some(Err(())),
                     }
                 };
-                let confined = super::gem_hooks::confined_writes(&self.known, self.calls.last().map(|c| (c.0.as_str(), c.1.as_str())), e, &devise, &writer);
+                let yields_other = |name: &str| self.lookup_in("Devise", name, MethodReceiver::Class, &mut HashSet::default()).is_some_and(|(def, _)| super::gem_hooks::yields_another_object(&def.body));
+                let confined = super::gem_hooks::confined_writes(&self.known, self.calls.last().map(|c| (c.0.as_str(), c.1.as_str())), e, &devise, &writer, &yields_other);
                 let Some(writes) = confined.or_else(|| self.may_write_with(e, &owner, side, &mut HashSet::default(), &frame.locals)) else {
                     return Err(format!("{why}, in a statement whose writes are not known"));
                 };
@@ -2532,8 +2544,137 @@ fn to_expr(v: &Val, span: Span) -> Res<Expr> {
             entries: entries.iter().map(|(k, v)| Ok((to_expr(k, span)?, to_expr(v, span)?))).collect::<Res<_>>()?,
             kwargs: false,
         }),
-        _ => return Err("a routing argument it cannot write".into()),
+        // `constraints(lambda { |request| … })` (devise's `authenticate`): the lambda, with each local it
+        // closes over written in as its value; one it cannot write, or `self`, is no routing argument.
+        // The block it closed over is the one a `yield` inside would run; a body with none does not need it.
+        Val::Proc { params, rest: None, body, locals, block, .. } if block.is_none() || !yields(body) => {
+            // A nested block that binds a name the outer one closes over: its reads are its own, which
+            // a substitution by name would replace.
+            if let Some(name) = rebound(body).into_iter().find(|n| locals.contains_key(n) && !params.contains(n)) {
+                return Err(format!("a block that rebinds `{}`, a local it closes over", name.as_str()));
+            }
+            let unwritable = std::cell::RefCell::new(None::<String>);
+            let body = crate::lower::controller_to_library::util::map_expr(body, &|e| match &*e.node {
+                ExprNode::Var { name, .. } if !params.contains(name) => {
+                    let value = locals.get(name)?;
+                    match to_expr(value, e.span) {
+                        Ok(written) => Some(written),
+                        Err(why) => {
+                            unwritable.borrow_mut().get_or_insert(format!("{why} (`{}` in a block)", name.as_str()));
+                            None
+                        }
+                    }
+                }
+                ExprNode::SelfRef => {
+                    unwritable.borrow_mut().get_or_insert_with(|| "a block that reads `self`".into());
+                    None
+                }
+                _ => None,
+            });
+            if let Some(why) = unwritable.into_inner() {
+                return Err(why);
+            }
+            // Checked on the result, not trusted to the walk: a read the substitution did not reach
+            // (a `when` pattern) would run unbound, and a pattern match can bind a name of its own.
+            if let Some(name) = reads(&body).into_iter().find(|n| locals.contains_key(n) && !params.contains(n)) {
+                return Err(format!("a block that reads `{}`, a local it closes over, where it cannot be written in", name.as_str()));
+            }
+            if matches_patterns(&body) {
+                return Err("a block with a pattern match, whose patterns may bind a local it closes over".into());
+            }
+            let body = fold_written(&body);
+            Expr::new(span, ExprNode::Lambda {
+                params: params.clone(),
+                rest_param: None,
+                extra_params: Vec::new(),
+                block_param: None,
+                body,
+                block_style: Default::default(),
+            })
+        }
+        other => return Err(format!("a routing argument it cannot write ({})", val_kind(other))),
     })
+}
+
+/// What writing a local in made constant: `nil.nil?`, and `true || x` (devise's `block.nil? || block.call(…)`
+/// with no block), whose right side never runs and so is no call the router has to type.
+fn fold_written(e: &Expr) -> Expr {
+    crate::lower::controller_to_library::util::map_expr(e, &|e| match &*e.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "nil?" && args.is_empty() && matches!(&*r.node, ExprNode::Lit { .. }) =>
+        {
+            let nil = matches!(&*r.node, ExprNode::Lit { value: Literal::Nil });
+            Some(Expr::new(e.span, ExprNode::Lit { value: Literal::Bool { value: nil } }))
+        }
+        ExprNode::BoolOp { op: op @ crate::expr::BoolOpKind::Or, surface, left, right } => {
+            let left = fold_written(left);
+            if matches!(&*left.node, ExprNode::Lit { value: Literal::Bool { value: true } }) {
+                return Some(left);
+            }
+            Some(Expr::new(e.span, ExprNode::BoolOp { op: *op, surface: *surface, left, right: fold_written(right) }))
+        }
+        _ => None,
+    })
+}
+
+fn reads(e: &Expr) -> Vec<Symbol> {
+    let mut out = Vec::new();
+    if let ExprNode::Var { name, .. } = &*e.node {
+        out.push(name.clone());
+    }
+    e.node.for_each_child(&mut |c| out.extend(reads(c)));
+    out
+}
+
+fn matches_patterns(e: &Expr) -> bool {
+    let mut found = matches!(&*e.node, ExprNode::CaseMatch { .. } | ExprNode::MatchPredicate { .. } | ExprNode::MatchRequired { .. });
+    e.node.for_each_child(&mut |c| found |= matches_patterns(c));
+    found
+}
+
+/// The names `e` binds: nested blocks' parameters and the locals it assigns, either of which makes a
+/// read of that name something other than the value the outer block closed over.
+fn rebound(e: &Expr) -> Vec<Symbol> {
+    let mut out = Vec::new();
+    if let ExprNode::Lambda { params, rest_param, block_param, .. } = &*e.node {
+        out.extend(params.iter().cloned());
+        out.extend(rest_param.iter().cloned());
+        out.extend(block_param.iter().cloned());
+    }
+    if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, .. }
+    | ExprNode::OpAssign { target: crate::expr::LValue::Var { name, .. }, .. } = &*e.node
+    {
+        out.push(name.clone());
+    }
+    if let ExprNode::MultiAssign { targets, .. } = &*e.node {
+        out.extend(targets.iter().filter_map(|t| match t {
+            crate::expr::LValue::Var { name, .. } => Some(name.clone()),
+            _ => None,
+        }));
+    }
+    e.node.for_each_child(&mut |c| out.extend(rebound(c)));
+    out
+}
+
+fn yields(e: &Expr) -> bool {
+    let mut found = matches!(&*e.node, ExprNode::Yield { .. });
+    e.node.for_each_child(&mut |c| found |= yields(c));
+    found
+}
+
+fn val_kind(v: &Val) -> &'static str {
+    match v {
+        Val::Proc { rest: Some(_), .. } => "a block with a rest parameter",
+        Val::Proc { block: Some(_), .. } => "a block that takes a block",
+        Val::Proc { .. } => "a block",
+        Val::Obj(_) => "an object",
+        Val::Regex(_) => "a regexp",
+        Val::Unknown => "a value it does not model",
+        Val::Router => "the mapper",
+        Val::Merger { .. } => "a with_options target",
+        Val::Defaulted { .. } => "a Hash with a default",
+        _ => "a value",
+    }
 }
 
 /// The routes a gem's routing method draws (`use_doorkeeper do … end`), run with the mapper as the
@@ -2564,6 +2705,22 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
     eval.drawn.push(Vec::new());
     eval.invoke(def, scope, Val::Router, argv, blk).map_err(|why| why.trim_start_matches(STOP).to_string())?;
     Ok((eval.drawn.pop().unwrap_or_default(), eval.omitted))
+}
+
+/// An engine initializer's loop that inserts a middleware per element: over a collection the app's own
+/// initializers leave empty (no `config.omniauth` for `Devise.omniauth_configs`), Rails inserts none.
+pub(super) fn fold_middleware_loops<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App, loops: Vec<(Expr, crate::diagnostic::Diagnostic)>) {
+    if loops.is_empty() {
+        return;
+    }
+    let initializers = initializer_statements(vfs, dir, &[]);
+    for (collection, refusal) in loops {
+        let empty = matches!(Eval::new(app).answer_value(&collection, &initializers), Ok(Val::Hash(e)) if e.is_empty())
+            || matches!(Eval::new(app).answer_value(&collection, &initializers), Ok(Val::Array(e)) if e.is_empty());
+        if !empty {
+            app.gem_middleware_refusals.push(refusal);
+        }
+    }
 }
 
 pub(super) fn initializers_of<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path::PathBuf]) -> Vec<Expr> {
@@ -2630,6 +2787,42 @@ mod tests {
         let first = program.statements().body().iter().next().expect("a statement");
         let (expr, _) = super::super::prism::scope(|| super::super::expr::ingest_expr(&first, "t.rb"));
         expr.expect("ingest")
+    }
+
+    fn setup_writes(source: &str, yields_other: &dyn Fn(&str) -> bool) -> Option<HashSet<(String, bool, String)>> {
+        let known: HashSet<String> = ["Devise".to_string()].into_iter().collect();
+        let devise: HashSet<Symbol> = HashSet::default();
+        super::super::gem_hooks::confined_writes(&known, Some(("Devise", "setup")), &statement(source), &devise, &|_| None, yields_other)
+    }
+
+    /// A block handed another object writes none of Devise's settings through it.
+    #[test]
+    fn a_block_handed_another_object_leaves_devises_settings_known() {
+        let writes = setup_writes("Devise.token do |token|\n  token.secret = \"x\"\nend\n", &|m| m == "token").expect("confined");
+        assert!(writes.is_empty(), "{writes:?}");
+    }
+
+    /// What the block writes through `config` is still Devise's, and only that.
+    #[test]
+    fn a_block_handed_another_object_keeps_what_it_writes_through_config() {
+        let writes = setup_writes("Devise.token do |token|\n  Devise.pepper = \"x\"\n  token.secret = \"x\"\nend\n", &|m| m == "token").expect("confined");
+        assert_eq!(writes.into_iter().collect::<Vec<_>>(), vec![("Devise".to_string(), true, "@@pepper".to_string())]);
+    }
+
+    /// A method not known to hand over another object may keep or run the block on Devise: every setting stays unsure.
+    #[test]
+    fn a_devise_method_with_a_block_it_cannot_read_leaves_every_setting_unsure() {
+        let writes = setup_writes("Devise.token do |token|\n  token.secret = \"x\"\nend\n", &|_| false).expect("confined");
+        assert_eq!(writes.into_iter().collect::<Vec<_>>(), vec![("Devise".to_string(), true, "*".to_string())]);
+    }
+
+    #[test]
+    fn only_a_yield_of_another_constants_reader_hands_over_another_object() {
+        let body = |source: &str| statement(source);
+        assert!(super::super::gem_hooks::yields_another_object(&body("yield(Devise::Token.config)\n")));
+        for other in ["yield(self)\n", "yield(Devise.config)\n", "yield(thing)\n", "yield\n", "@@x = 1\n"] {
+            assert!(!super::super::gem_hooks::yields_another_object(&body(other)), "{other}");
+        }
     }
 
     /// A block parameter that shadows a local the frame knows is the block's value, not the local's.
