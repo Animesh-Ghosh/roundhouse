@@ -87,8 +87,9 @@ pub(super) fn expand(app: &mut App) {
 /// (responders' `self.responder = …` and `clear_respond_to`). Such a
 /// value becomes a seed, so it may not read the class, and the writes
 /// must run as the seeds do (`seeds_run_like_the_block`), after every
-/// declaration. Anything else in the block, or an includer with its own
-/// class method of the called name, keeps the block as it was.
+/// declaration. Anything else in the block, or a class with its own class
+/// method of the called name, or an includer that `extend`s anything,
+/// keeps the block as it was.
 fn expand_included_blocks(app: &mut App) {
     let names: Vec<String> = app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()).collect();
     for mi in 0..app.library_classes.len() {
@@ -96,7 +97,7 @@ fn expand_included_blocks(app: &mut App) {
         if !module.is_module || module.origin.is_some() {
             continue;
         }
-        let Some((ci, decls, writes)) = module.unknown_calls.iter().enumerate().find_map(|(ci, call)| {
+        let Some((ci, decls, writes, calls_a_method)) = module.unknown_calls.iter().enumerate().find_map(|(ci, call)| {
             let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*call.node else { return None };
             if method.as_str() != "included" || !args.is_empty() {
                 return None;
@@ -121,7 +122,8 @@ fn expand_included_blocks(app: &mut App) {
                     return None;
                 }
             }
-            seeds_run_like_the_block(&decls, &writes).then_some((ci, decls, writes))
+            let calls_a_method = stmts[declared..].iter().any(|stmt| matches!(&*stmt.node, ExprNode::Send { recv: None, .. }));
+            seeds_run_like_the_block(&decls, &writes).then_some((ci, decls, writes, calls_a_method))
         }) else {
             continue;
         };
@@ -163,6 +165,10 @@ fn expand_included_blocks(app: &mut App) {
             .map(|(i, _)| i)
             .collect();
         if includers.is_empty() {
+            continue;
+        }
+        // An `extend` can put another method of that name ahead of the Concern's, by order or through what the module includes.
+        if calls_a_method && includers.iter().any(|&i| app.library_classes[i].unknown_calls.iter().any(is_extend)) {
             continue;
         }
         for &i in &includers {
@@ -217,7 +223,7 @@ fn block_writes(
     let shadowed = classes.iter().filter(|c| !c.is_module).flat_map(|c| c.methods.iter()).any(|m| {
         &m.name == method && matches!(m.receiver, MethodReceiver::Class) && m.name_span != called.name_span
     });
-    if shadowed || extended_module_defines(classes, method) {
+    if shadowed {
         return false;
     }
     let body: Vec<&Expr> = match &*called.body.node {
@@ -232,20 +238,8 @@ fn block_writes(
     true
 }
 
-/// Some class `extend`s a module with an instance method called `method`,
-/// which Ruby can reach ahead of the Concern's.
-fn extended_module_defines(classes: &[crate::dialect::LibraryClass], method: &Symbol) -> bool {
-    classes.iter().filter(|c| !c.is_module).flat_map(|c| &c.unknown_calls).any(|call| {
-        let ExprNode::Send { recv: None, method: called, args, .. } = &*call.node else { return false };
-        called.as_str() == "extend"
-            && args.iter().any(|arg| {
-                let ExprNode::Const { path } = &*arg.node else { return false };
-                let Some(last) = path.last() else { return false };
-                classes.iter().filter(|m| m.is_module && m.name.0.as_str().rsplit("::").next() == Some(last.as_str())).any(|m| {
-                    m.methods.iter().any(|d| &d.name == method && !matches!(d.receiver, MethodReceiver::Class))
-                })
-            })
-    })
+fn is_extend(call: &Expr) -> bool {
+    matches!(&*call.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "extend")
 }
 
 /// `self.name = value` for a name one of `decls` declares.

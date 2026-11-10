@@ -158,3 +158,14 @@ fn an_extended_modules_method_of_that_name_keeps_the_block() {
     let source = std::fs::read_to_string(emitted.join("app/models/listing.rb")).expect("listing.rb emitted");
     assert!(!source.contains("def self.page_size"), "the extended module's method was bypassed:\n{source}");
 }
+
+#[test]
+fn a_method_inherited_by_an_extended_module_keeps_the_block() {
+    let (emitted, _errors) = app(CONCERN)
+        .write("app/models/other.rb", "module Other\n  def reset_unit\n    self.unit = \"rows\"\n  end\nend\n")
+        .write("app/models/rowed.rb", "module Rowed\n  include Other\nend\n")
+        .write("app/models/listing.rb", "class Listing\n  extend Rowed\n  include Sized\nend\n")
+        .emit(BuildTarget::Spinel);
+    let source = std::fs::read_to_string(emitted.join("app/models/listing.rb")).expect("listing.rb emitted");
+    assert!(!source.contains("def self.page_size"), "the inherited method was bypassed:\n{source}");
+}
