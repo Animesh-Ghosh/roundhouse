@@ -9080,6 +9080,14 @@ fn report_enum_before_type_cast(app: &App, target: BuildTarget) {
     }
 }
 
+/// The Module queries Spinel answers as CRuby does on a value that is one of
+/// several classes: it looks the method or ancestor up in whichever class
+/// arrives. Every other query stays refused there: `const_get` raises and
+/// `const_defined?` answers false, Spinel itself refuses `instance_method`
+/// and `instance_methods`, and the class-variable queries are unverified.
+const UNION_ANSWERED_MODULE_QUERIES: &[&str] =
+    &["method_defined?", "public_method_defined?", "private_method_defined?", "include?"];
+
 fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     report_enum_before_type_cast(app, target);
     if puma_boot_hooks(app) && !matches!(target, BuildTarget::Blog | BuildTarget::Futamura | BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Spinel) {
@@ -9246,14 +9254,16 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                 );
             }
         }
-        // Spinel reads `x::CONST` through one of several classes, but not every
-        // explicit Module query on such a value (`const_get` raises there and
-        // `const_defined?` answers false), so it refuses them all.
+        // Spinel reads `x::CONST` through one of several classes, and answers
+        // the method and ancestry queries in `UNION_ANSWERED_MODULE_QUERIES`
+        // on such a value as CRuby does. It refuses every other Module query
+        // there.
         if target == "spinel"
             && expr.decisions & crate::expr::MODULE_QUERY != 0
             && expr.decisions & crate::expr::CONST_PATH == 0
             && let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
             && matches!(recv.ty, Some(crate::ty::Ty::Union { .. }))
+            && !UNION_ANSWERED_MODULE_QUERIES.contains(&method.as_str())
         {
             emit::diagnostics::report_unsupported(
                 expr.span,
