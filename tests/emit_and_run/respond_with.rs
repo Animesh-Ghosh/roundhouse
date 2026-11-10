@@ -96,6 +96,21 @@ const CONTROLLER: &str = r#"class GadgetsController < ApplicationController
     respond_with(@article) { |format| format.html { |variant| render plain: "variant-arm" } }
   end
 
+  def blk_both
+    @article = Article.new
+    respond_with(@article) { |format| format.html { render plain: "html-arm" }; format.json { render plain: "json-arm" } }
+  end
+
+  def blk_html_splat
+    @article = Article.new
+    respond_with(@article) { |format| format.any(:html, *other_formats) { render plain: "splat-arm" } }
+  end
+
+  def blk_responder
+    @article = Article.new
+    respond_with(@article, responder: Article) { |format| format.html { render plain: "responder-arm" } }
+  end
+
   def blk_argument
     @article = Article.new
     respond_with(@article) { |format| format.any(:json, other_formats.first); format.html { render plain: "argument-arm" } }
@@ -177,6 +192,11 @@ const ROUTES: &str = r#"  get "g/new", to: "gadgets#new"
   post "g/blk_variant", to: "gadgets#blk_variant"
   post "g/blk_statement", to: "gadgets#blk_statement"
   post "g/blk_argument", to: "gadgets#blk_argument"
+  post "g/blk_responder", to: "gadgets#blk_responder"
+  post "g/custom", to: "custom_gadgets#create"
+  post "g/deep", to: "deep9_gadgets#create"
+  post "g/blk_both", to: "gadgets#blk_both"
+  post "g/blk_html_splat", to: "gadgets#blk_html_splat"
   post "g/computed", to: "gadgets#computed"
   post "g/ordered", to: "gadgets#ordered"
   post "g/computed_location", to: "gadgets#computed_location"
@@ -197,8 +217,18 @@ fn respond_with_answers_as_the_responder_does_for_html() {
         .write("app/controllers/near_gadgets_controller.rb", "class NearGadgetsController < FarGadgetsController\n  self.responder = NearResponder\nend\n")
         .write("app/controllers/nearest_gadgets_controller.rb", "class NearestGadgetsController < NearGadgetsController\n  skip_forgery_protection\n\n  def create\n    @article = Article.new\n    @article.valid?\n    respond_with @article, location: \"/done\"\n  end\nend\n")
         .write("app/views/nearest_gadgets/new.html.erb", "nearest-new")
+        .write("app/models/custom_responder.rb", "class CustomResponder\n  def self.error_status = :unprocessable_entity\n  def self.redirect_status = :see_other\n\n  def to_html\n    nil\n  end\nend\n")
+        .write("app/controllers/custom_gadgets_controller.rb", "class CustomGadgetsController < ApplicationController\n  skip_forgery_protection\n  self.responder = CustomResponder\n  respond_to :html\n\n  def create\n    @article = Article.new(title: \"x\", body: \"a body long enough to pass\")\n    respond_with @article, location: \"/done\"\n  end\nend\n")
+        .write("app/controllers/deep0_gadgets_controller.rb", "class Deep0GadgetsController < ApplicationController\n  respond_to :json\nend\n")
         .write("app/views/gadgets/ordered.html.erb", "<%= @trace.join(\",\") %>")
-        .edit("config/routes.rb", "  root \"articles#index\"\n", &format!("  root \"articles#index\"\n{ROUTES}"))
+        .edit("config/routes.rb", "  root \"articles#index\"\n", &format!("  root \"articles#index\"\n{ROUTES}"));
+    // An ancestor past the lookup's depth still declares its formats.
+    let mut run = run;
+    for n in 1..9 {
+        run = run.write(&format!("app/controllers/deep{n}_gadgets_controller.rb"), &format!("class Deep{n}GadgetsController < Deep{}GadgetsController\nend\n", n - 1));
+    }
+    let run = run
+        .write("app/controllers/deep9_gadgets_controller.rb", "class Deep9GadgetsController < Deep8GadgetsController\n  skip_forgery_protection\n  respond_to :html\n\n  def create\n    @article = Article.new(title: \"x\", body: \"a body long enough to pass\")\n    respond_with @article, location: \"/done\"\n  end\nend\n")
         .run_ruby(
             r##"
 def hit(verb, path, query = "")
@@ -226,8 +256,6 @@ end
   ["POST",   "/g/act",     "",       200, "/done", "edit-template"],
   ["POST",   "/g/stat",    "",       302, "/done", ""],
   ["POST",   "/g/nearest", "",       422, "/done", "nearest-new"],
-  ["POST",   "/g/blk_json", "",      200, nil,     "new-template"],
-  ["POST",   "/g/blk_bare_any", "",  200, nil,     "new-template"],
   ["POST",   "/g/blk_navigational", "", 200, nil,  "navigational-arm"],
   ["POST",   "/g/computed", "",      200, nil,     "computed-template"],
   ["POST",   "/g/ordered", "",       200, nil,     "resource,options"],
@@ -237,7 +265,7 @@ end
   raise "#{verb} #{path}?#{query}: got #{got.inspect}, want #{[status, location, body].inspect}" unless ok
 end
 # Not modeled: these must fail, not answer with a response Rails wouldn't give.
-["/g/computed_location", "/g/several", "/g/blk_unread", "/g/blk_variant", "/g/blk_statement", "/g/blk_argument"].each do |path|
+["/g/computed_location", "/g/several", "/g/blk_unread", "/g/blk_variant", "/g/blk_statement", "/g/blk_argument", "/g/blk_responder", "/g/custom", "/g/deep", "/g/blk_both", "/g/blk_html_splat", "/g/blk_json", "/g/blk_bare_any"].each do |path|
   got = begin
     hit("POST", path)
   rescue ArgumentError, NoMethodError, NameError

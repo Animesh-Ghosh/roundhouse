@@ -25,6 +25,37 @@ use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
+/// The app's responders that define an instance method (`to_html`, `navigation_behavior`, …), which this lowering would bypass.
+/// A class-level `error_status` or `redirect_status` is read where the response is written, and the gem's own class stops the walk.
+pub(super) fn responders_with_behavior(classes: &[crate::dialect::LibraryClass]) -> crate::det::HashSet<String> {
+    const BASE: &str = "ActionController::Responder";
+    let defines = |c: &crate::dialect::LibraryClass| c.methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Instance);
+    classes
+        .iter()
+        .filter(|c| c.name.0.as_str() != BASE)
+        .filter(|c| {
+            let mut cur = Some(*c);
+            let mut depth = 0;
+            while let Some(class) = cur.filter(|class| class.name.0.as_str() != BASE && depth < 16) {
+                if defines(class) {
+                    return true;
+                }
+                depth += 1;
+                cur = class.parent.as_ref().and_then(|p| classes.iter().find(|k| &k.name == p));
+            }
+            false
+        })
+        .map(|c| c.name.0.as_str().to_string())
+        .collect()
+}
+
+/// Is `responder` a constant naming one of `with_behavior`?
+pub(super) fn names_responder_with_behavior(responder: &Expr, with_behavior: &crate::det::HashSet<String>) -> bool {
+    let ExprNode::Const { path } = &*responder.node else { return false };
+    let name = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    with_behavior.contains(&name)
+}
+
 /// The class-level `respond_to` of `controller`'s chain, root first, as declared.
 /// `Some(true)` when it is html alone; `None` for no declaration or one this cannot read.
 pub(super) fn html_only_declared(chain: &[&Controller]) -> Option<bool> {
@@ -126,63 +157,42 @@ fn is_pure(expr: &Expr) -> bool {
     matches!(&*expr.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Lit { .. } | ExprNode::SelfRef | ExprNode::Const { .. })
 }
 
-/// The html arm a `respond_with` block gives: the body of `format.html { … }` or
-/// `format.any(…) { … }` naming html, or a call of a forwarded `&block`. `Ok(None)` when the block has no
-/// such arm, `Err` when it has an arm whose formats this cannot read.
+/// The html arm of a `respond_with` block: the body of its one `format.html { … }` or `format.any(…) { … }` naming html,
+/// or a call of a forwarded `&block`. `Ok(None)` when that arm has no block of its own. `Err` for anything else: Rails picks
+/// an arm per request and runs whatever else the block holds, which a single arm cannot keep.
 fn block_html_arm(block: &Expr) -> Result<Option<Expr>, ()> {
     let ExprNode::Lambda { body, params, .. } = &*block.node else { return Ok(None) };
-    let Some(format_param) = params.first().map(|p| p.as_str().to_string()) else { return Ok(None) };
-    let stmts: Vec<&Expr> = match &*body.node {
-        ExprNode::Seq { exprs } => exprs.iter().collect(),
-        _ => vec![body],
+    let Some(format_param) = params.first().map(|p| p.as_str()) else { return Ok(None) };
+    let stmt = match &*body.node {
+        ExprNode::Seq { exprs } if exprs.len() == 1 => &exprs[0],
+        ExprNode::Seq { .. } => return Err(()),
+        _ => body,
     };
-    // Anything else the block does runs where it is written, which a single arm cannot keep: a statement, or a computed argument.
-    let plain_format_arg = |a: &Expr| match &*a.node {
-        ExprNode::Lit { .. } => true,
-        ExprNode::Splat { value } => matches!(&*value.node, ExprNode::Send { recv: None, .. }),
-        _ => false,
-    };
-    let is_format_call = |stmt: &&Expr| matches!(&*stmt.node, ExprNode::Send { recv: Some(r), args, .. } if matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == format_param) && args.iter().all(plain_format_arg));
-    if !stmts.iter().all(|s| is_format_call(s)) {
+    let ExprNode::Send { recv: Some(r), method, args, block: arm, .. } = &*stmt.node else { return Err(()) };
+    if !matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == format_param) {
         return Err(());
     }
-    for stmt in stmts {
-        let ExprNode::Send { recv: Some(r), method, args, block: arm, .. } = &*stmt.node else { continue };
-        if !matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == format_param) || !matches!(method.as_str(), "html" | "any" | "all") {
-            continue;
-        }
-        // `format.any(:json)` answers those formats only, and a bare `format.any` adds a wildcard beside the html
-        // entry `respond_to :html` made: either way an html request falls through to the default response.
-        if method.as_str() != "html" {
-            let names_html = args.iter().any(|a| match &*a.node {
-                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str() == "html",
-                // Devise's `format.any(*navigational_formats, &block)`, html among them by default.
-                ExprNode::Splat { value } => matches!(&*value.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "navigational_formats"),
-                _ => false,
-            });
-            if !names_html {
-                if args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. })) {
-                    return Err(());
-                }
-                continue;
-            }
-        }
-        match arm {
-            Some(arm) => {
-                if let ExprNode::Lambda { body, params, .. } = &*arm.node {
-                    // `format.html { |variant| … }` is handed a variant collector, which the body alone loses.
-                    if !params.is_empty() {
-                        return Err(());
-                    }
-                    return Ok(Some(body.clone()));
-                }
-                // `&block`: the block the enclosing method was given is the arm.
-                return Ok(Some(call(Some(arm.clone()), "call", vec![], arm.span)));
-            }
-            None => return Ok(None),
-        }
+    // Devise calls `format.any(*navigational_formats, &block)`; its default list holds html.
+    let navigational = |a: &Expr| matches!(&*a.node, ExprNode::Splat { value } if matches!(&*value.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "navigational_formats"));
+    let html = |a: &Expr| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "html");
+    let answers_html = match method.as_str() {
+        "html" => args.is_empty(),
+        "any" | "all" => args.iter().all(|a| navigational(a) || matches!(&*a.node, ExprNode::Lit { .. })) && args.iter().any(|a| navigational(a) || html(a)),
+        _ => false,
+    };
+    if !answers_html {
+        return Err(());
     }
-    Ok(None)
+    match arm {
+        // `format.html { |variant| … }` is handed a variant collector, which the body alone loses.
+        Some(arm) => match &*arm.node {
+            ExprNode::Lambda { params, .. } if !params.is_empty() => Err(()),
+            ExprNode::Lambda { body, .. } => Ok(Some(body.clone())),
+            // `&block`: the block the enclosing method was given is the arm.
+            _ => Ok(Some(call(Some(arm.clone()), "call", vec![], arm.span))),
+        },
+        None => Ok(None),
+    }
 }
 
 /// `respond_with` rewritten to the navigational response, or `None` for a shape this does not read
@@ -196,6 +206,11 @@ fn lower_call(call_expr: &Expr, facts: &Facts<'_>) -> Option<Expr> {
     let mut args: Vec<Expr> = args.clone();
     if let Some(block) = block {
         if let Some(arm) = block_html_arm(block).ok()? {
+            // A custom responder need not use the block at all.
+            let names_responder = args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { entries, .. } if entries.iter().any(|(k, _)| matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "responder"))));
+            if names_responder {
+                return None;
+            }
             // The block is the html response; the responders' arguments only pass to a block the block ignores.
             let mut stmts: Vec<Expr> = args
                 .into_iter()
