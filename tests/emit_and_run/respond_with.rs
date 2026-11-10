@@ -111,6 +111,11 @@ const CONTROLLER: &str = r#"class GadgetsController < ApplicationController
     respond_with(@article, responder: Article) { |format| format.html { render plain: "responder-arm" } }
   end
 
+  def blk_navigational_call
+    @article = Article.new
+    respond_with(@article) { |format| format.any(*navigational_formats(other_formats.first)) { render plain: "called-arm" } }
+  end
+
   def blk_argument
     @article = Article.new
     respond_with(@article) { |format| format.any(:json, other_formats.first); format.html { render plain: "argument-arm" } }
@@ -144,7 +149,7 @@ const CONTROLLER: &str = r#"class GadgetsController < ApplicationController
 
   private
 
-  def navigational_formats
+  def navigational_formats(*)
     [:html]
   end
 
@@ -192,6 +197,7 @@ const ROUTES: &str = r#"  get "g/new", to: "gadgets#new"
   post "g/blk_variant", to: "gadgets#blk_variant"
   post "g/blk_statement", to: "gadgets#blk_statement"
   post "g/blk_argument", to: "gadgets#blk_argument"
+  post "g/blk_navigational_call", to: "gadgets#blk_navigational_call"
   post "g/blk_responder", to: "gadgets#blk_responder"
   post "g/custom", to: "custom_gadgets#create"
   post "g/deep", to: "deep9_gadgets#create"
@@ -265,7 +271,7 @@ end
   raise "#{verb} #{path}?#{query}: got #{got.inspect}, want #{[status, location, body].inspect}" unless ok
 end
 # Not modeled: these must fail, not answer with a response Rails wouldn't give.
-["/g/computed_location", "/g/several", "/g/blk_unread", "/g/blk_variant", "/g/blk_statement", "/g/blk_argument", "/g/blk_responder", "/g/custom", "/g/deep", "/g/blk_both", "/g/blk_html_splat", "/g/blk_json", "/g/blk_bare_any"].each do |path|
+["/g/computed_location", "/g/several", "/g/blk_unread", "/g/blk_variant", "/g/blk_statement", "/g/blk_argument", "/g/blk_navigational_call", "/g/blk_responder", "/g/custom", "/g/deep", "/g/blk_both", "/g/blk_html_splat", "/g/blk_json", "/g/blk_bare_any"].each do |path|
   got = begin
     hit("POST", path)
   rescue ArgumentError, NoMethodError, NameError

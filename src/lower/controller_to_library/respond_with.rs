@@ -173,7 +173,7 @@ fn block_html_arm(block: &Expr) -> Result<Option<Expr>, ()> {
         return Err(());
     }
     // Devise calls `format.any(*navigational_formats, &block)`; its default list holds html.
-    let navigational = |a: &Expr| matches!(&*a.node, ExprNode::Splat { value } if matches!(&*value.node, ExprNode::Send { recv: None, method, .. } if method.as_str() == "navigational_formats"));
+    let navigational = |a: &Expr| matches!(&*a.node, ExprNode::Splat { value } if matches!(&*value.node, ExprNode::Send { recv: None, method, args, block: None, .. } if method.as_str() == "navigational_formats" && args.is_empty()));
     let html = |a: &Expr| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "html");
     let answers_html = match method.as_str() {
         "html" => args.is_empty(),
