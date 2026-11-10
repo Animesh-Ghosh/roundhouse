@@ -22101,3 +22101,5 @@ mod routing_method_boot_state;
 mod boot_base_mixins;
 #[path = "emit_and_run/array_grep_extract_options.rs"]
 mod array_grep_extract_options;
+#[path = "emit_and_run/load_time_string_definer.rs"]
+mod load_time_string_definer;
