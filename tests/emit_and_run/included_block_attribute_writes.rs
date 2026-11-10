@@ -90,10 +90,59 @@ fn an_includer_with_its_own_method_keeps_the_block() {
 fn a_written_value_that_reads_the_class_keeps_the_block() {
     for write in ["self.page_size = self.unit", "self.page_size = unit", "self.page_size = @unit"] {
         let concern = format!(
-            "module Sized\n  extend ActiveSupport::Concern\n\n  included do\n    class_attribute :page_size, :unit\n    self.unit = 7\n    {write}\n  end\nend\n"
+            "module Sized\n  extend ActiveSupport::Concern\n\n  included do\n    class_attribute :unit, :page_size\n    self.unit = 7\n    {write}\n  end\nend\n"
         );
         let (emitted, _errors) = app(&concern).emit(BuildTarget::Spinel);
         let source = std::fs::read_to_string(emitted.join("app/models/listing.rb")).expect("listing.rb emitted");
         assert!(!source.contains("def self.page_size"), "{write} was seeded out of order:\n{source}");
     }
+}
+
+// Seeds run in declaration order, once each, after every declaration. A block that wouldn't run that way stays as written.
+#[test]
+fn writes_a_seed_could_not_reproduce_keep_the_block() {
+    let seeded: Vec<&str> = [
+        ("a shared default", "class_attribute :page_size, :unit, default: 10\n    self.page_size = 20"),
+        ("another attribute's default", "class_attribute :unit\n    class_attribute :page_size, default: Registry.note(1)\n    self.unit = Registry.note(2)"),
+        ("an overwritten write", "class_attribute :page_size\n    self.page_size = Registry.note(1)\n    self.page_size = 5"),
+        ("writes out of declaration order", "class_attribute :page_size, :unit\n    self.unit = Registry.note(1)\n    self.page_size = Registry.note(2)"),
+        ("a write before its declaration", "self.page_size = 7\n    class_attribute :page_size"),
+    ]
+    .into_iter()
+    .filter(|(_, body)| {
+        let concern = format!("module Sized\n  extend ActiveSupport::Concern\n\n  included do\n    {body}\n  end\nend\n");
+        let (emitted, _errors) = app(&concern).emit(BuildTarget::Spinel);
+        std::fs::read_to_string(emitted.join("app/models/listing.rb")).expect("listing.rb emitted").contains("def self.page_size")
+    })
+    .map(|(what, _)| what)
+    .collect();
+    assert!(seeded.is_empty(), "seeded anyway: {seeded:?}");
+}
+
+// Another Concern's class method of that name can be the one Ruby calls.
+#[test]
+fn another_concerns_method_of_that_name_keeps_the_block() {
+    let (emitted, _errors) = app(CONCERN)
+        .write(
+            "app/models/rowed.rb",
+            "module Rowed\n  extend ActiveSupport::Concern\n\n  class_methods do\n    def reset_unit\n      self.unit = \"rows\"\n    end\n  end\nend\n",
+        )
+        .write("app/models/listing.rb", "class Listing\n  include Rowed\n  include Sized\nend\n")
+        .emit(BuildTarget::Spinel);
+    let source = std::fs::read_to_string(emitted.join("app/models/listing.rb")).expect("listing.rb emitted");
+    assert!(!source.contains("def self.page_size"), "the other Concern's method was bypassed:\n{source}");
+}
+
+#[test]
+fn a_method_reached_through_a_concern_keeps_the_block() {
+    let (emitted, _errors) = app(CONCERN)
+        .write(
+            "app/models/rowed.rb",
+            "module Rowed\n  extend ActiveSupport::Concern\n\n  class_methods do\n    def reset_unit\n      self.unit = \"rows\"\n    end\n  end\nend\n",
+        )
+        .write("app/models/both.rb", "module Both\n  extend ActiveSupport::Concern\n\n  include Rowed\n  include Sized\nend\n")
+        .write("app/models/listing.rb", "class Listing\n  include Both\nend\n")
+        .emit(BuildTarget::Spinel);
+    let source = std::fs::read_to_string(emitted.join("app/models/listing.rb")).expect("listing.rb emitted");
+    assert!(!source.contains("def self.page_size"), "the other Concern's method was bypassed:\n{source}");
 }

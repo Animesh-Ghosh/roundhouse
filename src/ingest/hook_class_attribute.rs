@@ -85,9 +85,10 @@ pub(super) fn expand(app: &mut App) {
 /// A block may also give the attributes their values, by `self.name =`
 /// or by a call of one of the Concern's class methods that only does that
 /// (responders' `self.responder = …` and `clear_respond_to`). Such a
-/// value becomes a seed, so it may not read the class, whose other seeds
-/// have no order against it. Anything else in the block, or an includer
-/// with its own class method of the called name, keeps the block as it was.
+/// value becomes a seed, so it may not read the class, and the writes
+/// must run as the seeds do (`seeds_run_like_the_block`), after every
+/// declaration. Anything else in the block, or an includer with its own
+/// class method of the called name, keeps the block as it was.
 fn expand_included_blocks(app: &mut App) {
     let names: Vec<String> = app.library_classes.iter().map(|lc| lc.name.0.as_str().to_string()).collect();
     for mi in 0..app.library_classes.len() {
@@ -109,17 +110,18 @@ fn expand_included_blocks(app: &mut App) {
                 _ => vec![body],
             };
             let class_attribute = |stmt: &Expr| declaration(stmt, None).filter(|d| matches!(d.kind, Kind::ClassAttribute { .. }));
-            let decls: Vec<Decl> = stmts.iter().filter_map(|stmt| class_attribute(stmt)).collect();
+            let declared = stmts.iter().take_while(|stmt| class_attribute(stmt).is_some()).count();
+            let decls: Vec<Decl> = stmts[..declared].iter().filter_map(|stmt| class_attribute(stmt)).collect();
             if decls.is_empty() {
                 return None;
             }
             let mut writes = Vec::new();
-            for stmt in stmts.iter().filter(|stmt| class_attribute(stmt).is_none()) {
-                if !block_writes(stmt, module, &app.library_classes, &decls, &mut writes) {
+            for stmt in &stmts[declared..] {
+                if class_attribute(stmt).is_some() || !block_writes(stmt, module, &app.library_classes, &decls, &mut writes) {
                     return None;
                 }
             }
-            Some((ci, decls, writes))
+            seeds_run_like_the_block(&decls, &writes).then_some((ci, decls, writes))
         }) else {
             continue;
         };
@@ -174,6 +176,15 @@ fn expand_included_blocks(app: &mut App) {
         }
         app.library_classes[mi].unknown_calls.remove(ci);
     }
+}
+
+/// Seeds run in declaration order, each name once, with a `default:` in
+/// place of a written value. Writes that follow that order and share a
+/// block with no default evaluate exactly as the block would.
+fn seeds_run_like_the_block(decls: &[Decl], writes: &[(Symbol, Expr)]) -> bool {
+    let order: Vec<&Symbol> = decls.iter().flat_map(|d| &d.names).collect();
+    let position = |name: &Symbol| order.iter().position(|n| *n == name);
+    writes.is_empty() || (decls.iter().all(|d| d.default.is_none()) && writes.windows(2).all(|w| position(&w[0].0) < position(&w[1].0)))
 }
 
 /// `stmt` read as writes to the block's declared attributes, appended
