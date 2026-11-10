@@ -40,6 +40,7 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
         return Err(format!("source_gems names {} but the app has no Gemfile.lock", names.join(", ")));
     };
     let roots = crate::i18n::gems::gem_roots(vfs, dir);
+    let app_features = app_required_features(vfs, dir);
     let mut gems = Vec::new();
     for name in names {
         let Some(version) = lock.version_of(name) else {
@@ -57,7 +58,13 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
         let installed = vfs.canonical(&installed).unwrap_or_else(|| normalize(&installed));
         let native_features = native_features(vfs, &roots, lock, name);
         let native = |feature: &str| native_features.contains(feature);
-        let files = required_files(vfs, &installed, name, lock.gemfile_requires.get(name), &native)?;
+        let mut files = required_files(vfs, &installed, name, lock.gemfile_requires.get(name), &native)?;
+        // Not only what the gem requires: the app's own `require "devise/orm/active_record"` loads that file of the gem too.
+        let lib = installed.join("lib");
+        let extra: Vec<String> = app_features.iter().filter(|f| vfs.exists(&lib.join(format!("{f}.rb")))).cloned().collect();
+        if !extra.is_empty() {
+            files.extend(required_files(vfs, &installed, name, Some(&extra), &native)?);
+        }
         gems.push(SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files });
     }
     Ok(gems)
@@ -154,6 +161,31 @@ fn requires_native(text: &str, native: &dyn Fn(&str) -> bool) -> bool {
     walk(&parsed.node(), native)
 }
 
+/// The features the app's own Ruby requires by name (`require "devise/orm/active_record"` in an
+/// initializer), from `config/`, `app/` and `lib/`.
+fn app_required_features<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut dirs: Vec<PathBuf> = ["config", "app", "lib"].iter().map(|d| dir.join(d)).collect();
+    while let Some(at) = dirs.pop() {
+        let Ok(entries) = vfs.read_dir(&at) else { continue };
+        for entry in entries {
+            // Not through a link: one back to an ancestor never empties the walk.
+            if vfs.is_symlink(&entry) {
+                continue;
+            }
+            if vfs.is_dir(&entry) {
+                dirs.push(entry);
+            } else if entry.extension().is_some_and(|e| e == "rb")
+                && let Ok(text) = vfs.read_to_string(&entry)
+                && text.contains("require")
+            {
+                out.extend(requires(&text).into_iter().filter(|(relative, _)| !relative).map(|(_, f)| f.trim_end_matches(".rb").to_string()));
+            }
+        }
+    }
+    out
+}
+
 fn required_files<V: Vfs + ?Sized>(
     vfs: &V,
     gem: &Path,
@@ -211,6 +243,15 @@ fn required_files<V: Vfs + ?Sized>(
                     } else if entry.extension().is_some_and(|e| e == "rb") {
                         pending.push(entry);
                     }
+                }
+            }
+        }
+        // Not only literal features: a method that autoloads a path it builds (devise's `add_module`, `"devise/models/#{module_name}"`) may load any file of that directory, the first time its constant is read.
+        for prefix in built_autoload_dirs(&text) {
+            let Ok(entries) = vfs.read_dir(&lib.join(&prefix)) else { continue };
+            for entry in entries {
+                if entry.extension().is_some_and(|e| e == "rb") && !vfs.is_dir(&entry) {
+                    pending.push(normalize(&entry));
                 }
             }
         }
@@ -374,6 +415,56 @@ fn requires(text: &str) -> Vec<(bool, String)> {
     let mut finder = Finder(Vec::new(), 0);
     ruby_prism::Visit::visit(&mut finder, &parsed.node());
     finder.0
+}
+
+/// The directories a method that calls `autoload` (or `send(:autoload, …)`) builds a path under:
+/// the literal head of an interpolated string in it, up to its last `/` (`"devise/models/#{name}"`).
+fn built_autoload_dirs(text: &str) -> Vec<String> {
+    struct Calls(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Calls {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            let name = node.name();
+            let first_sym = node.arguments().and_then(|a| a.arguments().iter().next()).and_then(|a| a.as_symbol_node().map(|s| s.unescaped().to_vec()));
+            if name.as_slice() == b"autoload" || (matches!(name.as_slice(), b"send" | b"__send__" | b"public_send") && first_sym.as_deref() == Some(b"autoload")) {
+                self.0 = true;
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+    struct Heads(Vec<String>);
+    impl<'pr> ruby_prism::Visit<'pr> for Heads {
+        fn visit_interpolated_string_node(&mut self, node: &ruby_prism::InterpolatedStringNode<'pr>) {
+            if let Some(head) = node.parts().iter().next().and_then(|p| p.as_string_node().map(|s| String::from_utf8_lossy(s.unescaped()).into_owned()))
+                && let Some((dir, _)) = head.rsplit_once('/')
+                && !dir.is_empty()
+                && !dir.starts_with('/')
+                && !dir.contains("..")
+            {
+                self.0.push(dir.to_string());
+            }
+            ruby_prism::visit_interpolated_string_node(self, node);
+        }
+    }
+    struct Defs(Vec<String>);
+    impl<'pr> ruby_prism::Visit<'pr> for Defs {
+        fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+            if let Some(body) = node.body() {
+                let mut calls = Calls(false);
+                ruby_prism::Visit::visit(&mut calls, &body);
+                if calls.0 {
+                    let mut heads = Heads(Vec::new());
+                    ruby_prism::Visit::visit(&mut heads, &body);
+                    self.0.extend(heads.0);
+                }
+            }
+        }
+    }
+    let parsed = super::prism::parse_silent(text.as_bytes());
+    let mut defs = Defs(Vec::new());
+    ruby_prism::Visit::visit(&mut defs, &parsed.node());
+    defs.0.sort();
+    defs.0.dedup();
+    defs.0
 }
 
 fn normalize(path: &Path) -> PathBuf {

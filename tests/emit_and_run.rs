@@ -22089,3 +22089,13 @@ mod route_loop_index;
 mod deprecation;
 #[path = "emit_and_run/loaded_begin.rs"]
 mod loaded_begin;
+#[path = "emit_and_run/class_eval_definer_call.rs"]
+mod class_eval_definer_call;
+#[path = "emit_and_run/model_mixin_macro.rs"]
+mod model_mixin_macro;
+#[path = "emit_and_run/controller_append_callbacks.rs"]
+mod controller_append_callbacks;
+#[path = "emit_and_run/routing_method_boot_state.rs"]
+mod routing_method_boot_state;
+#[path = "emit_and_run/boot_base_mixins.rs"]
+mod boot_base_mixins;

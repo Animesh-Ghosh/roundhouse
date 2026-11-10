@@ -53,6 +53,17 @@ fn rb_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<std::pa
     }
 }
 
+fn all_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            all_files(root, &path, out);
+        } else {
+            out.push(path.strip_prefix(root).unwrap().to_path_buf());
+        }
+    }
+}
+
 fn app(modules: &str, routes: &str) -> emit_and_run::Overlay {
     let fixture = roundhouse::fixtures::real_blog();
     let lock = std::fs::read_to_string(fixture.join("Gemfile.lock")).unwrap();
@@ -72,12 +83,19 @@ fn app(modules: &str, routes: &str) -> emit_and_run::Overlay {
         let gem = installed(name, version);
         let mut files = Vec::new();
         rb_files(&gem, &gem.join("lib"), &mut files);
+        // Not lib/ alone: an installed engine has its app/ too, devise's controllers and views.
+        all_files(&gem, &gem.join("app"), &mut files);
         for file in files {
             let text = std::fs::read_to_string(gem.join(&file)).unwrap();
             overlay = overlay.write(&format!("vendor/bundle/ruby/3.4.0/gems/{name}-{version}/{}", file.display()), &text);
         }
     }
     overlay
+}
+
+/// A route by its verb, path, controller and action, which a guard's arguments may follow: not a longer action's name.
+fn has_route(routes: &str, route: &str) -> bool {
+    routes.contains(&format!("{route})")) || routes.contains(&format!("{route},"))
 }
 
 fn drawn(overlay: emit_and_run::Overlay) -> (String, String) {
@@ -92,12 +110,12 @@ fn drawn(overlay: emit_and_run::Overlay) -> (String, String) {
 fn devise_for_draws_the_routes_of_the_models_modules() {
     let (routes, helpers) = drawn(app(":database_authenticatable, :registerable, :recoverable", "  devise_for :users\n"));
     for route in [
-        r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#,
-        r#"Route.new("DELETE", "/users/sign_out", :devise__sessions, :destroy)"#,
-        r#"Route.new("GET", "/users/cancel", :devise__registrations, :cancel)"#,
-        r#"Route.new("PUT", "/users/password", :devise__passwords, :update)"#,
+        r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new"#,
+        r#"Route.new("DELETE", "/users/sign_out", :devise__sessions, :destroy"#,
+        r#"Route.new("GET", "/users/cancel", :devise__registrations, :cancel"#,
+        r#"Route.new("PUT", "/users/password", :devise__passwords, :update"#,
     ] {
-        assert!(routes.contains(route), "{route}\n{routes}");
+        assert!(has_route(&routes, route), "{route}\n{routes}");
     }
     assert!(!routes.contains("confirmation"), "{routes}");
     for helper in ["new_user_session_path", "destroy_user_session_path", "cancel_user_registration_path", "edit_user_password_path"] {
@@ -105,11 +123,11 @@ fn devise_for_draws_the_routes_of_the_models_modules() {
     }
 
     let (routes, _) = drawn(app(":database_authenticatable", "  devise_for :users\n"));
-    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#), "{routes}");
+    assert!(has_route(&routes, r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new"#), "{routes}");
     assert!(!routes.contains("registrations") && !routes.contains("passwords"), "{routes}");
 
     let (routes, _) = drawn(app(":database_authenticatable, :registerable, :recoverable", "  devise_for :users, skip: [:registrations]\n"));
-    assert!(routes.contains(r#"Route.new("GET", "/users/password/new", :devise__passwords, :new)"#), "{routes}");
+    assert!(has_route(&routes, r#"Route.new("GET", "/users/password/new", :devise__passwords, :new"#), "{routes}");
     assert!(!routes.contains("registrations"), "{routes}");
 }
 
@@ -122,11 +140,11 @@ fn devise_for_options_and_an_enclosing_module_are_devises() {
         "  scope module: :auth do\n    devise_for :users, path: \"account\", path_names: { sign_in: \"login\" }, controllers: { registrations: \"users/registrations\" }\n  end\n",
     ));
     for route in [
-        r#"Route.new("GET", "/account/login", :auth__sessions, :new)"#,
-        r#"Route.new("DELETE", "/account/sign_out", :auth__sessions, :destroy)"#,
-        r#"Route.new("GET", "/account/sign_up", :users__registrations, :new)"#,
+        r#"Route.new("GET", "/account/login", :auth__sessions, :new"#,
+        r#"Route.new("DELETE", "/account/sign_out", :auth__sessions, :destroy"#,
+        r#"Route.new("GET", "/account/sign_up", :users__registrations, :new"#,
     ] {
-        assert!(routes.contains(route), "{route}\n{routes}");
+        assert!(has_route(&routes, route), "{route}\n{routes}");
     }
     assert!(!routes.contains("auth/devise/") && !routes.contains("auth__users__"), "{routes}");
 }
@@ -137,8 +155,8 @@ fn devise_for_a_subclass_draws_its_superclasss_modules() {
     let (routes, helpers) = drawn(
         app(":database_authenticatable, :recoverable", "  devise_for :admins, path: \"admin\"\n").write("app/models/admin.rb", "class Admin < User\nend\n"),
     );
-    assert!(routes.contains(r#"Route.new("GET", "/admin/sign_in", :devise__sessions, :new)"#), "{routes}");
-    assert!(routes.contains(r#"Route.new("GET", "/admin/password/new", :devise__passwords, :new)"#), "{routes}");
+    assert!(has_route(&routes, r#"Route.new("GET", "/admin/sign_in", :devise__sessions, :new"#), "{routes}");
+    assert!(has_route(&routes, r#"Route.new("GET", "/admin/password/new", :devise__passwords, :new"#), "{routes}");
     assert!(helpers.contains("def self.new_admin_session_path"), "{helpers}");
 }
 
@@ -197,7 +215,7 @@ fn devise_for_is_drawn_past_a_setup_block_configuring_another_object() {
             .write("lib/devise_token.rb", gem)
             .write("config/initializers/devise.rb", setup),
     );
-    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#), "{routes}");
+    assert!(has_route(&routes, r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new"#), "{routes}");
     assert!(helpers.contains("def self.new_user_session_path"), "{helpers}");
 }
 
@@ -211,7 +229,7 @@ fn devise_for_knows_a_module_registered_inside_module_devise() {
             .edit("Gemfile", "gem \"devise\"\n", "gem \"devise\"\ngem \"devise-token\"\n")
             .write("vendor/bundle/ruby/3.4.0/gems/devise-token-0.1.0/lib/devise-token.rb", "module Devise\n  add_module(:token_authenticatable, strategy: :token)\nend\n"),
     );
-    assert!(routes.contains(r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new)"#), "{routes}");
+    assert!(has_route(&routes, r#"Route.new("GET", "/users/sign_in", :devise__sessions, :new"#), "{routes}");
 }
 
 /// A `devise` option sets that option on the model and no other: `stretches:` leaves the unlock strategy Devise's, so its unlock routes are drawn.
@@ -219,7 +237,7 @@ fn devise_for_knows_a_module_registered_inside_module_devise() {
 #[test]
 fn devise_for_reads_past_a_model_option_it_does_not_ask_about() {
     let (routes, _) = drawn(app(":database_authenticatable, :lockable, stretches: 1", "  devise_for :users\n"));
-    assert!(routes.contains(r#"Route.new("GET", "/users/unlock/new", :devise__unlocks, :new)"#), "{routes}");
+    assert!(has_route(&routes, r#"Route.new("GET", "/users/unlock/new", :devise__unlocks, :new"#), "{routes}");
 
     let (routes, _) = drawn(app(":database_authenticatable, :lockable, unlock_strategy: :time", "  devise_for :users\n"));
     assert!(!routes.contains("/users/unlock"), "{routes}");
@@ -345,4 +363,26 @@ fn devise_url_helpers_of_a_named_router_are_refused() {
     assert!(module.contains("define_method"), "{module}");
     let helpers = std::fs::read_to_string(tree.join("app/route_helpers.rb")).expect("route_helpers.rb");
     assert!(!helpers.contains("def self.new_session_path"), "{helpers}");
+}
+
+/// `devise_for` runs `Devise.add_mapping` at boot, as Rails draws the routes then, and `devise_scope`'s
+/// constraint writes the mapping into the env each routed request carries, where Devise's controllers read it.
+#[test]
+fn devise_for_maps_at_boot_and_its_scope_writes_the_mapping_a_request_carries() {
+    let (tree, _) = app(":database_authenticatable", "  devise_for :users\n").emit(BuildTarget::Spinel);
+    let boot = std::fs::read_to_string(tree.join("config/initializers.rb")).expect("initializers.rb");
+    assert!(boot.contains("Devise.add_mapping(:users, "), "{boot}");
+    let guards = std::fs::read_to_string(tree.join("app/models/roundhouse_route_guards.rb")).expect("guards");
+    assert!(guards.contains("request.env[\"devise.mapping\"] = Devise.mappings[:user]"), "{guards}");
+}
+
+/// A Devise controller no route dispatches to (no model is `:recoverable`, so no password routes) runs no
+/// action: it is left out of the Spinel tree, and is there once a model's modules route to it.
+#[test]
+fn a_devise_controller_no_route_reaches_is_left_out() {
+    let (tree, _) = app(":database_authenticatable", "  devise_for :users\n").emit(BuildTarget::Spinel);
+    assert!(tree.join("app/controllers/devise/sessions_controller.rb").exists());
+    assert!(!tree.join("app/controllers/devise/passwords_controller.rb").exists());
+    let (tree, _) = app(":database_authenticatable, :recoverable", "  devise_for :users\n").emit(BuildTarget::Spinel);
+    assert!(tree.join("app/controllers/devise/passwords_controller.rb").exists());
 }

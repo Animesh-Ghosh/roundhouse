@@ -257,6 +257,10 @@ fn validate_activation(
             }
         }
     }
+    // Not only the source's own: a model macro's body that includes (devise's `devise`) wrote these in the call's place.
+    for (owner, module) in &app.macro_includes {
+        includes.entry(owner.clone()).or_default().push(module.clone());
+    }
     // Spelling alone does not prove deferral: use the same source identity,
     // binding barriers and extension ordering as finite configuration.
     let deferred = super::class_configuration::verified_framework_concerns(

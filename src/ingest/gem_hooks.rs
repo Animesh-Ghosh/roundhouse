@@ -17,7 +17,7 @@ pub(super) enum RouterCall {
 
 /// `caller` is the program's method the call is made from, as (owner, name).
 pub(super) fn router_call(known: &HashSet<String>, caller: Option<(&str, &str)>, method: &str, argv: &[Val]) -> Option<RouterCall> {
-    // devise's `devise_scope` wraps its block in `constraints(lambda { |request| request.env["devise.mapping"] = …; true })`: always true, and the env it sets is read only by devise's controllers, whose mapping is not modeled.
+    // devise's `devise_scope` wraps its block in `constraints(lambda { |request| request.env["devise.mapping"] = …; true })`: always true, so the block runs where it stands and its routes take the constraint afterwards (`configured_superclass`), which then writes the env devise's controllers read.
     if known.contains("Devise")
         && caller == Some(("ActionDispatch::Routing::Mapper", "devise_scope"))
         && method == "constraints"
@@ -128,6 +128,12 @@ fn devise_calls(app: &App) -> Vec<(&str, &[Expr])> {
             }
         }
     }
+    // Not only the calls still standing: one whose body's mixins took its place (`configured_superclass::expand_model_mixin_macros`) declared the modules too.
+    for (class, call) in &app.expanded_macro_calls {
+        if let Some(args) = is_devise(call) {
+            out.push((class.0.as_str(), args));
+        }
+    }
     out
 }
 
@@ -176,6 +182,59 @@ pub(super) fn omits_statement_on_failure(known: &HashSet<String>, statement: &Ex
     }
     (crate::emit::ruby::emit_expr(cond).starts_with("defined?(::OmniAuth)") && crate::emit::ruby::emit_expr(statement).contains("DeviseTokenAuth.omniauth_prefix"))
         .then_some("mount_devise_token_auth_for: the OmniAuth routes are not drawn: one redirects through a block that builds its URL per request")
+}
+
+/// Devise's mapping, as its controllers reach it: `request.env["devise.mapping"]`, which the `devise_scope`
+/// constraint writes (`Devise.mappings[scope]`), is a `Devise::Mapping`, and its `to` is the class one of the
+/// app's `devise` models is: Devise reads the mapping's class name back as a constant (`Devise::Getter`).
+pub(super) fn devise_mapping_types(app: &mut App) {
+    if !app.library_classes.iter().any(|c| c.name.0.as_str() == "Devise::Mapping") {
+        return;
+    }
+    let writes = crate::lower::route_guards::guards(&app.routes.entries).iter().any(|guard| {
+        let mut found = false;
+        visit(guard, &mut |e| {
+            if let ExprNode::Send { method, args, .. } = &*e.node
+                && method.as_str() == "[]="
+                && matches!(args.first().map(|a| &*a.node), Some(ExprNode::Lit { value: Literal::Str { value } }) if value == "devise.mapping")
+            {
+                found = true;
+            }
+        });
+        found
+    });
+    if !writes {
+        return;
+    }
+    let mut models: Vec<String> = Facts::of(app).devise_models.keys().cloned().collect();
+    models.sort();
+    if models.is_empty() {
+        return;
+    }
+    app.rack_env_writes.insert("devise.mapping".to_string(), "Devise::Mapping".to_string());
+    let class_of = |m: &str| crate::ty::Ty::Class {
+        id: crate::ident::ClassId(crate::ident::Symbol::from("Class")),
+        args: vec![crate::ty::Ty::Class { id: crate::ident::ClassId(crate::ident::Symbol::from(m)), args: vec![].into() }].into(),
+    };
+    let to = match models.as_slice() {
+        [one] => class_of(one),
+        many => crate::ty::Ty::Union { variants: many.iter().map(|m| class_of(m)).collect::<Vec<_>>().into() },
+    };
+    let signature = crate::ty::Ty::Fn { params: Vec::new().into(), block: None, ret: to.into(), effects: Default::default() };
+    app.rbs_signatures
+        .entry(crate::ident::ClassId(crate::ident::Symbol::from("Devise::Mapping")))
+        .or_default()
+        .insert(crate::ident::Symbol::from("to"), signature);
+}
+
+/// What a gem's module answers about a model, where the answer is the Rails the compiler takes rather than the model:
+/// devise's `Devise::Orm.active_record_51?(model)` picks its dirty-tracking methods by ActiveRecord's version,
+/// and every Rails the compiler takes (7.0 on) is past 5.1.
+pub(super) fn module_answer(facts: &Facts, class: &str, method: &str, argv: &[Val]) -> Option<Val> {
+    match (class.trim_start_matches("::"), method, argv) {
+        ("Devise::Orm", "active_record?" | "active_record_51?", [Val::Class(model)]) if facts.devise_models.contains_key(model.trim_start_matches("::")) => Some(Val::Bool(true)),
+        _ => None,
+    }
 }
 
 /// What a class outside the library classes (a model) answers that a gem's macro gave it.
@@ -548,4 +607,9 @@ mod tests {
         assert!(source.contains("\n  raise ArgumentError, \"`new_user_session_path` needs its 1 path segment(s), which a Devise url helper does not pass\" if scope == :user\n"), "{source}");
         assert!(!source.contains("devise_path_with(raise"), "{source}");
     }
+}
+
+fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    f(e);
+    e.node.for_each_child(&mut |c| visit(c, f));
 }

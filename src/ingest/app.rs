@@ -3053,6 +3053,14 @@ end
     // `Ns::BaseController`; `include Avatar` inside `class User` names
     // `User::Avatar`. The passes above leave both as written.
     super::written_names::resolve(&mut app, &sources, &const_resolver.for_sources(&sources));
+    // Before the concern splices: what a `ClassMethods` body's call defines is copied onto the includers with the rest.
+    super::configured_superclass::expand_model_mixin_macros(vfs, dir, &path_gems, &mut app);
+    for (owner, span) in super::configured_superclass::expand_load_time_definers(&mut app, &sources) {
+        if let Some(carrier) = concern_class_method_spans.iter_mut().find(|c| c.owner == owner) {
+            carrier.methods.push(span);
+        }
+        app.concern_class_side_spans.insert(span);
+    }
     // Before the concern splices: they read `library_classes`, and this
     // turns `Current`'s metaprogrammed surface into real methods first.
     super::current_attributes::lower_current_attributes(&mut app);
@@ -7165,9 +7173,9 @@ fn filter_from_send(
         return None;
     };
     let kind = match method.as_str() {
-        "before_action" | "prepend_before_action" => FilterKind::Before,
-        "around_action" => FilterKind::Around,
-        "after_action" => FilterKind::After,
+        "before_action" | "prepend_before_action" | "append_before_action" => FilterKind::Before,
+        "around_action" | "append_around_action" => FilterKind::Around,
+        "after_action" | "append_after_action" => FilterKind::After,
         "skip_before_action" => FilterKind::Skip,
         "skip_around_action" => FilterKind::SkipAround,
         "skip_after_action" => FilterKind::SkipAfter,

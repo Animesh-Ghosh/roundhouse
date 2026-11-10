@@ -87,9 +87,58 @@ pub(super) fn expand<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_dirs: &[std::path
         app.gem_route_gaps.extend(gaps);
     }
     app.routes.entries = entries;
+    // After the initializers, as Rails loads the routes after them.
+    for boot in super::configured_superclass::take_boot_calls() {
+        match boot {
+            Ok(expr) => app.boot_program.push(expr),
+            Err(why) => {
+                let mut gap = crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "routing method boot state", why);
+                gap.severity = crate::diagnostic::Severity::Warning;
+                app.gem_route_gaps.push(gap);
+            }
+        }
+    }
     write_devise_url_helpers(app, devise);
+    write_mapping_helpers(app);
+    super::configured_superclass::expand_boot_base_mixins(app);
+    super::gem_hooks::devise_mapping_types(app);
     if !failed {
         consume_installs(app);
+    }
+}
+
+/// Each drawn mapping's controller helpers as its module's own methods, and the definer they came from emptied: Rails ran it at
+/// boot and `Devise.add_mapping` still calls it there, but what it would define is defined. The names it made view helpers are the views'.
+fn write_mapping_helpers(app: &mut App) {
+    let written = super::configured_superclass::take_mapping_helpers();
+    if written.is_empty() {
+        return;
+    }
+    // Not the definer emptied for a module one of whose mappings did not run: Rails runs it at boot for each, so it stays.
+    let mut failed: Vec<String> = Vec::new();
+    for (module, result) in &written {
+        if let Err(why) = result {
+            let mut gap = crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "mapping helpers", why.clone());
+            gap.severity = crate::diagnostic::Severity::Warning;
+            app.gem_route_gaps.push(gap);
+            failed.push(module.clone());
+        }
+    }
+    for (module, result) in written {
+        let Ok((defs, names)) = result else { continue };
+        if failed.contains(&module) {
+            continue;
+        }
+        let Some(lc) = app.library_classes.iter_mut().find(|lc| lc.name.0.as_str() == module) else { continue };
+        for def in defs {
+            if !lc.methods.iter().any(|m| m.name == def.name && m.receiver == def.receiver) {
+                lc.methods.push(def);
+            }
+        }
+        for m in lc.methods.iter_mut().filter(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == "define_helpers") {
+            m.body = Expr::new(m.body.span, ExprNode::Lit { value: Literal::Nil });
+        }
+        app.view_visible_controller_methods.extend(names.into_iter().map(|n| crate::ident::Symbol::from(n.as_str())));
     }
 }
 
@@ -151,6 +200,10 @@ fn write_devise_url_helpers(app: &mut App, draws: DeviseDraws) {
 fn place_guards(entries: &mut [RouteSpec], span: crate::span::Span) {
     fn place(e: &mut Expr, span: crate::span::Span) {
         e.span = span;
+        // Not resolved where the call stands: no `Devise` is written there, and the constant is the gem method's own.
+        if matches!(&*e.node, ExprNode::Const { .. }) {
+            e.decisions |= crate::expr::GENERATED_CONST_REF;
+        }
         e.node.for_each_child_mut(&mut |child| place(child, span));
     }
     for entry in entries {
