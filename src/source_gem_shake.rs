@@ -654,8 +654,28 @@ impl<'a> Gems<'a> {
                     || reached.methods.contains(&(owner.clone(), m.receiver == MethodReceiver::Class, m.name.to_string()))
             });
         }
+        // A model's copy of a gem module's method (Devise's `Models.config` writers, copied onto `User`) goes with the
+        // original: a call on the model reaches the original through the model's ancestors, so an unreached original
+        // is a copy nothing calls.
+        let mut copies_dropped = 0usize;
+        for model in &mut trimmed.models {
+            let name = model.name.0.to_string();
+            model.body.retain(|item| {
+                let crate::dialect::ModelBodyItem::Method { method: m, .. } = item else { return true };
+                let side = m.receiver == MethodReceiver::Class;
+                // Not the app's own `def`: a copy has a gem file's span, or none (a `class_eval` string's).
+                let own = m.body.span.file.0 != 0 && !mounted(app, m.body.span.file);
+                if own || IMPLICIT.contains(&m.name.as_str()) {
+                    return true;
+                }
+                let Some(original) = self.lookup(&name, side, m.name.as_str()) else { return true };
+                let keep = !self.names.contains(&original.0) || reached.methods.contains(&original);
+                copies_dropped += usize::from(!keep);
+                keep
+            });
+        }
         let after: usize = trimmed.library_classes.iter().map(|c| c.methods.len() + 1).sum();
-        (after != before).then_some(trimmed)
+        (after != before || copies_dropped > 0).then_some(trimmed)
     }
 }
 

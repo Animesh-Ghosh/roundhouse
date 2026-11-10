@@ -140,6 +140,8 @@ mod source_gem_autoload;
 mod source_gem_load_order;
 #[path = "emit_and_run/gem_file_statements.rs"]
 mod gem_file_statements;
+#[path = "emit_and_run/uncalled_config_writers.rs"]
+mod uncalled_config_writers;
 #[path = "emit_and_run/boot_with_options.rs"]
 mod boot_with_options;
 #[path = "emit_and_run/class_param_or_assign.rs"]
