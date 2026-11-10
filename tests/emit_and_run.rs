@@ -154,6 +154,8 @@ mod defined_method_query;
 mod metal_subclass;
 #[path = "emit_and_run/boot_with_options.rs"]
 mod boot_with_options;
+#[path = "support/class_param_or_assign.rs"]
+mod class_param_or_assign_app;
 #[path = "emit_and_run/class_param_or_assign.rs"]
 mod class_param_or_assign;
 #[path = "emit_and_run/forwarded_block_reach.rs"]
