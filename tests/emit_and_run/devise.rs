@@ -53,6 +53,17 @@ fn rb_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<std::pa
     }
 }
 
+fn all_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            all_files(root, &path, out);
+        } else {
+            out.push(path.strip_prefix(root).unwrap().to_path_buf());
+        }
+    }
+}
+
 fn app(modules: &str, routes: &str) -> emit_and_run::Overlay {
     let fixture = roundhouse::fixtures::real_blog();
     let lock = std::fs::read_to_string(fixture.join("Gemfile.lock")).unwrap();
@@ -72,6 +83,8 @@ fn app(modules: &str, routes: &str) -> emit_and_run::Overlay {
         let gem = installed(name, version);
         let mut files = Vec::new();
         rb_files(&gem, &gem.join("lib"), &mut files);
+        // Not lib/ alone: an installed engine has its app/ too, devise's controllers and views.
+        all_files(&gem, &gem.join("app"), &mut files);
         for file in files {
             let text = std::fs::read_to_string(gem.join(&file)).unwrap();
             overlay = overlay.write(&format!("vendor/bundle/ruby/3.4.0/gems/{name}-{version}/{}", file.display()), &text);
@@ -345,4 +358,26 @@ fn devise_url_helpers_of_a_named_router_are_refused() {
     assert!(module.contains("define_method"), "{module}");
     let helpers = std::fs::read_to_string(tree.join("app/route_helpers.rb")).expect("route_helpers.rb");
     assert!(!helpers.contains("def self.new_session_path"), "{helpers}");
+}
+
+/// `devise_for` runs `Devise.add_mapping` at boot, as Rails draws the routes then, and `devise_scope`'s
+/// constraint writes the mapping into the env each routed request carries, where Devise's controllers read it.
+#[test]
+fn devise_for_maps_at_boot_and_its_scope_writes_the_mapping_a_request_carries() {
+    let (tree, _) = app(":database_authenticatable", "  devise_for :users\n").emit(BuildTarget::Spinel);
+    let boot = std::fs::read_to_string(tree.join("config/initializers.rb")).expect("initializers.rb");
+    assert!(boot.contains("Devise.add_mapping(:users, "), "{boot}");
+    let guards = std::fs::read_to_string(tree.join("app/models/roundhouse_route_guards.rb")).expect("guards");
+    assert!(guards.contains("request.env[\"devise.mapping\"] = Devise.mappings[:user]"), "{guards}");
+}
+
+/// A Devise controller no route dispatches to (no model is `:recoverable`, so no password routes) runs no
+/// action: it is left out of the Spinel tree, and is there once a model's modules route to it.
+#[test]
+fn a_devise_controller_no_route_reaches_is_left_out() {
+    let (tree, _) = app(":database_authenticatable", "  devise_for :users\n").emit(BuildTarget::Spinel);
+    assert!(tree.join("app/controllers/devise/sessions_controller.rb").exists());
+    assert!(!tree.join("app/controllers/devise/passwords_controller.rb").exists());
+    let (tree, _) = app(":database_authenticatable, :recoverable", "  devise_for :users\n").emit(BuildTarget::Spinel);
+    assert!(tree.join("app/controllers/devise/passwords_controller.rb").exists());
 }

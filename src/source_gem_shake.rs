@@ -97,7 +97,13 @@ fn called_names(source: &str) -> Vec<String> {
 pub(crate) fn shake(app: &App) -> Option<App> {
     let gems = Gems::of(app)?;
     let reached = gems.reach(app);
-    gems.trim(app, &reached)
+    let mut trimmed = gems.trim(app, &reached);
+    // Nor a gem's controller no route dispatches to (`unreachable_views::unrouted_gem_controllers`).
+    let unrouted = crate::ingest::unreachable_views::unrouted_gem_controllers(app);
+    if app.controllers.iter().any(|c| unrouted.contains(c.name.0.as_str())) {
+        trimmed.get_or_insert_with(|| app.clone()).controllers.retain(|c| !unrouted.contains(c.name.0.as_str()));
+    }
+    trimmed
 }
 
 /// An error in a gem's code the program does not reach becomes a note: the Spinel tree leaves that
@@ -127,6 +133,11 @@ pub fn demote_unreached_gem_errors(app: &App, diags: &mut [crate::diagnostic::Di
             unreached.extend(c.include_spans.iter().copied().filter(|s| !s.is_synthetic()));
             unreached.extend(c.constants.iter().map(|(_, v)| v.span).filter(|s| !s.is_synthetic()));
         }
+    }
+    // Not only library classes: a gem's controller no route dispatches to runs no action either.
+    let unrouted = crate::ingest::unreachable_views::unrouted_gem_controllers(app);
+    for c in app.controllers.iter().filter(|c| unrouted.contains(c.name.0.as_str())) {
+        unreached.extend(c.actions().map(|a| a.body.span).chain(c.class_methods().map(|m| m.body.span)).filter(|s| !s.is_synthetic()));
     }
     let within = |span: &crate::span::Span| unreached.iter().any(|u| u.file == span.file && u.start <= span.start && span.end <= u.end);
     for d in diags.iter_mut().filter(|d| d.severity == Severity::Error && !d.span.is_synthetic() && within(&d.span)) {
@@ -297,8 +308,11 @@ impl<'a> Gems<'a> {
     /// The bodies outside the gems, and the app's own classes, `self` known in their methods.
     fn roots(&self, app: &App) -> (Vec<Call>, Vec<Const>, Vec<String>) {
         let mut s = Scan { context: None, calls: Vec::new(), consts: Vec::new() };
+        // Not from a gem controller no route dispatches to: what it calls is never run.
+        let unrouted = crate::ingest::unreachable_views::unrouted_gem_controllers(app);
+        let dead: HashSet<FileId> = app.controllers.iter().filter(|c| unrouted.contains(c.name.0.as_str())).map(|c| c.parent_span.file).collect();
         crate::lower::for_each_emit_body_ref(app, &mut |e| {
-            if e.span.file.0 == 0 || !mounted(app, e.span.file) {
+            if (e.span.file.0 == 0 || !mounted(app, e.span.file)) && !dead.contains(&e.span.file) {
                 scan(e, &mut s);
             }
         });
