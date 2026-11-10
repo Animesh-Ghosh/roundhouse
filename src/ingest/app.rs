@@ -3245,6 +3245,7 @@ end
     // class-side methods, and its expansion joins the same filter chain.
     super::class_configuration::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes)?;
     super::class_attribute::expand(&mut app, &concern_class_method_spans, &framework_shadow_scopes);
+    super::controller_class_methods::splice(&mut app, &concern_class_method_spans);
     expand_class_body_macros(&mut app)?;
     // After the splice: a guard constant may live on an ancestor or arrive with a concern.
     super::caches_page::expand(&mut app);
@@ -4310,6 +4311,25 @@ pub(super) fn concern_class_method_catalog(
     class_side
 }
 
+/// A concern's class method as its includer's: the concern's bare
+/// constants are spelled so they still name its own.
+pub(super) fn concern_class_method_copy(
+    method: &crate::dialect::MethodDef,
+    concern: &crate::ident::ClassId,
+    consts: &crate::det::HashSet<Symbol>,
+) -> crate::dialect::MethodDef {
+    let mut copy = method.clone();
+    if !consts.is_empty() {
+        qualify_lexical_consts(&mut copy.body, concern, consts);
+        for param in &mut copy.params {
+            if let Some(default) = &mut param.default {
+                qualify_lexical_consts(default, concern, consts);
+            }
+        }
+    }
+    copy
+}
+
 /// Copy a concern's CLASS-side methods onto every model or library class
 /// that includes it, before analysis so receiver-relative bodies are
 /// typed against each concrete includer.
@@ -4402,16 +4422,7 @@ fn splice_concern_class_methods_into_includers(
                     continue;
                 }
                 provenance.insert(m.name.clone(), concern.clone());
-                let mut m = m.clone();
-                if !consts.is_empty() {
-                    qualify_lexical_consts(&mut m.body, concern, consts);
-                    for param in &mut m.params {
-                        if let Some(default) = &mut param.default {
-                            qualify_lexical_consts(default, concern, consts);
-                        }
-                    }
-                }
-                added.push(m);
+                added.push(concern_class_method_copy(m, concern, consts));
             }
         }
         (added, provenance)

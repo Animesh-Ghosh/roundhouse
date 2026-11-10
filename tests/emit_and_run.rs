@@ -21081,6 +21081,8 @@ mod file_level_struct;
 mod concern_class_side_contract;
 #[path = "emit_and_run/concern_class_side.rs"]
 mod concern_class_side;
+#[path = "emit_and_run/controller_concern_class_methods.rs"]
+mod controller_concern_class_methods;
 #[path = "support/concern_define_loop.rs"]
 mod concern_define_loop_contract;
 #[path = "emit_and_run/concern_define_loop.rs"]
