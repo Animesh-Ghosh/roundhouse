@@ -1530,14 +1530,14 @@ mod tests {
             &[
                 ("notify-1.0/lib/notify.rb", "require \"notify/mailer\"\nrequire \"notify/sender\"\nrequire \"notify/hooks\"\nrequire \"notify/manager\"\n"),
                 ("notify-1.0/lib/notify/mailer.rb", "module Notify\n  class Mailer\n    def welcome\n      \"w\"\n    end\n\n    def goodbye\n      \"g\"\n    end\n\n    def user_path\n      \"/u\"\n    end\n\n    def admin_path\n      \"/a\"\n    end\n\n    def user_home\n      \"h\"\n    end\n\n    def alpha\n      \"a\"\n    end\n\n    def beta\n      \"b\"\n    end\n  end\n\n  class Echo\n    def hello\n      \"hi\"\n    end\n  end\n\n  class Box\n    def gamma\n      \"g\"\n    end\n  end\nend\n"),
-                ("notify-1.0/lib/notify/sender.rb", "module Notify\n  class Sender\n    def deliver(notification)\n      Mailer.new.send(notification)\n    end\n\n    def path_for(scope)\n      Mailer.new.send(\"#{scope}_path\")\n    end\n\n    def home\n      Mailer.new.send(home_name)\n    end\n\n    def home_name\n      :\"user_home\"\n    end\n\n    def picked(flag)\n      Mailer.new.send(pick(flag))\n    end\n\n    def pick(flag)\n      return :alpha if flag\n      :beta\n    end\n\n    def relay(notification)\n      Echo.new.send(notification)\n    end\n\n    def forward(name, arg)\n      send(name, arg)\n    end\n\n    def chosen(sel)\n      Box.new.send(sel)\n    end\n  end\nend\n"),
+                ("notify-1.0/lib/notify/sender.rb", "module Notify\n  class Sender\n    def deliver(notification)\n      Mailer.new.send(notification)\n    end\n\n    def path_for(scope)\n      Mailer.new.send(\"#{scope}_path\")\n    end\n\n    def home\n      Mailer.new.send(home_name)\n    end\n\n    def home_name\n      :\"user_home\"\n    end\n\n    def picked(flag)\n      Mailer.new.send(pick(flag))\n    end\n\n    def pick(flag)\n      return :alpha if flag\n      :beta\n    end\n\n    def relay(notification)\n      Echo.new.send(notification)\n    end\n  end\n\n  class Forwarder\n    def forward(name, arg)\n      send(name, arg)\n    end\n\n    def chosen(sel)\n      Box.new.send(sel)\n    end\n  end\nend\n"),
                 ("notify-1.0/lib/notify/hooks.rb", "module Notify\n  module Hooks\n    def on_boot\n      \"boot\"\n    end\n\n    def on_halt\n      \"halt\"\n    end\n  end\nend\n"),
                 ("notify-1.0/lib/notify/manager.rb", "module Notify\n  class Manager\n    extend Hooks\n  end\nend\n"),
             ],
             &[(
                 "app/models/article.rb",
                 "class Article < ApplicationRecord\n",
-                "class Article < ApplicationRecord\n  def notify\n    s = Notify::Sender.new\n    [s.deliver(:welcome), s.path_for(title), s.home, s.picked(title), [:hello].map(&s.method(:relay)), s.forward(:chosen, :gamma), Notify::Manager.on_boot]\n  end\n\n",
+                "class Article < ApplicationRecord\n  def notify\n    s = Notify::Sender.new\n    [s.deliver(:welcome), s.path_for(title), s.home, s.picked(title), [:hello].map(&s.method(:relay)), Notify::Forwarder.new.forward(:chosen, :gamma), Notify::Manager.on_boot]\n  end\n\n",
             )],
         );
         let reached = reached(&app);
@@ -1553,7 +1553,7 @@ mod tests {
             // Called through `method(:relay)`, with whatever the block yields: any name.
             ("Notify::Echo", false, "hello"),
             // A sink a parameter names, given the rest of the arguments: `forward(:chosen, :gamma)`.
-            ("Notify::Sender", false, "chosen"),
+            ("Notify::Forwarder", false, "chosen"),
             ("Notify::Box", false, "gamma"),
         ] {
             assert!(reached.methods.contains(&method(owner, class_side, name)), "{owner} {name}: {reached:#?}");
