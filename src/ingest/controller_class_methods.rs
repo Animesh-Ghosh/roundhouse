@@ -102,8 +102,8 @@ pub(super) fn splice(app: &mut App, carriers: &[ConcernClassMethodSpans]) {
         // Registration order, so the last is what Ruby's ancestors reach first. An ancestor's Concern is the ancestor's copy.
         for concern in surface.includes.iter().rev().filter(|c| !surface.inherited_includes.contains(c)) {
             let Some((methods, consts)) = catalog.get(concern) else { continue };
-            // The class body's own write isn't emitted, so a copied reader would answer wrongly. Left off, the call still fails loudly.
-            if methods.iter().any(|m| m.name.as_str().ends_with('=') && class_body[&controller.name].contains(&m.name)) {
+            // A class-body call that is still here wasn't expanded, so a copied reader would answer without its effect. Left off, the read still fails loudly.
+            if methods.iter().any(|m| class_body[&controller.name].contains(&m.name)) {
                 continue;
             }
             for method in methods.iter().filter(|m| wanted.contains(&m.name)) {
