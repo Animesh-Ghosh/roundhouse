@@ -931,6 +931,7 @@ impl<'a> Scan<'a> {
         let mut names = names_of(name, &self.locals, self.gems, self.context, 2);
         // Not a parameter's callers: Ruby calls `method_missing` and its kin with no call site to read.
         let implicit = self.context.is_some_and(|(_, _, m)| IMPLICIT.contains(&m));
+        let mut from_callers = false;
         if let ExprNode::Var { name: var, .. } = &*name.node
             && !implicit
         {
@@ -939,6 +940,7 @@ impl<'a> Scan<'a> {
                 let reassigned = self.locals.get(var.as_str()).cloned();
                 if let Some((_, _, m)) = self.context {
                     self.calls.push((target.clone(), format!("{PARAM}{m}\u{1}{i}")));
+                    from_callers = true;
                 }
                 names = match positional[i].default.as_ref() {
                     Some(d) => names_of(d, &HashMap::default(), self.gems, self.context, 2),
@@ -959,7 +961,7 @@ impl<'a> Scan<'a> {
                 Name::Built(prefix, suffix) => built_matches(sink, &format!("{prefix}\u{1}{suffix}")),
             }),
             None => g.may_answer(target, sink),
-        }).collect()).unwrap_or_default();
+        } || (from_callers && g.may_answer(target, sink))).collect()).unwrap_or_default();
         for sink in sinks {
             self.pass(sink, Some(rest));
         }
@@ -1057,9 +1059,12 @@ fn names_of(e: &Expr, locals: &HashMap<String, Option<Vec<Name>>>, gems: Option<
             })?;
             let mut last = body.1;
             // Not the tail's name alone when a `return` leaves earlier: `return :admin_home if admin?; :user_home`.
-            let returns = count_returns(last);
-            if returns > usize::from(tail_is_return(last)) {
-                return None;
+            let owner_ctx = Some((body.0.as_str(), side, ""));
+            let mut early = Vec::new();
+            let mut returned = Vec::new();
+            collect_returns(last, &mut returned);
+            for value in returned {
+                early.extend(names_of(value, &HashMap::default(), Some(gems), owner_ctx, depth - 1)?);
             }
             loop {
                 match &*last.node {
@@ -1068,26 +1073,19 @@ fn names_of(e: &Expr, locals: &HashMap<String, Option<Vec<Name>>>, gems: Option<
                     _ => break,
                 }
             }
-            let owner = body.0;
-            names_of(last, &HashMap::default(), Some(gems), Some((owner.as_str(), side, "")), depth - 1)
+            let mut names = names_of(last, &HashMap::default(), Some(gems), owner_ctx, depth - 1)?;
+            names.extend(early);
+            Some(names)
         }
         _ => None,
     }
 }
 
-fn count_returns(e: &Expr) -> usize {
-    let own = usize::from(matches!(&*e.node, ExprNode::Return { .. }));
-    let mut nested = 0;
-    e.node.for_each_child(&mut |c| nested += count_returns(c));
-    own + nested
-}
-
-fn tail_is_return(e: &Expr) -> bool {
-    match &*e.node {
-        ExprNode::Seq { exprs } => exprs.last().is_some_and(tail_is_return),
-        ExprNode::Return { .. } => true,
-        _ => false,
+fn collect_returns<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    if let ExprNode::Return { value } = &*e.node {
+        out.push(value);
     }
+    e.node.for_each_child(&mut |c| collect_returns(c, out));
 }
 
 /// Every local `e` binds, with the names it may hold; any binding but a plain assignment holds any.
@@ -1531,15 +1529,15 @@ mod tests {
             &[("notify (1.0)", &[])],
             &[
                 ("notify-1.0/lib/notify.rb", "require \"notify/mailer\"\nrequire \"notify/sender\"\nrequire \"notify/hooks\"\nrequire \"notify/manager\"\n"),
-                ("notify-1.0/lib/notify/mailer.rb", "module Notify\n  class Mailer\n    def welcome\n      \"w\"\n    end\n\n    def goodbye\n      \"g\"\n    end\n\n    def user_path\n      \"/u\"\n    end\n\n    def admin_path\n      \"/a\"\n    end\n\n    def user_home\n      \"h\"\n    end\n\n    def alpha\n      \"a\"\n    end\n\n    def beta\n      \"b\"\n    end\n  end\n\n  class Echo\n    def hello\n      \"hi\"\n    end\n  end\nend\n"),
-                ("notify-1.0/lib/notify/sender.rb", "module Notify\n  class Sender\n    def deliver(notification)\n      Mailer.new.send(notification)\n    end\n\n    def path_for(scope)\n      Mailer.new.send(\"#{scope}_path\")\n    end\n\n    def home\n      Mailer.new.send(home_name)\n    end\n\n    def home_name\n      :\"user_home\"\n    end\n\n    def picked(flag)\n      Mailer.new.send(pick(flag))\n    end\n\n    def pick(flag)\n      return :alpha if flag\n      :beta\n    end\n\n    def relay(notification)\n      Echo.new.send(notification)\n    end\n  end\nend\n"),
+                ("notify-1.0/lib/notify/mailer.rb", "module Notify\n  class Mailer\n    def welcome\n      \"w\"\n    end\n\n    def goodbye\n      \"g\"\n    end\n\n    def user_path\n      \"/u\"\n    end\n\n    def admin_path\n      \"/a\"\n    end\n\n    def user_home\n      \"h\"\n    end\n\n    def alpha\n      \"a\"\n    end\n\n    def beta\n      \"b\"\n    end\n  end\n\n  class Echo\n    def hello\n      \"hi\"\n    end\n  end\n\n  class Box\n    def gamma\n      \"g\"\n    end\n  end\nend\n"),
+                ("notify-1.0/lib/notify/sender.rb", "module Notify\n  class Sender\n    def deliver(notification)\n      Mailer.new.send(notification)\n    end\n\n    def path_for(scope)\n      Mailer.new.send(\"#{scope}_path\")\n    end\n\n    def home\n      Mailer.new.send(home_name)\n    end\n\n    def home_name\n      :\"user_home\"\n    end\n\n    def picked(flag)\n      Mailer.new.send(pick(flag))\n    end\n\n    def pick(flag)\n      return :alpha if flag\n      :beta\n    end\n\n    def relay(notification)\n      Echo.new.send(notification)\n    end\n\n    def forward(name, arg)\n      send(name, arg)\n    end\n\n    def chosen(sel)\n      Box.new.send(sel)\n    end\n  end\nend\n"),
                 ("notify-1.0/lib/notify/hooks.rb", "module Notify\n  module Hooks\n    def on_boot\n      \"boot\"\n    end\n\n    def on_halt\n      \"halt\"\n    end\n  end\nend\n"),
                 ("notify-1.0/lib/notify/manager.rb", "module Notify\n  class Manager\n    extend Hooks\n  end\nend\n"),
             ],
             &[(
                 "app/models/article.rb",
                 "class Article < ApplicationRecord\n",
-                "class Article < ApplicationRecord\n  def notify\n    s = Notify::Sender.new\n    [s.deliver(:welcome), s.path_for(title), s.home, s.picked(title), [:hello].map(&s.method(:relay)), Notify::Manager.on_boot]\n  end\n\n",
+                "class Article < ApplicationRecord\n  def notify\n    s = Notify::Sender.new\n    [s.deliver(:welcome), s.path_for(title), s.home, s.picked(title), [:hello].map(&s.method(:relay)), s.forward(:chosen, :gamma), Notify::Manager.on_boot]\n  end\n\n",
             )],
         );
         let reached = reached(&app);
@@ -1554,6 +1552,9 @@ mod tests {
             ("Notify::Mailer", false, "beta"),
             // Called through `method(:relay)`, with whatever the block yields: any name.
             ("Notify::Echo", false, "hello"),
+            // A sink a parameter names, given the rest of the arguments: `forward(:chosen, :gamma)`.
+            ("Notify::Sender", false, "chosen"),
+            ("Notify::Box", false, "gamma"),
         ] {
             assert!(reached.methods.contains(&method(owner, class_side, name)), "{owner} {name}: {reached:#?}");
         }
