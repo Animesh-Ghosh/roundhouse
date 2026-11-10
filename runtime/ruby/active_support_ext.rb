@@ -580,6 +580,14 @@ module ActiveSupport
     list - elements.flatten(1)
   end
 
+  # AS `Array#extract_options!` (`lower::enumerable_ext`): the trailing
+  # Hash, removed from the Array it was called on, or a new empty one.
+  def self.extract_options!(list)
+    last = list.last
+    return list.pop if last.is_a?(Hash)
+    {}
+  end
+
   # AS `Enumerable#pluck` on a receiver the analyzer could not type
   # (lobsters' `value.pluck(:term)` over a parslet parse tree). Not
   # `map` for a Relation or a model class: Rails' own `pluck` selects only those columns.

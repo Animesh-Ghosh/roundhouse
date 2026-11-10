@@ -2707,6 +2707,8 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (Some(_), "grapheme_clusters") if matches!(recv_ty, Some(Ty::Str)) => Some("String#grapheme_clusters"),
                 (Some(_), "truncate_bytes") if matches!(recv_ty, Some(Ty::Str)) => Some("String#truncate_bytes"),
                 (Some(_), "each_slice") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_slice"),
+                (Some(_), "grep") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#grep"),
+                (Some(_), "grep_v") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#grep_v"),
                 (Some(_), "each_cons") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_cons"),
                 (Some(_), "lazy") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#lazy"),
                 (Some(_), "with_object") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Enumerator#with_object"),
@@ -8852,6 +8854,8 @@ const RUBY_SPINEL_ONLY_METHODS: &[(&str, &str)] = &[
     // The ActiveModel::Attributes writers call the same module. Flattening
     // the include is not a claim that a strict target can run the cast.
     ("ActiveSupport", "cast_string"),
+    // `lower::enumerable_ext`'s `extract_options!`, beside it in `active_support_ext.rb`.
+    ("ActiveSupport", "extract_options!"),
     // The deprecator's stderr line, beside it in `active_support_ext.rb`.
     ("ActiveSupport", "deprecation_line"),
     ("ActiveSupport", "cast_integer"),

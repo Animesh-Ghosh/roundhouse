@@ -22099,3 +22099,5 @@ mod controller_append_callbacks;
 mod routing_method_boot_state;
 #[path = "emit_and_run/boot_base_mixins.rs"]
 mod boot_base_mixins;
+#[path = "emit_and_run/array_grep_extract_options.rs"]
+mod array_grep_extract_options;
