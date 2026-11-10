@@ -3,6 +3,7 @@
 //! ||= Class.new(Base)` never assigns (`lower::bool_fold`); the parameter
 //! stays a class, of no one identity, so `strategy.method_defined?
 //! (:authenticate!)` and `strategy.ancestors` ask whichever class it is.
+//! Only a gem's method: an app method's tests may leave the argument out.
 
 use super::emit_and_run;
 
@@ -39,8 +40,15 @@ puts "class parameter passed"
 "#;
 
 fn app() -> emit_and_run::Overlay {
+    let gem = "vendor/bundle/ruby/3.4.0/gems/kinds-1.0";
     emit_and_run::real_blog()
-        .write("app/models/registry.rb", REGISTRY)
+        .edit("Gemfile.lock", "    debug (1.11.1)\n", "    debug (1.11.1)\n    kinds (1.0)\n")
+        .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  kinds\n")
+        .write(".bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n")
+        .write("roundhouse.yml", "extensions:\n  - config/roundhouse\n")
+        .write("config/roundhouse/gems.yml", "source_gems:\n  - {gem: \"kinds\"}\n")
+        .write(&format!("{gem}/lib/kinds.rb"), "require \"kinds/registry\"\n")
+        .write(&format!("{gem}/lib/kinds/registry.rb"), REGISTRY)
         .write("config/initializers/registry.rb", "Registry.add(:plain, Registry::Plain)\n")
 }
 

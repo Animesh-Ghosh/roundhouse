@@ -34,9 +34,13 @@ fn params_of_get(client: &str) -> Vec<Ty> {
     )
 }
 
-/// The caller's `{ a: 1 }`, not joined with the `{}` default no caller leaves it to: no `{ query: … }` arm.
+/// The caller's `{ a: 1 }` joined with the `{}` default: no `{ query: … }` arm.
 fn caller_options_hash() -> Ty {
-    Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(Ty::Int) }
+    let unknown = || Ty::Var { var: roundhouse::ident::TyVar(0) };
+    Ty::Hash {
+        key: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Sym, unknown()].into() }),
+        value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, unknown()].into() }),
+    }
 }
 
 /// HTTParty gives the class a `get(url, options)`; `self.class.get` inside

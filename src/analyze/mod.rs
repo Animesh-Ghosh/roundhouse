@@ -135,6 +135,9 @@ pub struct Analyzer {
     /// they pass, not its default too: Warden's `add(label, strategy =
     /// nil)` is never called without the class. Grows only.
     defaulted_param_slots: std::sync::Mutex<BTreeSet<(ParamKey, usize)>>,
+    /// The classes compiled from a gem's source. Only their slots drop a default no caller leaves:
+    /// an app method's callers include its tests and the console, which no site here records.
+    source_gem_classes: crate::det::HashSet<ClassId>,
     /// (class, method) pairs an author wrote a signature for, as opposed
     /// to a `Fn` the registry stamped from the def itself. Only in the
     /// first is an `untyped` slot a statement rather than an inference
@@ -1380,6 +1383,7 @@ impl Analyzer {
             open_param_slots: BTreeSet::new(),
             pinned_param_slots: BTreeSet::new(),
             defaulted_param_slots: Default::default(),
+            source_gem_classes: source_gem_classes(app),
             declared_signatures: app
                 .rbs_signatures
                 .iter()
@@ -8595,6 +8599,9 @@ pub(crate) fn fold_param_observations(
 impl Analyzer {
     /// Whether some call site may leave `key`'s slot `i` to its default.
     fn defaulted(&self, key: &ParamKey, i: usize) -> bool {
+        if !self.source_gem_classes.contains(&key.0) {
+            return true;
+        }
         let defaulted = self.defaulted_param_slots.lock().unwrap_or_else(|e| e.into_inner());
         defaulted.contains(&(key.clone(), i)) || defaulted.contains(&(key.clone(), usize::MAX))
     }
@@ -9779,6 +9786,20 @@ fn prefer_declared(declared: Option<Ty>, observed: Option<Ty>) -> Option<Ty> {
         (_, Some(o)) if !matches!(o, Ty::Var { .. }) => Some(o),
         (d, o) => d.or(o),
     }
+}
+
+fn source_gem_classes(app: &App) -> crate::det::HashSet<ClassId> {
+    let Some(lock) = app.gem_lock.as_ref() else { return Default::default() };
+    let in_gem = |file: crate::span::FileId| {
+        app.source_path(file).is_some_and(|path| {
+            lock.source.iter().any(|gem| lock.version_of(gem).is_some_and(|v| crate::ingest::source_gems::file_of(path, gem, v)))
+        })
+    };
+    app.library_classes
+        .iter()
+        .filter(|c| c.methods.iter().any(|m| !m.body.span.is_synthetic() && in_gem(m.body.span.file)))
+        .map(|c| c.name.clone())
+        .collect()
 }
 
 fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param, defaulted: bool) -> Option<Ty> {
@@ -11961,7 +11982,7 @@ impl Analyzer {
     /// is measured on a copy. Destructured without `..`, so a new field has
     /// to be listed here; `Copy` fields own no heap.
     pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
-        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, defaulted_param_slots, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
+        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, defaulted_param_slots, source_gem_classes, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
         let mut freed: Vec<(&str, i64)> = vec![
             ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
             ("module_self_types", crate::memory_census::freed_by(|| drop(module_self_types))),
@@ -11971,6 +11992,7 @@ impl Analyzer {
             ("open_param_slots", crate::memory_census::freed_by(|| drop(open_param_slots))),
             ("pinned_param_slots", crate::memory_census::freed_by(|| drop(pinned_param_slots))),
             ("defaulted_param_slots", crate::memory_census::freed_by(|| drop(defaulted_param_slots))),
+            ("source_gem_classes", crate::memory_census::freed_by(|| drop(source_gem_classes))),
             ("declared_signatures", crate::memory_census::freed_by(|| drop(declared_signatures))),
             ("adapter", crate::memory_census::freed_by(|| drop(adapter))),
             ("concern_folded", crate::memory_census::freed_by(|| drop(concern_folded))),
