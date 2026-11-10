@@ -696,6 +696,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth, param_
             models: &app.models,
             wrap_parameters_by_default: app.wrap_parameters_by_default,
             concern_spliced_actions: Some(&app.concern_spliced_actions),
+            jbuilder_loaded: app.gem_lock.as_ref().map(|lock| lock.has("jbuilder")),
         },
     )
 }

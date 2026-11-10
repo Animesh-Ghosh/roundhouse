@@ -204,6 +204,9 @@ fn respond_with_on_an_api_controller_without_views() {
         .remove("app/views/articles/index.json.jbuilder")
         .remove("app/views/articles/show.json.jbuilder")
         .remove("app/views/articles/_article.json.jbuilder")
+        .edit("Gemfile", "gem \"jbuilder\"\n", "")
+        .edit("Gemfile.lock", "    jbuilder (2.15.1)\n", "")
+        .edit("Gemfile.lock", "  jbuilder\n", "")
         .write("app/controllers/bare_gadgets_controller.rb", API_CONTROLLER)
         .edit("config/routes.rb", "  root \"articles#index\"\n", &format!("  root \"articles#index\"\n{API_ROUTES}"))
         .run_ruby(
@@ -232,4 +235,40 @@ puts "respond_with api passed"
         );
     run.assert_passes();
     assert!(run.stdout.contains("respond_with api passed"), "{}", run.stdout);
+}
+
+/// An app that bundles jbuilder renders views on `ActionController::API` even with no `.jbuilder` file of its
+/// own: a bare `*/*` gets the json answers and errors their 422, as on `ActionController::Base`.
+#[test]
+fn respond_with_on_an_api_controller_of_an_app_that_bundles_jbuilder() {
+    let run = emit_and_run::real_blog()
+        .remove("app/views/articles/index.json.jbuilder")
+        .remove("app/views/articles/show.json.jbuilder")
+        .remove("app/views/articles/_article.json.jbuilder")
+        .write("app/controllers/bare_gadgets_controller.rb", API_CONTROLLER)
+        .edit("config/routes.rb", "  root \"articles#index\"\n", &format!("  root \"articles#index\"\n{API_ROUTES}"))
+        .run_ruby(
+            r##"
+def hit(verb, path, query, accept)
+  env = { "REQUEST_METHOD" => verb, "PATH_INFO" => path, "QUERY_STRING" => query, "REMOTE_ADDR" => "127.0.0.1",
+          "HTTP_HOST" => "localhost", "rack.input" => StringIO.new(""), "HTTP_ACCEPT" => accept }
+  status, headers, body = Main.run_rack(env)
+  [status, (headers["location"] || headers["Location"]).to_s.sub("http://localhost", ""), body.join]
+end
+# verb, path, query, accept, status, location, body substring
+[
+  ["GET",  "/b/show",        "",       "*/*",              200, "",      "\"title\":\"s\""],
+  ["POST", "/b/stat",        "",       "*/*",              202, "/done", "\"title\":\"x\""],
+  ["PUT",  "/b/update",      "",       "*/*",              422, "",      "{\"errors\":{\"title\":"],
+  ["PUT",  "/b/update.json", "name=a", "application/json", 204, "/done", ""],
+].each do |verb, path, query, accept, status, location, body|
+  got = hit(verb, path, query, accept)
+  ok = got[0] == status && got[1] == location && got[2].include?(body)
+  raise "#{verb} #{path}?#{query} (#{accept}): got #{got.inspect}, want #{[status, location, body].inspect}" unless ok
+end
+puts "respond_with api jbuilder passed"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("respond_with api jbuilder passed"), "{}", run.stdout);
 }

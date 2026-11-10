@@ -295,6 +295,9 @@ pub struct LowerControllerOptions<'a> {
     /// for every controller. Read only when the tree
     /// `FormatBreadth::wraps_json_params`.
     pub wrap_parameters_by_default: bool,
+    /// The app bundles jbuilder (its `Gemfile.lock`), so `ActionController::API` renders views: jbuilder's
+    /// railtie includes `ActionView::Rendering` there. `None` without a lockfile: any `.jbuilder` view answers.
+    pub jbuilder_loaded: Option<bool>,
     /// `App::concern_spliced_actions`: per controller, the methods the
     /// ingest copied in from included modules. They count as defined
     /// for the missing-action check (`missing_action_check`). `None`
@@ -332,6 +335,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         models,
         wrap_parameters_by_default,
         concern_spliced_actions,
+        jbuilder_loaded,
     } = opts;
     // `None` (every wrapper's default) means the projection stays
     // purely shape-directed — what it was before this table existed.
@@ -342,7 +346,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // the permit lists (`permit_splat`).
     let responders_with_behavior = respond_with::Responders {
         with_behavior: respond_with::responders_with_behavior(library_classes),
-        jbuilder_loaded: views.iter().any(|v| v.jbuilder),
+        jbuilder_loaded: jbuilder_loaded.unwrap_or_else(|| views.iter().any(|v| v.jbuilder)),
     };
     let inlined = self::permit_splat::inline_permit_splats(controllers);
     let controllers: &[Controller] = inlined.as_deref().unwrap_or(controllers);
