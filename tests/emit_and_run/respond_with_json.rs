@@ -83,6 +83,15 @@ const CONTROLLER: &str = r#"class GadgetsController < ApplicationController
 end
 "#;
 
+// `tmpl`'s template is `gadgets/tmpl.json.jbuilder`, the parent's: Rails' lookup walks the controller's prefixes.
+const SUB_CONTROLLER: &str = r#"class SubGadgetsController < GadgetsController
+  def tmpl
+    @article = Article.new(title: params[:name], body: "a body long enough to pass")
+    respond_with @article
+  end
+end
+"#;
+
 const ROUTES: &str = r#"  get "g/show", to: "gadgets#show"
   get "g/tmpl", to: "gadgets#tmpl"
   post "g/tmpl", to: "gadgets#tmpl"
@@ -97,6 +106,7 @@ const ROUTES: &str = r#"  get "g/show", to: "gadgets#show"
   post "g/act", to: "gadgets#act"
   post "g/several", to: "gadgets#several"
   get "g/helper_call", to: "gadgets#helper_call"
+  get "g/sub_tmpl", to: "sub_gadgets#tmpl"
 "#;
 
 #[test]
@@ -105,6 +115,7 @@ fn respond_with_answers_as_the_responder_does_for_json() {
         .write("app/controllers/gadgets_controller.rb", CONTROLLER)
         .write("app/views/gadgets/tmpl.json.jbuilder", "json.tmpl @article.title\n")
         .write("app/views/gadgets/helper_call.json.jbuilder", "json.helper @article.title\n")
+        .write("app/controllers/sub_gadgets_controller.rb", SUB_CONTROLLER)
         .edit("config/routes.rb", "  root \"articles#index\"\n", &format!("  root \"articles#index\"\n{ROUTES}"))
         .run_ruby(
             r##"
@@ -153,6 +164,13 @@ end
   raise "typed?#{query}: got #{[got_status, got_type].inspect}, want #{[status, type].inspect}" unless got_status == status && got_type == type
 end
 # Not modeled: these must fail, not answer with a response Rails wouldn't give.
+# A subclass's action whose json template sits under the parent's views: Rails renders it, so the call stays.
+got = begin
+  hit("GET", "/g/sub_tmpl.json", "name=t")
+rescue ArgumentError, NoMethodError, NameError
+  [500]
+end
+raise "sub_tmpl: expected a failure, got #{got.inspect}" unless got[0] == 500
 # A helper's `respond_with` would render the calling action's template, which the lowering can't name.
 [["POST", "/g/act"], ["POST", "/g/several"], ["GET", "/g/helper_call"]].each do |verb, path|
   got = begin

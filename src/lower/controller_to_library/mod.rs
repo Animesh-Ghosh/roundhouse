@@ -3290,7 +3290,12 @@ fn action_to_method(
     let responder_keeps_defaults = !responder_expr.is_some_and(|r| respond_with::names_responder_with_behavior(r, &responders_with_behavior.with_behavior));
     let html_only = respond_with::html_only_declared(&chain) == Some(true);
     let json_only = respond_with::json_only_declared(&chain) == Some(true);
-    let respond_with_body = (chain_complete && responder_keeps_defaults && (html_only || json_only)).then(|| {
+    // Native renders an action's template from the controller's own view directory. A json-only action whose
+    // template could come from an ancestor's directory instead keeps its call: Rails would render that template.
+    let json_template_inherited = json_only
+        && !json_actions.contains(&a.name)
+        && chain.iter().skip(1).any(|c| views_module_name(c).is_some_and(|m| view_ivars.contains_key(&(m, format!("{}_json", a.name.as_str())))));
+    let respond_with_body = (chain_complete && responder_keeps_defaults && (html_only || json_only) && !json_template_inherited).then(|| {
         let has_template = if json_only {
             json_actions.contains(&a.name)
         } else {
