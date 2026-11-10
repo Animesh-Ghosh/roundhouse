@@ -21965,3 +21965,5 @@ mod loaded_begin;
 mod class_eval_definer_call;
 #[path = "emit_and_run/model_mixin_macro.rs"]
 mod model_mixin_macro;
+#[path = "emit_and_run/controller_append_callbacks.rs"]
+mod controller_append_callbacks;
