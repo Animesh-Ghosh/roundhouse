@@ -508,8 +508,9 @@ module ActiveSupport
   #
   # Not Kernel#warn, which `-W0` silences, nor `Rails.log_line`, which a
   # host logger may filter: Rails' :stderr behavior writes the stream.
+  # STDERR, not `$stderr`, which the runtime's typing cannot type.
   def self.deprecation_line(line)
-    $stderr.puts(line)
+    STDERR.puts(line)
     nil
   end
 
