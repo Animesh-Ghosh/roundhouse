@@ -6,7 +6,7 @@
 
 use super::emit_and_run;
 
-const REGISTRY: &str = r#"class Registry
+const REGISTRY: &str = r##"class Registry
   @@entries = []
 
   def self.add(name, kind: "none", tags: {})
@@ -17,7 +17,7 @@ const REGISTRY: &str = r#"class Registry
     @@entries.join(",")
   end
 end
-"#;
+"##;
 
 const INITIALIZER: &str = r#"Registry.with_options(kind: "plain", tags: { a: 1 }) do |r|
   r.add("one")
