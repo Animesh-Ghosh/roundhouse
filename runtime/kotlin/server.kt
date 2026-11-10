@@ -127,14 +127,20 @@ object Server {
         // Content-Type at all. Otherwise `formParamMap` reads the (empty)
         // body of every GET through Jetty's request-content lock (+2-4%
         // GET throughput on the real-blog bench routes without it).
-        var method = ctx.method().name
+        // Both tests read the ORIGINAL method, as Rack's do: Javalin's
+        // `ctx.method()` already applies an `X-HTTP-Method-Override`
+        // header, on any method.
+        val originalMethod = ctx.req().method
         val formBody = ctx.isFormUrlencoded() || ctx.isMultipartFormData() ||
-            (method == "POST" && ctx.header("Content-Type") == null)
+            (originalMethod == "POST" && ctx.header("Content-Type") == null)
 
-        // Rails' `_method` override (button_to delete/patch forms POST).
-        // Under the same gate as the params, as `Rack::MethodOverride`
-        // does: a text/plain POST neither re-routes nor carries fields.
-        if (method == "POST" && formBody) {
+        // Rails' method override (button_to delete/patch forms POST), as
+        // `Rack::MethodOverride` decides it: only a POST is overridden, the
+        // `_method` param wins over the header, and the param is read under
+        // the same gate as the params, so a text/plain POST neither
+        // re-routes nor carries fields. A GET with the header stays a GET.
+        var method = if (originalMethod == "POST") ctx.method().name else originalMethod
+        if (originalMethod == "POST" && formBody) {
             ctx.formParam("_method")?.let { method = it.uppercase() }
         }
 
