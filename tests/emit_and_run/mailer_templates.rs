@@ -83,3 +83,14 @@ fn a_subclass_of_a_mailer_whose_module_mails_renders_its_own_template() {
     run.assert_passes();
     assert!(run.stdout.contains("inherited module mail passed"), "{}", run.stdout);
 }
+
+/// `template_name:` / `template_path:` naming a template under another directory, by a name no action has, render it.
+#[test]
+fn a_spelled_template_path_and_name_render_that_template() {
+    let run = emit_and_run::real_blog()
+        .write("app/mailers/shared_mailer.rb", "class SharedMailer < ApplicationMailer\n  def welcome(name)\n    @name = name\n    mail(to: \"s@example.com\", subject: \"hi\", template_name: \"special\", template_path: \"shared\")\n  end\nend\n")
+        .write("app/views/shared/special.text.erb", "Special <%= @name %>\n")
+        .run_ruby("m = SharedMailer.welcome(\"Bo\").deliver_now\nraise \"body #{m.body.to_s.inspect}\" unless m.body.to_s.include?(\"Special Bo\")\nputs \"spelled template passed\"\n");
+    run.assert_passes();
+    assert!(run.stdout.contains("spelled template passed"), "{}", run.stdout);
+}

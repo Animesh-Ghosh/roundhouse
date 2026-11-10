@@ -4349,18 +4349,6 @@ impl Analyzer {
         // A mailer whose `mail` looks its template up renders one named after its action under another directory too
         // (Devise's scoped `users/mailer/confirmation_instructions`).
         let looking_up = crate::lower::mailer_templates::lookup_dirs(app);
-        let mut elsewhere: HashMap<String, Vec<Symbol>> = HashMap::default();
-        for v in &app.views {
-            if let Some((dir, action)) = v.name.as_str().rsplit_once('/')
-                && !action.starts_with('_')
-                && !dir.starts_with("layouts")
-            {
-                let names = elsewhere.entry(action.to_string()).or_default();
-                if !names.contains(&v.name) {
-                    names.push(v.name.clone());
-                }
-            }
-        }
 
         // A mailer's modules write its ivars too: Devise's `devise_mail` sets `@resource` and `@email` from
         // `Devise::Mailers::Helpers`, which its templates read. As last typed: the fixpoint reruns this.
@@ -4535,10 +4523,20 @@ impl Analyzer {
                     }
                     let view_name = Symbol::from(format!("{prefix}/{}", method.name.as_str()).as_str());
                     let params = mailer_with_params.get(&lc_name).map(|row| Ty::Record { row: row.clone() });
-                    if let Some((dirs, _)) = looking_up.get(lc_name.0.as_str()) {
-                        // Only the directories the lookup can reach (`LookupDirs`).
-                        let reached = |n: &Symbol| n.as_str().rsplit_once('/').is_some_and(|(dir, _)| dirs.admits(dir));
-                        for other in elsewhere.get(method.name.as_str()).into_iter().flatten().filter(|n| **n != view_name && reached(n)) {
+                    if let Some((dirs, actions)) = looking_up.get(lc_name.0.as_str()) {
+                        // Only the templates the lookup can reach (`LookupDirs`): named after this action, or after a
+                        // name the code spells, which any action can pass as `template_name:`.
+                        let reached = |n: &Symbol| n.as_str().rsplit_once('/').is_some_and(|(dir, name)| dirs.admits_template(dir, name, actions));
+                        let others: Vec<Symbol> = app
+                            .views
+                            .iter()
+                            .map(|v| v.name.clone())
+                            .filter(|n| *n != view_name && reached(n))
+                            .filter(|n| n.as_str().rsplit_once('/').is_some_and(|(dir, name)| !name.starts_with('_') && !dir.starts_with("layouts") && (name == method.name.as_str() || !actions.iter().any(|a| a == name))))
+                            .collect::<crate::det::HashSet<_>>()
+                            .into_iter()
+                            .collect();
+                        for other in others.iter() {
                             views.push((other.clone(), params.clone(), ivars.clone()));
                         }
                     }

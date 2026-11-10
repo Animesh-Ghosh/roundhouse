@@ -192,21 +192,33 @@ pub(crate) struct LookupDirs {
     own: String,
     spelled: BTreeSet<String>,
     tails: BTreeSet<String>,
+    /// Symbol literals too: a `template_name:` the code names (`:special`).
+    names: BTreeSet<String>,
 }
 
 impl LookupDirs {
     pub(crate) fn admits(&self, dir: &str) -> bool {
         dir == self.own || self.spelled.contains(dir) || self.tails.iter().any(|t| dir.ends_with(t.as_str()))
     }
+
+    /// A template `dir/name` the lookup can find: any under the mailer's own directory, else one named after an
+    /// action or after a name the code spells.
+    pub(crate) fn admits_template(&self, dir: &str, name: &str, actions: &[String]) -> bool {
+        self.admits(dir)
+            && (dir == self.own || actions.iter().any(|a| a == name) || self.spelled.contains(name) || self.names.contains(name))
+    }
 }
 
 /// Each looking-up mailer's `LookupDirs`, and the actions a template under a directory other than its own is named
 /// after.
 pub(crate) fn lookup_dirs(app: &App) -> HashMap<String, (LookupDirs, Vec<String>)> {
-    fn strings(e: &Expr, spelled: &mut BTreeSet<String>, tails: &mut BTreeSet<String>) {
+    fn strings(e: &Expr, spelled: &mut BTreeSet<String>, tails: &mut BTreeSet<String>, names: &mut BTreeSet<String>) {
         match &*e.node {
             ExprNode::Lit { value: Literal::Str { value } } if !value.is_empty() => {
                 spelled.insert(value.clone());
+            }
+            ExprNode::Lit { value: Literal::Sym { value } } => {
+                names.insert(value.as_str().to_string());
             }
             ExprNode::StringInterp { parts } => {
                 if let Some(crate::expr::InterpPart::Text { value }) = parts.last()
@@ -218,7 +230,7 @@ pub(crate) fn lookup_dirs(app: &App) -> HashMap<String, (LookupDirs, Vec<String>
             }
             _ => {}
         }
-        e.node.for_each_child(&mut |c| strings(c, spelled, tails));
+        e.node.for_each_child(&mut |c| strings(c, spelled, tails, names));
     }
     let mailers = super::mailer_class_side::mailer_names(app);
     let looking = looking_up_mailers(app);
@@ -233,12 +245,13 @@ pub(crate) fn lookup_dirs(app: &App) -> HashMap<String, (LookupDirs, Vec<String>
         let chain = ancestry(class, &parents, &mailers);
         let mut spelled = BTreeSet::new();
         let mut tails = BTreeSet::new();
+        let mut names = BTreeSet::new();
         let mut actions = Vec::new();
         for lc in app.library_classes.iter().filter(|c| {
             chain.iter().any(|k| k == c.name.0.as_str()) || includes_of.get(class).is_some_and(|inc| inc.contains(c.name.0.as_str()))
         }) {
             for m in &lc.methods {
-                strings(&m.body, &mut spelled, &mut tails);
+                strings(&m.body, &mut spelled, &mut tails, &mut names);
             }
             if chain.iter().any(|k| k == lc.name.0.as_str()) {
                 actions.extend(
@@ -249,7 +262,7 @@ pub(crate) fn lookup_dirs(app: &App) -> HashMap<String, (LookupDirs, Vec<String>
                 );
             }
         }
-        out.insert(class.clone(), (LookupDirs { own: view_dir(class), spelled, tails }, actions));
+        out.insert(class.clone(), (LookupDirs { own: view_dir(class), spelled, tails, names }, actions));
     }
     out
 }
@@ -357,7 +370,7 @@ fn synthesize_lookup(
             continue;
         }
         let Some((dir, action)) = name.rsplit_once('/') else { continue };
-        if action.starts_with('_') || dir.starts_with("layouts") || !lookup.dirs.admits(dir) || (dir != lookup.dirs.own && !lookup.actions.iter().any(|a| a == action)) {
+        if action.starts_with('_') || dir.starts_with("layouts") || !lookup.dirs.admits_template(dir, action, &lookup.actions) {
             continue;
         }
         let pair = (dir.to_string(), action.to_string());
