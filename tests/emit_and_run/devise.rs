@@ -214,3 +214,125 @@ fn devise_for_reads_past_a_model_option_it_does_not_ask_about() {
     let (routes, _) = drawn(app(":database_authenticatable, :lockable, unlock_strategy: :time", "  devise_for :users\n"));
     assert!(!routes.contains("/users/unlock"), "{routes}");
 }
+
+/// `new_session_path(resource_or_scope, *args)`, which Devise's `generate_helpers!` defines by a computed name, calls the scope's own helper.
+/// The expected answers are Rails' (Devise 4.9.4 on Rails 8.1), with `:admin` a mapping that uses no password routes and has its session routes skipped.
+#[test]
+fn devise_generated_url_helpers_answer_for_a_scope_and_a_resource_as_in_rails() {
+    let admins = "  create_table \"admins\", force: :cascade do |t|\n    t.string \"email\", default: \"\", null: false\n    t.string \"encrypted_password\", default: \"\", null: false\n  end\n\n";
+    let (tree, _) = app(":database_authenticatable, :recoverable", "  devise_for :users\n  devise_for :admins, skip: [:sessions]\n")
+        .edit("db/schema.rb", "  create_table \"articles\"", &format!("{admins}  create_table \"articles\""))
+        .write("app/models/admin.rb", "class Admin < ApplicationRecord\n  devise :database_authenticatable\nend\n")
+        // A query passed to the scope's own helper gives it a keyword parameter, which is no path segment.
+        .write("app/controllers/gadgets_controller.rb", "class GadgetsController < ApplicationController\n  def show\n    redirect_to new_user_session_path(foo: 1)\n  end\nend\n")
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"gadget\", to: \"gadgets#show\"\n")
+        .emit(BuildTarget::Spinel);
+    // The Spinel tree is the one holding the gem compiled from source; `RouteHelpers` and its query rendering load on their own.
+    let script = r##"
+module ActiveSupport; end
+class User; end
+class Manager < User; end
+class Admin; end
+require "./runtime/action_view/view_helpers"
+require "./runtime/hash_to_query"
+require "./app/route_helpers"
+def expect(label, want)
+  got = begin
+    yield
+  rescue Exception => e
+    e.class
+  end
+  raise "#{label}: #{got.inspect}, want #{want.inspect}" unless got == want
+end
+R = RouteHelpers
+expect("symbol", "/users/sign_in") { R.new_session_path(:user) }
+expect("string", "/users/sign_in") { R.new_session_path("user") }
+expect("instance", "/users/sign_in") { R.new_session_path(User.new) }
+expect("class", "/users/sign_in") { R.new_session_path(User) }
+expect("subclass instance", "/users/sign_in") { R.new_session_path(Manager.new) }
+expect("destroy", "/users/sign_out") { R.destroy_session_path(:user) }
+expect("no action", "/users/sign_in") { R.session_path(:user) }
+expect("query", "/users/password/edit?reset_password_token=x+y") { R.edit_password_path(:user, reset_password_token: "x y") }
+expect("instance and query", "/users/password/edit?extra%5B%5D=1&extra%5B%5D=2&reset_password_token=x") { R.edit_password_path(User.new, reset_password_token: "x", extra: [1, 2]) }
+# Rails answers these two, which the helper does not write: refused rather than left out of the URL.
+expect("format", ArgumentError) { R.new_session_path(:user, format: :json) }
+expect("positional format", ArgumentError) { R.new_session_path(:user, "json") }
+# A helper this mapping does not use, one whose routes are skipped, one no mapping uses, an unknown scope and an object that maps to none: Rails' errors.
+expect("helper the mapping does not use", NoMethodError) { R.new_password_path(:admin) }
+expect("routes skipped", NoMethodError) { R.new_session_path(:admin) }
+expect("no mapping uses it", NoMethodError) { R.new_confirmation_path(:user) }
+expect("unknown scope", NoMethodError) { R.new_session_path(:ghost) }
+expect("no mapping for the object", RuntimeError) { R.new_session_path(Object.new) }
+expect("nil", RuntimeError) { R.new_session_path(nil) }
+puts "devise url helpers passed"
+"##;
+    let out = std::process::Command::new("ruby").args(["-e", script]).current_dir(&tree).output().expect("spawn ruby");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("devise url helpers passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// `Devise.mappings` is a Hash, so a scope drawn again keeps its first place, and `find_scope!` walks it in that order.
+#[test]
+fn devise_url_helpers_keep_a_redrawn_scopes_first_place() {
+    let admins = "  create_table \"admins\", force: :cascade do |t|\n    t.string \"email\", default: \"\", null: false\n    t.string \"encrypted_password\", default: \"\", null: false\n  end\n\n";
+    let (tree, _) = app(":database_authenticatable", "  devise_for :users, skip: :all\n  devise_for :admins\n  devise_for :users\n")
+        .edit("db/schema.rb", "  create_table \"articles\"", &format!("{admins}  create_table \"articles\""))
+        .write("app/models/admin.rb", "class Admin < ApplicationRecord\n  devise :database_authenticatable\nend\n")
+        .emit(BuildTarget::Spinel);
+    let script = r##"
+module ActiveSupport; end
+class User; end
+class Admin < User; end
+require "./runtime/action_view/view_helpers"
+require "./runtime/hash_to_query"
+require "./app/route_helpers"
+got = RouteHelpers.new_session_path(Admin.new)
+raise "got #{got}" unless got == "/users/sign_in"
+puts "first place kept"
+"##;
+    let out = std::process::Command::new("ruby").args(["-e", script]).current_dir(&tree).output().expect("spawn ruby");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("first place kept"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// The helper asks the record itself for its scope, so a caller's record reaches it whole: `@user.id` would map to no scope.
+#[test]
+fn devise_generated_url_helpers_take_a_record_as_written() {
+    let (tree, _) = app(":database_authenticatable", "  devise_for :users\n")
+        .write("app/controllers/gadgets_controller.rb", "class GadgetsController < ApplicationController\n  def show\n    @user = User.new\n    @path = new_session_path(@user)\n    @url = new_session_url(@user)\n  end\nend\n")
+        .write("app/views/gadgets/show.html.erb", "<%= new_session_path(@user) %>\n<%= render \"row\", user: @user %>\n")
+        .write("app/views/gadgets/_row.html.erb", "<%= link_to \"in\", new_session_path(user) %>\n")
+        .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"gadget\", to: \"gadgets#show\"\n")
+        .emit(BuildTarget::Spinel);
+    let controller = std::fs::read_to_string(tree.join("app/controllers/gadgets_controller.rb")).expect("controller");
+    assert!(controller.contains("RouteHelpers.new_session_path(@user)"), "{controller}");
+    assert!(!controller.contains("@user.id"), "{controller}");
+    let view = std::fs::read_to_string(tree.join("app/views/gadgets/show.rb")).expect("view");
+    assert!(!view.contains(".id"), "{view}");
+    let partial = std::fs::read_to_string(tree.join("app/views/gadgets/_row.rb")).expect("partial");
+    assert!(partial.contains("RouteHelpers.new_session_path(user)"), "{partial}");
+}
+
+/// Without a `define_method` by a computed name left for Spinel to refuse: the generator's bodies are written out.
+#[test]
+fn devise_generate_helpers_is_emptied_once_its_helpers_are_written() {
+    let (tree, errors) = app(":database_authenticatable", "  devise_for :users\n")
+        .write("app/models/widget_links.rb", "class WidgetLinks\n  include Devise::Controllers::UrlHelpers\nend\n")
+        .emit(BuildTarget::Spinel);
+    let module = std::fs::read_to_string(tree.join("app/models/devise/controllers/url_helpers.rb")).expect("url_helpers.rb");
+    assert!(!module.contains("define_method"), "{module}");
+    assert!(!errors.iter().any(|e| e.contains("url helpers")), "{errors:#?}");
+}
+
+/// `devise_for … router_name:`: the helper sends to another router, which `RouteHelpers` does not hold. Refused, its generator left standing.
+#[test]
+fn devise_url_helpers_of_a_named_router_are_refused() {
+    let (tree, errors) = app(":database_authenticatable", "  devise_for :users, router_name: :other\n")
+        .write("app/models/widget_links.rb", "class WidgetLinks\n  include Devise::Controllers::UrlHelpers\nend\n")
+        .emit(BuildTarget::Spinel);
+    assert!(errors.iter().any(|e| e.contains("url helpers") && e.contains("router_name")), "{errors:#?}");
+    let module = std::fs::read_to_string(tree.join("app/models/devise/controllers/url_helpers.rb")).expect("url_helpers.rb");
+    assert!(module.contains("define_method"), "{module}");
+    let helpers = std::fs::read_to_string(tree.join("app/route_helpers.rb")).expect("route_helpers.rb");
+    assert!(!helpers.contains("def self.new_session_path"), "{helpers}");
+}

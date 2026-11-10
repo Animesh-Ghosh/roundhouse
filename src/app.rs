@@ -161,6 +161,9 @@ pub struct App {
     /// Routes a gem's routing method draws that are left out (`ingest::gem_hooks::omits_on_failure`), at the call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gem_route_gaps: Vec<crate::diagnostic::Diagnostic>,
+    /// `RouteHelpers` methods a gem's load generates from its route tables (Devise's `new_session_path(resource_or_scope)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_route_helpers: Vec<crate::dialect::MethodDef>,
     /// Pins from `config/importmap.rb`, expanded (each
     /// `pin_all_from` has been resolved into explicit per-file
     /// pins via `app/javascript/**` walking). Consumed by the
@@ -1297,6 +1300,7 @@ impl App {
             included_hoist_conflicts: Vec::new(),
             superclass_refusals: Vec::new(),
             gem_route_gaps: Vec::new(),
+            generated_route_helpers: Vec::new(),
             importmap: None,
             engine_importmaps: Vec::new(),
             inertia: None,

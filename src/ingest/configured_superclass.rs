@@ -2680,7 +2680,10 @@ fn val_kind(v: &Val) -> &'static str {
 /// The routes a gem's routing method draws (`use_doorkeeper do … end`), run with the mapper as the
 /// recording `Router` after the initializers that call on `root` have run.
 /// `enclosing` is the scope the call stands in (`path`, `module`, `as`, as Rails accumulates them), `None` inside a resource.
-pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr, initializers: &[Expr], roots: &[String], mixins: Vec<String>, enclosing: Option<(Option<String>, Option<String>, Option<String>)>) -> Res<(Vec<Expr>, Vec<String>)> {
+/// The routes drawn, what was left out, and for `devise_for` what `generate_helpers!` would read.
+pub(super) type DrawnRoutes = (Vec<Expr>, Vec<String>, Option<Result<super::gem_hooks::DeviseUrlFacts, String>>);
+
+pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr, initializers: &[Expr], roots: &[String], mixins: Vec<String>, enclosing: Option<(Option<String>, Option<String>, Option<String>)>) -> Res<DrawnRoutes> {
     let mut eval = Eval::new(app);
     let enclosing = enclosing.map(|(path, module, as_)| {
         [("path", path), ("module", module), ("as", as_)]
@@ -2704,7 +2707,11 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
     };
     eval.drawn.push(Vec::new());
     eval.invoke(def, scope, Val::Router, argv, blk).map_err(|why| why.trim_start_matches(STOP).to_string())?;
-    Ok((eval.drawn.pop().unwrap_or_default(), eval.omitted))
+    let devise = (def.name.as_str() == "devise_for" && eval.known.contains("Devise")).then(|| {
+        let heap = &eval.heap;
+        super::gem_hooks::devise_url_facts(eval.consts.get("Devise::URL_HELPERS"), eval.cvars.get(&("Devise".to_string(), "@@mappings".to_string())), &|id, name| heap[id].ivars.get(name).cloned())
+    });
+    Ok((eval.drawn.pop().unwrap_or_default(), eval.omitted, devise))
 }
 
 /// An engine initializer's loop that inserts a middleware per element: over a collection the app's own

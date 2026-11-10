@@ -6140,6 +6140,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         .direct_helpers
         .iter()
         .map(|h| format!("{}_path", h.name.as_str()))
+        .chain(app.generated_route_helpers.iter().map(|m| m.name.as_str().to_string()))
         .collect();
     let class_method_targets = record_answering_class_methods(app);
     // The route helpers' OWN lowered signatures — read off the slice we
