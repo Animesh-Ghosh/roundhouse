@@ -1158,7 +1158,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     ]);
     register_stdlib_class(classes, "ActiveSupport::Deprecation::DeprecatedConstantAccessor", &[], &[]);
     // `runtime/ruby/action_controller/metal.rb`: the modules a Metal subclass includes back, which Base already holds.
-    for module in ["ActionController::UrlFor", "ActionController::Redirecting", "AbstractController::Callbacks"] {
+    for module in ["ActionController::UrlFor", "ActionController::Redirecting", "AbstractController::Callbacks", "ActionView::Rendering"] {
         register_stdlib_class(classes, module, &[], &[]);
     }
     register_stdlib_class(classes, crate::analyze::indifferent::CLASS, &[], &[]);

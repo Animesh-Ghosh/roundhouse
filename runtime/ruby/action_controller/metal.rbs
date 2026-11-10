@@ -3,11 +3,27 @@ module AbstractController
   end
 end
 
+module ActionView
+  module Rendering
+  end
+end
+
 module ActionController
   module UrlFor
   end
 
   module Redirecting
+  end
+
+  class Base
+    include AbstractController::Callbacks
+    include UrlFor
+    include Redirecting
+    include ActionView::Rendering
+  end
+
+  class API < Base
+    def self.include?: (Module mod) -> bool
   end
 
   class Metal < Base
