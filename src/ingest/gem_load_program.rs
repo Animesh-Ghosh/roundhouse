@@ -81,8 +81,12 @@ fn named_by_the_app(app: &App, programs: &HashMap<String, &FileProgram>) -> Hash
             return;
         }
         visit(body, &mut |e| {
+            // Each enclosing name too: Ruby reads `Foo` and `Foo::Bar` on its way to `Foo::Bar::Baz`.
             if let ExprNode::Const { path } = &*e.node {
-                named.insert(path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"));
+                let segments: Vec<&str> = path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect();
+                for end in 1..=segments.len() {
+                    named.insert(segments[..end].join("::"));
+                }
             }
         });
     });
@@ -129,14 +133,19 @@ impl Walk<'_> {
                 }
                 ProgramItem::Statement(e) if self.carried_call(e) => self.taken.push(e.clone()),
                 ProgramItem::Statement(e) => self.left.push(e.span),
+                ProgramItem::NotCarried { span, .. } => self.left.push(*span),
                 ProgramItem::Branch { then_items, else_items, .. } => {
-                    for nested in then_items.iter().chain(else_items) {
-                        if let ProgramItem::Statement(e) = nested {
-                            self.left.push(e.span);
+                    let mut pending: Vec<&ProgramItem> = then_items.iter().chain(else_items).collect();
+                    while let Some(nested) = pending.pop() {
+                        match nested {
+                            ProgramItem::Statement(e) => self.left.push(e.span),
+                            ProgramItem::NotCarried { span, .. } => self.left.push(*span),
+                            ProgramItem::Branch { then_items, else_items, .. } => pending.extend(then_items.iter().chain(else_items)),
+                            _ => {}
                         }
                     }
                 }
-                ProgramItem::Declared(_) | ProgramItem::Opened(_) | ProgramItem::NotCarried { .. } => {}
+                ProgramItem::Declared(_) | ProgramItem::Opened(_) => {}
             }
         }
     }
