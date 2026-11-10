@@ -46,12 +46,20 @@ thread_local! {
     static FOLDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static PENDING: RefCell<Vec<Pending>> = const { RefCell::new(Vec::new()) };
     static CLASS_NAMES: RefCell<Vec<(Span, Expr)>> = const { RefCell::new(Vec::new()) };
+    /// What a gem's routing method did to the gem's own state as it drew (devise's `Devise.add_mapping`), for the boot program.
+    static BOOT_CALLS: RefCell<Vec<Result<Expr, String>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The routing methods' calls that changed the gems' state as Rails drew the routes, since `reset`.
+pub(super) fn take_boot_calls() -> Vec<Result<Expr, String>> {
+    BOOT_CALLS.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 pub(super) fn reset() {
     FOLDING.with(|f| f.set(true));
     PENDING.with(|p| p.borrow_mut().clear());
     CLASS_NAMES.with(|p| p.borrow_mut().clear());
+    BOOT_CALLS.with(|p| p.borrow_mut().clear());
 }
 
 /// An association's `class_name:` written as an expression, by the declaration's span.
@@ -384,6 +392,8 @@ struct Eval<'a> {
     mixed_in: Vec<(String, &'static str, String)>,
     /// The modules whose `self.included(base)` ran to its end where they were included.
     hooked: HashSet<String>,
+    /// A routing method's own calls on a gem's class that changed state: the class, the method, what it was given.
+    side_calls: Vec<(String, String, Vec<Val>)>,
     /// What the drawing left out, and why (`gem_hooks::omits_on_failure`).
     omitted: Vec<String>,
 }
@@ -420,7 +430,7 @@ const SCOPE_KEYS: &[&str] = &["path", "as", "module", "constraints", "defaults",
 impl<'a> Eval<'a> {
     fn new(app: &'a App) -> Self {
         let known = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
-        Eval { classes: &app.library_classes, concern_items: &app.concern_model_items, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default(), evaled: HashMap::default(), singleton_attrs: Vec::new(), passed_over: false, mixed_in: Vec::new(), hooked: HashSet::default(), omitted: Vec::new() }
+        Eval { classes: &app.library_classes, concern_items: &app.concern_model_items, known, heap: Vec::new(), class_ivars: HashMap::default(), unsure: HashMap::default(), written: HashMap::default(), tick: 0, depth: 0, subject: None, calls: Vec::new(), drawn: Vec::new(), cvars: HashMap::default(), router: RouterState::default(), facts: super::gem_hooks::Facts::of(app), consts: HashMap::default(), evaled: HashMap::default(), singleton_attrs: Vec::new(), passed_over: false, mixed_in: Vec::new(), hooked: HashSet::default(), side_calls: Vec::new(), omitted: Vec::new() }
     }
 
     /// The constant `expr` names once the initializers that call on its root have run.
@@ -740,23 +750,22 @@ impl<'a> Eval<'a> {
             }
             // `self.devise_modules |= selected`: the reader, the operator, then the writer, as Ruby desugars it.
             ExprNode::OpAssign { target: LValue::Attr { recv, name }, op, value } if op.binary_op().is_some() => {
-                let read = Expr::new(Span::synthetic(), ExprNode::Send { recv: Some(recv.clone()), method: name.clone(), args: Vec::new(), block: None, parenthesized: false });
-                let current = self.value(&read, frame)?;
+                // Not the receiver twice: Ruby evaluates it once and calls both the reader and the writer on that object.
+                let receiver = self.value(recv, frame)?;
+                let current = self.dispatch(Some(recv), receiver.clone(), name.as_str(), Vec::new(), None, frame)?;
                 let operand = self.value(value, frame)?;
                 let combined = self.dispatch(None, current, op.binary_op().expect("checked"), vec![operand], None, frame)?;
-                let receiver = self.value(recv, frame)?;
                 self.dispatch(Some(recv), receiver, &format!("{name}="), vec![combined.clone()], None, frame)?;
                 combined
             }
             // `self.devise_modules ||= []`: written through the writer only when the reader answers nil or false.
             ExprNode::OpAssign { target: LValue::Attr { recv, name }, op: OpAssignOp::OrOr, value } => {
-                let read = Expr::new(Span::synthetic(), ExprNode::Send { recv: Some(recv.clone()), method: name.clone(), args: Vec::new(), block: None, parenthesized: false });
-                let current = self.value(&read, frame)?;
+                let receiver = self.value(recv, frame)?;
+                let current = self.dispatch(Some(recv), receiver.clone(), name.as_str(), Vec::new(), None, frame)?;
                 if current.truthy()? {
                     current
                 } else {
                     let v = self.value(value, frame)?;
-                    let receiver = self.value(recv, frame)?;
                     self.dispatch(Some(recv), receiver, &format!("{name}="), vec![v.clone()], None, frame)?;
                     v
                 }
@@ -1185,12 +1194,33 @@ impl<'a> Eval<'a> {
                 && self.known.contains(c)
             {
                 let full = format!("{c}::{name}");
-                let found = self.known.contains(&full);
-                return match method {
-                    "const_defined?" => Ok(Val::Bool(found)),
-                    _ if found => Ok(Val::Class(full)),
-                    _ => Err(format!("`{c}.const_get({name:?})` names no constant here")),
-                };
+                if self.known.contains(&full) {
+                    return Ok(if method == "const_defined?" { Val::Bool(true) } else { Val::Class(full) });
+                }
+                if method == "const_get" {
+                    return Err(format!("`{c}.const_get({name:?})` names no class or module here"));
+                }
+                // Ruby looks in the module, its ancestors and Object: false only where every one of them is declared here without it.
+                let declares = |owner: &str| self.classes.iter().filter(|lc| lc.name.0.as_str() == owner).any(|lc| lc.constants.iter().any(|(n, _)| n.as_str() == name));
+                let mut seen = HashSet::default();
+                let mut pending = vec![c.clone()];
+                while let Some(owner) = pending.pop() {
+                    if !seen.insert(owner.clone()) {
+                        continue;
+                    }
+                    if declares(&owner) || self.known.contains(&format!("{owner}::{name}")) {
+                        return Ok(Val::Bool(true));
+                    }
+                    let decls: Vec<&LibraryClass> = self.classes.iter().filter(|lc| lc.name.0.as_str() == owner).collect();
+                    if decls.is_empty() || decls.iter().any(|lc| lc.includes.iter().any(|i| !self.known.contains(i.0.as_str())) || lc.parent.as_ref().is_some_and(|p| !self.known.contains(p.0.as_str()))) {
+                        return Err(format!("{STOP}`{c}.const_defined?({name:?})` asks of an ancestor not declared here"));
+                    }
+                    for lc in decls {
+                        pending.extend(lc.includes.iter().map(|i| i.0.to_string()));
+                        pending.extend(lc.parent.iter().map(|p| p.0.to_string()));
+                    }
+                }
+                return Ok(Val::Bool(self.known.contains(name.as_str())));
             }
             if method == "singleton_class" && argv.is_empty() && blk.is_none() {
                 return Ok(Val::Class(format!("#<Class:{c}>")));
@@ -1224,6 +1254,21 @@ impl<'a> Eval<'a> {
         }
         // A method the program defines answers before anything built in.
         if let Some((def, scope)) = self.lookup(&this, method) {
+            // Rails draws the routes at boot, so what a routing method's own call on a gem class changes (`Devise.add_mapping`) is boot state the program needs too.
+            let from_router = self.router.drawing
+                && matches!(&this, Val::Class(c) if c != MAPPER)
+                && self.calls.last().is_some_and(|(owner, ..)| owner == MAPPER || self.router.mixins.contains(owner));
+            if from_router && blk.is_none() {
+                let before = (self.written.len(), self.cvars.len(), self.consts.len());
+                let given = argv.clone();
+                let answer = self.invoke(&def, scope, this.clone(), argv, blk)?;
+                if (self.written.len(), self.cvars.len(), self.consts.len()) != before
+                    && let Val::Class(c) = &this
+                {
+                    self.side_calls.push((c.clone(), method.to_string(), given));
+                }
+                return Ok(answer);
+            }
             return self.invoke(&def, scope, this, argv, blk);
         }
         // Not only a model's: a subclass with no table of its own is a library class, and what `devise` gave its superclass it has too.
@@ -2852,6 +2897,9 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
     };
     eval.drawn.push(Vec::new());
     eval.invoke(def, scope, Val::Router, argv, blk).map_err(|why| why.trim_start_matches(STOP).to_string())?;
+    for (class, method, given) in std::mem::take(&mut eval.side_calls) {
+        BOOT_CALLS.with(|c| c.borrow_mut().push(boot_call(call.span, &class, &method, &given)));
+    }
     let devise = (def.name.as_str() == "devise_for" && eval.known.contains("Devise")).then(|| {
         let heap = &eval.heap;
         super::gem_hooks::devise_url_facts(eval.consts.get("Devise::URL_HELPERS"), eval.cvars.get(&("Devise".to_string(), "@@mappings".to_string())), &|id, name| heap[id].ivars.get(name).cloned())
@@ -2937,7 +2985,7 @@ pub(super) fn expand_load_time_definers(app: &mut App, sources: &[crate::span::S
                 && eval.written.keys().all(|(h, _)| matches!(h, Holder::Class(c) if *c == owner))
                 && eval.evaled.keys().all(|c| *c == owner)
                 && eval.singleton_attrs.iter().all(|(c, _, _)| *c == owner);
-            let in_class_methods = within_class_methods(sources, call.span);
+            let in_class_methods = within_class_methods(sources, call.span, &owner);
             let expansion = ran.then(|| expand_into(&owner, &eval, in_class_methods)).flatten();
             match expansion {
                 Some((mut methods, ivars)) => {
@@ -3056,6 +3104,10 @@ pub(super) fn expand_model_mixin_macros<V: Vfs + ?Sized>(vfs: &V, dir: &Path, ge
             eval.subject = Some((name.clone(), class_side, HashMap::default()));
             // Not what the gems' files did as they loaded: only the call's own doings are the model's.
             eval.passed_over = false;
+            // Not what the replayed initializers mixed in or hooked: only the call's own doings are checked and written.
+            eval.mixed_in.clear();
+            eval.singleton_attrs.clear();
+            eval.hooked.clear();
             let written_before: HashSet<(Holder, String)> = eval.written.keys().cloned().collect();
             let cvars_before = eval.cvars.len();
             let evaled_before: usize = eval.evaled.values().map(Vec::len).sum();
@@ -3230,28 +3282,77 @@ fn expand_into(owner: &str, eval: &Eval<'_>, in_class_methods: bool) -> Option<(
 }
 
 /// Whether `span` lies in the body of a `module ClassMethods` of its file.
-fn within_class_methods(sources: &[crate::span::SourceFile], span: Span) -> bool {
+fn within_class_methods(sources: &[crate::span::SourceFile], span: Span, owner: &str) -> bool {
     let Some(source) = (span.file.0 as usize).checked_sub(1).and_then(|i| sources.get(i)) else { return false };
-    struct Find {
+    // Not any module named `ClassMethods`: only the carrier nested in the module ingest folds it into.
+    struct Find<'o> {
         at: usize,
+        owner: &'o str,
+        scope: Vec<String>,
         hit: bool,
     }
-    impl<'pr> ruby_prism::Visit<'pr> for Find {
+    impl<'pr> ruby_prism::Visit<'pr> for Find<'_> {
         fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
             let loc = node.location();
-            if super::prism_api::PrismLocation::start_offset(&loc) <= self.at
-                && self.at < super::prism_api::PrismLocation::end_offset(&loc)
-                && super::util::module_name_path(node).as_deref() == Some(&["ClassMethods".to_string()])
-            {
+            let here = super::prism_api::PrismLocation::start_offset(&loc) <= self.at && self.at < super::prism_api::PrismLocation::end_offset(&loc);
+            let path = super::util::module_name_path(node).unwrap_or_default();
+            if here && path == ["ClassMethods".to_string()] && !self.scope.is_empty() && self.scope.join("::") == self.owner {
                 self.hit = true;
             }
+            let depth = self.scope.len();
+            self.scope.extend(path);
             ruby_prism::visit_module_node(self, node);
+            self.scope.truncate(depth);
+        }
+        fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+            let depth = self.scope.len();
+            self.scope.extend(super::util::class_name_path(node).unwrap_or_default());
+            ruby_prism::visit_class_node(self, node);
+            self.scope.truncate(depth);
         }
     }
     let result = ruby_prism::parse(source.text.as_bytes());
-    let mut find = Find { at: span.start as usize, hit: false };
+    let mut find = Find { at: span.start as usize, owner, scope: Vec::new(), hit: false };
     ruby_prism::Visit::visit(&mut find, &result.node());
     find.hit
+}
+
+/// `Class.method(args…)` with each argument the value the evaluation gave it, written as Ruby would.
+fn boot_call(span: Span, class: &str, method: &str, given: &[Val]) -> Result<Expr, String> {
+    let args = given
+        .iter()
+        .map(ruby_value_literal)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| format!("`{class}.{method}`, which a routing method calls as it draws, is given a value that has no Ruby literal, so the boot program does not run it"))?;
+    let text = format!("{class}.{method}({})\n", args.join(", "));
+    let parsed = super::prism::parse_silent(text.as_bytes());
+    let node = parsed.node();
+    let statement = node.as_program_node().and_then(|p| p.statements().body().iter().next()).ok_or("an unparsable boot call")?;
+    let mut expr = super::expr::ingest_expr(&statement, "<routes>").map_err(|e| format!("{e:?}"))?;
+    // Not the call's place for the parts: a constant is resolved by where it is written, and the routes file names no `Devise` there.
+    fn synthetic(e: &mut Expr) {
+        e.span = Span::synthetic();
+        e.node.for_each_child_mut(&mut synthetic);
+    }
+    synthetic(&mut expr);
+    expr.span = span;
+    Ok(expr)
+}
+
+/// `ruby_literal`, and also a Hash with Symbol or String keys and a class or module the program names.
+fn ruby_value_literal(v: &Val) -> Option<String> {
+    match v {
+        Val::Hash(entries) => {
+            let pairs = entries
+                .iter()
+                .map(|(k, v)| Some(format!("{} => {}", ruby_value_literal(k)?, ruby_value_literal(v)?)))
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("{{{}}}", pairs.join(", ")))
+        }
+        Val::Array(items) => Some(format!("[{}]", items.iter().map(ruby_value_literal).collect::<Option<Vec<_>>>()?.join(", "))),
+        Val::Class(c) if c.split("::").all(|seg| seg.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())) => Some(c.clone()),
+        other => ruby_literal(other),
+    }
 }
 
 fn ruby_literal(v: &Val) -> Option<String> {
@@ -3259,7 +3360,24 @@ fn ruby_literal(v: &Val) -> Option<String> {
         Val::Nil => "nil".into(),
         Val::Bool(b) => b.to_string(),
         Val::Int(i) => i.to_string(),
-        Val::Str(s) => format!("{s:?}"),
+        Val::Str(s) => {
+            // Not Rust's Debug escaping: it leaves `#` alone, so `"a#{b}"` would interpolate when Ruby reads it back.
+            let mut out = String::from("\"");
+            for c in s.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '#' => out.push_str("\\#"),
+                    '\n' => out.push_str("\\n"),
+                    '\t' => out.push_str("\\t"),
+                    '\r' => out.push_str("\\r"),
+                    c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
         Val::Sym(s) if s.chars().all(|c| c.is_alphanumeric() || c == '_') => format!(":{s}"),
         Val::Array(items) => format!("[{}]", items.iter().map(ruby_literal).collect::<Option<Vec<_>>>()?.join(", ")),
         _ => return None,

@@ -72,13 +72,26 @@ fn a_gems_load_error_fallback_is_left_natively() {
     assert!(run.stdout.contains("loaded begin passed"), "{}", run.stdout);
 }
 
-/// `class << mod` in a method defines on `mod`; it is refused rather than read as `class << self`.
-#[test]
-fn a_singleton_class_of_another_object_in_a_method_is_refused() {
-    let result = ruby_prism::parse(b"def config(mod)\n  class << mod; attr_accessor :x; end\nend\n");
+fn method_body(source: &[u8]) -> Result<roundhouse::expr::Expr, String> {
+    let result = ruby_prism::parse(source);
     let program = result.node();
     let def = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
     let body = def.as_def_node().unwrap().body().unwrap();
-    let err = roundhouse::ingest::expr::ingest_expr(&body, "t.rb").expect_err("refused");
-    assert!(format!("{err:?}").contains("other than self"), "{err:?}");
+    roundhouse::ingest::expr::ingest_expr(&body, "t.rb").map_err(|e| format!("{e:?}"))
+}
+
+/// `class << mod` in a method defines on `mod`; it is refused rather than read as `class << self`.
+#[test]
+fn a_singleton_class_of_another_object_in_a_method_is_refused() {
+    let err = method_body(b"def config(mod)\n  class << mod\n    def x; end\n  end\nend\n").expect_err("refused");
+    assert!(err.contains("other than self"), "{err}");
+}
+
+/// Attribute macros alone are `mod.singleton_class.attr_accessor(:x)`, which Ruby's `class << mod` runs.
+#[test]
+fn a_singleton_class_of_another_object_holding_only_attributes_is_its_singleton_classs_call() {
+    let expr = method_body(b"def config(mod)\n  class << mod; attr_accessor :x; end\nend\n").expect("ingested");
+    let roundhouse::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node else { panic!("{expr:?}") };
+    assert_eq!(method.as_str(), "attr_accessor");
+    assert!(matches!(&*recv.node, roundhouse::expr::ExprNode::Send { method, .. } if method.as_str() == "singleton_class"), "{recv:?}");
 }

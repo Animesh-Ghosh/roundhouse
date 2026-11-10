@@ -3,7 +3,7 @@
 
 use super::emit_and_run;
 
-const CONTROLLER: &str = r#"class GreetingsController < ApplicationController
+const CONTROLLER: &str = r##"class GreetingsController < ApplicationController
   append_before_action :set_name
   before_action :set_tail
 
@@ -26,15 +26,15 @@ const CONTROLLER: &str = r#"class GreetingsController < ApplicationController
   end
   alias :greeting :salute
 end
-"#;
+"##;
 
-const SCRIPT: &str = r#"env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => "/greeting", "QUERY_STRING" => "", "REMOTE_ADDR" => "127.0.0.1",
+const SCRIPT: &str = r##"env = { "REQUEST_METHOD" => "GET", "PATH_INFO" => "/greeting", "QUERY_STRING" => "", "REMOTE_ADDR" => "127.0.0.1",
         "HTTP_HOST" => "localhost", "rack.input" => StringIO.new("") }
 status, _, body = Main.run_rack(env)
 text = body.respond_to?(:join) ? body.join : body.to_s
 raise "#{status} #{text.inspect}" unless status == 200 && text == "devise hello done"
 puts "append callbacks passed"
-"#;
+"##;
 
 fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog()

@@ -169,6 +169,10 @@ fn app_required_features<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> BTreeSet<Strin
     while let Some(at) = dirs.pop() {
         let Ok(entries) = vfs.read_dir(&at) else { continue };
         for entry in entries {
+            // Not through a link: one back to an ancestor never empties the walk.
+            if vfs.is_symlink(&entry) {
+                continue;
+            }
             if vfs.is_dir(&entry) {
                 dirs.push(entry);
             } else if entry.extension().is_some_and(|e| e == "rb")
