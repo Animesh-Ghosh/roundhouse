@@ -34,6 +34,7 @@ pub(crate) mod form_builder;
 pub(crate) mod turbo_drive;
 pub(crate) mod turbo_frames;
 pub(crate) mod attr_parts;
+pub(crate) mod hoist_constants;
 
 /// Largest `cached: true` collection that skips the store (`length > N`
 /// takes the concat-cache path). Named for the exclusive bound: length
