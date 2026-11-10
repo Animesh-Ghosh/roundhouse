@@ -121,9 +121,20 @@ object Server {
             return
         }
 
-        // Rails' `_method` override (button_to delete/patch forms POST).
+        // Read a form body only when the request carries one — Rack's
+        // `form_data?`: a form media type (Javalin's predicates match it
+        // case-insensitively, as RFC 9110 requires), or a POST with no
+        // Content-Type at all. Otherwise `formParamMap` reads the (empty)
+        // body of every GET through Jetty's request-content lock (+2-4%
+        // GET throughput on the real-blog bench routes without it).
         var method = ctx.method().name
-        if (method == "POST") {
+        val formBody = ctx.isFormUrlencoded() || ctx.isMultipartFormData() ||
+            (method == "POST" && ctx.header("Content-Type") == null)
+
+        // Rails' `_method` override (button_to delete/patch forms POST).
+        // Under the same gate as the params, as `Rack::MethodOverride`
+        // does: a text/plain POST neither re-routes nor carries fields.
+        if (method == "POST" && formBody) {
             ctx.formParam("_method")?.let { method = it.uppercase() }
         }
 
@@ -149,14 +160,7 @@ object Server {
         for ((k, vals) in ctx.queryParamMap()) {
             vals.firstOrNull()?.let { setParam(params, k, it) }
         }
-        // Read a form body only when the request carries one, as the
-        // crystal/rust/python servers do. `formParamMap` otherwise reads the
-        // (empty) body of every GET through Jetty's request-content lock
-        // (+2-4% GET throughput on the real-blog bench routes without it).
-        // Javalin's own predicates, which match the media type
-        // case-insensitively as RFC 9110 requires and are the same test
-        // `formParamMap` uses to pick its multipart parser.
-        if (ctx.isFormUrlencoded() || ctx.isMultipartFormData()) {
+        if (formBody) {
             for ((k, vals) in ctx.formParamMap()) {
                 vals.firstOrNull()?.let { setParam(params, k, it) }
             }
