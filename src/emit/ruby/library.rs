@@ -3610,11 +3610,10 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     // Read from the whole app, not this run's slice: a controller's untyped
     // receiver can be a model or a library class. A helper's `pluralize` is
     // called bare, so a receiver never reaches one.
-    let app_defines_pluralize = lcs.iter().any(|lc| lc.methods.iter().any(|m| m.name.as_str() == "pluralize"))
-        || app.models.iter().any(|m| m.methods().any(|d| d.name.as_str() == "pluralize"))
-        || app
-            .library_classes
+    let app_defines_pluralize = app.models.iter().any(|m| m.methods().any(|d| d.name.as_str() == "pluralize"))
+        || lcs
             .iter()
+            .chain(app.library_classes.iter())
             .filter(|lc| !helper_modules.contains(&lc.name))
             .any(|lc| lc.methods.iter().any(|m| m.name.as_str() == "pluralize"));
     let app_framework_helper_names: BTreeSet<String> = app

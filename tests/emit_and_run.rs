@@ -11130,6 +11130,24 @@ puts "ok"
         .assert_passes();
 }
 
+/// The same inside the helper module that defines it (Rails 8.1.4 answers
+/// `statuses` from `word.pluralize` there).
+#[test]
+fn a_helper_pluralize_leaves_its_own_untyped_call_lowered() {
+    emit_and_run::real_blog()
+        .write(
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n  def pluralize(count, word)\n    \"custom\"\n  end\n\n  def plural_of(word)\n    word.pluralize\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"out = ApplicationHelper.plural_of("status")
+raise "helper took the call: #{out}" unless out == "statuses"
+puts "ok"
+"#,
+        )
+        .assert_passes();
+}
+
 /// A helper's `pluralize(count, word)` is not what `row.pluralize` reaches.
 #[test]
 fn a_helper_pluralize_leaves_an_untyped_controller_call_lowered() {
