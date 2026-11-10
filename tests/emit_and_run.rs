@@ -21093,6 +21093,8 @@ mod mutated_loop_constant;
 mod solid_queue_worker_contract;
 #[path = "emit_and_run/solid_queue_surface.rs"]
 mod solid_queue_surface;
+#[path = "emit_and_run/included_block_attribute_writes.rs"]
+mod included_block_attribute_writes;
 #[path = "emit_and_run/controller_surface.rs"]
 mod controller_surface;
 #[path = "emit_and_run/rack_attack.rs"]
