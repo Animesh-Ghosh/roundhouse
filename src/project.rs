@@ -10087,6 +10087,8 @@ module GemMiddleware
     env["PATH_INFO"] = req.path
     env["QUERY_STRING"] = req.raw_query
     env["REMOTE_ADDR"] = req.remote_host
+    # Not from a header: the listener that accepted the connection, as the controller's request.env carries it.
+    env["roundhouse.listener"] = req.listener_transport
     env["SERVER_PROTOCOL"] = req.http_version
     env["rack.url_scheme"] = req.req_headers.fetch("x-forwarded-proto", "http") == "https" ? "https" : "http"
     req.req_headers.each do |name, value|
