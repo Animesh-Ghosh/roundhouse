@@ -5914,13 +5914,19 @@ fn is_serialization_scope_nil(method: &str, args: &[crate::expr::Expr]) -> bool 
         && matches!(args, [a] if matches!(&*a.node, crate::expr::ExprNode::Lit { value: crate::expr::Literal::Nil }))
 }
 
+/// `respond_to :html`: what `respond_with` lowers for (`lower::controller_to_library::respond_with`).
+fn respond_to_macro_is_html_only(args: &[crate::expr::Expr]) -> bool {
+    use crate::expr::{ExprNode, Literal};
+    !args.is_empty() && args.iter().all(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "html"))
+}
+
 /// Class-level `respond_to :json` is consumed as a no-op when nothing
 /// in this controller's ANCESTOR CHAIN (self included) calls
 /// `respond_with` — the only thing the responders gem's `respond_to`
-/// declaration ever feeds. `respond_with` isn't modeled, so a
-/// controller that actually calls it is left to fail there (an
-/// ordinary unresolved-method error at analyze time), not silenced by
-/// this check.
+/// declaration ever feeds. `respond_with` is modeled for html-only
+/// declarations; a controller that calls it with another format is
+/// left to fail there (an ordinary unresolved-method error at analyze
+/// time), not silenced by this check.
 fn respond_to_macro_is_consumed(
     controller: &crate::dialect::Controller,
     all: &[crate::dialect::Controller],
@@ -6165,17 +6171,18 @@ fn report_unrecognized_controller_macros(app: &App) {
             }
             // Class-level `respond_to :json` (the responders gem) — a
             // pure config declaration: it names the mimes `respond_with`
-            // answers, and has no effect of its own. `respond_with`
-            // itself isn't modeled, so a controller that actually
-            // depends on it keeps failing loudly there (an ordinary
-            // unresolved-method error); this macro just configures a
-            // call nothing in the chain makes, so it's consumed as a
-            // no-op rather than flagged as an unrecognized gap. Distinct
+            // answers, and has no effect of its own. `respond_with` is
+            // modeled for html-only declarations
+            // (`lower::controller_to_library::respond_with`); for others
+            // a controller that depends on it keeps failing loudly there
+            // (an ordinary unresolved-method error). Otherwise this macro
+            // configures a call nothing in the chain makes, so it's
+            // consumed as a no-op rather than flagged as a gap. Distinct
             // from the ACTION-body `respond_to do |format| … end`
             // block, which carries a block and never reaches this
             // (blockless) branch at all.
             if method.as_str() == "respond_to"
-                && respond_to_macro_is_consumed(controller, &app.controllers)
+                && (respond_to_macro_is_html_only(args) || respond_to_macro_is_consumed(controller, &app.controllers))
             {
                 continue;
             }

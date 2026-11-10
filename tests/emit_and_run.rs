@@ -22083,6 +22083,8 @@ fn join_nil_renders_as_rails() {
 }
 #[path = "emit_and_run/cable_connection_request.rs"]
 mod cable_connection_request;
+#[path = "emit_and_run/respond_with.rs"]
+mod respond_with;
 #[path = "emit_and_run/route_loop_index.rs"]
 mod route_loop_index;
 #[path = "emit_and_run/deprecation.rs"]
