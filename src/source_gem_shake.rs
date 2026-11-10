@@ -310,9 +310,17 @@ impl<'a> Gems<'a> {
         let mut s = Scan { context: None, calls: Vec::new(), consts: Vec::new() };
         // Not from a gem controller no route dispatches to: what it calls is never run.
         let unrouted = crate::ingest::unreachable_views::unrouted_gem_controllers(app);
-        let dead: HashSet<FileId> = app.controllers.iter().filter(|c| unrouted.contains(c.name.0.as_str())).map(|c| c.parent_span.file).collect();
+        // The controllers' bodies, not their files: a library class beside one in the file is still reached.
+        let dead: Vec<crate::span::Span> = app
+            .controllers
+            .iter()
+            .filter(|c| unrouted.contains(c.name.0.as_str()))
+            .flat_map(|c| c.actions().map(|a| a.body.span).chain(c.class_methods().map(|m| m.body.span)).collect::<Vec<_>>())
+            .filter(|s| !s.is_synthetic())
+            .collect();
+        let in_dead = |span: &crate::span::Span| dead.iter().any(|d| d.file == span.file && d.start <= span.start && span.end <= d.end);
         crate::lower::for_each_emit_body_ref(app, &mut |e| {
-            if (e.span.file.0 == 0 || !mounted(app, e.span.file)) && !dead.contains(&e.span.file) {
+            if (e.span.file.0 == 0 || !mounted(app, e.span.file)) && !in_dead(&e.span) {
                 scan(e, &mut s);
             }
         });

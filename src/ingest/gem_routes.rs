@@ -114,7 +114,21 @@ fn write_mapping_helpers(app: &mut App) {
     if written.is_empty() {
         return;
     }
-    for (module, defs, names) in written {
+    // Not the definer emptied for a module one of whose mappings did not run: Rails runs it at boot for each, so it stays.
+    let mut failed: Vec<String> = Vec::new();
+    for (module, result) in &written {
+        if let Err(why) = result {
+            let mut gap = crate::diagnostic::Diagnostic::unsupported(crate::span::Span::synthetic(), None, "mapping helpers", why.clone());
+            gap.severity = crate::diagnostic::Severity::Warning;
+            app.gem_route_gaps.push(gap);
+            failed.push(module.clone());
+        }
+    }
+    for (module, result) in written {
+        let Ok((defs, names)) = result else { continue };
+        if failed.contains(&module) {
+            continue;
+        }
         let Some(lc) = app.library_classes.iter_mut().find(|lc| lc.name.0.as_str() == module) else { continue };
         for def in defs {
             if !lc.methods.iter().any(|m| m.name == def.name && m.receiver == def.receiver) {

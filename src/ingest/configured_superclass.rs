@@ -49,11 +49,11 @@ thread_local! {
     /// What a gem's routing method did to the gem's own state as it drew (devise's `Devise.add_mapping`), for the boot program.
     static BOOT_CALLS: RefCell<Vec<Result<Expr, String>>> = const { RefCell::new(Vec::new()) };
     /// The methods a mapping's helper definer wrote (devise's `define_helpers`), by module, and the names it made view helpers.
-    static MAPPING_HELPERS: RefCell<Vec<(String, Vec<MethodDef>, Vec<String>)>> = const { RefCell::new(Vec::new()) };
+    static MAPPING_HELPERS: RefCell<Vec<(String, Result<(Vec<MethodDef>, Vec<String>), String>)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The helper methods each drawn mapping defined (`MAPPING_HELPERS`), since `reset`.
-pub(super) fn take_mapping_helpers() -> Vec<(String, Vec<MethodDef>, Vec<String>)> {
+pub(super) fn take_mapping_helpers() -> Vec<(String, Result<(Vec<MethodDef>, Vec<String>), String>)> {
     MAPPING_HELPERS.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
@@ -1039,10 +1039,12 @@ impl<'a> Eval<'a> {
                             Some(b) => self.call_proc(b, Vec::new(), frame)?,
                             None => Val::Nil,
                         };
-                        if let Some(Ok(mut lambda)) = constraint
-                            && let Some(level) = self.drawn.last_mut()
-                            && level.len() > start
+                        if let Some(constraint) = constraint
+                            && self.drawn.last().is_some_and(|level| level.len() > start)
                         {
+                            // Not drawn without it: the constraint is what writes the env the routes' controllers read.
+                            let mut lambda = constraint?;
+                            let level = self.drawn.last_mut().expect("checked");
                             // Not the gem file's places for its parts: a constant is resolved by where it is written, and the guard is the app's.
                             fn synthetic(e: &mut Expr) {
                                 e.span = Span::synthetic();
@@ -3007,12 +3009,13 @@ pub(super) fn draw_routes(app: &App, def: &MethodDef, scope: String, call: &Expr
             let before = eval.helper_methods.len();
             eval.evaled.remove("Devise::Controllers::Helpers");
             let mut frame = Frame { this: Val::Class("Object".into()), locals: HashMap::default(), block: None, scope: None };
-            if eval.dispatch(None, helpers, "define_helpers", vec![mapping], None, &mut frame).is_ok()
-                && let Some(defs) = eval.evaled.get("Devise::Controllers::Helpers").cloned()
-            {
-                let names = eval.helper_methods[before..].to_vec();
-                MAPPING_HELPERS.with(|c| c.borrow_mut().push(("Devise::Controllers::Helpers".to_string(), defs, names)));
-            }
+            let ran = eval.dispatch(None, helpers, "define_helpers", vec![mapping], None, &mut frame);
+            let written = match (ran, eval.evaled.get("Devise::Controllers::Helpers").cloned()) {
+                (Ok(_), Some(defs)) => Ok((defs, eval.helper_methods[before..].to_vec())),
+                (Ok(_), None) => Err("`Devise::Controllers::Helpers.define_helpers` defined nothing for a mapping".to_string()),
+                (Err(why), _) => Err(format!("`Devise::Controllers::Helpers.define_helpers` did not run for a mapping: {}", why.trim_start_matches(STOP))),
+            };
+            MAPPING_HELPERS.with(|c| c.borrow_mut().push(("Devise::Controllers::Helpers".to_string(), written)));
         }
     }
     let devise = (def.name.as_str() == "devise_for" && eval.known.contains("Devise")).then(|| {
