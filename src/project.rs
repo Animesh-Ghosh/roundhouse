@@ -3393,6 +3393,16 @@ fn target_files_inner(
         without_inherited_replay = trimmed;
         &without_inherited_replay
     } else { app };
+    // First, so that no later pass or emitter sees a rooted constant on
+    // a target with no `::` to print (`lower::rooted_constants`).
+    let without_rooted_constants;
+    let app = match crate::lower::rooted_constants::lower_for_target(app, target) {
+        Some(lowered) => {
+            without_rooted_constants = lowered;
+            &without_rooted_constants
+        }
+        None => app,
+    };
     if !matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
         refuse_conditional_definitions(app, target);
     }
