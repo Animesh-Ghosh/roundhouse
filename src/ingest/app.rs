@@ -3540,7 +3540,7 @@ fn report_unmodelled_records(app: &App) {
     }
 }
 
-const APP_REQUIRABLE_STDLIB: &[&str] = &[
+pub(crate) const APP_REQUIRABLE_STDLIB: &[&str] = &[
     "base64", "benchmark", "bigdecimal", "cgi", "csv", "date", "delegate", "digest",
     "digest/md5", "digest/sha1", "digest/sha2", "English", "erb", "etc", "fileutils", "find",
     "forwardable", "io/console", "io/nonblock", "io/wait", "ipaddr", "json", "logger",

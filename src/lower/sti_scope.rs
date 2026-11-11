@@ -160,6 +160,10 @@ impl Sti {
 
 pub fn apply_sti_scope_lowering(app: &mut App) {
     let bases = sti_bases(app);
+    // Not the STI subclasses alone: Rails' base_class is the base model whatever the table's type column.
+    let mut every_base = bases.clone();
+    every_base.extend(plain_subclass_bases(app));
+    push_base_class(app, &every_base);
     if bases.is_empty() {
         return;
     }
@@ -205,10 +209,9 @@ pub fn apply_sti_scope_lowering(app: &mut App) {
     }
     push_becomes_from(app, &bases, &recast);
     stamp_sti_subclasses(app, &bases);
-    push_base_class(app, &bases);
 }
 
-/// Rails' `base_class` of an STI subclass: its base model (`ActiveRecord::Base.base_class` answers the class itself).
+/// Rails' `base_class` of a model's subclass, STI or plain: its base model (the runtime's answers the class itself).
 fn push_base_class(app: &mut App, bases: &HashMap<ClassId, ClassId>) {
     for lc in &mut app.library_classes {
         let Some(base) = bases.get(&lc.name) else { continue };

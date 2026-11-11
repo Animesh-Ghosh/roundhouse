@@ -1815,7 +1815,10 @@ fn unloadable_classes(app: &App, names: &HashSet<String>) -> HashSet<String> {
     };
     let provided = |feature: &str| {
         let root = feature.split('/').next().unwrap_or(feature);
-        let stdlib = |name: &str| matches!(crate::gems::fate_of(name), crate::gems::GemFate::Stdlib);
+        // Not the gem fate alone: it marks what is compiled from source, and Ruby ships more than it calls Stdlib (`forwardable`).
+        let stdlib = |name: &str| {
+            matches!(crate::gems::fate_of(name), crate::gems::GemFate::Stdlib) || crate::ingest::app::APP_REQUIRABLE_STDLIB.contains(&name)
+        };
         // Not the gem name alone: a gem may provide a feature of another root (`concurrent-ruby`'s `concurrent`).
         let gem_named = lock.specs.iter().any(|(gem, _)| {
             let gem = gem.as_str();
@@ -1824,6 +1827,7 @@ fn unloadable_classes(app: &App, names: &HashSet<String>) -> HashSet<String> {
         crate::project::is_framework_feature(feature)
             || gem_named
             || stdlib(root)
+            || stdlib(feature)
             || stdlib(&feature.replace('/', "-"))
             || carried(feature)
     };

@@ -8,7 +8,7 @@ module ActiveRecord
       ActiveSupport.humanize(attr.to_s.tr(".", "_"))
     end
 
-    # Rails' `base_class`: the class itself, unless an STI subclass answers its base model (`lower::sti_scope`).
+    # Rails' `base_class`: the class itself, unless a model's subclass answers its base model (`lower::sti_scope`).
     # Not in the shared runtime: a strict target has no class value for `self` in a class method.
     def self.base_class
       self
