@@ -147,9 +147,11 @@ pub struct Analyzer {
     /// The classes that pass left a `p ||= v` untyped in: the first
     /// fixpoint round retypes them whatever else moved.
     unseen_or_assign_classes: std::sync::Mutex<crate::det::HashSet<ClassId>>,
-    /// The classes compiled from a gem's source. Only their slots drop a default no caller leaves:
-    /// an app method's callers include its tests and the console, which no site here records.
-    source_gem_classes: crate::det::HashSet<ClassId>,
+    /// Per method name, the fewest positional arguments a call by that
+    /// name in the app's tests passes. Those calls are callers too, and
+    /// the unification reads only the ones that reach a test helper, so
+    /// `defaulted` reads them here.
+    test_call_arities: HashMap<Symbol, usize>,
     /// (class, method) pairs an author wrote a signature for, as opposed
     /// to a `Fn` the registry stamped from the def itself. Only in the
     /// first is an `untyped` slot a statement rather than an inference
@@ -1403,7 +1405,7 @@ impl Analyzer {
             seeding_unseen_params: false,
             deferring_pending_slots: false,
             unseen_or_assign_classes: Default::default(),
-            source_gem_classes: source_gem_classes(app),
+            test_call_arities: test_call_arities(app),
             declared_signatures: app
                 .rbs_signatures
                 .iter()
@@ -2315,7 +2317,7 @@ impl Analyzer {
                         let ty = if p.rest {
                             rest_element(inferred.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default())
                         } else {
-                            param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p, self.defaulted(&key, i))
+                            param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p.default.as_ref(), self.defaulted(&key, i))
                                 .unwrap_or(Ty::Untyped)
                                 .subst_self(&owner_ty)
                         };
@@ -3072,7 +3074,7 @@ impl Analyzer {
                     // (`fold_concern_param_sites`), whichever includer the
                     // sites were in.
                     let origin = spliced_from.as_ref().and_then(|m| m.get(&action.name));
-                    let mctx = self.seed_action_params(
+                    let mut mctx = self.seed_action_params(
                         &ctx,
                         &ctrl_id,
                         origin,
@@ -3082,8 +3084,8 @@ impl Analyzer {
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
                     );
-                    self.analyze_action_defaults(action, &mctx, &ctrl_id, origin);
-                    self.body_typer().analyze_expr(&mut action.body, &mctx);
+                    self.analyze_action_defaults(action, &mut mctx, &ctrl_id, origin);
+                    self.body_typer().analyze_method_body(&mut action.body, &mctx);
                 }
             }
 
@@ -3656,7 +3658,7 @@ impl Analyzer {
                             .concern_spliced_actions
                             .get(&ctrl_name)
                             .and_then(|m| m.get(&action.name));
-                        let inner_ctx = self.seed_action_params(
+                        let mut inner_ctx = self.seed_action_params(
                             &base_ctx,
                             &ctrl_name,
                             origin,
@@ -3666,8 +3668,8 @@ impl Analyzer {
                             action.block_param.as_ref(),
                             action.rest_param.as_ref(),
                         );
-                        self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
-                        self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
+                        self.analyze_action_defaults(action, &mut inner_ctx, &ctrl_name, origin);
+                        self.body_typer().analyze_method_body(&mut action.body, &inner_ctx);
                     }
                 }
 
@@ -4142,7 +4144,7 @@ impl Analyzer {
                         .concern_spliced_actions
                         .get(&ctrl_name)
                         .and_then(|m| m.get(&action.name));
-                    let inner_ctx = self.seed_action_params(
+                    let mut inner_ctx = self.seed_action_params(
                         &base_ctx,
                         &ctrl_name,
                         origin,
@@ -4152,8 +4154,8 @@ impl Analyzer {
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
                     );
-                    self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, origin);
-                    self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
+                    self.analyze_action_defaults(action, &mut inner_ctx, &ctrl_name, origin);
+                    self.body_typer().analyze_method_body(&mut action.body, &inner_ctx);
                 }
             });
         }
@@ -4212,7 +4214,7 @@ impl Analyzer {
                         in_view: false, class_side: false, claimed_macro_template: false, instance_body: false, method_body: false, building_self: false, live_class_locals: Default::default(), super_method: None, helper_body: false,
                         view_name: None,
                     };
-                    let inner_ctx = self.seed_action_params(
+                    let mut inner_ctx = self.seed_action_params(
                         &base_ctx,
                         &ctrl_name,
                         None,
@@ -4222,8 +4224,8 @@ impl Analyzer {
                         action.block_param.as_ref(),
                         action.rest_param.as_ref(),
                     );
-                    self.analyze_action_defaults(action, &inner_ctx, &ctrl_name, None);
-                    self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
+                    self.analyze_action_defaults(action, &mut inner_ctx, &ctrl_name, None);
+                    self.body_typer().analyze_method_body(&mut action.body, &inner_ctx);
                 }
             });
         }
@@ -5250,7 +5252,7 @@ impl Analyzer {
                 let elem = rest_element(observed.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default());
                 Some(Ty::Array { elem: std::sync::Arc::new(elem) })
             } else {
-                param_ty_with_default(observed.and_then(|v| v.get(i)).cloned(), param, self.defaulted(&key, i))
+                param_ty_with_default(observed.and_then(|v| v.get(i)).cloned(), param.default.as_ref(), self.defaulted(&key, i))
             };
             let ty = prefer_declared(
                 self.declared_param_ty(class_id, &method.name, positional, &param.name),
@@ -5396,39 +5398,71 @@ impl Analyzer {
         ctx
     }
 
-    fn analyze_action_defaults(&self, action: &mut crate::dialect::Action, ctx: &Ctx, class_id: &ClassId, origin: Option<&ClassId>) {
+    /// Types an action's defaults, and binds its optional positional
+    /// parameters in `ctx`, the body's, as `seed_method_params` binds a
+    /// method's: what the call sites pass, joined with the default only
+    /// where a call may leave the slot to it. A `p ||= v` over a slot no
+    /// call site has typed yet is left untyped (`Ctx::unseen_params`).
+    fn analyze_action_defaults(&self, action: &mut crate::dialect::Action, ctx: &mut Ctx, class_id: &ClassId, origin: Option<&ClassId>) {
+        // A concern method spliced in keeps its sites under the module's key.
+        let keys: Vec<ParamKey> = [Some(class_id), origin]
+            .into_iter()
+            .flatten()
+            .map(|c| (c.clone(), action.name.clone(), MethodReceiver::Instance))
+            .collect();
+        let rows: Vec<&Vec<Ty>> = keys.iter().filter_map(|k| self.inferred_params.get(k)).collect();
         let observed = |slot: usize| {
-            [Some(class_id), origin]
-                .into_iter()
-                .flatten()
-                .filter_map(|c| self.inferred_params.get(&(c.clone(), action.name.clone(), MethodReceiver::Instance)))
+            rows.iter()
                 .filter_map(|v| v.get(slot).cloned())
                 .filter(|t| !matches!(t, Ty::Var { .. }))
                 .reduce(unify_param_ty)
         };
         let required = action.params.fields.len();
-        let observed: Vec<Option<Ty>> = (0..action.opt_params.len()).map(|j| observed(required + j)).collect();
-        let mut ctx = ctx.clone();
-        for ((name, default), seen) in action.opt_params.iter_mut().zip(observed) {
-            self.body_typer().analyze_expr(default, &ctx);
-            if !ctx.local_bindings.contains_key(name) {
-                let own = default.ty.clone().filter(|t| !matches!(t, Ty::Var { .. }));
-                let ty = match (seen, own) {
-                    (Some(seen), Some(own)) => Some(unify_param_ty(seen, own)),
-                    (seen, own) => seen.or(own),
-                };
-                if let Some(ty) = ty {
-                    ctx.local_bindings.insert(name.clone(), ty);
-                }
+        for (j, (name, default)) in action.opt_params.iter_mut().enumerate() {
+            self.body_typer().analyze_expr(default, ctx);
+            // Not the default alone: a helper no typed site calls keeps
+            // the parameter unbound, as it was before any row existed.
+            if rows.is_empty() || ctx.local_bindings.contains_key(name) {
+                continue;
+            }
+            let slot = required + j;
+            let defaulted = keys.iter().any(|k| self.defaulted(k, slot));
+            if let Some(ty) = param_ty_with_default(observed(slot), Some(&*default), defaulted) {
+                ctx.local_bindings.insert(name.clone(), ty);
             }
         }
+        let rebound = body::rebound_locals(&action.body);
+        let positional: Vec<&Symbol> = action.params.fields.keys().chain(action.opt_params.iter().map(|(n, _)| n)).collect();
+        if !rows.is_empty() {
+            ctx.call_site_params = positional.iter().filter(|n| !rebound.contains(**n)).map(|n| (*n).clone()).collect();
+        }
+        if self.seeding_unseen_params || (self.deferring_pending_slots && !rows.is_empty()) {
+            let unseen_slot = |i: usize| {
+                if rows.is_empty() {
+                    self.seeding_unseen_params
+                } else {
+                    rows.iter().all(|row| row.get(i).is_none_or(|t| matches!(t, Ty::Var { .. })))
+                }
+            };
+            let or_assigned = body::or_assigned_locals(&action.body);
+            ctx.unseen_params = positional.iter().enumerate()
+                .filter(|(i, n)| !rebound.contains(**n) && or_assigned.contains(**n) && unseen_slot(*i))
+                .filter(|(_, n)| !ctx.local_bindings.contains_key(**n))
+                .map(|(_, n)| (*n).clone())
+                .collect();
+            if self.seeding_unseen_params && !ctx.unseen_params.is_empty() {
+                self.unseen_or_assign_classes.lock().unwrap_or_else(|e| e.into_inner()).insert(class_id.clone());
+            }
+        }
+        // Not bound in the body: no call-site row reaches a keyword.
+        let mut kw_ctx = ctx.clone();
         for (name, default) in action.kw_params.iter_mut() {
             let Some(default) = default else { continue };
-            self.body_typer().analyze_expr(default, &ctx);
-            if !ctx.local_bindings.contains_key(name)
+            self.body_typer().analyze_expr(default, &kw_ctx);
+            if !kw_ctx.local_bindings.contains_key(name)
                 && let Some(ty) = default.ty.clone().filter(|t| !matches!(t, Ty::Var { .. }))
             {
-                ctx.local_bindings.insert(name.clone(), ty);
+                kw_ctx.local_bindings.insert(name.clone(), ty);
             }
         }
     }
@@ -8903,8 +8937,11 @@ pub(crate) fn fold_param_observations(
 
 impl Analyzer {
     /// Whether some call site may leave `key`'s slot `i` to its default.
+    /// A call in a test counts by its method's name alone: the
+    /// production rounds decide this before any test is typed, and a
+    /// test receiver left untyped would otherwise hide the call.
     fn defaulted(&self, key: &ParamKey, i: usize) -> bool {
-        if !self.source_gem_classes.contains(&key.0) {
+        if self.test_call_arities.get(&key.1).is_some_and(|&passed| i >= passed) {
             return true;
         }
         let defaulted = self.defaulted_param_slots.lock().unwrap_or_else(|e| e.into_inner());
@@ -10102,28 +10139,50 @@ fn prefer_declared(declared: Option<Ty>, observed: Option<Ty>) -> Option<Ty> {
     }
 }
 
-fn source_gem_classes(app: &App) -> crate::det::HashSet<ClassId> {
-    let Some(lock) = app.gem_lock.as_ref() else { return Default::default() };
-    let in_gem = |file: crate::span::FileId| {
-        app.source_path(file).is_some_and(|path| {
-            lock.source.iter().any(|gem| lock.version_of(gem).is_some_and(|v| crate::ingest::source_gems::file_of(path, gem, v)))
-        })
-    };
-    app.library_classes
-        .iter()
-        .filter(|c| c.methods.iter().any(|m| !m.body.span.is_synthetic() && in_gem(m.body.span.file)))
-        .map(|c| c.name.clone())
-        .collect()
+/// Per method name, the fewest positional arguments any call in the
+/// app's tests passes. A splat, or the name written as a symbol
+/// (`send(:add, …)`, `method(:add)`), counts as none passed. By name
+/// alone: a call whose receiver is another class only keeps a default
+/// that could have been dropped.
+fn test_call_arities(app: &App) -> HashMap<Symbol, usize> {
+    fn walk(e: &Expr, out: &mut HashMap<Symbol, usize>) {
+        let mut note = |name: &Symbol, passed: usize| {
+            let slot = out.entry(name.clone()).or_insert(passed);
+            *slot = (*slot).min(passed);
+        };
+        match &*e.node {
+            ExprNode::Send { method, args, .. } => {
+                let passed = if args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. } | ExprNode::ForwardArgs)) {
+                    0
+                } else {
+                    args.iter().filter(|a| !matches!(&*a.node, ExprNode::Hash { kwargs: true, .. } | ExprNode::KeywordSplat { .. })).count()
+                };
+                note(method, passed);
+            }
+            ExprNode::Lit { value: Literal::Sym { value } } | ExprNode::MethodRef { name: value, .. } => note(value, 0),
+            _ => {}
+        }
+        e.node.for_each_child(&mut |c| walk(c, out));
+    }
+    let mut out = HashMap::default();
+    for module in &app.test_modules {
+        let methods = module.helpers.iter().chain(module.inner_classes.iter().flat_map(|c| c.methods.iter()));
+        let bodies = module.setup.iter()
+            .chain(module.tests.iter().map(|t| &t.body))
+            .chain(methods.flat_map(|m| m.params.iter().filter_map(|p| p.default.as_ref()).chain(std::iter::once(&m.body))));
+        for body in bodies {
+            walk(body, &mut out);
+        }
+    }
+    out
 }
 
-fn param_ty_with_default(observed: Option<Ty>, param: &crate::dialect::Param, defaulted: bool) -> Option<Ty> {
+fn param_ty_with_default(observed: Option<Ty>, default: Option<&Expr>, defaulted: bool) -> Option<Ty> {
     let observed = observed.filter(|t| !matches!(t, Ty::Var { .. }));
     if let Some(o) = observed.as_ref().filter(|_| !defaulted) {
         return Some(o.clone());
     }
-    let default = param
-        .default
-        .as_ref()
+    let default = default
         .and_then(|d| d.ty.clone().map(|t| class_object_arg_ty(d, t)))
         .filter(|t| !matches!(t, Ty::Var { .. }));
     match (observed, default) {
@@ -12385,7 +12444,7 @@ impl Analyzer {
     /// is measured on a copy. Destructured without `..`, so a new field has
     /// to be listed here; `Copy` fields own no heap.
     pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
-        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, defaulted_param_slots, seeding_unseen_params: _, deferring_pending_slots: _, unseen_or_assign_classes, source_gem_classes, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, constant_predicates, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, class_ivar_writes, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
+        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, defaulted_param_slots, seeding_unseen_params: _, deferring_pending_slots: _, unseen_or_assign_classes, test_call_arities, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, constant_predicates, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, class_ivar_writes, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
         let mut freed: Vec<(&str, i64)> = vec![
             ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
             ("module_self_types", crate::memory_census::freed_by(|| drop(module_self_types))),
@@ -12396,7 +12455,7 @@ impl Analyzer {
             ("pinned_param_slots", crate::memory_census::freed_by(|| drop(pinned_param_slots))),
             ("defaulted_param_slots", crate::memory_census::freed_by(|| drop(defaulted_param_slots))),
             ("unseen_or_assign_classes", crate::memory_census::freed_by(|| drop(unseen_or_assign_classes))),
-            ("source_gem_classes", crate::memory_census::freed_by(|| drop(source_gem_classes))),
+            ("test_call_arities", crate::memory_census::freed_by(|| drop(test_call_arities))),
             ("declared_signatures", crate::memory_census::freed_by(|| drop(declared_signatures))),
             ("adapter", crate::memory_census::freed_by(|| drop(adapter))),
             ("concern_folded", crate::memory_census::freed_by(|| drop(concern_folded))),
