@@ -271,6 +271,11 @@ fn emitted_ruby_tls_settings_match_the_rails_control() {
         String::from_utf8_lossy(&control.stderr)
     );
     std::fs::remove_dir_all(scratch).unwrap();
+}
+
+/// The emitted-Ruby contract needs no Rails, so it runs even where the Rails control above is skipped.
+#[test]
+fn emitted_ruby_tls_settings_reach_the_connection() {
     tls_contract(BuildTarget::Ruby);
 }
 
