@@ -85,19 +85,24 @@ pub(crate) fn unroot_for_target(app: &mut App, target: BuildTarget) {
             strip(path)
         })
     });
-    // TypeScript hoists a test class's own classes to the test file's
-    // scope (`export class Article` above `TallyTest`), where a bare name
-    // reaches the test's class first: a rooted constant naming one is
-    // refused there, as one a namespace member hides is.
+    // TypeScript hoists a test class's own classes and constants to the
+    // test file's scope (`export class Article`, `const Article` above
+    // `TallyTest`), where a bare name reaches the test's own first: a
+    // rooted constant naming one is refused there, as one a namespace
+    // member hides is. A class declared beside the test class, at the
+    // file's top level, is the class the root names, so it hides
+    // nothing.
     if matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker) {
         for tm in &mut app.test_modules {
             let hoisted: Vec<String> = tm
                 .inner_classes
                 .iter()
+                .filter(|c| tm.body_classes.contains(&c.name))
                 .flat_map(|c| {
                     let name = c.name.0.as_str().trim_start_matches("::");
                     [name.split("::").next().unwrap_or(name).to_string(), name.rsplit("::").next().unwrap_or(name).to_string()]
                 })
+                .chain(tm.constants.iter().map(|(name, _)| name.as_str().to_string()))
                 .collect();
             if hoisted.is_empty() {
                 continue;
@@ -130,6 +135,9 @@ pub(crate) fn unroot_for_target(app: &mut App, target: BuildTarget) {
             }
             for h in &mut tm.helpers {
                 check(&mut h.body);
+                for default in h.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                    check(default);
+                }
             }
             for (_, value) in &mut tm.constants {
                 check(value);
@@ -137,6 +145,9 @@ pub(crate) fn unroot_for_target(app: &mut App, target: BuildTarget) {
             for class in &mut tm.inner_classes {
                 for m in &mut class.methods {
                     check(&mut m.body);
+                    for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                        check(default);
+                    }
                 }
             }
         }
