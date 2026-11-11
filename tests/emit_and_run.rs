@@ -22115,6 +22115,8 @@ mod cable_connection_request;
 mod respond_with;
 #[path = "emit_and_run/respond_with_json.rs"]
 mod respond_with_json;
+#[path = "emit_and_run/respond_with_resource_location.rs"]
+mod respond_with_resource_location;
 #[path = "emit_and_run/route_loop_index.rs"]
 mod route_loop_index;
 #[path = "emit_and_run/deprecation.rs"]

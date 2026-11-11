@@ -414,7 +414,8 @@ fn lower_call(call_expr: &Expr, facts: &Facts<'_>) -> Option<Expr> {
 ///
 /// A call outside a routed action, in a controller that renders views, stays: `default_render` would look up the
 /// calling action's template. Only a literal options Hash is read; `action:`, `render:`, `responder:` and `allow_other_host:` leave
-/// the call standing, as do several resources, a computed options Hash and a block with another arm.
+/// the call standing, as do several resources, a computed options Hash and a block with another arm. A POST with
+/// no `location:` whose resource is not an instance variable raises on success, as native has no `url_for(record)`.
 fn lower_json_call(call_expr: &Expr, facts: &Facts<'_>) -> Option<Expr> {
     let span = call_expr.span;
     let ExprNode::Send { recv, method, args, block, .. } = &*call_expr.node else { return None };
@@ -457,6 +458,7 @@ fn lower_json_call(call_expr: &Expr, facts: &Facts<'_>) -> Option<Expr> {
         _ => None,
     };
 
+    let resource_is_hash = matches!(&*resource_expr.node, ExprNode::Hash { .. });
     let mut stmts = vec![assign("__rh_resource", resource_expr, span)];
     let location_read = location.map(|l| {
         stmts.push(assign("__rh_location", l, span));
@@ -491,9 +493,25 @@ fn lower_json_call(call_expr: &Expr, facts: &Facts<'_>) -> Option<Expr> {
     };
     let resource = || var("__rh_resource", span);
     let get_branch = render_with(None, Some(("json", resource())), user_status.clone(), location_read.clone());
-    let post_location = location_read.clone().or(location_fallback);
-    let Some(post_location) = post_location else { return None };
-    let post_branch = render_with(None, Some(("json", resource())), Some(user_status.clone().unwrap_or_else(|| sym("created", span))), Some(post_location));
+    let post_status = Some(user_status.clone().unwrap_or_else(|| sym("created", span)));
+    let post_branch = match location_read.clone().or(location_fallback) {
+        Some(post_location) => render_with(None, Some(("json", resource())), post_status, Some(post_location)),
+        // `api_location` is `url_for(resource)`, which only an instance variable's name resolves on native
+        // (`rewrite_location_in_kwargs`). Any other record raises rather than answer with a wrong Location;
+        // its errors branch still answers 422. A Hash has no url.
+        None if !resource_is_hash => Expr::new(
+            span,
+            ExprNode::Raise {
+                value: Expr::new(
+                    span,
+                    ExprNode::Lit {
+                        value: Literal::Str { value: "roundhouse: respond_with on a POST needs location: for a resource that is not an instance variable".into() },
+                    },
+                ),
+            },
+        ),
+        None => return None,
+    };
     let mut head_args = vec![sym("no_content", span)];
     if facts.view_rendering && let Some(l) = &location_read {
         head_args.push(kwargs(vec![(sym("location", span), l.clone())], span));
