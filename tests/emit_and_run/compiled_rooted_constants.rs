@@ -196,3 +196,53 @@ fn typescript_refuses_a_top_level_constant_a_test_class_hides() {
     let test = std::fs::read_to_string(emitted.join("test/tally.test.ts")).unwrap();
     assert!(test.contains("new Tally(2).n"), "{test}");
 }
+
+/// A test class can declare its own `Article` as a constant
+/// (`Article = Struct.new(:n)`) rather than a class: TypeScript writes it
+/// at the test file's scope (`const Article = ...`), where a bare
+/// `Article` is the test's constant, not the model. `::Article` is
+/// refused there too.
+#[test]
+fn typescript_refuses_a_top_level_constant_a_test_constant_hides() {
+    let (_, errors) = app("")
+        .write(
+            "test/models/tally_test.rb",
+            "require \"test_helper\"\n\nclass TallyTest < ActiveSupport::TestCase\n  Article = Struct.new(:n)\n\n  test \"reads the model\" do\n    assert_equal 2, ::Article.count\n  end\nend\n",
+        )
+        .emit(BuildTarget::Typescript);
+    let refused: Vec<&String> = errors.iter().filter(|e| e.contains("`::Article` in `TallyTest`")).collect();
+    assert_eq!(refused.len(), 1, "{errors:#?}");
+}
+
+/// A class declared at the test file's top level, beside the test class,
+/// is the top-level class `::Widget` names: TypeScript writes it at the
+/// same file scope, where a bare `Widget` still names it. The constant
+/// is written bare, not refused.
+#[test]
+fn typescript_writes_a_top_level_helper_class_bare() {
+    let (emitted, errors) = app("")
+        .write(
+            "test/models/tally_test.rb",
+            "require \"test_helper\"\n\nclass Widget\n  def self.n\n    3\n  end\nend\n\nclass TallyTest < ActiveSupport::TestCase\n  test \"reads the helper\" do\n    assert_equal 3, ::Widget.n\n  end\nend\n",
+        )
+        .emit(BuildTarget::Typescript);
+    assert!(!errors.iter().any(|e| e.contains("::Widget")), "{errors:#?}");
+    let test = std::fs::read_to_string(emitted.join("test/tally.test.ts")).unwrap();
+    assert!(test.contains("Widget.n()"), "{test}");
+}
+
+/// A parameter default reads its constants where the method is
+/// written: `def total(klass = ::Article)` in a test helper, or in a
+/// method of the test's own class, names the model, and TypeScript's
+/// bare `Article` would name the test's class. Each is refused.
+#[test]
+fn typescript_refuses_a_hidden_top_level_constant_in_a_test_methods_default() {
+    let (_, errors) = app("")
+        .write(
+            "test/models/tally_test.rb",
+            "require \"test_helper\"\n\nclass TallyTest < ActiveSupport::TestCase\n  class Article\n    def self.count(klass = ::Article)\n      klass.name\n    end\n  end\n\n  test \"counts\" do\n    assert_equal 2, total\n  end\n\n  def total(klass = ::Article)\n    klass.count\n  end\nend\n",
+        )
+        .emit(BuildTarget::Typescript);
+    let refused: Vec<&String> = errors.iter().filter(|e| e.contains("`::Article` in `TallyTest`")).collect();
+    assert_eq!(refused.len(), 2, "{errors:#?}");
+}
