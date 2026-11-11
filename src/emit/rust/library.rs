@@ -34,7 +34,7 @@ use crate::ty::Ty;
 /// make_record(size: 1)`, a test helper the tests call bare) gets the
 /// source's default written in. Only literal defaults are copied — a
 /// computed default could read other parameters — and only onto calls
-/// whose arguments are all positional; a trailing keyword hash is
+/// whose arguments are all positional (a braced `{}` is one); a trailing keyword hash is
 /// matched to its parameters by name later, in send dispatch.
 fn pad_sibling_defaults(methods: &mut [MethodDef]) {
     use crate::expr::{Expr, ExprNode};
@@ -61,7 +61,7 @@ fn pad_sibling_defaults(methods: &mut [MethodDef]) {
                 None => true,
                 Some(r) => matches!(&*r.node, ExprNode::SelfRef),
             };
-            if !self_call || args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { .. })) {
+            if !self_call || args.iter().any(|a| matches!(&*a.node, ExprNode::Hash { kwargs: true, .. })) {
                 return;
             }
             let Some(ds) = defaults.get(method) else { return };
@@ -118,14 +118,10 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
             writeln!(out).unwrap();
         }
         first = false;
-        out.push_str(&emit_module_method(m)?);
-    }
-    // Module-mode methods are free functions: there is no `Self` for a
-    // sibling call (`self.helper` / bare `helper` in a `def self.X`
-    // body) to dispatch through, and the sibling is in scope by name.
-    for m in &colored {
-        let name = super::expr::sanitize_ident(m.name.as_str());
-        out = out.replace(&format!("Self::{name}("), &format!("{name}("));
+        // A free function: a sibling call is written by name, not
+        // through `Self::` (library mode, below, wraps the same method
+        // in an `impl`).
+        out.push_str(&super::expr::with_free_function_scope(|| emit_module_method(m))?);
     }
     Ok(out)
 }

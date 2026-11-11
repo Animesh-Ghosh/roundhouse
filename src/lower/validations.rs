@@ -304,7 +304,11 @@ pub fn presence_gaps_for_target(
             let Some(column) = table.columns.iter().find(|c| c.name == validation.attribute) else { continue };
             let numeric = matches!(
                 column.col_type,
-                ColumnType::Integer | ColumnType::BigInt | ColumnType::Float | ColumnType::Decimal { .. }
+                ColumnType::Integer
+                    | ColumnType::BigInt
+                    | ColumnType::Float
+                    | ColumnType::Decimal { .. }
+                    | ColumnType::Reference { .. }
             );
             if !numeric
                 || column.nullable

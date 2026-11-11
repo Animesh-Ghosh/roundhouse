@@ -3,8 +3,9 @@
 //! spelled `self.abstract_class = true`, `has_many … dependent:
 //! :destroy` and `belongs_to` (whose reflection field is the Rust keyword
 //! `macro`), a class method that calls `find_by`, presence and scoped
-//! uniqueness rules, and tests that call `create!`, `valid?`, `destroy!`,
-//! `==` and a test helper with keyword defaults.
+//! uniqueness rules, and tests that call `create!`, `valid?`, `destroy!`
+//! (and use its result), `==` in both operand orders and a test helper
+//! with keyword defaults, and one whose default follows a positional hash.
 
 use super::emit_and_run;
 
@@ -105,6 +106,16 @@ class ShelfTest < ActiveSupport::TestCase
     assert_equal [item], shelf.items.to_a
   end
 
+  test "a new shelf equals no other" do
+    refute Shelf.new(aisle: 1, position: 2) == Shelf.new(aisle: 1, position: 2)
+  end
+
+  test "destroy! answers the destroyed shelf" do
+    shelf = Shelf.create!(aisle: 1, position: 2)
+    destroyed = shelf.destroy!
+    assert_equal shelf.id, destroyed.id
+  end
+
   test "destroying a shelf destroys its items" do
     shelf = Shelf.create!(aisle: 1, position: 2)
     shelf.items.create!(name: "a", weight: 1)
@@ -136,6 +147,7 @@ class ItemTest < ActiveSupport::TestCase
     shelf = make_shelf
     item = shelf.items.create!(name: "box", weight: 3)
     assert_equal shelf, item.shelf
+    assert item.shelf == shelf
   end
 
   test "name is unique on a shelf" do
@@ -153,10 +165,19 @@ class ItemTest < ActiveSupport::TestCase
     assert_predicate other.items.build(name: "box", weight: 4), :valid?
   end
 
+  test "a helper's default fills in after a positional hash" do
+    assert_equal 7, padded_size({})
+  end
+
   private
 
   def make_shelf(aisle: 1, position: 2)
     Shelf.create!(aisle: aisle, position: position)
+  end
+
+  #: (Hash[String, String] attrs, ?Integer extra) -> Integer
+  def padded_size(attrs, extra = 7)
+    attrs.size + extra
   end
 end
 "#)
@@ -171,8 +192,11 @@ pub const PASSING: &[&str] = &[
     "shelf::test_labelled_finds_by_label",
     "shelf::test_labelled_returns_nil_for_an_unknown_label",
     "shelf::test_has_many_items",
+    "shelf::test_a_new_shelf_equals_no_other",
+    "shelf::test_destroy_answers_the_destroyed_shelf",
     "shelf::test_destroying_a_shelf_destroys_its_items",
     "item::test_requires_a_name",
     "item::test_belongs_to_a_shelf",
     "item::test_the_same_name_on_another_shelf_is_fine",
+    "item::test_a_helper_s_default_fills_in_after_a_positional_hash",
 ];

@@ -33,7 +33,7 @@ fn record_tests_app_emits_the_model_surface_its_tests_call() {
     assert!(!record.contains("fn to_param") && !record.contains("self.id"), "{record}");
 
     let shelf = read("src/models/shelf.rs");
-    for want in ["pub fn find_by<", "pub fn create_bang<", "pub fn valid_pred(&mut self)", "pub fn destroy_bang(&mut self)", "impl PartialEq for Shelf", "impl PartialEq<Option<Shelf>> for Shelf"] {
+    for want in ["pub fn find_by<", "pub fn create_bang<", "pub fn valid_pred(&mut self)", "pub fn destroy_bang(&mut self) -> Self", "impl PartialEq for Shelf", "impl PartialEq<Option<Shelf>> for Shelf", "impl PartialEq<Shelf> for Option<Shelf>"] {
         assert!(shelf.contains(want), "missing `{want}`:\n{shelf}");
     }
 
@@ -42,27 +42,34 @@ fn record_tests_app_emits_the_model_surface_its_tests_call() {
 
     let item_test = read("src/tests/item.rs");
     assert!(item_test.contains("make_shelf(1_i64, 2_i64)") && !item_test.contains("Self::make_shelf"), "{item_test}");
+    assert!(item_test.contains(", 7_i64)") && !item_test.contains("Self::padded_size"), "{item_test}");
 }
 
 /// `validates :x, presence:` on a NOT NULL number with no default cannot
 /// fire on a strict target, whose field starts at 0, so the build reports
-/// it rather than claiming it. A String column (`name`) checks blank, and
-/// the ruby family keeps nil, so neither is reported.
+/// it rather than claiming it — as a warning naming the target, out of
+/// `target_files`. A String column (`name`) checks blank, and the ruby
+/// family keeps nil, so neither is reported.
 #[test]
 fn presence_on_a_not_null_number_is_reported_on_strict_targets() {
-    let (_emitted, app, _errors) = rust_record_tests_app::app().emit_with_app(roundhouse::project::BuildTarget::Rust);
-    let names = |target| -> Vec<String> {
-        roundhouse::lower::validations::presence_gaps_for_target(&app, target)
+    let presence = |target| -> Vec<roundhouse::diagnostic::Diagnostic> {
+        rust_record_tests_app::app()
+            .emit_warnings(target)
             .into_iter()
-            .map(|d| d.message)
+            .filter(|d| d.message.starts_with("validates :") && d.message.contains(", presence:"))
             .collect()
     };
-    let rust = names(roundhouse::project::BuildTarget::Rust);
-    assert_eq!(rust.len(), 3, "{rust:?}");
+    let rust = presence(roundhouse::project::BuildTarget::Rust);
+    let messages: Vec<&str> = rust.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(rust.len(), 3, "{messages:?}");
     for attr in ["aisle", "position", "weight"] {
-        assert!(rust.iter().any(|m| m.contains(&format!("validates :{attr}, presence:"))), "{attr}: {rust:?}");
+        assert!(messages.iter().any(|m| m.starts_with(&format!("validates :{attr}, presence: not supported (rust)"))), "{attr}: {messages:?}");
     }
-    assert!(names(roundhouse::project::BuildTarget::Ruby).is_empty());
+    assert!(rust.iter().all(|d| matches!(
+        &d.kind,
+        roundhouse::diagnostic::DiagnosticKind::Unsupported { target: Some(t), .. } if t.as_str() == "rust"
+    )));
+    assert!(presence(roundhouse::project::BuildTarget::Ruby).is_empty());
 }
 
 /// The same app's emitted `cargo test`: every test whose rules the target

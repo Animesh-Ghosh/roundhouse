@@ -346,10 +346,10 @@ pub(super) fn emit_send(
                 }
             }
         }
-        if coerced.is_empty() {
-            return format!("Self::{rewritten_method}()");
-        }
-        return format!("Self::{rewritten_method}({})", coerced.join(", "));
+        // A module-mode method is a free function: its siblings are
+        // in scope by name, with no `Self` to dispatch through.
+        let path = if super::in_free_function() { "" } else { "Self::" };
+        return format!("{path}{rewritten_method}({})", coerced.join(", "));
     }
     // Callee-back-propagation for two recv shapes:
     //

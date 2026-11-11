@@ -848,9 +848,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     ));
                 }
                 // No abort channel on the strict targets, so the bang
-                // form is `destroy` (as `ActiveRecord::Base#destroy!`).
+                // form is `destroy` (as `ActiveRecord::Base#destroy!`),
+                // answering the record as `save_bang` does.
                 if !has_method("destroy!") {
-                    extras.push_str("pub fn destroy_bang(&mut self) { self.destroy(); }\n");
+                    extras.push_str("pub fn destroy_bang(&mut self) -> Self { self.destroy(); self.clone() }\n");
                 }
                 // `find_by(col: value, …)`: equality per condition (`IS
                 // NULL` for nil), ANDed, first row. The keys are the
@@ -878,15 +879,21 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 extras
             };
             // Active Record equality: the same model and the same saved
-            // id (a new record equals no other). `assert_equal record,
-            // other.association` compares against the reader's Option.
+            // id (a new record equals no other). Ruby's identity half
+            // (`super`, so a new record equals itself) has no Rust
+            // counterpart: the emitted operands are clones, so an
+            // address compare never sees the same record twice.
+            // `assert_equal record, other.association` and
+            // `other.association == record` compare against the reader's
+            // Option, in either order.
             let shim_eq = if has_method("==") {
                 String::new()
             } else {
                 let name = rust_struct_name(lc.name.0.as_str());
                 format!(
                     "impl PartialEq for {name} {{ fn eq(&self, other: &Self) -> bool {{ self.id != 0 && self.id == other.id }} }}\n\
-                     impl PartialEq<Option<{name}>> for {name} {{ fn eq(&self, other: &Option<{name}>) -> bool {{ other.as_ref().is_some_and(|o| self == o) }} }}\n"
+                     impl PartialEq<Option<{name}>> for {name} {{ fn eq(&self, other: &Option<{name}>) -> bool {{ other.as_ref().is_some_and(|o| self == o) }} }}\n\
+                     impl PartialEq<{name}> for Option<{name}> {{ fn eq(&self, other: &{name}) -> bool {{ self.as_ref().is_some_and(|s| s == other) }} }}\n"
                 )
             };
             let ar_shim = if needs_ar_shim {
