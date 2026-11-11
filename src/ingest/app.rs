@@ -5392,7 +5392,11 @@ fn same_read(a: &crate::expr::Expr, b: &crate::expr::Expr) -> bool {
 }
 
 fn every_primary_key_is_id(app: &App) -> bool {
-    app.models.iter().all(|m| m.primary_key.as_ref().is_none_or(|k| k.as_str() == "id"))
+    // Nor where a class of the app answers `primary_key` itself: the send then names whatever that method answers.
+    let own_primary_key = app.library_classes.iter().flat_map(|c| c.methods.iter()).any(|m| m.name.as_str() == "primary_key")
+        || app.models.iter().any(|m| m.methods().any(|d| d.name.as_str() == "primary_key"));
+    !own_primary_key
+        && app.models.iter().all(|m| m.primary_key.as_ref().is_none_or(|k| k.as_str() == "id"))
         && app.schema.tables.values().all(|t| {
             t.primary_key_columns.is_empty() && t.columns.iter().filter(|c| c.primary_key).all(|c| c.name.as_str() == "id")
         })
