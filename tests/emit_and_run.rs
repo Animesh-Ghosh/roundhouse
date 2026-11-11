@@ -22150,3 +22150,7 @@ mod mime_extension_lookup;
 mod self_class_argument;
 #[path = "emit_and_run/form_for_record.rs"]
 mod form_for_record;
+#[path = "support/library_concern_included_include.rs"]
+mod library_concern_included_include_contract;
+#[path = "emit_and_run/library_concern_included_include.rs"]
+mod library_concern_included_include;
