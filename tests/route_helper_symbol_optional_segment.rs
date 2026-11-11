@@ -33,6 +33,14 @@ const CONTROLLER: &str = "class MediaController < ApplicationController
   def maybe_mixed_path(id, pick)
     media_proxy_path(id, pick == 1 ? :thumb : (pick == 2 ? \"small\" : nil))
   end
+
+  def numbered_path(id, flag)
+    media_proxy_path(id, flag ? :thumb : 42)
+  end
+
+  def maybe_numbered_path(id, pick)
+    media_proxy_path(id, pick == 1 ? :thumb : (pick == 2 ? 42 : nil))
+  end
 end
 ";
 
@@ -77,6 +85,11 @@ raise c.mixed_path(1, false).inspect unless c.mixed_path(1, false) == "/media_pr
 raise c.maybe_mixed_path(1, 1).inspect unless c.maybe_mixed_path(1, 1) == "/media_proxy/1/thumb"
 raise c.maybe_mixed_path(1, 2).inspect unless c.maybe_mixed_path(1, 2) == "/media_proxy/1/small"
 raise c.maybe_mixed_path(1, 3).inspect unless c.maybe_mixed_path(1, 3) == "/media_proxy/1"
+raise c.numbered_path(1, true).inspect unless c.numbered_path(1, true) == "/media_proxy/1/thumb"
+raise c.numbered_path(1, false).inspect unless c.numbered_path(1, false) == "/media_proxy/1/42"
+raise c.maybe_numbered_path(1, 1).inspect unless c.maybe_numbered_path(1, 1) == "/media_proxy/1/thumb"
+raise c.maybe_numbered_path(1, 2).inspect unless c.maybe_numbered_path(1, 2) == "/media_proxy/1/42"
+raise c.maybe_numbered_path(1, 3).inspect unless c.maybe_numbered_path(1, 3) == "/media_proxy/1"
 puts "proxy paths passed"
 "#,
         )
@@ -120,4 +133,22 @@ fn a_symbol_or_string_value_in_an_optional_segment_is_its_string() {
     }
     let start = controller.find("def maybe_mixed_path").unwrap_or_else(|| panic!("{controller}"));
     assert!(controller[start..].contains(".nil?"), "{controller}");
+}
+
+/// A Symbol-or-Integer value (`flag ? :thumb : 42`) is its String too,
+/// with or without nil: Rails renders an Integer with `to_param`, its
+/// `to_s`, and a nil drops the segment.
+#[test]
+fn a_symbol_or_integer_value_in_an_optional_segment_is_its_string() {
+    let (emitted, _) = example().emit(BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/media_controller.rb")).expect("read the emitted controller");
+    let body = |method: &str| {
+        let start = controller.find(method).unwrap_or_else(|| panic!("{controller}"));
+        let body = &controller[start..];
+        body[..body.find("\n  end").unwrap_or(body.len())].to_string()
+    };
+    let numbered = body("def numbered_path");
+    assert!(numbered.contains("to_s"), "{numbered}");
+    let maybe = body("def maybe_numbered_path");
+    assert!(maybe.contains("to_s") && maybe.contains(".nil?"), "{maybe}");
 }
