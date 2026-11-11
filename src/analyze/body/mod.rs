@@ -143,8 +143,9 @@ pub struct Ctx {
     /// Not any local's: a destructured `before, after = row` types an element it may not hold.
     pub call_site_params: crate::det::HashSet<Symbol>,
     /// The parameters a `p ||= v` in the body assigns whose call sites
-    /// have not been read yet: the typing pass before the first
-    /// unification, which has no parameter rows. Such a `||=` leaves `p`
+    /// have not been read yet: in the typing pass before the first
+    /// unification, which has no parameter rows, or in a production round
+    /// whose row still has the slot pending. Such a `||=` leaves `p`
     /// unbound instead of binding it to `v`'s type: whether `v` ever runs
     /// is the callers' to say, and a `v` bound now and written through a
     /// hash the callers read back (`_kinds[label] = kind`, `add(label,
@@ -908,6 +909,28 @@ impl<'a> BodyTyper<'a> {
     /// raise-equivalent without re-classifying.
     pub fn analyze_expr(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {
         self.analyze_expr_role(expr, ctx, false)
+    }
+
+    /// [`Self::analyze_expr`] for a method's whole body. A body that is
+    /// one `p ||= v` is typed as the one statement of a sequence, as any
+    /// longer body's `||=` is: the call-site deferral
+    /// (`Ctx::unseen_params`) and the dead default (`expr::DEAD_OR_ASSIGN`)
+    /// are decided per statement, and `def pick(kind = nil) = kind ||=
+    /// Class.new(Base)` is the same `||=` as one with a statement before it.
+    pub fn analyze_method_body(&self, body: &mut Expr, ctx: &Ctx) -> Ty {
+        if !matches!(&*body.node, ExprNode::OpAssign { target: LValue::Var { .. }, op: crate::expr::OpAssignOp::OrOr, .. }) {
+            return self.analyze_expr(body, ctx);
+        }
+        let span = body.span;
+        let stmt = std::mem::replace(body, Expr::new(span, ExprNode::Lit { value: Literal::Nil }));
+        let mut seq = Expr::new(span, ExprNode::Seq { exprs: vec![stmt] });
+        let ty = self.analyze_expr(&mut seq, ctx);
+        if let ExprNode::Seq { exprs } = &mut *seq.node {
+            if let Some(stmt) = exprs.pop() {
+                *body = stmt;
+            }
+        }
+        ty
     }
 
     fn analyze_receiver(&self, expr: &mut Expr, ctx: &Ctx) -> Ty {

@@ -140,6 +140,10 @@ pub struct Analyzer {
     /// one its call sites have not been read for, not one nobody passes
     /// (`Ctx::unseen_params`).
     seeding_unseen_params: bool,
+    /// Set for the production rounds' typing passes: a `p ||= v` over a
+    /// parameter whose row slot is still pending is left untyped too. The
+    /// passes after that loop retype every production body without it.
+    deferring_pending_slots: bool,
     /// The classes that pass left a `p ||= v` untyped in: the first
     /// fixpoint round retypes them whatever else moved.
     unseen_or_assign_classes: std::sync::Mutex<crate::det::HashSet<ClassId>>,
@@ -1397,6 +1401,7 @@ impl Analyzer {
             pinned_param_slots: BTreeSet::new(),
             defaulted_param_slots: Default::default(),
             seeding_unseen_params: false,
+            deferring_pending_slots: false,
             unseen_or_assign_classes: Default::default(),
             source_gem_classes: source_gem_classes(app),
             declared_signatures: app
@@ -1641,6 +1646,7 @@ impl Analyzer {
             )
         });
         self.seeding_unseen_params = false;
+        self.deferring_pending_slots = true;
         // Those bodies were typed against no rows, so the first round
         // retypes them even where no row or return moved.
         let mut unseen = std::mem::take(&mut *self.unseen_or_assign_classes.lock().unwrap_or_else(|e| e.into_inner()));
@@ -1715,6 +1721,7 @@ impl Analyzer {
                 )
             });
         }
+        self.deferring_pending_slots = false;
         let round_inputs = fixpoint_check::RoundInputs {
             dynamic_render_ivars: &dynamic_render_ivars,
             existing_view_names: &existing_view_names,
@@ -2887,7 +2894,7 @@ impl Analyzer {
                     }
                 }
                 let mctx = self.seed_method_params(&class_ctx, &model_name, method, true);
-                self.body_typer().analyze_expr(&mut method.body, &mctx);
+                self.body_typer().analyze_method_body(&mut method.body, &mctx);
             }
 
             // Pass B: gather every ivar assignment across the model's
@@ -2964,7 +2971,7 @@ impl Analyzer {
                 for method in model.methods_mut() {
                     let side = if method.receiver == MethodReceiver::Class { &class_side_ctx } else { &reseeded_ctx };
                     let mctx = self.seed_method_params(side, &model_name, method, true);
-                    self.body_typer().analyze_expr(&mut method.body, &mctx);
+                    self.body_typer().analyze_method_body(&mut method.body, &mctx);
                 }
             }
             self.harvest_one_model(model);
@@ -3097,7 +3104,7 @@ impl Analyzer {
                         }
                     }
                     let mctx = self.seed_method_params(&ctx, &ctrl_id, method, false);
-                    self.body_typer().analyze_expr(&mut method.body, &mctx);
+                    self.body_typer().analyze_method_body(&mut method.body, &mctx);
                 }
             }
 
@@ -4465,7 +4472,7 @@ impl Analyzer {
                             self.body_typer().analyze_expr(default, &mctx);
                         }
                     }
-                    self.body_typer().analyze_expr(&mut method.body, &mctx);
+                    self.body_typer().analyze_method_body(&mut method.body, &mctx);
                 }
             }
 
@@ -4620,7 +4627,7 @@ impl Analyzer {
                 };
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method, true);
-                    self.body_typer().analyze_expr(&mut method.body, &mctx);
+                    self.body_typer().analyze_method_body(&mut method.body, &mctx);
                 }
             }
             views
@@ -5295,14 +5302,22 @@ impl Analyzer {
             .filter(|p| !p.rest && !rebound.contains(&p.name) && observed.is_some())
             .map(|p| p.name.clone())
             .collect();
-        if self.seeding_unseen_params && observed.is_none() {
+        // Before the first unification no row exists; in the production
+        // rounds after it, a row whose slot is still pending (`Var`) names
+        // callers whose argument is not typed yet. A method no call site
+        // reaches has no row then, and keeps its default from round one.
+        let unseen_slot = |i: usize| match observed {
+            None => self.seeding_unseen_params,
+            Some(row) => self.deferring_pending_slots && row.get(i).is_none_or(|t| matches!(t, Ty::Var { .. })),
+        };
+        if self.seeding_unseen_params || (self.deferring_pending_slots && observed.is_some()) {
             let or_assigned = body::or_assigned_locals(&method.body);
-            ctx.unseen_params = method.params.iter()
-                .filter(|p| !p.rest && !rebound.contains(&p.name) && or_assigned.contains(&p.name))
-                .filter(|p| !ctx.local_bindings.contains_key(&p.name))
-                .map(|p| p.name.clone())
+            ctx.unseen_params = method.params.iter().enumerate()
+                .filter(|(i, p)| !p.rest && !rebound.contains(&p.name) && or_assigned.contains(&p.name) && unseen_slot(*i))
+                .filter(|(_, p)| !ctx.local_bindings.contains_key(&p.name))
+                .map(|(_, p)| p.name.clone())
                 .collect();
-            if !ctx.unseen_params.is_empty() {
+            if self.seeding_unseen_params && !ctx.unseen_params.is_empty() {
                 self.unseen_or_assign_classes.lock().unwrap_or_else(|e| e.into_inner()).insert(class_id.clone());
             }
         }
@@ -12360,7 +12375,7 @@ impl Analyzer {
     /// is measured on a copy. Destructured without `..`, so a new field has
     /// to be listed here; `Copy` fields own no heap.
     pub fn census_drop(self) -> HashMap<ClassId, ClassInfo> {
-        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, defaulted_param_slots, seeding_unseen_params: _, unseen_or_assign_classes, source_gem_classes, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, constant_predicates, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, class_ivar_writes, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
+        let Analyzer { classes, module_self_types, upload_array_fields, materialized_associations, inferred_params, open_param_slots, pinned_param_slots, defaulted_param_slots, seeding_unseen_params: _, deferring_pending_slots: _, unseen_or_assign_classes, source_gem_classes, declared_signatures, adapter, concern_folded, host_folded, inquirers, i18n, helper_modules, helper_index, open_classes, refined_action_bindings, const_resolver, source_indexed, typed_constants, data_factories, class_factories, constant_predicates, data_factories_without_custom_initialize, view_seeds, callers_by_target, controller_action_meta_cache, fixpoint_rounds, fixpoint_checks, settle, written_ivars, class_ivar_writes, site_cache, retyped_since_unify, settled_constants, surveys, retyped_since_survey, unify_memo } = self;
         let mut freed: Vec<(&str, i64)> = vec![
             ("classes (kept)", crate::memory_census::live_delta(|| classes.clone())),
             ("module_self_types", crate::memory_census::freed_by(|| drop(module_self_types))),

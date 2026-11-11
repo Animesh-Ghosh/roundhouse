@@ -42,6 +42,21 @@ pub fn overlay_lambda_default() -> super::emit_and_run::Overlay {
     overlay().write(&format!("{gem}/lib/kinds/registry.rb"), &registry)
 }
 
+/// [`overlay`], with the default in a method of its own whose body is
+/// the one `||=`: `add` takes `pick(kind)`'s return. That body is no
+/// sequence of statements, and its `Class.new` must stay out of the
+/// return the first typing harvests, or `add` stores it in the hash.
+pub fn overlay_default_method() -> super::emit_and_run::Overlay {
+    let gem = "vendor/bundle/ruby/3.4.0/gems/kinds-1.0";
+    let default = "      kind ||= Class.new(Registry::Base)\n";
+    assert!(REGISTRY.contains(default));
+    let registry = REGISTRY.replace(default, "      kind = pick(kind)\n").replace(
+        "    def _kinds\n",
+        "    def pick(kind = nil)\n      kind ||= Class.new(Registry::Base)\n    end\n\n    def _kinds\n",
+    );
+    overlay().write(&format!("{gem}/lib/kinds/registry.rb"), &registry)
+}
+
 const REGISTRY: &str = r##"class Registry
   class Base
     def run

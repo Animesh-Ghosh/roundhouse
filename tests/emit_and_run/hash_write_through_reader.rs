@@ -34,3 +34,18 @@ fn a_lambda_default_runs() {
     run.assert_passes();
     assert_eq!(run.stdout, contract::EXPECTED, "stderr:\n{}", run.stderr);
 }
+
+/// As above, with the default in a method whose whole body is the `||=`.
+#[test]
+fn a_default_method_stays_out_of_the_hash_for_spinel() {
+    let overlay = contract::overlay_default_method();
+    let (_emitted, errors) = overlay.emit(roundhouse::project::BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+}
+
+#[test]
+fn a_default_method_runs() {
+    let run = contract::overlay_default_method().run_ruby(contract::SCRIPT);
+    run.assert_passes();
+    assert_eq!(run.stdout, contract::EXPECTED, "stderr:\n{}", run.stderr);
+}
