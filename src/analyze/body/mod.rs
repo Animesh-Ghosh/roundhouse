@@ -1307,7 +1307,11 @@ impl<'a> BodyTyper<'a> {
                         && self.is_instance(r, ctx)
                         && variants.iter().any(|v| !matches!(v, Ty::Nil))
                         && variants.iter().filter(|v| !matches!(v, Ty::Nil)).all(|v| {
-                            matches!(v, Ty::Class { id, .. } if !self.chain_defines(id, &try_name)) && self.never_responds(v, &asked)
+                            // Nor where a member answers `respond_to?` itself, which `try` calls, or lacks Object's `try`.
+                            matches!(v, Ty::Class { id, .. } if !self.chain_defines(id, &try_name)
+                                && !self.chain_defines(id, &Symbol::from("respond_to?"))
+                                && self.reaches_object(id))
+                                && self.never_responds(v, &asked)
                         }) =>
                 {
                     Some(false)

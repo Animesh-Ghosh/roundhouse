@@ -1252,8 +1252,10 @@ impl<'a> BodyTyper<'a> {
             };
             // Not settled past a module the program does not define, or a `method_missing`: either may answer it.
             // Nor an open class: a gem the program does not model may define the method on it.
+            // Nor one the source defines whose signature is not harvested yet.
             if cls.open
                 || cls.instance_methods.contains_key(method)
+                || cls.source_instance_methods.contains(method)
                 || cls.instance_methods.contains_key(&Symbol::from("method_missing"))
                 || cls.instance_methods.contains_key(&Symbol::from("respond_to_missing?"))
                 || cls.includes.iter().any(|m| {
@@ -1266,6 +1268,20 @@ impl<'a> BodyTyper<'a> {
             {
                 return false;
             }
+            current = cls.parent.clone();
+        }
+        false
+    }
+
+    /// Whether `of`'s chain ends at `Object`, whose `try` (Active Support's) answers nil for a method it lacks.
+    pub(super) fn reaches_object(&self, of: &ClassId) -> bool {
+        let mut current = Some(of.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { return true };
+            if id.0.as_str().trim_start_matches("::") == "BasicObject" {
+                return false;
+            }
+            let Some(cls) = self.classes().get(&id) else { return id.0.as_str().trim_start_matches("::") == "Object" };
             current = cls.parent.clone();
         }
         false

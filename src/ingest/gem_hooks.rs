@@ -366,6 +366,10 @@ pub(super) fn fold_devise_view_scope(app: &mut App, mappings: &[(String, String)
 /// mapping's plural, in one of Devise's controllers' directories (`users/sessions/new`).
 fn devise_rendered(view: &str, mappings: &[(String, String)]) -> bool {
     const CONTROLLERS: &[&str] = &["sessions", "registrations", "passwords", "confirmations", "unlocks", "omniauth_callbacks", "shared", "mailer"];
+    // Not a mailer's view: a mailer has no request mapping for the case to read.
+    if view.split('/').any(|dir| dir == "mailer") {
+        return false;
+    }
     if view.starts_with("devise/") {
         return true;
     }
