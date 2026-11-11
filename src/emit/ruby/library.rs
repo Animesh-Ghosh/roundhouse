@@ -7795,8 +7795,14 @@ pub(crate) fn apply_constant_rooting(
             let segs: Vec<&str> = name.split("::").collect();
             (1..segs.len()).map(|i| segs[..i].join("::")).collect()
         };
+        // A parameter's default is evaluated in the method's lexical
+        // scope, as its body is: `def tag(value = Util.tag)` in a
+        // compact `class Gadget::Thing` reads `::Util`.
         for m in &mut lc.methods {
             root_shadowed_constants(&mut m.body, name, &shadowing, &prefixes, &known);
+            for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
+                root_shadowed_constants(default, name, &shadowing, &prefixes, &known);
+            }
         }
     }
 }
