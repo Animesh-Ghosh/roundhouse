@@ -85,11 +85,11 @@ pub(crate) fn unroot_for_target(app: &mut App, target: BuildTarget) {
             strip(path)
         })
     });
-    let mut visit = |expr: &mut Expr| unroot(expr, &mut |path, _| strip(path));
-    crate::lower::for_each_test_body(app, &mut visit);
-    for view in &mut app.views {
-        visit(&mut view.body);
-    }
+    // Every other root the target emits: views, tests, fixtures' ERB
+    // values and preambles, association and parameter defaults, the
+    // routes' `direct` helpers. It walks the hook bodies again, where no
+    // root is left.
+    crate::lower::for_each_emit_body(app, &mut |expr| unroot(expr, &mut |path, _| strip(path)));
 }
 
 /// For a rooted `path` read in `owner`'s body, the enclosing namespace
