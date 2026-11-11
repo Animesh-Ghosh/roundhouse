@@ -21,6 +21,10 @@ const CONTROLLER: &str = "class MediaController < ApplicationController
     style = :thumb
     media_proxy_path(id, style)
   end
+
+  def maybe_styled_path(id, flag)
+    media_proxy_path(id, flag ? :thumb : nil)
+  end
 end
 ";
 
@@ -58,6 +62,8 @@ c.params = { "style" => "small" }
 paths = c.proxy_paths(1)
 raise paths.inspect unless paths == ["/media_proxy/1/original", "/media_proxy/1/small", "/media_proxy/1"]
 raise c.styled_path(1).inspect unless c.styled_path(1) == "/media_proxy/1/thumb"
+raise c.maybe_styled_path(1, true).inspect unless c.maybe_styled_path(1, true) == "/media_proxy/1/thumb"
+raise c.maybe_styled_path(1, false).inspect unless c.maybe_styled_path(1, false) == "/media_proxy/1"
 puts "proxy paths passed"
 "#,
         )
@@ -71,4 +77,16 @@ fn a_symbol_typed_value_in_an_optional_segment_is_its_string() {
     let (emitted, _) = example().emit(BuildTarget::Ruby);
     let controller = std::fs::read_to_string(emitted.join("app/controllers/media_controller.rb")).expect("read the emitted controller");
     assert!(controller.contains("RouteHelpers.media_proxy_path(id, style.to_s)"), "{controller}");
+}
+
+/// A Symbol-or-nil value (`flag ? :thumb : nil`) keeps its nil, which
+/// drops the segment as Rails does, and its Symbol is its String.
+#[test]
+fn a_symbol_or_nil_value_in_an_optional_segment_keeps_its_nil() {
+    let (emitted, _) = example().emit(BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/media_controller.rb")).expect("read the emitted controller");
+    let start = controller.find("def maybe_styled_path").unwrap_or_else(|| panic!("{controller}"));
+    let body = &controller[start..];
+    let body = &body[..body.find("\n  end").unwrap_or(body.len())];
+    assert!(body.contains("to_s"), "{body}");
 }
