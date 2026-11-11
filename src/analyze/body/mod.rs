@@ -1300,8 +1300,10 @@ impl<'a> BodyTyper<'a> {
                 // Not a class with a `try` of the program's in its chain: Object's is the one that answers nil.
                 Some(t @ Ty::Class { id, .. }) if self.never_responds(t, &asked) && !self.chain_defines(id, &try_name) => Some(false),
                 // Nor a union of such classes (Devise's mailer views over two mappings' models): nil's `try` answers nil too.
+                // Not past a receiver that may run code (`(flag ? A.new : B.new).try(:m)`): the fold would drop it with the condition.
                 Some(Ty::Union { variants })
-                    if variants.iter().any(|v| !matches!(v, Ty::Nil))
+                    if matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef | ExprNode::Const { .. })
+                        && variants.iter().any(|v| !matches!(v, Ty::Nil))
                         && variants.iter().filter(|v| !matches!(v, Ty::Nil)).all(|v| {
                             matches!(v, Ty::Class { id, .. } if !self.chain_defines(id, &try_name)) && self.never_responds(v, &asked)
                         }) =>

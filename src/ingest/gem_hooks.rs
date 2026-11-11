@@ -336,7 +336,8 @@ pub(super) fn fold_devise_view_scope(app: &mut App, mappings: &[(String, String)
             fold_scope_reads(&mut view.body, name);
             continue;
         }
-        if !reads_scope(&view.body) {
+        // Not an app's own view, which may read the name only in a branch a request without a mapping never takes: the case would read it first.
+        if !view.name.as_str().starts_with("devise/") || !reads_scope(&view.body) {
             continue;
         }
         let span = view.body.span;

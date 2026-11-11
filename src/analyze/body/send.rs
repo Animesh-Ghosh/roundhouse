@@ -1251,7 +1251,9 @@ impl<'a> BodyTyper<'a> {
                     && !EXCEPTION_METHODS.contains(&method.as_str());
             };
             // Not settled past a module the program does not define, or a `method_missing`: either may answer it.
-            if cls.instance_methods.contains_key(method)
+            // Nor an open class: a gem the program does not model may define the method on it.
+            if cls.open
+                || cls.instance_methods.contains_key(method)
                 || cls.instance_methods.contains_key(&Symbol::from("method_missing"))
                 || cls.instance_methods.contains_key(&Symbol::from("respond_to_missing?"))
                 || cls.includes.iter().any(|m| self.classes().get(m).is_none() || self.lookup_in_module(m, method).is_some())
@@ -1576,7 +1578,8 @@ impl<'a> BodyTyper<'a> {
                     args: args.clone(),
                 },
                 // Not the bare Class for a union of classes: each is its own class's (Devise's `resource.class.model_name` over two mappings' models).
-                Some(Ty::Union { variants }) if !variants.is_empty() && variants.iter().all(|v| matches!(v, Ty::Class { .. })) => {
+                // Nor a union of class objects (`flag ? User : Admin`), whose `.class` is `Class` itself.
+                Some(Ty::Union { variants }) if !variants.is_empty() && variants.iter().all(|v| matches!(v, Ty::Class { id, .. } if id.0.as_str() != "Class")) => {
                     Ty::Union { variants: variants.clone() }
                 }
                 _ => Ty::Class {
