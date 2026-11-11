@@ -6140,7 +6140,7 @@ fn all_program_items(items: &[crate::app::ProgramItem]) -> Vec<&crate::app::Prog
 /// A feature of the Rails frameworks (`active_support/core_ext/…`,
 /// `rails`): the runtime ports are the framework in an emitted tree, and
 /// no such file is on its load path.
-fn is_framework_feature(feature: &str) -> bool {
+pub(crate) fn is_framework_feature(feature: &str) -> bool {
     let root = feature.split('/').next().unwrap_or(feature);
     matches!(
         root,

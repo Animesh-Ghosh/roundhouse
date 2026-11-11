@@ -3231,6 +3231,7 @@ end
     super::configured_superclass::fold_middleware_loops(vfs, dir, &mut app, middleware_loops);
     super::gem_routes::expand(vfs, dir, &path_gems, &mut app);
     super::class_macros::drop_expanded_hook_macros(&mut app, &hook_macros_called, &mentions);
+    super::extend_splice::splice_load_hook_extended_calls(&mut app);
     super::model_callbacks::expand_model_callbacks(&mut app);
     // After the macros: an expanded `has_ancestry` is what writes the `extend`.
     super::extend_splice::splice_sole_extended_modules(&mut app);

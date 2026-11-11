@@ -205,6 +205,37 @@ pub fn apply_sti_scope_lowering(app: &mut App) {
     }
     push_becomes_from(app, &bases, &recast);
     stamp_sti_subclasses(app, &bases);
+    push_base_class(app, &bases);
+}
+
+/// Rails' `base_class` of an STI subclass: its base model (`ActiveRecord::Base.base_class` answers the class itself).
+fn push_base_class(app: &mut App, bases: &HashMap<ClassId, ClassId>) {
+    for lc in &mut app.library_classes {
+        let Some(base) = bases.get(&lc.name) else { continue };
+        if lc.methods.iter().any(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == "base_class") {
+            continue;
+        }
+        let ty = Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![Ty::Class { id: base.clone(), args: vec![].into() }].into() };
+        let mut body = Expr::new(crate::span::Span::synthetic(), ExprNode::Const { path: base.0.as_str().split("::").map(Symbol::from).collect() });
+        body.ty = Some(ty.clone());
+        lc.methods.push(crate::dialect::MethodDef {
+            visibility: crate::dialect::MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from("base_class"),
+            receiver: MethodReceiver::Class,
+            params: Vec::new(),
+            body,
+            signature: Some(Ty::Fn { params: vec![].into(), block: None, ret: std::sync::Arc::new(ty), effects: crate::effect::EffectSet::default() }),
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: Some(lc.name.0.clone()),
+            kind: crate::dialect::AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
 }
 
 /// Record each base model's STI subclasses on the model itself
