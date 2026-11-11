@@ -6366,7 +6366,16 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
             // `to_s`. campfire's own test writes `user_sidebar_url(:me)`
             // against a `scope defaults: { user_id: "me" }` segment,
             // and that segment is declared `String` after its default.
-            if wants_str_here {
+            // An optional segment (`/media_proxy/:id/(*any)`, `String |
+            // nil`) the same: a Symbol is never nil.
+            let wants_str_or_nil_here = matches!(
+                declared.as_ref().and_then(|tys| tys.get(idx)),
+                Some(crate::ty::Ty::Union { variants })
+                    if variants.len() == 2
+                        && variants.contains(&crate::ty::Ty::Str)
+                        && variants.contains(&crate::ty::Ty::Nil)
+            );
+            if wants_str_here || wants_str_or_nil_here {
                 if let ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*arg.node {
                     let mut lit = Expr::new(
                         arg.span,
@@ -6392,19 +6401,12 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
             // whatever the schema says (a new record's key, a reader the
             // model overrides), so the argument is bound once and only a
             // value that isn't nil is converted.
-            let wants_opt_str_here = matches!(
-                declared.as_ref().and_then(|tys| tys.get(idx)),
-                Some(crate::ty::Ty::Union { variants })
-                    if variants.len() == 2
-                        && variants.contains(&crate::ty::Ty::Str)
-                        && variants.contains(&crate::ty::Ty::Nil)
-            );
             // `Integer | nil` too (`flag ? n : nil`): the binding keeps the nil.
             let int_or_nil = matches!(&arg.ty, Some(crate::ty::Ty::Union { variants })
                 if variants.len() == 2
                     && variants.contains(&crate::ty::Ty::Int)
                     && variants.contains(&crate::ty::Ty::Nil));
-            if wants_opt_str_here
+            if wants_str_or_nil_here
                 && (matches!(arg.ty, Some(crate::ty::Ty::Int)) || int_or_nil || is_integer_column_read(arg, sig))
             {
                 let value = std::mem::replace(arg, Expr::new(arg.span, ExprNode::Seq { exprs: vec![] }));
