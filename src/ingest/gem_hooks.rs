@@ -337,7 +337,7 @@ pub(super) fn fold_devise_view_scope(app: &mut App, mappings: &[(String, String)
             continue;
         }
         // Not an app's own view, which may read the name only in a branch a request without a mapping never takes: the case would read it first.
-        if !view.name.as_str().starts_with("devise/") || !reads_scope(&view.body) {
+        if !devise_rendered(view.name.as_str(), mappings) || !reads_scope(&view.body) {
             continue;
         }
         let span = view.body.span;
@@ -360,6 +360,21 @@ pub(super) fn fold_devise_view_scope(app: &mut App, mappings: &[(String, String)
         let scrutinee = Expr::new(span, ExprNode::Send { recv: None, method: crate::ident::Symbol::from("resource_name"), args: Vec::new(), block: None, parenthesized: false });
         view.body = Expr::new(span, ExprNode::Case { scrutinee, arms });
     }
+}
+
+/// A view only Devise's controllers render: its own `devise/…`, or a scoped one (`config.scoped_views`) under a
+/// mapping's plural, in one of Devise's controllers' directories (`users/sessions/new`).
+fn devise_rendered(view: &str, mappings: &[(String, String)]) -> bool {
+    const CONTROLLERS: &[&str] = &["sessions", "registrations", "passwords", "confirmations", "unlocks", "omniauth_callbacks", "shared", "mailer"];
+    if view.starts_with("devise/") {
+        return true;
+    }
+    mappings.iter().any(|(name, _)| {
+        let plural = crate::naming::pluralize(name);
+        view.strip_prefix(&format!("{plural}/"))
+            .and_then(|rest| rest.split('/').next())
+            .is_some_and(|dir| CONTROLLERS.contains(&dir))
+    })
 }
 
 fn reads_scope(e: &Expr) -> bool {

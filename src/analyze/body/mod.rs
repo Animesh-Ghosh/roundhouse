@@ -1302,7 +1302,9 @@ impl<'a> BodyTyper<'a> {
                 // Nor a union of such classes (Devise's mailer views over two mappings' models): nil's `try` answers nil too.
                 // Not past a receiver that may run code (`(flag ? A.new : B.new).try(:m)`): the fold would drop it with the condition.
                 Some(Ty::Union { variants })
-                    if matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef | ExprNode::Const { .. })
+                    if matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef)
+                        // Nor a union of class objects, which the flat `Ty::Class` does not tell from instances: their class side answers.
+                        && self.is_instance(r, ctx)
                         && variants.iter().any(|v| !matches!(v, Ty::Nil))
                         && variants.iter().filter(|v| !matches!(v, Ty::Nil)).all(|v| {
                             matches!(v, Ty::Class { id, .. } if !self.chain_defines(id, &try_name)) && self.never_responds(v, &asked)
