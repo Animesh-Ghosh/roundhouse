@@ -25,6 +25,14 @@ const CONTROLLER: &str = "class MediaController < ApplicationController
   def maybe_styled_path(id, flag)
     media_proxy_path(id, flag ? :thumb : nil)
   end
+
+  def mixed_path(id, flag)
+    media_proxy_path(id, flag ? :thumb : \"small\")
+  end
+
+  def maybe_mixed_path(id, pick)
+    media_proxy_path(id, pick == 1 ? :thumb : (pick == 2 ? \"small\" : nil))
+  end
 end
 ";
 
@@ -64,6 +72,11 @@ raise paths.inspect unless paths == ["/media_proxy/1/original", "/media_proxy/1/
 raise c.styled_path(1).inspect unless c.styled_path(1) == "/media_proxy/1/thumb"
 raise c.maybe_styled_path(1, true).inspect unless c.maybe_styled_path(1, true) == "/media_proxy/1/thumb"
 raise c.maybe_styled_path(1, false).inspect unless c.maybe_styled_path(1, false) == "/media_proxy/1"
+raise c.mixed_path(1, true).inspect unless c.mixed_path(1, true) == "/media_proxy/1/thumb"
+raise c.mixed_path(1, false).inspect unless c.mixed_path(1, false) == "/media_proxy/1/small"
+raise c.maybe_mixed_path(1, 1).inspect unless c.maybe_mixed_path(1, 1) == "/media_proxy/1/thumb"
+raise c.maybe_mixed_path(1, 2).inspect unless c.maybe_mixed_path(1, 2) == "/media_proxy/1/small"
+raise c.maybe_mixed_path(1, 3).inspect unless c.maybe_mixed_path(1, 3) == "/media_proxy/1"
 puts "proxy paths passed"
 "#,
         )
@@ -89,4 +102,22 @@ fn a_symbol_or_nil_value_in_an_optional_segment_keeps_its_nil() {
     let body = &controller[start..];
     let body = &body[..body.find("\n  end").unwrap_or(body.len())];
     assert!(body.contains("to_s"), "{body}");
+}
+
+/// A Symbol-or-String value (`flag ? :thumb : "small"`) is its String
+/// either way, and a Symbol-String-or-nil one keeps its nil as well: a
+/// String's `to_s` is itself, and the Symbol is its String, as Rails
+/// renders both with `to_param`.
+#[test]
+fn a_symbol_or_string_value_in_an_optional_segment_is_its_string() {
+    let (emitted, _) = example().emit(BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/media_controller.rb")).expect("read the emitted controller");
+    for method in ["def mixed_path", "def maybe_mixed_path"] {
+        let start = controller.find(method).unwrap_or_else(|| panic!("{controller}"));
+        let body = &controller[start..];
+        let body = &body[..body.find("\n  end").unwrap_or(body.len())];
+        assert!(body.contains("to_s"), "{method}: {body}");
+    }
+    let start = controller.find("def maybe_mixed_path").unwrap_or_else(|| panic!("{controller}"));
+    assert!(controller[start..].contains(".nil?"), "{controller}");
 }
