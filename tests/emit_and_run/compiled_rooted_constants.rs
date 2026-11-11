@@ -172,3 +172,27 @@ fn elixir_emits_a_rooted_constant_in_a_fixture_as_the_bare_one() {
     let differing = differing_between(fixture_app("::"), fixture_app(""), BuildTarget::Elixir);
     assert!(differing.is_empty(), "{}", differing.join("\n\n"));
 }
+
+/// A test class that declares its own `Article` while reading the
+/// model as `::Article`. In Ruby the root picks the top-level model.
+fn test_class_app() -> emit_and_run::Overlay {
+    app("").write(
+        "test/models/tally_test.rb",
+        "require \"test_helper\"\n\nclass TallyTest < ActiveSupport::TestCase\n  class Article\n    def self.total\n      \"inner\"\n    end\n  end\n\n  test \"reads the model\" do\n    assert_equal 2, ::Article.count\n  end\n\n  test \"counts\" do\n    assert_equal 2, ::Tally.new(2).n\n  end\nend\n",
+    )
+}
+
+/// TypeScript hoists a test class's own classes to the test file's
+/// scope, where a bare `Article` is the test's `Article`, not the
+/// model: dropping the root would read the wrong class, so the constant
+/// is refused, as it is inside a namespace. `::Tally`, which the test
+/// declares no twin of, is written bare.
+#[test]
+fn typescript_refuses_a_top_level_constant_a_test_class_hides() {
+    let (emitted, errors) = test_class_app().emit(BuildTarget::Typescript);
+    let refused: Vec<&String> = errors.iter().filter(|e| e.contains("`::Article` in `TallyTest`")).collect();
+    assert_eq!(refused.len(), 1, "{errors:#?}");
+    assert!(!errors.iter().any(|e| e.contains("::Tally")), "{errors:#?}");
+    let test = std::fs::read_to_string(emitted.join("test/tally.test.ts")).unwrap();
+    assert!(test.contains("new Tally(2).n"), "{test}");
+}
