@@ -5081,7 +5081,7 @@ impl Analyzer {
         fn writes(e: &Expr, out: &mut HashMap<Symbol, Ty>) {
             if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } = &*e.node
                 && let Some(cvar) = name.as_str().strip_prefix("@@")
-                && let Some(ty) = value.ty.clone().filter(|t| !t.is_open() && !matches!(t, Ty::Untyped))
+                && let Some(ty) = value.ty.clone().filter(|t| !t.is_open() && !matches!(t, Ty::Untyped)).map(|t| class_object_arg_ty(value, t))
             {
                 let key = Symbol::from(cvar);
                 let joined = match out.remove(&key) {
@@ -9255,6 +9255,15 @@ fn class_object_union(answers: &[Option<&Ty>]) -> Option<Ty> {
 
 // Recorded flat, a class object argument would type its parameter as an instance of that class.
 fn class_object_arg_ty(arg: &Expr, ty: Ty) -> Ty {
+    // `x.class` is typed as x's own class (so `self.class.find` dispatches), which as a parameter declared an instance.
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*arg.node
+        && method.as_str() == "class"
+        && args.is_empty()
+        && r.decisions & crate::expr::CLASS_OBJECT_VALUE == 0
+        && matches!(&ty, Ty::Class { id, args } if args.is_empty() && !matches!(id.0.as_str(), "Class" | "Module"))
+    {
+        return Ty::Class { id: ClassId(Symbol::from("Class")), args: vec![ty].into() };
+    }
     match ty {
         Ty::Class { ref args, .. }
             if arg.decisions & crate::expr::CLASS_OBJECT_VALUE != 0 && args.is_empty() =>
@@ -10780,7 +10789,8 @@ fn walk_ivar_assignments(
             let empty_indifferent = matches!(&*value.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
                 if method.as_str() == "new" && args.is_empty() && matches!(&*r.node, ExprNode::Const { path }
                     if matches!(path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().as_slice(), ["HashWithIndifferentAccess"] | ["ActiveSupport", "HashWithIndifferentAccess"])));
-            let ty = if empty_indifferent { Some(crate::analyze::indifferent::of(crate::analyze::body::unknown())) } else { value.ty.clone() };
+            // A class object stored is the class (`@responder = Devise::Controllers::Responder`), as a method answering it is.
+            let ty = if empty_indifferent { Some(crate::analyze::indifferent::of(crate::analyze::body::unknown())) } else { value.ty.clone().map(|t| class_object_arg_ty(value, t)) };
             if let Some(ty) = ty {
                 // Union with existing entry so repeated assignments to
                 // the same ivar accumulate (rather than the last write

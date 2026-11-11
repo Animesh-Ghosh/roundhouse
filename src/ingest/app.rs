@@ -3216,6 +3216,7 @@ end
     // After the macros: an expanded `has_ancestry` is what writes the `extend`.
     super::extend_splice::splice_sole_extended_modules(&mut app);
     super::included_extend::splice_included_extends(&mut app);
+    super::metal_actions::synthesize(&mut app);
     super::absence_guards::raise_undefined_capitalized_calls(&mut app);
     // Not asked at `absence_guards::mark`: by then a source gem's methods no longer resolve their file.
     let source_gem_classes = super::absence_guards::source_gem_classes(&app);

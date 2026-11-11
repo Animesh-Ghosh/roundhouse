@@ -94,6 +94,35 @@ pub fn parse_app_signatures(
     Ok(out)
 }
 
+/// The instance methods each class or module of an RBS source declares, by name only (a class's `def self.x` is
+/// not one: an instance of it answers no `x`).
+pub fn parse_instance_method_names(source: &str) -> Result<crate::det::HashMap<ClassId, crate::det::HashSet<Symbol>>, String> {
+    fn walk(decl: &Node<'_>, parent: Option<&str>, out: &mut crate::det::HashMap<ClassId, crate::det::HashSet<Symbol>>) {
+        let (name, members): (String, Vec<Node<'_>>) = match decl {
+            Node::Class(class) => (namespace_join(parent, &declared_name(&class.name())), class.members().iter().collect()),
+            Node::Module(module) => (namespace_join(parent, &declared_name(&module.name())), module.members().iter().collect()),
+            _ => return,
+        };
+        for member in members {
+            match &member {
+                Node::MethodDefinition(method)
+                    if matches!(method.kind(), ruby_rbs::node::MethodDefinitionKind::Instance | ruby_rbs::node::MethodDefinitionKind::SingletonInstance) =>
+                {
+                    out.entry(ClassId(Symbol::new(&name))).or_default().insert(Symbol::new(method.name().as_str()));
+                }
+                Node::Class(_) | Node::Module(_) => walk(&member, Some(&name), out),
+                _ => {}
+            }
+        }
+    }
+    let signature = parse(source)?;
+    let mut out = crate::det::HashMap::default();
+    for decl in signature.declarations().iter() {
+        walk(&decl, None, &mut out);
+    }
+    Ok(out)
+}
+
 /// Parse RBS `@ivar: T` declarations grouped by enclosing class/module.
 /// Names are stored without the leading `@` so they match
 /// `ExprNode::Ivar` / `Ctx::ivar_bindings` keys.
