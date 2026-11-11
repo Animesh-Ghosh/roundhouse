@@ -16,6 +16,11 @@ const CONTROLLER: &str = "class MediaController < ApplicationController
   def proxy_paths(id)
     [media_proxy_path(id, :original), media_proxy_path(id, params[:style].to_s), media_proxy_path(id)]
   end
+
+  def styled_path(id)
+    style = :thumb
+    media_proxy_path(id, style)
+  end
 end
 ";
 
@@ -52,8 +57,18 @@ c = MediaController.new
 c.params = { "style" => "small" }
 paths = c.proxy_paths(1)
 raise paths.inspect unless paths == ["/media_proxy/1/original", "/media_proxy/1/small", "/media_proxy/1"]
+raise c.styled_path(1).inspect unless c.styled_path(1) == "/media_proxy/1/thumb"
 puts "proxy paths passed"
 "#,
         )
         .assert_passes();
+}
+
+/// A Symbol read from a local, not written at the call, is its String
+/// too: the argument is typed Symbol, never nil, so it is its `to_s`.
+#[test]
+fn a_symbol_typed_value_in_an_optional_segment_is_its_string() {
+    let (emitted, _) = example().emit(BuildTarget::Ruby);
+    let controller = std::fs::read_to_string(emitted.join("app/controllers/media_controller.rb")).expect("read the emitted controller");
+    assert!(controller.contains("RouteHelpers.media_proxy_path(id, style.to_s)"), "{controller}");
 }

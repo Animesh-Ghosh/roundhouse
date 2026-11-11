@@ -6413,11 +6413,15 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
                 *arg = to_s_keeping_nil(value, sig);
                 continue;
             }
-            if wants_str_here
+            // A Symbol-typed value in an optional segment (`style =
+            // :thumb; media_proxy_path(id, style)`) is never nil, so it
+            // is its `to_s` there as well (CodeRabbit on #2071).
+            if (wants_str_here
                 && (is_bare_id_read(arg)
                     || is_symbol_arg(arg)
                     || matches!(arg.ty, Some(crate::ty::Ty::Int))
-                    || is_integer_column_read(arg, sig))
+                    || is_integer_column_read(arg, sig)))
+                || (wants_str_or_nil_here && is_symbol_arg(arg))
             {
                 let span = arg.span;
                 let inner =
