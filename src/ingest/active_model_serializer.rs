@@ -543,9 +543,9 @@ fn rewrite_renders(expr: &mut Expr, lowered: &HashSet<String>) {
 const RESOURCE: [&str; 2] = ["ActiveModelSerializers", "SerializableResource"];
 
 /// `ActiveModelSerializers::SerializableResource.new(x, serializer: S).as_json`,
-/// `serializer:` its only option and `as_json` given nothing: S as written
-/// and the `new`'s argument list, whose first entry is x.
-fn resource_as_json(expr: &Expr) -> Option<(String, &Expr)> {
+/// `serializer:` its only option and `as_json` given nothing: S's name
+/// without a leading `::` (the lowered class's), S as written, and x.
+fn resource_as_json(expr: &Expr) -> Option<(String, &Expr, &Expr)> {
     let ExprNode::Send { recv: Some(resource), method, args, block: None, .. } = &*expr.node else { return None };
     if method.as_str() != "as_json" || !args.is_empty() {
         return None;
@@ -564,13 +564,13 @@ fn resource_as_json(expr: &Expr) -> Option<(String, &Expr)> {
     if key.as_str() != "serializer" {
         return None;
     }
-    Some((path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"), value))
+    Some((path.iter().map(|s| s.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("::"), serializer, value))
 }
 
 /// The resource reads in `expr`, per serializer as written.
 fn count_resources(expr: &mut Expr, out: &mut HashMap<String, usize>) {
     expr.node.for_each_child_mut(&mut |c| count_resources(c, out));
-    if let Some((class, _)) = resource_as_json(expr) {
+    if let Some((class, _, _)) = resource_as_json(expr) {
         *out.entry(class).or_default() += 1;
     }
 }
@@ -581,13 +581,16 @@ fn count_resources(expr: &mut Expr, out: &mut HashMap<String, usize>) {
 /// (active_model_serializers 0.10.16: the same Hash, values as read).
 fn rewrite_resources(expr: &mut Expr, lowered: &HashSet<String>) {
     expr.node.for_each_child_mut(&mut |c| rewrite_resources(c, lowered));
-    let Some((class, value)) = resource_as_json(expr) else { return };
+    let Some((class, serializer, value)) = resource_as_json(expr) else { return };
     if !lowered.contains(&class) {
         return;
     }
+    // S as written, a leading `::` kept: inside `module Api`,
+    // `::ArticleSerializer` is the top-level class, not `Api::ArticleSerializer`.
+    let ExprNode::Const { path } = &*serializer.node else { return };
+    let class_expr = Expr::new(Span::synthetic(), ExprNode::Const { path: path.clone() });
     let value = value.clone();
     let span = expr.span;
-    let class_expr = Expr::new(Span::synthetic(), ExprNode::Const { path: class.split("::").map(Symbol::from).collect() });
     let send = |recv: Expr, m: &str, args: Vec<Expr>| {
         Expr::new(span, ExprNode::Send { recv: Some(recv), method: Symbol::from(m), args, block: None, parenthesized: true })
     };

@@ -38,3 +38,44 @@ fn a_serializable_resource_as_json_emits_for_spinel() {
     let (_emitted, errors) = app().emit(roundhouse::project::BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:#?}");
 }
+
+/// `serializer: ::ArticleSerializer` inside `module Api`, where
+/// `Api::ArticleSerializer` is lowered too, reads the top-level class, as
+/// active_model_serializers 0.10.16 does (`{id: 1, title: "Hello"}`; the
+/// nested one answers `{id: 1}`): the rewritten call keeps the root.
+#[test]
+fn a_rooted_serializer_in_a_module_reads_the_top_level_class() {
+    let run = app()
+        .write("app/serializers/api/article_serializer.rb", "module Api\n  class ArticleSerializer < ActiveModel::Serializer\n    attributes :id\n  end\nend\n")
+        .write(
+            "app/models/api/article_card.rb",
+            r#"module Api
+  class ArticleCard
+    def initialize(article)
+      @article = article
+    end
+
+    def as_json
+      ActiveModelSerializers::SerializableResource.new(@article, serializer: ::ArticleSerializer).as_json
+    end
+
+    def nested_json
+      ActiveModelSerializers::SerializableResource.new(@article, serializer: Api::ArticleSerializer).as_json
+    end
+  end
+end
+"#,
+        )
+        .run_ruby(
+            r##"a = Article.create!(title: "Hello", body: "A long body")
+card = Api::ArticleCard.new(a)
+raise "rooted read #{card.as_json.keys.inspect}" unless card.as_json.keys == [:id, :title, :created_at, :shout]
+raise "nested read #{card.nested_json.inspect}" unless card.nested_json == { id: a.id }
+source = File.read("app/models/api/article_card.rb")
+raise "the gem's class is still read:\n#{source}" if source.include?("SerializableResource")
+puts "rooted OK"
+"##,
+        );
+    run.assert_passes();
+    assert!(run.stdout.contains("rooted OK"), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
+}
