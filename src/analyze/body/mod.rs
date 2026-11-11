@@ -4139,7 +4139,7 @@ impl<'a> BodyTyper<'a> {
                 value_ty
             }
 
-            ExprNode::OpAssign { target, value, .. } => {
+            ExprNode::OpAssign { target, op, value } => {
                 // Same recursion shape as Assign: walk target's child
                 // Exprs + walk value. Short-circuit-aware type
                 // narrowing (suppressing the union-widen on `||=` when
@@ -4147,6 +4147,25 @@ impl<'a> BodyTyper<'a> {
                 // for now the analyzer treats the result as the value
                 // expression's type, which matches naive desugar.
                 let value_ty = self.analyze_expr(value, ctx);
+                // `@x ||= {}` answers `@x` whenever it is set, so it is the
+                // slot's container, as `x || {}` is (the BoolOp arm): a
+                // memoizing reader `def _kinds = @kinds ||= {}` reads the
+                // hash its `[]=` writes typed. The literal keeps its own
+                // pending type: stamped with the slot's, the ivar harvest
+                // would read last round's slot back as a write to it.
+                if let (LValue::Ivar { name }, crate::expr::OpAssignOp::OrOr) = (&*target, &*op)
+                    && let Some(slot) = ctx.ivar_bindings.get(name)
+                {
+                    let peeled = narrowing::remove_nil(slot);
+                    let adopts = match (&*value.node, &peeled) {
+                        (ExprNode::Array { elements, .. }, Ty::Array { .. }) => elements.is_empty(),
+                        (ExprNode::Hash { entries, .. }, Ty::Hash { .. }) => entries.is_empty(),
+                        _ => false,
+                    };
+                    if adopts && !peeled.mentions_unknown() {
+                        return peeled;
+                    }
+                }
                 if let LValue::Attr { recv, .. } = target {
                     self.analyze_receiver(recv, ctx);
                 }
@@ -7147,6 +7166,87 @@ mod tests {
             ivar_write("data", empty_hash()),
         ]);
         assert_eq!(written_first, want);
+    }
+
+    /// `_kinds[k] = v` through a reader of `@kinds` (`def _kinds =
+    /// @kinds ||= {}`) types `@kinds` as `@kinds[k] = v` does. A
+    /// receiverless call of a method that is not such a reader writes
+    /// no ivar.
+    #[test]
+    fn index_writes_through_a_memoizing_reader_type_its_ivar() {
+        let through = |reader: &str, ty: Ty| {
+            let mut write = ivar_index_write("unused", ty);
+            if let ExprNode::Send { recv: Some(recv), .. } = &mut *write.node {
+                *recv = synth(ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from(reader),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                });
+            }
+            write
+        };
+        let mut readers: HashMap<Symbol, Symbol> = HashMap::default();
+        readers.insert(Symbol::from("_kinds"), Symbol::from("kinds"));
+        let env = crate::analyze::ivar_set::IvarNameEnv {
+            self_class: None,
+            owned: None,
+            lookup: None,
+            models_by_ivar: None,
+            hash_readers: Some(&readers),
+        };
+        let mut out = HashMap::default();
+        let body = synth(ExprNode::Seq { exprs: vec![
+            through("_kinds", Ty::Int),
+            through("_kinds", Ty::Str),
+            through("other", Ty::Float),
+        ] });
+        crate::analyze::extract_ivar_assignments_in(&body, &mut out, &env);
+        let want = Ty::Hash {
+            key: std::sync::Arc::new(Ty::Str),
+            value: std::sync::Arc::new(Ty::Union { variants: vec![Ty::Int, Ty::Str].into() }),
+        };
+        assert_eq!(out.remove(&Symbol::from("kinds")), Some(want));
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// A later same-name definition that is not a reader overrides the
+    /// reader, so the name is no ivar's reader: a write through it must
+    /// not join the first definition's ivar.
+    #[test]
+    fn a_reader_overridden_by_a_non_reader_is_no_reader() {
+        use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, MethodVisibility};
+        let def = |name: &str, body: Expr| MethodDef {
+            visibility: MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from(name),
+            receiver: MethodReceiver::Instance,
+            params: Vec::new(),
+            body,
+            signature: None,
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        };
+        let reader = |ivar: &str| synth(ExprNode::Ivar { name: Symbol::from(ivar) });
+        let other = || synth(ExprNode::Lit { value: Literal::Nil });
+        let methods = vec![
+            def("_kinds", reader("kinds")),
+            def("_kinds", other()),
+            def("_names", other()),
+            def("_names", reader("names")),
+            def("_tags", reader("tags")),
+        ];
+        let readers = crate::analyze::hash_readers(methods.iter(), MethodReceiver::Instance);
+        let mut want: HashMap<Symbol, Symbol> = HashMap::default();
+        want.insert(Symbol::from("_tags"), Symbol::from("tags"));
+        assert_eq!(readers, want);
     }
 
     /// The widening still leaves an ivar holding a class instance (or
