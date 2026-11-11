@@ -1309,10 +1309,14 @@ impl<'a> BodyTyper<'a> {
                         && variants.iter().filter(|v| !matches!(v, Ty::Nil)).all(|v| {
                             // Nor where a member answers `respond_to?` itself, which `try` calls, or lacks Object's `try`.
                             matches!(v, Ty::Class { id, .. } if !self.chain_defines(id, &try_name)
+                                && !self.defines_short_of_object(id, &try_name)
                                 && !self.chain_defines(id, &Symbol::from("respond_to?"))
                                 && self.reaches_object(id))
                                 && self.never_responds(v, &asked)
-                        }) =>
+                        })
+                        // Nor past a nil whose `try` the program overrides: NilClass's own answers nil.
+                        && (!variants.iter().any(|v| matches!(v, Ty::Nil))
+                            || !self.chain_defines(&ClassId(Symbol::from("NilClass")), &try_name)) =>
                 {
                     Some(false)
                 }
@@ -1339,6 +1343,28 @@ impl<'a> BodyTyper<'a> {
         };
         // Nor a name another class of the registry answers (a column's `admin?`, a framework method).
         self.only_answered_by(&definer, method).then_some(answer)
+    }
+
+    /// Whether a class or module in `class`'s chain short of `Object` registers `method`, source or not: a gem's
+    /// `try` there answers before Active Support's.
+    fn defines_short_of_object(&self, class: &ClassId, method: &Symbol) -> bool {
+        let classes = self.classes();
+        let mut seen: Vec<ClassId> = Vec::new();
+        let mut pending = vec![class.clone()];
+        while let Some(c) = pending.pop() {
+            if matches!(c.0.as_str().trim_start_matches("::"), "Object" | "BasicObject" | "Kernel") || seen.contains(&c) || seen.len() > 64 {
+                continue;
+            }
+            seen.push(c.clone());
+            if let Some(info) = classes.get(&c) {
+                if info.instance_methods.contains_key(method) {
+                    return true;
+                }
+                pending.extend(info.parent.iter().cloned());
+                pending.extend(info.includes.iter().cloned());
+            }
+        }
+        false
     }
 
     /// Whether a source definition of `method` is in `class`'s chain: itself, its parents, the modules they include.
