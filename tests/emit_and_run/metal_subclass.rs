@@ -151,3 +151,16 @@ fn a_metal_actions_around_block_runs_around_it_natively() {
     run.assert_passes();
     assert!(run.stdout.contains("around action passed"), "{}", run.stdout);
 }
+
+/// A callback the synthesized dispatch does not run is reported, not dropped: Rails would run a `before_action`'s
+/// check first, and a second `around_action` block around the first.
+#[test]
+fn a_metal_actions_other_callbacks_are_reported_unsupported() {
+    let source = AROUND.replace(
+        "  def self.call(env)",
+        "  before_action :check\n\n  around_action do |around, action|\n    action.call\n  end\n\n  def self.call(env)",
+    );
+    let (_, errors) = emit_and_run::real_blog().write("app/models/around.rb", &source).emit(roundhouse::project::BuildTarget::Ruby);
+    assert!(errors.iter().any(|e| e.contains("`before_action` on `Around` is not run")), "{errors:#?}");
+    assert!(errors.iter().any(|e| e.contains("`around_action` on `Around` is not run")), "{errors:#?}");
+}

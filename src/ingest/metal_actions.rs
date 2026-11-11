@@ -3,6 +3,7 @@
 //! cannot, so the names the class hands `action` are a `process_action` of its own, as a routed controller's are.
 //! A single `around_action do |controller, action| … end` block becomes that dispatch's body, its `action`
 //! the dispatch and its `controller` self, as AbstractController::Callbacks runs it around `process_action`.
+//! Any other callback the class declares is reported unsupported: the dispatch would run without it.
 
 use crate::App;
 use crate::dialect::MethodReceiver;
@@ -58,6 +59,23 @@ pub(super) fn synthesize(app: &mut App) {
         let lc = &mut app.library_classes[at];
         if wrapped_around {
             lc.unknown_calls.retain(|c| around_block(std::slice::from_ref(c)).is_none());
+        }
+        // Not run around the dispatch, and not dropped in silence: a callback the dispatch leaves out (a `before_action`'s check) is what Rails would have run first.
+        for call in &lc.unknown_calls {
+            if let ExprNode::Send { method, .. } = &*call.node
+                && super::library_class::is_controller_callback_macro(method.as_str())
+            {
+                super::prism::push(crate::diagnostic::Diagnostic::unsupported(
+                    call.span,
+                    None,
+                    "callback",
+                    format!(
+                        "`{}` on `{}` is not run around the actions `action(:name)` dispatches: only a single `around_action do |controller, action| … end` block is",
+                        method.as_str(),
+                        lc.name.0.as_str()
+                    ),
+                ));
+            }
         }
         lc.methods.extend(methods);
     }
