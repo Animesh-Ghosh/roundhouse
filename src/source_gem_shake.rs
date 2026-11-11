@@ -1855,3 +1855,44 @@ fn unloadable_classes(app: &App, names: &HashSet<String>) -> HashSet<String> {
     }
     by_name.into_iter().filter(|(_, all)| *all).map(|(name, _)| name.to_string()).collect()
 }
+
+/// Does `target`'s tree carry only the part of a gem compiled from source the program reaches? Spinel's does, and the
+/// ruby family's where it compiles a gem too (`compiled_on_the_ruby_family`).
+pub(crate) fn shakes_source_gems(app: &App, target: crate::build_target::BuildTarget) -> bool {
+    target == crate::build_target::BuildTarget::Spinel
+        || (matches!(target, crate::build_target::BuildTarget::Ruby | crate::build_target::BuildTarget::Jruby) && !compiled_on_the_ruby_family(app).is_empty())
+}
+
+/// The automatically sourced gems the ruby family compiles too: a gem that needs Rails' railties cannot load as
+/// the real gem over the runtime, which is not Rails (Devise, responders), and a sourced gem one of them depends on
+/// (Warden) comes with it, since the compiled gem calls its compiled classes.
+pub(crate) fn compiled_on_the_ruby_family(app: &App) -> crate::det::HashSet<String> {
+    let Some(lock) = app.gem_lock.as_ref() else { return Default::default() };
+    let deps = |gem: &str| lock.spec_deps.get(gem).cloned().unwrap_or_default();
+    let needs_railties = |gem: &str| {
+        let mut seen: crate::det::HashSet<String> = Default::default();
+        let mut stack = vec![gem.to_string()];
+        while let Some(g) = stack.pop() {
+            if g == "railties" {
+                return true;
+            }
+            if seen.insert(g.clone()) {
+                stack.extend(deps(&g));
+            }
+        }
+        false
+    };
+    let mut kept: crate::det::HashSet<String> = app.auto_source_gems.iter().filter(|g| needs_railties(g)).cloned().collect();
+    loop {
+        let more: Vec<String> = app
+            .auto_source_gems
+            .iter()
+            .filter(|g| !kept.contains(*g) && kept.iter().any(|k| deps(k).iter().any(|d| d == *g)))
+            .cloned()
+            .collect();
+        if more.is_empty() {
+            return kept;
+        }
+        kept.extend(more);
+    }
+}
