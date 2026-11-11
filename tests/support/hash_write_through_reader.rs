@@ -7,6 +7,10 @@
 //! its own writes fill. Every caller passes a class, so the `||=`
 //! never assigns and `Class.new`, which Spinel cannot build, is dead
 //! once the entry `update` reads back is typed as what `add` stored.
+//! `add` asks `kind.method_defined?(:run)`, a Module query Spinel answers
+//! only on a value proven to be one of those classes: the cycle through
+//! the hash must not keep a `Class` arm from a round where `update`'s
+//! argument was still untyped and the default could still run.
 //!
 //! The expected lines are CRuby's output for the same code.
 
@@ -45,6 +49,7 @@ const REGISTRY: &str = r##"class Registry
   class << self
     def add(label, kind = nil)
       kind ||= Class.new(Registry::Base)
+      raise "#{kind} cannot run" unless kind.method_defined?(:run)
       _kinds[label] = kind
     end
 
