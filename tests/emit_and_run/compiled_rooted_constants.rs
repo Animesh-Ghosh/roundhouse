@@ -31,15 +31,20 @@ fn app(root: &str) -> emit_and_run::Overlay {
 /// app. A TypeScript source map is left out: it carries the Ruby source as
 /// written, `::` and its columns included.
 fn differing_files(target: BuildTarget) -> Vec<String> {
-    let (rooted, _) = app("::").emit(target);
-    let (bare, _) = app("").emit(target);
+    differing_between(app("::"), app(""), target)
+}
+
+/// [`differing_files`] for any two apps.
+fn differing_between(rooted: emit_and_run::Overlay, bare: emit_and_run::Overlay, target: BuildTarget) -> Vec<String> {
+    let (rooted, _) = rooted.emit(target);
+    let (bare, _) = bare.emit(target);
     let mut out = Vec::new();
     for entry in walk(&bare).into_iter().filter(|p| p.extension().is_none_or(|e| e != "map")) {
         let rel = entry.strip_prefix(&*bare).unwrap();
         let theirs = std::fs::read(rooted.join(rel)).unwrap_or_default();
         if std::fs::read(&entry).unwrap() != theirs {
             let text = String::from_utf8_lossy(&theirs);
-            let lines: Vec<&str> = text.lines().filter(|l| l.contains("Article") || l.contains("Tally")).collect();
+            let lines: Vec<&str> = text.lines().filter(|l| l.contains("Article") || l.contains("Tally") || l.contains("Limits")).collect();
             out.push(format!("{}:\n{}", rel.display(), lines.join("\n")));
         }
     }
@@ -136,4 +141,34 @@ fn elixir_reads_a_rooted_constant_in_a_namespace_as_the_top_level_module() {
     let controller = std::fs::read_to_string(emitted.join("lib/admin_reportscontroller.ex")).unwrap();
     assert!(controller.starts_with("defmodule Admin.ReportsController do"), "{controller}");
     assert!(controller.contains("record = %{record | outer: Article.total}"), "{controller}");
+}
+
+/// A rooted constant outside a method body: a fixture's ERB value
+/// (`<%= ::Limits::TITLE %>`) is emitted as the bare one's too.
+fn fixture_app(root: &str) -> emit_and_run::Overlay {
+    emit_and_run::real_blog()
+        .write("app/models/limits.rb", "module Limits\n  TITLE = \"Limited\"\nend\n")
+        .edit(
+            "test/fixtures/articles.yml",
+            "  title: Getting Started with Rails\n",
+            &format!("  title: <%= {root}Limits::TITLE %>\n"),
+        )
+}
+
+#[test]
+fn typescript_emits_a_rooted_constant_in_a_fixture_as_the_bare_one() {
+    let differing = differing_between(fixture_app("::"), fixture_app(""), BuildTarget::Typescript);
+    assert!(differing.is_empty(), "{}", differing.join("\n\n"));
+}
+
+#[test]
+fn python_emits_a_rooted_constant_in_a_fixture_as_the_bare_one() {
+    let differing = differing_between(fixture_app("::"), fixture_app(""), BuildTarget::Python);
+    assert!(differing.is_empty(), "{}", differing.join("\n\n"));
+}
+
+#[test]
+fn elixir_emits_a_rooted_constant_in_a_fixture_as_the_bare_one() {
+    let differing = differing_between(fixture_app("::"), fixture_app(""), BuildTarget::Elixir);
+    assert!(differing.is_empty(), "{}", differing.join("\n\n"));
 }
