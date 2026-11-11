@@ -112,6 +112,47 @@ puts KindRegistry.add(:plain, kind: PlainKind)
 puts KindRegistry.add(:fancy, kind: FancyKind)
 "##;
 
+/// An app method whose test calls it without the argument only inside
+/// the key of a keyword pair (`keyed(article.joined => 1)`). That call is
+/// a caller too: the default stays, so `value` is `Array | Nil` and the
+/// emitted method answers both.
+pub fn call_in_a_keyword_key() -> super::emit_and_run::Overlay {
+    super::emit_and_run::real_blog()
+        .edit(
+            "app/models/article.rb",
+            "class Article < ApplicationRecord\n  has_many :comments, dependent: :destroy",
+            r#"class Article < ApplicationRecord
+  has_many :comments, dependent: :destroy
+
+  def joined(value = nil)
+    Array.wrap(value).map { |item| item.to_s }.join(",")
+  end
+
+  def joined_pair
+    joined(%w[a b])
+  end
+"#,
+        )
+        .write(KEYWORD_KEY_TEST_PATH, KEYWORD_KEY_TEST)
+}
+
+pub const KEYWORD_KEY_TEST_PATH: &str = "test/models/article_joined_test.rb";
+
+const KEYWORD_KEY_TEST: &str = r##"require "test_helper"
+
+class ArticleJoinedTest < ActiveSupport::TestCase
+  def keyed(pairs)
+    pairs
+  end
+
+  test "a call in a keyword key leaves the default" do
+    article = Article.new
+    assert_equal({ "" => 1 }, keyed(article.joined => 1))
+    assert_equal "a,b", article.joined_pair
+  end
+end
+"##;
+
 pub const CLASS_SCRIPT: &str = r##"
 puts KindRegistry.refresh(:plain)
 puts KindRegistry.refresh(:fancy)

@@ -36,6 +36,13 @@ fn a_keyword_registry_runs() {
     assert_eq!(run.stdout, contract::EXPECTED, "stderr:\n{}", run.stderr);
 }
 
+/// A test call inside the key of a keyword pair keeps the default it
+/// leaves out.
+#[test]
+fn a_call_in_a_keyword_key_keeps_the_default() {
+    contract::call_in_a_keyword_key().run_test(contract::KEYWORD_KEY_TEST_PATH).assert_passes();
+}
+
 #[test]
 fn an_app_instance_registry_runs() {
     let run = contract::model_instance_methods().run_ruby(contract::REQUEST_SCRIPT);

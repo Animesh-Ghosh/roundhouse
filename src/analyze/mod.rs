@@ -10197,12 +10197,17 @@ fn test_call_arities(app: &App) -> HashMap<Symbol, TestCalls> {
                         ExprNode::Hash { entries, kwargs: true } => {
                             for (key, value) in entries {
                                 match &*key.node {
+                                    // The keyword, not a mention of a method.
                                     ExprNode::Lit { value: Literal::Sym { value: k } } => {
                                         keywords.insert(k.clone());
                                     }
-                                    _ => named = false,
+                                    // A computed key is an expression like any
+                                    // other: `keyed(record.add => 1)` calls `add`.
+                                    _ => {
+                                        named = false;
+                                        walk(key, out);
+                                    }
                                 }
-                                // The key is the keyword, not a mention of a method.
                                 walk(value, out);
                             }
                         }
