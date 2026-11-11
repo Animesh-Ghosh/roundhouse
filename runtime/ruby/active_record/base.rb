@@ -512,11 +512,6 @@ module ActiveRecord
       []
     end
 
-    # Rails' `base_class`: the class itself, unless an STI subclass answers its base model (`lower::sti_scope`).
-    def self.base_class
-      self
-    end
-
     # Each association's macro, foreign key and `polymorphic:`, in `_association_names`' order (the lowerer's too).
     def self._association_macros
       []
