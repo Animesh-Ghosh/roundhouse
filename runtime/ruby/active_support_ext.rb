@@ -591,9 +591,11 @@ module ActiveSupport
   # (`instance_of?(Hash)`): a subclass stays in the Array.
   # AS `Hash#assert_valid_keys`: the first key outside the list raises, naming the list.
   def self.assert_valid_keys(hash, valid_keys)
+    # Not the list as given: Rails flattens it, so `assert_valid_keys(KEYS)` and `(:a, [:b])` name the same keys.
+    keys = valid_keys.flatten
     hash.keys.each do |key|
-      unless valid_keys.include?(key)
-        raise ArgumentError, "Unknown key: #{key.inspect}. Valid keys are: #{valid_keys.map { |valid| valid.inspect }.join(", ")}"
+      unless keys.include?(key)
+        raise ArgumentError, "Unknown key: #{key.inspect}. Valid keys are: #{keys.map { |valid| valid.inspect }.join(", ")}"
       end
     end
     hash

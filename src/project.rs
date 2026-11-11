@@ -10131,10 +10131,12 @@ module GemMiddleware
   def self.stack
     return @stack if @stack
     # Not a bare `||=`: two first requests at once would each build a stack and run its constructors twice.
+    # Not published before the routes are finalized: a request that reads `@stack` outside the lock would run before Warden is configured.
     STACK_LOCK.synchronize {{
       unless @stack
-        @stack = {stacked}
+        stack = {stacked}
         ActionDispatch::Routing::RouteSet.finalize_app!
+        @stack = stack
       end
       @stack
     }}

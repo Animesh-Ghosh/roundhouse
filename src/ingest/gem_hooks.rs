@@ -869,12 +869,13 @@ pub(super) fn devise_url_helpers_source(facts: &DeviseUrlFacts, routes: &HashMap
         "def self.devise_path_with(path, params)\n  return path if params.nil?\n  raise ArgumentError, \"a positional argument to a Devise url helper is not supported\" unless params.is_a?(Hash)\n  params.each_key {{ |key| raise ArgumentError, \"`#{{key}}:` on a Devise url helper is not supported\" if %w[{DEVISE_URL_RESERVED}].include?(key.to_s) }}\n  path + RouteHelpers.query_suffix(params)\nend\n\n"
     ));
     // Devise's FailureApp answers Warden with `main_app.send(route(scope), opts)` (`fold_devise_failure_route`), and
-    // Rails' `main_app` answers each `_url` helper; the nil options it passes (`script_name:`) Rails' url_for skips.
+    // Rails' `main_app` answers each `_url` helper; the nil options it passes Rails' url_for skips, and a `script_name:`
+    // (`RAILS_RELATIVE_URL_ROOT`) leads the path.
     for m in &facts.mappings {
         let path = format!("new_{}_session_path", m.name);
         if routes.get(&path) == Some(&0) {
             out.push_str(&format!(
-                "def self.new_{name}_session_url(options = nil)\n  given = options.nil? ? nil : options.reject {{ |_, value| value.nil? }}\n  Rails.application.protocol + Rails.application.domain + RouteHelpers.devise_path_with(RouteHelpers.{path}, given)\nend\n\n",
+                "def self.new_{name}_session_url(options = nil)\n  given = options.nil? ? nil : options.reject {{ |_, value| value.nil? }}\n  script = given.nil? ? nil : given.delete(:script_name)\n  Rails.application.protocol + Rails.application.domain + script.to_s.chomp(\"/\") + RouteHelpers.devise_path_with(RouteHelpers.{path}, given)\nend\n\n",
                 name = m.name
             ));
         }

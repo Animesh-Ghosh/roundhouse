@@ -302,9 +302,11 @@ fn apply_param_selector_dispatch(
     for _ in 0..16 {
         let mut changed = false;
         for (to, i, from, j) in &forwards {
+            // Not "never called" for a caller that is no target: its calls were not recorded, so what it is handed is unknown.
             let given = match seen.get(from) {
                 Some(slots) => slots.get(*j).cloned().unwrap_or(None),
-                None => Some(Vec::new()),
+                None if targets.contains_key(from) => Some(Vec::new()),
+                None => None,
             };
             let Some(slot) = seen.get_mut(to).and_then(|slots| slots.get_mut(*i)) else { continue };
             match (slot.as_mut(), given) {
@@ -752,11 +754,14 @@ fn rewrite(
         }).collect();
         let Some(names) = names else { return };
         let span = e.span;
-        let nil = || Expr::new(span, ExprNode::Lit { value: Literal::Nil });
+        let nil = || Expr { ty: Some(Ty::Nil), ..Expr::new(span, ExprNode::Lit { value: Literal::Nil }) };
+        let class = recv_class(recv);
         let mut arms: Vec<Arm> = names.iter().map(|n| {
-            let sym = Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(n.as_str()) } });
-            let responds = Expr::new(span, ExprNode::Send { recv: Some(recv_expr.clone()), method: Symbol::from("respond_to?"), args: vec![sym], block: None, parenthesized: true });
-            let call = Expr::new(span, ExprNode::Send { recv: Some(recv_expr.clone()), method: Symbol::from(n.as_str()), args: rest.to_vec(), block: None, parenthesized: !rest.is_empty() });
+            let sym = Expr { ty: Some(Ty::Sym), ..Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(n.as_str()) } }) };
+            // Not unstamped: the audit after lowering reads an unstamped send on a typed receiver as a failed dispatch (`build_arms` stamps its own).
+            let responds = Expr { ty: Some(Ty::Bool), ..Expr::new(span, ExprNode::Send { recv: Some(recv_expr.clone()), method: Symbol::from("respond_to?"), args: vec![sym], block: None, parenthesized: true }) };
+            let mut call = Expr::new(span, ExprNode::Send { recv: Some(recv_expr.clone()), method: Symbol::from(n.as_str()), args: rest.to_vec(), block: None, parenthesized: !rest.is_empty() });
+            call.ty = Some(class.as_ref().and_then(|c| method_return_via_registry(registry, c, n.as_str())).unwrap_or(Ty::Untyped));
             Arm {
                 pattern: Pattern::Lit { value: Literal::Sym { value: Symbol::from(n.as_str()) } },
                 guard: None,

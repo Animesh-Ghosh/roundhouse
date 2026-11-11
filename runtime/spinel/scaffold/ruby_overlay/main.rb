@@ -33,6 +33,8 @@
 require_relative "boot"
 
 module Main
+  GEM_STACK_LOCK = Mutex.new
+
   # The framework class used by the nominal ParseError fallback.
   FrameworkParseError = ActionDispatch::Http::Parameters::ParseError
 
@@ -492,7 +494,8 @@ module Main
     env["action_dispatch.request_id"] = ActionDispatch::RequestId.make(env["HTTP_X_REQUEST_ID"].to_s)
     # Not restored in dispatch_core alone: Rails' session middleware sits above Warden's, which reads `rack.session`.
     Main.restore_session(env, CgiIo.parse_cookies(env["HTTP_COOKIE"].to_s))
-    @gem_stack ||= GemMiddleware.wrap(->(inner_env) { Main.run_app(inner_env) })
+    # Not a bare `||=`: two first requests at once would each build the stack and finalize the routes, one before the other is done.
+    @gem_stack || GEM_STACK_LOCK.synchronize { @gem_stack ||= GemMiddleware.wrap(->(inner_env) { Main.run_app(inner_env) }) }
     env["roundhouse.session.above"] = true unless env.key?("roundhouse.session")
     status, headers, body = @gem_stack.call(env)
     Main.commit_session(env, headers) unless env.key?("roundhouse.session")

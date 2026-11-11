@@ -22,9 +22,10 @@ module ActionDispatch
       # The app's route set, finalized once: what the stack calls after it is built.
       def self.finalize_app!
         return nil if @finalized
-        @finalized = true
         @app = new
         @app.finalize!
+        # Not before `finalize!` returns: until then the routes are not finalized, and a caller that raised there tries again.
+        @finalized = true
         nil
       end
     end

@@ -49,5 +49,8 @@ fn is_receiver_autoload(e: &Expr) -> bool {
         },
         _ => return false,
     };
-    args.len() == 2 && args.iter().all(|a| !matches!(&*a.node, ExprNode::Splat { .. }))
+    // Not a literal path: that file is the program's to load, and its registration stays (only a computed one names no file).
+    args.len() == 2
+        && args.iter().all(|a| !matches!(&*a.node, ExprNode::Splat { .. }))
+        && !matches!(&*args[1].node, ExprNode::Lit { value: Literal::Str { .. } })
 }
