@@ -6406,8 +6406,18 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
                 if variants.len() == 2
                     && variants.contains(&crate::ty::Ty::Int)
                     && variants.contains(&crate::ty::Ty::Nil));
+            // `Symbol | nil` (`flag ? :thumb : nil`) the same way: the
+            // Symbol is its String, the nil drops the segment (CodeRabbit
+            // on #2071).
+            let sym_or_nil = matches!(&arg.ty, Some(crate::ty::Ty::Union { variants })
+                if variants.len() == 2
+                    && variants.contains(&crate::ty::Ty::Sym)
+                    && variants.contains(&crate::ty::Ty::Nil));
             if wants_str_or_nil_here
-                && (matches!(arg.ty, Some(crate::ty::Ty::Int)) || int_or_nil || is_integer_column_read(arg, sig))
+                && (matches!(arg.ty, Some(crate::ty::Ty::Int))
+                    || int_or_nil
+                    || sym_or_nil
+                    || is_integer_column_read(arg, sig))
             {
                 let value = std::mem::replace(arg, Expr::new(arg.span, ExprNode::Seq { exprs: vec![] }));
                 *arg = to_s_keeping_nil(value, sig);
