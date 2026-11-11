@@ -10612,15 +10612,21 @@ pub(crate) fn extract_methods_ivar_assignments<'a>(
 /// memoized registry) or `def kinds = @kinds`. `_kinds[k] = v` through
 /// one writes `@kinds`'s hash as `@kinds[k] = v` would, so the index-write
 /// join in [`extract_ivar_assignments_in`] can count it. A name defined
-/// twice on the side with different ivars is no one ivar's reader.
+/// more than once on the side is a reader only when every definition
+/// reads the same ivar: any other definition may be the one that runs
+/// (a later `def` overrides, and reopened bodies don't fix an order here).
 pub(crate) fn hash_readers<'a>(
     methods: impl Iterator<Item = &'a crate::dialect::MethodDef>,
     side: crate::dialect::MethodReceiver,
 ) -> HashMap<Symbol, Symbol> {
     let mut out: HashMap<Symbol, Symbol> = HashMap::default();
     let mut ambiguous: BTreeSet<Symbol> = BTreeSet::new();
-    for m in methods.filter(|m| m.receiver == side && m.params.is_empty() && m.block_param.is_none()) {
-        let Some(ivar) = reader_ivar(&m.body) else {
+    for m in methods.filter(|m| m.receiver == side) {
+        let ivar = (m.params.is_empty() && m.block_param.is_none())
+            .then(|| reader_ivar(&m.body))
+            .flatten();
+        let Some(ivar) = ivar else {
+            ambiguous.insert(m.name.clone());
             continue;
         };
         if out.get(&m.name).is_some_and(|prev| *prev != ivar) {

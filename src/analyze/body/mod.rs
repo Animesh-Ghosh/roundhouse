@@ -7211,6 +7211,44 @@ mod tests {
         assert!(out.is_empty(), "{out:?}");
     }
 
+    /// A later same-name definition that is not a reader overrides the
+    /// reader, so the name is no ivar's reader: a write through it must
+    /// not join the first definition's ivar.
+    #[test]
+    fn a_reader_overridden_by_a_non_reader_is_no_reader() {
+        use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, MethodVisibility};
+        let def = |name: &str, body: Expr| MethodDef {
+            visibility: MethodVisibility::Public,
+            unsupported_formals: None,
+            has_anonymous_block: false,
+            name_span: crate::span::Span::synthetic(),
+            name: Symbol::from(name),
+            receiver: MethodReceiver::Instance,
+            params: Vec::new(),
+            body,
+            signature: None,
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        };
+        let reader = |ivar: &str| synth(ExprNode::Ivar { name: Symbol::from(ivar) });
+        let other = || synth(ExprNode::Lit { value: Literal::Nil });
+        let methods = vec![
+            def("_kinds", reader("kinds")),
+            def("_kinds", other()),
+            def("_names", other()),
+            def("_names", reader("names")),
+            def("_tags", reader("tags")),
+        ];
+        let readers = crate::analyze::hash_readers(methods.iter(), MethodReceiver::Instance);
+        let mut want: HashMap<Symbol, Symbol> = HashMap::default();
+        want.insert(Symbol::from("_tags"), Symbol::from("tags"));
+        assert_eq!(readers, want);
+    }
+
     /// The widening still leaves an ivar holding a class instance (or
     /// a nullable one) alone: that class's own `[]=` runs, not Hash's.
     #[test]
