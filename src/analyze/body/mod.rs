@@ -1295,9 +1295,19 @@ impl<'a> BodyTyper<'a> {
         {
             let asked = asked.clone();
             self.analyze_expr(r, ctx);
+            let try_name = Symbol::from("try");
             return match r.ty.as_ref().map(Ty::peel_nilable) {
                 // Not a class with a `try` of the program's in its chain: Object's is the one that answers nil.
-                Some(t @ Ty::Class { id, .. }) if self.never_responds(t, &asked) && !self.chain_defines(id, &Symbol::from("try")) => Some(false),
+                Some(t @ Ty::Class { id, .. }) if self.never_responds(t, &asked) && !self.chain_defines(id, &try_name) => Some(false),
+                // Nor a union of such classes (Devise's mailer views over two mappings' models): nil's `try` answers nil too.
+                Some(Ty::Union { variants })
+                    if variants.iter().any(|v| !matches!(v, Ty::Nil))
+                        && variants.iter().filter(|v| !matches!(v, Ty::Nil)).all(|v| {
+                            matches!(v, Ty::Class { id, .. } if !self.chain_defines(id, &try_name)) && self.never_responds(v, &asked)
+                        }) =>
+                {
+                    Some(false)
+                }
                 _ => None,
             };
         }

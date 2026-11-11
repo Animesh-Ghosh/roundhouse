@@ -1575,6 +1575,10 @@ impl<'a> BodyTyper<'a> {
                     id: id.clone(),
                     args: args.clone(),
                 },
+                // Not the bare Class for a union of classes: each is its own class's (Devise's `resource.class.model_name` over two mappings' models).
+                Some(Ty::Union { variants }) if !variants.is_empty() && variants.iter().all(|v| matches!(v, Ty::Class { .. })) => {
+                    Ty::Union { variants: variants.clone() }
+                }
                 _ => Ty::Class {
                     id: ClassId(Symbol::from("Class")),
                     args: vec![].into(),
