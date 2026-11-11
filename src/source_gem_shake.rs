@@ -56,6 +56,10 @@ const ARG: &str = "\u{0}arg ";
 /// A call of the method that follows that passes a block (`*`: of a name not known), `Class\u{1}name` when its
 /// receiver is of a known class.
 const BLOCK: &str = "\u{0}block ";
+/// A call that passes on the block its enclosing method was given (`add(label, &block)` in `def update(label, &block)`):
+/// the forwarder's `Class\u{1}method`, `\u{2}`, and what a [`BLOCK`] of the call would name follow. It passes a block
+/// only if one may reach the forwarder ([`blocks_passed`]).
+const FORWARD: &str = "\u{0}forward ";
 
 /// What a name built at run time is known to be.
 #[derive(Clone, PartialEq, Debug)]
@@ -233,17 +237,50 @@ pub fn demote_unreached_gem_errors(app: &App, diags: &mut [crate::diagnostic::Di
 struct Reached {
     classes: HashSet<String>,
     methods: HashSet<MethodKey>,
-    /// The method names a reached call passes a block to ([`BLOCK`]).
+    /// The method names a reached call passes a block to ([`BLOCK`], and a [`FORWARD`] whose forwarder may be given one).
     blocks: HashSet<String>,
 }
 
 impl Reached {
     /// Whether a reached call may pass `owner`'s `method` a block.
     fn may_pass_block(&self, gems: &Gems<'_>, owner: &str, method: &str) -> bool {
-        self.blocks.iter().any(|b| match b.split_once('\u{1}') {
-            Some((c, m)) => (m == method || m == "*") && (gems.ancestors(c).iter().any(|a| a == owner) || gems.ancestors(owner).iter().any(|a| a == c)),
-            None => b == method || b == "*",
-        })
+        passes_block(&self.blocks, gems, owner, method)
+    }
+}
+
+fn passes_block(blocks: &HashSet<String>, gems: &Gems<'_>, owner: &str, method: &str) -> bool {
+    blocks.iter().any(|b| match b.split_once('\u{1}') {
+        Some((c, m)) => (m == method || m == "*") && (gems.ancestors(c).iter().any(|a| a == owner) || gems.ancestors(owner).iter().any(|a| a == c)),
+        None => b == method || b == "*",
+    })
+}
+
+/// What the reached calls pass a block to: each [`BLOCK`], and each [`FORWARD`] whose forwarder some call, itself
+/// perhaps a forward, may pass a block. Ruby's `update(label, &block)` hands `add` a block only if its caller gave one.
+fn blocks_passed<'c>(gems: &Gems<'_>, calls: impl IntoIterator<Item = &'c Call>) -> HashSet<String> {
+    let mut blocks = HashSet::default();
+    let mut forwards = Vec::new();
+    for (_, m) in calls {
+        if let Some(b) = m.strip_prefix(BLOCK) {
+            blocks.insert(b.to_string());
+        } else if let Some((from, to)) = m.strip_prefix(FORWARD).and_then(|f| f.split_once('\u{2}'))
+            && let Some((owner, method)) = from.split_once('\u{1}')
+        {
+            forwards.push((owner, method, to));
+        }
+    }
+    loop {
+        let before = forwards.len();
+        forwards.retain(|(owner, method, to)| {
+            let passed = passes_block(&blocks, gems, owner, method);
+            if passed {
+                blocks.insert(to.to_string());
+            }
+            !passed
+        });
+        if forwards.len() == before {
+            return blocks;
+        }
     }
 }
 
@@ -601,7 +638,7 @@ impl<'a> Gems<'a> {
             let name = c.name.0.as_str();
             for m in &c.methods {
                 let mut s = Scan::new(Some((name, m.receiver == MethodReceiver::Class, m.name.as_str())), Some(self));
-                s.body(&m.body, &m.params);
+                s.method(m);
                 calls.extend(s.calls);
                 consts.extend(s.consts);
             }
@@ -671,7 +708,7 @@ impl<'a> Gems<'a> {
         let mut s = Scan::new(Some((owner.as_str(), *side, name.as_str())), Some(self));
         for entry in self.entries.get(owner).into_iter().flatten() {
             for m in entry.methods.iter().filter(|m| m.name.as_str() == name && (m.receiver == MethodReceiver::Class) == *side) {
-                s.body(&m.body, &m.params);
+                s.method(m);
             }
         }
         (s.calls, s.consts)
@@ -717,7 +754,7 @@ impl<'a> Gems<'a> {
         }
         walk.consts = consts;
         walk.run();
-        let blocks = walk.calls.iter().filter_map(|(_, m)| m.strip_prefix(BLOCK).map(str::to_string)).collect();
+        let blocks = blocks_passed(self, &walk.calls);
         Reached { classes: walk.classes, methods: walk.methods, blocks }
     }
 
@@ -929,7 +966,7 @@ impl Walk<'_, '_> {
 
     fn answer_call(&mut self, (target, method): Call) {
         let gems = self.gems;
-        if method.starts_with(BLOCK) {
+        if method.starts_with(BLOCK) || method.starts_with(FORWARD) {
             return;
         }
         if let Some((m, i, _)) = method.strip_prefix(PARAM).and_then(passed_key) {
@@ -1021,11 +1058,13 @@ struct Scan<'a> {
     /// The names each local of the body walked may hold, wherever it is bound; `None` for any name.
     locals: HashMap<String, Option<Vec<Name>>>,
     params: &'a [crate::dialect::Param],
+    /// The `&` parameter of the method walked, whose block a call may pass on ([`FORWARD`]).
+    block_param: Option<&'a str>,
 }
 
 impl<'a> Scan<'a> {
     fn new(context: Option<(&'a str, bool, &'a str)>, gems: Option<&'a Gems<'a>>) -> Self {
-        Scan { context, calls: Vec::new(), consts: Vec::new(), gems, locals: HashMap::default(), params: &[] }
+        Scan { context, calls: Vec::new(), consts: Vec::new(), gems, locals: HashMap::default(), params: &[], block_param: None }
     }
 
     /// A method's or a block of the app's body, its locals its own.
@@ -1039,6 +1078,21 @@ impl<'a> Scan<'a> {
         }
         self.locals = HashMap::default();
         self.params = &[];
+    }
+
+    /// A method's body, the block it is given its own.
+    fn method(&mut self, m: &'a crate::dialect::MethodDef) {
+        self.block_param = m.block_param.as_ref().map(|p| p.name.as_str());
+        self.body(&m.body, &m.params);
+        self.block_param = None;
+    }
+
+    /// The method a call that passes `block` on hands its own block to: its `&` parameter, read as it came.
+    fn forwarder(&self, block: &Expr) -> Option<String> {
+        let ExprNode::Var { name, .. } = &*block.node else { return None };
+        let (c, _, m) = self.context?;
+        (self.block_param == Some(name.as_str()) && !m.is_empty() && !self.locals.contains_key(name.as_str()))
+            .then(|| format!("{c}\u{1}{m}"))
     }
 
     /// The calls `send(name)` on `target` makes by `name`.
@@ -1303,7 +1357,11 @@ fn scan(e: &Expr, s: &mut Scan<'_>) {
                     Some(c) => named.into_iter().map(|n| format!("{c}\u{1}{n}")).collect(),
                     None => named,
                 };
-                s.calls.extend(named.into_iter().map(|n| (Target::Any, format!("{BLOCK}{n}"))));
+                let forwarder = block.as_ref().and_then(|b| s.forwarder(b));
+                s.calls.extend(named.into_iter().map(|n| match &forwarder {
+                    Some(from) => (Target::Any, format!("{FORWARD}{from}\u{2}{n}")),
+                    None => (Target::Any, format!("{BLOCK}{n}")),
+                }));
             }
             s.pass(method.as_str(), Some(args));
             // `after_update :send_email_changed_notification, if: :send_email_changed_notification?` in a class body
@@ -1520,7 +1578,7 @@ mod tests {
                 for entry in entries.get(owner).into_iter().flatten() {
                     for m in entry.methods.iter().filter(|m| m.name.as_str() == name && (m.receiver == MethodReceiver::Class) == *side) {
                         let mut s = Scan::new(Some((owner.as_str(), *side, name.as_str())), Some(gems));
-                        s.body(&m.body, &m.params);
+                        s.method(m);
                         calls.extend(s.calls);
                         consts.extend(s.consts);
                     }
@@ -1531,7 +1589,7 @@ mod tests {
                 break;
             }
         }
-        let blocks = calls.iter().filter_map(|(_, m)| m.strip_prefix(BLOCK).map(str::to_string)).collect();
+        let blocks = blocks_passed(gems, &calls);
         Reached { classes: live_classes, methods: live_methods, blocks }
     }
 
