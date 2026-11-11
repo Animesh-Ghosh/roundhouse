@@ -88,3 +88,52 @@ fn ruby_keeps_the_root() {
     let controller = std::fs::read_to_string(rooted.join("app/controllers/articles_controller.rb")).unwrap();
     assert!(controller.contains("::Article.total") && controller.contains("::Tally.new(2)"), "{controller}");
 }
+
+/// `Api::Article` beside the top-level `Article`, and `Api::Report`
+/// reading each: `::Article` is the top-level class, a bare `Article`
+/// inside `module Api` is `Api::Article` (`::Tally` has no namespace
+/// twin).
+fn namespaced_app() -> emit_and_run::Overlay {
+    app("")
+        .write("app/models/api/article.rb", "module Api\n  class Article\n    def self.total\n      \"inner\"\n    end\n  end\nend\n")
+        .write(
+            "app/models/api/report.rb",
+            "module Api\n  class Report\n    def self.outer\n      ::Article.total\n    end\n\n    def self.inner\n      Article.total\n    end\n\n    def self.tally\n      ::Tally.new(2).n\n    end\n  end\nend\n",
+        )
+}
+
+/// TypeScript declares `Api::Report` inside `export namespace Api`, where
+/// a bare `Article` is `Api.Article`: dropping the root would read the
+/// wrong class, so the constant is refused. `::Tally`, which no member
+/// of `Api` hides, is written bare.
+#[test]
+fn typescript_refuses_a_top_level_constant_a_namespace_member_hides() {
+    let (emitted, errors) = namespaced_app().emit(BuildTarget::Typescript);
+    let refused: Vec<&String> = errors.iter().filter(|e| e.contains("`::Article` in `Api::Report`")).collect();
+    assert_eq!(refused.len(), 1, "{errors:#?}");
+    assert!(refused[0].contains("namespace Api"), "{}", refused[0]);
+    assert!(!errors.iter().any(|e| e.contains("::Tally")), "{errors:#?}");
+    let api = std::fs::read_to_string(emitted.join("app/models/api.ts")).unwrap();
+    assert!(api.contains("return new Tally(2).n;") && !api.contains("return ."), "{api}");
+}
+
+/// Elixir declares every module at the top level (`defmodule
+/// Admin.ReportsController`), so a bare `Article` there is the
+/// top-level module, never `Admin.Article`.
+#[test]
+fn elixir_reads_a_rooted_constant_in_a_namespace_as_the_top_level_module() {
+    let (emitted, _) = app("")
+        .write(
+            "app/models/admin/article.rb",
+            "module Admin\n  class Article < ApplicationRecord\n    self.table_name = \"articles\"\n  end\nend\n",
+        )
+        .write(
+            "app/controllers/admin/reports_controller.rb",
+            "module Admin\n  class ReportsController < ApplicationController\n    def index\n      @outer = ::Article.total\n      render plain: @outer\n    end\n  end\nend\n",
+        )
+        .edit("config/routes.rb", "Rails.application.routes.draw do\n", "Rails.application.routes.draw do\n  namespace :admin do\n    resources :reports, only: :index\n  end\n")
+        .emit(BuildTarget::Elixir);
+    let controller = std::fs::read_to_string(emitted.join("lib/admin_reportscontroller.ex")).unwrap();
+    assert!(controller.starts_with("defmodule Admin.ReportsController do"), "{controller}");
+    assert!(controller.contains("record = %{record | outer: Article.total}"), "{controller}");
+}
