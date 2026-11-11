@@ -79,3 +79,48 @@ puts "rooted OK"
     run.assert_passes();
     assert!(run.stdout.contains("rooted OK"), "stdout:\n{}\nstderr:\n{}", run.stdout, run.stderr);
 }
+
+/// `render json: SerializableResource.new(x, serializer: ::S).as_json` in
+/// a controller inside `module Api` is rewritten to `render json:
+/// ::S.new(x).serializable_hash`, which the serializer's own writer
+/// (`as_json_str`) renders, as it renders `Api::CardSerializer`: the
+/// root names the same lowered class. Two serializers of their own, whose
+/// writers stand (the base app's `ArticleSerializer` has a block
+/// attribute). Python, where the generic encoder
+/// of the Hash is `JsonRender.encode`.
+#[test]
+fn a_rooted_serializer_render_goes_through_its_writer_on_python() {
+    let (emitted, errors) = app()
+        .write("app/serializers/card_serializer.rb", "class CardSerializer < ActiveModel::Serializer\n  attributes :id, :title\nend\n")
+        .write("app/serializers/api/card_serializer.rb", "module Api\n  class CardSerializer < ActiveModel::Serializer\n    attributes :id\n  end\nend\n")
+        .write(
+            "app/controllers/api/articles_controller.rb",
+            r#"module Api
+  class ArticlesController < ApplicationController
+    def show
+      render json: ActiveModelSerializers::SerializableResource.new(Article.find(params[:id]), serializer: ::CardSerializer).as_json
+    end
+
+    def nested
+      render json: ActiveModelSerializers::SerializableResource.new(Article.find(params[:id]), serializer: Api::CardSerializer).as_json
+    end
+  end
+end
+"#,
+        )
+        .edit(
+            "config/routes.rb",
+            "  resources :articles do",
+            "  get \"api/articles/:id/nested\" => \"api/articles#nested\"\n  get \"api/articles/:id\" => \"api/articles#show\"\n  resources :articles do",
+        )
+        .emit(roundhouse::project::BuildTarget::Python);
+    // The base app's `ArticleCard`, a plain class, has no Python emit.
+    let errors: Vec<&String> = errors.iter().filter(|e| !e.contains("class `ArticleCard` is not emitted")).collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+    let controllers = std::fs::read_to_string(emitted.join("app/v2/controllers.py")).unwrap();
+    let renders: Vec<&str> = controllers.lines().filter(|l| l.contains("CardSerializer")).collect();
+    assert_eq!(renders.len(), 2, "{controllers}");
+    for render in &renders {
+        assert!(render.contains(".as_json_str()") && !render.contains("JsonRender.encode"), "{}", renders.join("\n"));
+    }
+}
