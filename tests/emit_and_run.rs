@@ -22154,3 +22154,5 @@ mod form_for_record;
 mod library_concern_included_include_contract;
 #[path = "emit_and_run/library_concern_included_include.rs"]
 mod library_concern_included_include;
+#[path = "emit_and_run/serializable_resource_as_json.rs"]
+mod serializable_resource_as_json;
