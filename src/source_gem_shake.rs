@@ -652,6 +652,14 @@ impl<'a> Gems<'a> {
             if let Some(p) = &m.parent {
                 consts.push((None, p.0.to_string()));
             }
+            // Not only what the walk above reads: a method copied onto the model from a gem module still in the tree
+            // (`to_adapter` over two Devise models) has that module's spans, which it skips as the module's body.
+            for method in m.methods().filter(|d| in_walked(&d.body.span)) {
+                let mut s = Scan::new(Some((m.name.0.as_str(), method.receiver == MethodReceiver::Class, method.name.as_str())), Some(self));
+                s.method(method);
+                calls.extend(s.calls);
+                consts.extend(s.consts);
+            }
             // What the record runs as it saves: `after_update :send_email_changed_notification` names a method of its own.
             for item in &m.body {
                 if let crate::dialect::ModelBodyItem::Callback { callback, .. } = item {
