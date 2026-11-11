@@ -27,6 +27,21 @@ pub fn overlay() -> super::emit_and_run::Overlay {
         .write("config/initializers/registry.rb", INIT)
 }
 
+/// [`overlay`], with the default answered by a local lambda: its `.call`
+/// gives the lambda its parameter types and retypes the `||=` statement,
+/// which must stay as unknown as the first typing left it. Bound to the
+/// lambda's `Integer` there, `kind` would carry it through the hash.
+pub fn overlay_lambda_default() -> super::emit_and_run::Overlay {
+    let gem = "vendor/bundle/ruby/3.4.0/gems/kinds-1.0";
+    let default = "      kind ||= Class.new(Registry::Base)\n";
+    assert!(REGISTRY.contains(default));
+    let registry = REGISTRY.replace(
+        default,
+        "      fallback = ->(n) { n }\n      kind ||= fallback.call(1)\n",
+    );
+    overlay().write(&format!("{gem}/lib/kinds/registry.rb"), &registry)
+}
+
 const REGISTRY: &str = r##"class Registry
   class Base
     def run

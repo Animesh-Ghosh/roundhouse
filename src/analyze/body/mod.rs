@@ -3571,6 +3571,11 @@ impl<'a> BodyTyper<'a> {
                     let tail = i + 1 == exprs.len();
                     // What the statement was typed against, for the retype below.
                     let entry_ctx = (!nil_seed.is_empty()).then(|| local_ctx.clone());
+                    // `Ctx::unseen_params`: the statement's type stays
+                    // unknown after each typing of it below, the retypes
+                    // included, so `p` is never bound and never returned.
+                    let unseen_or_assign = matches!(&*exprs[i].node, ExprNode::OpAssign { target: LValue::Var { name, .. }, op: crate::expr::OpAssignOp::OrOr, .. }
+                        if local_ctx.unseen_params.contains(name) && !local_ctx.local_bindings.contains_key(name));
                     {
                         let e = &mut exprs[i];
                         if !tail {
@@ -3583,9 +3588,7 @@ impl<'a> BodyTyper<'a> {
                             if local_ctx.call_site_params.contains(name) && local_ctx.local_bindings.get(name).is_some_and(never_falsy));
                         if dead_or_assign { e.decisions |= crate::expr::DEAD_OR_ASSIGN } else { e.decisions &= !crate::expr::DEAD_OR_ASSIGN }
                         last = self.analyze_expr(e, &local_ctx);
-                        if matches!(&*e.node, ExprNode::OpAssign { target: LValue::Var { name, .. }, op: crate::expr::OpAssignOp::OrOr, .. }
-                            if local_ctx.unseen_params.contains(name) && !local_ctx.local_bindings.contains_key(name))
-                        {
+                        if unseen_or_assign {
                             e.ty = Some(unknown());
                             last = unknown();
                         }
@@ -3667,6 +3670,10 @@ impl<'a> BodyTyper<'a> {
                         }
                     }
                     self.refine_lambda_locals(exprs, i, &mut local_ctx, &mut lambda_locals, &mut last);
+                    if unseen_or_assign {
+                        exprs[i].ty = Some(unknown());
+                        last = unknown();
+                    }
                     let e = &mut exprs[i];
                     if let ExprNode::Assign { target, value } = &*e.node {
                         let slot = match target {
@@ -4046,6 +4053,10 @@ impl<'a> BodyTyper<'a> {
                                     _ => None,
                                 };
                                 last = self.analyze_expr(&mut exprs[i], &retype);
+                                if unseen_or_assign {
+                                    exprs[i].ty = Some(unknown());
+                                    last = unknown();
+                                }
                                 // Not the binding the first typing exported: `values = xs.map { … prev … }` now answers the widened element.
                                 // Not over a refinement either: an accumulator scan may already have narrowed the binding past the first typing.
                                 if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*exprs[i].node {
