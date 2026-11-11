@@ -6408,13 +6408,14 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
                     && variants.contains(&crate::ty::Ty::Nil));
             // `Symbol | nil` (`flag ? :thumb : nil`) the same way: the
             // Symbol is its String, the nil drops the segment (CodeRabbit
-            // on #2071). `Symbol | String | nil` too: a String's `to_s` is
-            // itself.
+            // on #2071). `Symbol | String | nil` and `Symbol | Integer | nil`
+            // too: a String's `to_s` is itself, an Integer's is its
+            // `to_param`.
             let sym_union = |nil: bool| {
                 matches!(&arg.ty, Some(crate::ty::Ty::Union { variants })
                     if variants.contains(&crate::ty::Ty::Sym)
                         && variants.contains(&crate::ty::Ty::Nil) == nil
-                        && variants.iter().all(|v| matches!(v, crate::ty::Ty::Sym | crate::ty::Ty::Str | crate::ty::Ty::Nil)))
+                        && variants.iter().all(|v| matches!(v, crate::ty::Ty::Sym | crate::ty::Ty::Str | crate::ty::Ty::Int | crate::ty::Ty::Nil)))
             };
             let sym_or_nil = sym_union(true);
             if wants_str_or_nil_here
@@ -6430,7 +6431,8 @@ fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
             // A Symbol-typed value in an optional segment (`style =
             // :thumb; media_proxy_path(id, style)`) is never nil, so it
             // is its `to_s` there as well (CodeRabbit on #2071), as is a
-            // `Symbol | String` one (`flag ? :thumb : "small"`).
+            // `Symbol | String` or `Symbol | Integer` one (`flag ? :thumb :
+            // "small"`).
             if (wants_str_here
                 && (is_bare_id_read(arg)
                     || is_symbol_arg(arg)
