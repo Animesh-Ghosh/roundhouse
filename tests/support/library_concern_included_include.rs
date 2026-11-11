@@ -9,7 +9,7 @@ use super::emit_and_run;
 const SCOPED: &str = r#"module Scoped
   extend ActiveSupport::Concern
 
-  module ClassMethods
+  class_methods do
     def scoped?
       false
     end
