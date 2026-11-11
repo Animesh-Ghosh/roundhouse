@@ -896,8 +896,9 @@ fn emit_expr_inner(e: &Expr) -> String {
                     "{slot}.lock().unwrap().clone().unwrap_or_default()"
                 );
             }
+            let field = util::escape_rust_keyword(name.as_str());
             if in_constructor() {
-                name.as_str().to_string()
+                field
             } else if in_return_tail()
                 && matches!(e.ty.as_ref(), Some(t) if !is_copy_ty(t))
             {
@@ -905,9 +906,9 @@ fn emit_expr_inner(e: &Expr) -> String {
                 // out of `&self`. `attr_reader`-shaped getters are the
                 // canonical case (`def body; @body; end`); also kicks
                 // in for any tail-`@x` body.
-                format!("self.{name}.clone()")
+                format!("self.{field}.clone()")
             } else {
-                format!("self.{name}")
+                format!("self.{field}")
             }
         }
         ExprNode::SelfRef => {
