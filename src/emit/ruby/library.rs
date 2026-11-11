@@ -9801,6 +9801,9 @@ struct NameIndex {
     first_modules_bare: std::cell::OnceCell<HashMap<String, usize>>,
     constant_paths: std::cell::OnceCell<std::rc::Rc<crate::det::HashSet<String>>>,
     file_constant_owners: std::cell::OnceCell<HashMap<String, String>>,
+    /// How each declared signature spelled its class names
+    /// (`app.rbs_spellings`), by `Owner#method`, for `rbs::type_name`.
+    written: HashMap<String, crate::rbs::Spellings>,
     source_ptr: usize,
     source_len: usize,
 }
@@ -9844,6 +9847,7 @@ impl NameIndex {
             first_modules_bare: std::cell::OnceCell::new(),
             constant_paths: std::cell::OnceCell::new(),
             file_constant_owners: std::cell::OnceCell::new(),
+            written: declared_spellings(app),
             source_ptr: classes.as_ptr() as usize,
             source_len: classes.len(),
         };
@@ -10454,6 +10458,31 @@ fn app_constant_paths(app: &App, classes: &[LibraryClass]) -> std::rc::Rc<crate:
         Some(index) => index.constant_paths.get_or_init(build).clone(),
         None => build(),
     }
+}
+
+/// How each declared method (`app.rbs_signatures`) spelled its class
+/// names, by `Owner#method`; empty where its reader recorded none.
+fn declared_spellings(app: &App) -> HashMap<String, crate::rbs::Spellings> {
+    let methods = app.rbs_signatures.iter().flat_map(|(owner, methods)| methods.keys().map(move |m| (owner, m)));
+    methods.map(|(owner, m)| {
+        let spelled = app.rbs_spellings.get(owner).and_then(|s| s.get(m)).cloned().unwrap_or_default();
+        (format!("{}#{}", owner.0.as_str(), m.as_str()), spelled)
+    }).collect()
+}
+
+/// For an RBS sidecar: how `owner`'s declared signature of `method`
+/// spelled its class names, from the installed index.
+pub(super) fn written_names(owner: &str, method: &str) -> Option<crate::rbs::Spellings> {
+    NAME_INDEX.with(|slot| slot.borrow().as_ref().and_then(|(_, index)| index.written.get(&format!("{owner}#{method}")).cloned()))
+}
+
+/// For an RBS sidecar: whether `path` is a model, controller or library
+/// class or module, the classes analysis resolves a written name against
+/// (`analyze::body::lexical_class`). False with no index installed.
+pub(super) fn registers(path: &str) -> bool {
+    NAME_INDEX.with(|slot| slot.borrow().as_ref().is_some_and(|(_, index)| {
+        index.models.contains(path) || index.controllers.contains(path) || index.library_classes.contains_key(path)
+    }))
 }
 
 /// Does the app declare the constant `path`, or a namespace enclosing a
