@@ -46,8 +46,8 @@ fn drops_the_root(target: BuildTarget) -> bool {
 /// [`drops_the_root`]; a no-op on any other target. It mutates the
 /// target's own copy of the app, the one `project::target_files_inner`
 /// already makes for every target outside the Ruby family, so it adds no
-/// clone. A constant TypeScript would hide behind a namespace member is
-/// refused ([`hidden_by_namespace`]).
+/// clone. A constant TypeScript would hide behind a namespace member
+/// ([`hidden_by_namespace`]) or a test class's own class is refused.
 pub(crate) fn unroot_for_target(app: &mut App, target: BuildTarget) {
     if !drops_the_root(target) {
         return;
@@ -85,6 +85,62 @@ pub(crate) fn unroot_for_target(app: &mut App, target: BuildTarget) {
             strip(path)
         })
     });
+    // TypeScript hoists a test class's own classes to the test file's
+    // scope (`export class Article` above `TallyTest`), where a bare name
+    // reaches the test's class first: a rooted constant naming one is
+    // refused there, as one a namespace member hides is.
+    if matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker) {
+        for tm in &mut app.test_modules {
+            let hoisted: Vec<String> = tm
+                .inner_classes
+                .iter()
+                .flat_map(|c| {
+                    let name = c.name.0.as_str().trim_start_matches("::");
+                    [name.split("::").next().unwrap_or(name).to_string(), name.rsplit("::").next().unwrap_or(name).to_string()]
+                })
+                .collect();
+            if hoisted.is_empty() {
+                continue;
+            }
+            let test = tm.name.0.as_str().trim_start_matches("::").to_string();
+            let mut check = |expr: &mut Expr| {
+                unroot(expr, &mut |path, span| {
+                    let segments = const_segments(path);
+                    if segments.len() < path.len() && segments.first().is_some_and(|first| hoisted.iter().any(|h| h == first.as_str())) {
+                        let name = segments.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+                        crate::emit::diagnostics::report_unsupported(
+                            span,
+                            target.as_str(),
+                            "top-level constant in a test class",
+                            format!(
+                                "`::{name}` in `{test}`: {} writes the test's own `{}` at the test file's scope, which hides the top-level one, and has no spelling for the top-level class there",
+                                target.as_str(),
+                                segments[0].as_str(),
+                            ),
+                        );
+                    }
+                    strip(path)
+                })
+            };
+            if let Some(setup) = &mut tm.setup {
+                check(setup);
+            }
+            for t in &mut tm.tests {
+                check(&mut t.body);
+            }
+            for h in &mut tm.helpers {
+                check(&mut h.body);
+            }
+            for (_, value) in &mut tm.constants {
+                check(value);
+            }
+            for class in &mut tm.inner_classes {
+                for m in &mut class.methods {
+                    check(&mut m.body);
+                }
+            }
+        }
+    }
     // Every other root the target emits: views, tests, fixtures' ERB
     // values and preambles, association and parameter defaults, the
     // routes' `direct` helpers. It walks the hook bodies again, where no
