@@ -407,6 +407,10 @@ mod json_params;
 mod class_side_default_contract;
 #[path = "emit_and_run/class_side_default.rs"]
 mod class_side_default;
+#[path = "support/hash_write_through_reader.rs"]
+mod hash_write_through_reader_contract;
+#[path = "emit_and_run/hash_write_through_reader.rs"]
+mod hash_write_through_reader;
 #[path = "emit_and_run/helper_anonymous_rest.rs"]
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]

@@ -198,6 +198,10 @@ mod backticks;
 mod class_side_default_contract;
 #[path = "spinel_toolchain/class_side_default.rs"]
 mod class_side_default;
+#[path = "support/hash_write_through_reader.rs"]
+mod hash_write_through_reader_contract;
+#[path = "spinel_toolchain/hash_write_through_reader.rs"]
+mod hash_write_through_reader;
 #[path = "spinel_toolchain/action_text_sanitize.rs"]
 mod action_text_sanitize;
 #[path = "support/campfire_caches.rs"]
