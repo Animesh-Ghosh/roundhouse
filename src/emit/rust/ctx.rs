@@ -184,8 +184,8 @@ pub struct EmitCtx {
 
     /// True while `library::emit_module` renders a method as a free
     /// `pub fn` with no `impl` around it, so a sibling call
-    /// (`self.helper` / bare `helper`) is written by name, not through
-    /// `Self::`. Set by `with_free_function_scope`.
+    /// (`self.helper` / bare `helper`) is written through the module
+    /// (`self::helper`), not `Self::`. Set by `with_free_function_scope`.
     pub in_free_function: Cell<bool>,
 
     /// True at expression positions whose value flows out of the

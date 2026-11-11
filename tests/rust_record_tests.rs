@@ -41,7 +41,7 @@ fn record_tests_app_emits_the_model_surface_its_tests_call() {
     assert!(fixtures.contains("crate::db::setup_test_db(crate::schema_sql::CREATE_TABLES);"), "{fixtures}");
 
     let item_test = read("src/tests/item.rs");
-    assert!(item_test.contains("make_shelf(1_i64, 2_i64)") && !item_test.contains("Self::make_shelf"), "{item_test}");
+    assert!(item_test.contains("make_shelf(1_i64, 2_i64)") && !item_test.contains("Self::make_shelf") && item_test.contains("self::make_shelf("), "{item_test}");
     assert!(item_test.contains(", 7_i64)") && !item_test.contains("Self::padded_size"), "{item_test}");
 }
 

@@ -118,9 +118,9 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
             writeln!(out).unwrap();
         }
         first = false;
-        // A free function: a sibling call is written by name, not
-        // through `Self::` (library mode, below, wraps the same method
-        // in an `impl`).
+        // A free function: a sibling call is written through the module
+        // (`self::name`), not `Self::` (library mode, below, wraps the
+        // same method in an `impl`).
         out.push_str(&super::expr::with_free_function_scope(|| emit_module_method(m))?);
     }
     Ok(out)

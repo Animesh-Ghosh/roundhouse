@@ -5,7 +5,8 @@
 //! `macro`), a class method that calls `find_by`, presence and scoped
 //! uniqueness rules, and tests that call `create!`, `valid?`, `destroy!`
 //! (and use its result), `==` in both operand orders and a test helper
-//! with keyword defaults, and one whose default follows a positional hash.
+//! with keyword defaults, and one whose default follows a positional hash
+//! (called from a method whose parameter shares its name).
 
 use super::emit_and_run;
 
@@ -169,6 +170,10 @@ class ItemTest < ActiveSupport::TestCase
     assert_equal 7, padded_size({})
   end
 
+  test "a parameter does not hide a helper of the same name" do
+    assert_equal 9, shadowed(2)
+  end
+
   private
 
   def make_shelf(aisle: 1, position: 2)
@@ -178,6 +183,11 @@ class ItemTest < ActiveSupport::TestCase
   #: (Hash[String, String] attrs, ?Integer extra) -> Integer
   def padded_size(attrs, extra = 7)
     attrs.size + extra
+  end
+
+  #: (Integer padded_size) -> Integer
+  def shadowed(padded_size)
+    padded_size({}) + padded_size
   end
 end
 "#)
@@ -199,4 +209,5 @@ pub const PASSING: &[&str] = &[
     "item::test_belongs_to_a_shelf",
     "item::test_the_same_name_on_another_shelf_is_fine",
     "item::test_a_helper_s_default_fills_in_after_a_positional_hash",
+    "item::test_a_parameter_does_not_hide_a_helper_of_the_same_name",
 ];
