@@ -447,6 +447,7 @@ pub(super) fn render_self_literal() -> String {
     if fields.is_empty() {
         "Self {}".to_string()
     } else {
+        let fields: Vec<String> = fields.iter().map(|f| crate::emit::rust::expr::util::escape_rust_keyword(f)).collect();
         format!("Self {{ {} }}", fields.join(", "))
     }
 }
@@ -913,9 +914,9 @@ fn emit_expr_inner(e: &Expr) -> String {
                     "{slot}.lock().unwrap().clone().unwrap_or_default()"
                 );
             }
-            let field = util::escape_rust_keyword(name.as_str());
+            let name = crate::emit::rust::expr::util::escape_rust_keyword(name.as_str());
             if in_constructor() {
-                field
+                name
             } else if in_return_tail()
                 && matches!(e.ty.as_ref(), Some(t) if !is_copy_ty(t))
             {
@@ -923,9 +924,9 @@ fn emit_expr_inner(e: &Expr) -> String {
                 // out of `&self`. `attr_reader`-shaped getters are the
                 // canonical case (`def body; @body; end`); also kicks
                 // in for any tail-`@x` body.
-                format!("self.{field}.clone()")
+                format!("self.{name}.clone()")
             } else {
-                format!("self.{field}")
+                format!("self.{name}")
             }
         }
         ExprNode::SelfRef => {

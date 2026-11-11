@@ -666,15 +666,14 @@ pub(super) fn emit_instance_method(
                 writeln!(
                     out,
                     "    let {}: {} = {};",
-                    super::expr::util::escape_rust_keyword(fname),
+                    crate::emit::rust::expr::util::escape_rust_keyword(fname),
                     super::ty::rust_ty(fty),
                     default_value_for_ty(fty),
                 )
                 .unwrap();
             }
         }
-        let fields: Vec<String> =
-            ivars.iter().map(|(n, _)| super::expr::util::escape_rust_keyword(n.as_str())).collect();
+        let fields: Vec<String> = ivars.iter().map(|(n, _)| crate::emit::rust::expr::util::escape_rust_keyword(n)).collect();
         writeln!(out, "    Self {{ {} }}", fields.join(", ")).unwrap();
     }
     out.push_str("}\n");
