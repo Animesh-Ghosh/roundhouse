@@ -3276,8 +3276,11 @@ end
     carry_included_block_includes_into_controllers(&mut app);
     refuse_unread_concern_filters(&app)?;
     drop_modelled_included_hooks(&mut app);
-    crate::lower::for_each_hook_body(&mut app, &mut read_primary_key_sends);
     splice_concerns_into_controllers(&mut app);
+    // After the splice: a concern's filter reads the key as the controller's own body does.
+    if every_primary_key_is_id(&app) {
+        crate::lower::for_each_hook_body(&mut app, &mut read_primary_key_sends);
+    }
     // After the splice: an action a concern provides is not implicit.
     synthesize_template_only_actions(&mut app);
     // After the splice: a macro has to resolve against the concern's
@@ -5357,18 +5360,28 @@ fn answers_callback_macro(app: &App, name: &crate::ident::ClassId) -> bool {
     false
 }
 
-/// `record.send(record.class.primary_key)` (orm_adapter's `conditions_to_fields`): the record's key attribute, its
-/// `[]` of that name, as the key is a column the record reads.
+/// `record.send(record.class.primary_key)` (orm_adapter's `conditions_to_fields`) where every model's key is `id`:
+/// `record.id`, the same method the send names, an override of `id` included.
+// Not `record[key]`: that reads the column past a reader the model overrides.
 fn read_primary_key_sends(body: &mut crate::expr::Expr) {
     use crate::expr::ExprNode;
     body.node.for_each_child_mut(&mut read_primary_key_sends);
-    if let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &mut *body.node
+    if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &mut *body.node
         && matches!(method.as_str(), "send" | "public_send" | "__send__")
+        && matches!(&*recv.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef)
         && let [name] = args.as_slice()
         && matches!(&*name.node, ExprNode::Send { method, args, block: None, .. } if method.as_str() == "primary_key" && args.is_empty())
     {
-        *method = crate::ident::Symbol::from("[]");
+        *method = crate::ident::Symbol::from("id");
+        args.clear();
     }
+}
+
+fn every_primary_key_is_id(app: &App) -> bool {
+    app.models.iter().all(|m| m.primary_key.as_ref().is_none_or(|k| k.as_str() == "id"))
+        && app.schema.tables.values().all(|t| {
+            t.primary_key_columns.is_empty() && t.columns.iter().filter(|c| c.primary_key).all(|c| c.name.as_str() == "id")
+        })
 }
 
 /// A modelled hook has nothing left to do at load, and the emitted
