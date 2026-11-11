@@ -246,3 +246,50 @@ fn typescript_refuses_a_hidden_top_level_constant_in_a_test_methods_default() {
     let refused: Vec<&String> = errors.iter().filter(|e| e.contains("`::Article` in `TallyTest`")).collect();
     assert_eq!(refused.len(), 2, "{errors:#?}");
 }
+
+/// TypeScript declares a qualified class by its last segment: a test's
+/// own `class Tally::Row` is `export class Row` at the test file's scope,
+/// which hides nothing named `Tally`. `::Tally` is written bare.
+#[test]
+fn typescript_writes_bare_a_constant_a_qualified_test_class_only_nests_in() {
+    let (emitted, errors) = app("")
+        .write(
+            "test/models/tally_test.rb",
+            "require \"test_helper\"\n\nclass TallyTest < ActiveSupport::TestCase\n  class Tally::Row\n    def self.width\n      1\n    end\n  end\n\n  test \"counts\" do\n    assert_equal 2, ::Tally.new(2).n\n  end\nend\n",
+        )
+        .emit(BuildTarget::Typescript);
+    assert!(!errors.iter().any(|e| e.contains("::Tally")), "{errors:#?}");
+    let test = std::fs::read_to_string(emitted.join("test/tally.test.ts")).unwrap();
+    assert!(test.contains("new Tally(2).n"), "{test}");
+}
+
+/// A qualified class declared at the file's top level, beside a test of
+/// the same namespace (`Models::Article` beside `Models::ArticleTest`),
+/// is written as `Article` at the test file's scope too: it hides the
+/// top-level `::Article`, so that read is refused.
+#[test]
+fn typescript_refuses_a_top_level_constant_a_qualified_helper_class_hides() {
+    let (_, errors) = app("")
+        .write(
+            "test/models/article_test.rb",
+            "require \"test_helper\"\n\nmodule Models\n  class Article\n    def self.count\n      0\n    end\n  end\n\n  class ArticleTest < ActiveSupport::TestCase\n    test \"reads the model\" do\n      assert_equal 2, ::Article.count\n    end\n  end\nend\n",
+        )
+        .emit(BuildTarget::Typescript);
+    let refused: Vec<&String> = errors.iter().filter(|e| e.contains("`::Article` in `Models::ArticleTest`")).collect();
+    assert_eq!(refused.len(), 1, "{errors:#?}");
+}
+
+/// The check reads every part of a test's own class that is emitted: its
+/// constants, its class-body calls and its class-level instance
+/// variables, as well as its methods.
+#[test]
+fn typescript_refuses_a_hidden_top_level_constant_in_a_test_class_body() {
+    let (_, errors) = app("")
+        .write(
+            "test/models/tally_test.rb",
+            "require \"test_helper\"\n\nclass TallyTest < ActiveSupport::TestCase\n  class Article\n    TOTAL = ::Article.count\n    @total = ::Article.count\n    puts ::Article.name\n  end\n\n  test \"counts\" do\n    assert_equal 2, ::Tally.new(2).n\n  end\nend\n",
+        )
+        .emit(BuildTarget::Typescript);
+    let refused: Vec<&String> = errors.iter().filter(|e| e.contains("`::Article` in `TallyTest`")).collect();
+    assert_eq!(refused.len(), 3, "{errors:#?}");
+}

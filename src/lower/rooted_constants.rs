@@ -215,6 +215,27 @@ mod tests {
         assert_eq!(hidden_by_namespace("Api::Report", &path(&["Article"]), &declared), None);
     }
 
+    /// A rooted constant written as a compound or multiple assignment's
+    /// target (`::Limits::TITLE ||= "x"`, `::Limits::A, ::Limits::B = 1,
+    /// 2`) is a constant path as much as a read or a plain write is: the
+    /// walk reaches it and drops its root.
+    #[test]
+    fn a_rooted_assignment_target_drops_its_root_in_every_form() {
+        let span = crate::span::Span::synthetic();
+        let value = || Expr::new(span, ExprNode::Const { path: path(&["X"]) });
+        let target = |name: &str| LValue::Const { path: path(&["", "Limits", name]) };
+        let mut op = Expr::new(span, ExprNode::OpAssign { target: target("TITLE"), op: crate::expr::OpAssignOp::OrOr, value: value() });
+        let mut multi = Expr::new(span, ExprNode::MultiAssign { targets: vec![target("A"), target("B")], value: value() });
+        for expr in [&mut op, &mut multi] {
+            unroot(expr, &mut |p, _| strip(p));
+        }
+        let ExprNode::OpAssign { target: LValue::Const { path: op_path }, .. } = &*op.node else { panic!() };
+        assert_eq!(op_path, &path(&["Limits", "TITLE"]));
+        let ExprNode::MultiAssign { targets, .. } = &*multi.node else { panic!() };
+        let paths: Vec<&Vec<Symbol>> = targets.iter().map(|t| match t { LValue::Const { path } => path, _ => panic!() }).collect();
+        assert_eq!(paths, [&path(&["Limits", "A"]), &path(&["Limits", "B"])]);
+    }
+
     #[test]
     fn an_unrooted_path_is_itself() {
         assert_eq!(const_segments(&path(&["A", "B"])), &path(&["A", "B"])[..]);
