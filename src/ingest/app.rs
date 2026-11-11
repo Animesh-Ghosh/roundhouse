@@ -5370,10 +5370,24 @@ fn read_primary_key_sends(body: &mut crate::expr::Expr) {
         && matches!(method.as_str(), "send" | "public_send" | "__send__")
         && matches!(&*recv.node, ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef)
         && let [name] = args.as_slice()
-        && matches!(&*name.node, ExprNode::Send { method, args, block: None, .. } if method.as_str() == "primary_key" && args.is_empty())
+        && let ExprNode::Send { recv: Some(class), method: key, args: key_args, block: None, .. } = &*name.node
+        && key.as_str() == "primary_key"
+        && key_args.is_empty()
+        // Only the record's own class's key: another class's (`KeySource.primary_key`) names any column.
+        && matches!(&*class.node, ExprNode::Send { recv: Some(of), method, args, block: None, .. }
+            if method.as_str() == "class" && args.is_empty() && same_read(of, recv))
     {
         *method = crate::ident::Symbol::from("id");
         args.clear();
+    }
+}
+
+fn same_read(a: &crate::expr::Expr, b: &crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    match (&*a.node, &*b.node) {
+        (ExprNode::Var { name: x, .. }, ExprNode::Var { name: y, .. }) | (ExprNode::Ivar { name: x }, ExprNode::Ivar { name: y }) => x == y,
+        (ExprNode::SelfRef, ExprNode::SelfRef) => true,
+        _ => false,
     }
 }
 

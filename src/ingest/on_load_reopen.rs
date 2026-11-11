@@ -657,9 +657,17 @@ fn load_time_statements<'pr>(prog: &ruby_prism::ProgramNode<'pr>) -> Vec<(Node<'
         })
     }
     fn walk<'pr>(stmts: Vec<Node<'pr>>, out: &mut Vec<(Node<'pr>, Vec<String>)>, in_railtie: bool, scope: &[String]) {
+        // One entry per header, as `Module.nesting` has it: `class Vendor::Railtie` nests in `Vendor::Railtie` alone.
         let inner = |path: Option<Vec<String>>| {
+            let path = path.unwrap_or_default();
+            let rooted = path.first().is_some_and(|p| p.is_empty());
+            let written = path.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join("::");
+            let full = match scope.last() {
+                Some(outer) if !rooted => format!("{outer}::{written}"),
+                _ => written,
+            };
             let mut s = scope.to_vec();
-            s.extend(path.unwrap_or_default().into_iter().filter(|p| !p.is_empty()));
+            s.push(full);
             s
         };
         for stmt in stmts {

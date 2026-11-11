@@ -179,8 +179,8 @@ pub(super) fn splice_load_hook_extended_calls(app: &mut App) {
     app.spliced_class_methods.extend(spliced_names);
 }
 
-// A bare path names what Ruby's lexical lookup finds from the hook's modules outward (`Vendor::Adapter` ahead of
-// `::Adapter`), among the classes the program defines.
+// A bare path names what Ruby's lexical lookup finds from the hook's nesting outward (`Vendor::Adapter` ahead of
+// `::Adapter` inside `module Vendor`), among the classes the program defines.
 fn resolve_hook_constants(app: &App) -> Vec<(Symbol, Vec<Symbol>)> {
     let known: HashSet<String> = app
         .library_classes
@@ -195,10 +195,9 @@ fn resolve_hook_constants(app: &App) -> Vec<(Symbol, Vec<Symbol>)> {
             let bare: Vec<Symbol> = path.iter().filter(|p| !p.as_str().is_empty()).cloned().collect();
             let found = (!rooted)
                 .then(|| {
-                    (1..=scope.len()).rev().find_map(|end| {
-                        let candidate: Vec<Symbol> = scope[..end].iter().chain(bare.iter()).cloned().collect();
-                        let text = candidate.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-                        known.contains(&text).then_some(candidate)
+                    scope.iter().rev().find_map(|entry| {
+                        let text = std::iter::once(entry.as_str()).chain(bare.iter().map(|s| s.as_str())).collect::<Vec<_>>().join("::");
+                        known.contains(&text).then(|| text.split("::").map(Symbol::from).collect::<Vec<_>>())
                     })
                 })
                 .flatten();
