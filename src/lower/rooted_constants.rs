@@ -85,22 +85,22 @@ pub(crate) fn unroot_for_target(app: &mut App, target: BuildTarget) {
             strip(path)
         })
     });
-    // TypeScript hoists a test class's own classes and constants to the
-    // test file's scope (`export class Article`, `const Article` above
-    // `TallyTest`), where a bare name reaches the test's own first: a
-    // rooted constant naming one is refused there, as one a namespace
-    // member hides is. A class declared beside the test class, at the
-    // file's top level, is the class the root names, so it hides
-    // nothing.
+    // TypeScript hoists a test file's classes and a test class's own
+    // constants to the test file's scope, each under its last segment
+    // (`export class Article` for `Models::Article`, `const Article`
+    // above `TallyTest`), where a bare name reaches that declaration
+    // first: a rooted constant naming one is refused there, as one a
+    // namespace member hides is. An unqualified class declared at the
+    // file's top level is the class the root names, so it hides nothing.
     if matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker) {
         for tm in &mut app.test_modules {
             let hoisted: Vec<String> = tm
                 .inner_classes
                 .iter()
-                .filter(|c| tm.body_classes.contains(&c.name))
-                .flat_map(|c| {
+                .filter_map(|c| {
                     let name = c.name.0.as_str().trim_start_matches("::");
-                    [name.split("::").next().unwrap_or(name).to_string(), name.rsplit("::").next().unwrap_or(name).to_string()]
+                    let declared = name.rsplit("::").next().unwrap_or(name);
+                    (tm.body_classes.contains(&c.name) || declared != name).then(|| declared.to_string())
                 })
                 .chain(tm.constants.iter().map(|(name, _)| name.as_str().to_string()))
                 .collect();
@@ -127,29 +127,8 @@ pub(crate) fn unroot_for_target(app: &mut App, target: BuildTarget) {
                     strip(path)
                 })
             };
-            if let Some(setup) = &mut tm.setup {
-                check(setup);
-            }
-            for t in &mut tm.tests {
-                check(&mut t.body);
-            }
-            for h in &mut tm.helpers {
-                check(&mut h.body);
-                for default in h.params.iter_mut().filter_map(|p| p.default.as_mut()) {
-                    check(default);
-                }
-            }
-            for (_, value) in &mut tm.constants {
-                check(value);
-            }
-            for class in &mut tm.inner_classes {
-                for m in &mut class.methods {
-                    check(&mut m.body);
-                    for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
-                        check(default);
-                    }
-                }
-            }
+            // The same bodies the strip walk below reaches in a test module.
+            crate::lower::for_each_test_module_body(tm, &mut check);
         }
     }
     // Every other root the target emits: views, tests, fixtures' ERB
@@ -179,7 +158,16 @@ fn unroot(expr: &mut Expr, on_path: &mut impl FnMut(&mut Vec<Symbol>, crate::spa
     let span = expr.span;
     match &mut *expr.node {
         ExprNode::Const { path } => on_path(path, span),
-        ExprNode::Assign { target: LValue::Const { path }, .. } => on_path(path, span),
+        ExprNode::Assign { target: LValue::Const { path }, .. } | ExprNode::OpAssign { target: LValue::Const { path }, .. } => {
+            on_path(path, span)
+        }
+        ExprNode::MultiAssign { targets, .. } => {
+            for target in targets {
+                if let LValue::Const { path } = target {
+                    on_path(path, span);
+                }
+            }
+        }
         _ => {}
     }
     expr.node.for_each_child_mut(&mut |child| unroot(child, on_path));
