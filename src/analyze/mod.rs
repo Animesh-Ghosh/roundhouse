@@ -147,11 +147,10 @@ pub struct Analyzer {
     /// The classes that pass left a `p ||= v` untyped in: the first
     /// fixpoint round retypes them whatever else moved.
     unseen_or_assign_classes: std::sync::Mutex<crate::det::HashSet<ClassId>>,
-    /// Per method name, the fewest positional arguments a call by that
-    /// name in the app's tests passes. Those calls are callers too, and
-    /// the unification reads only the ones that reach a test helper, so
-    /// `defaulted` reads them here.
-    test_call_arities: HashMap<Symbol, usize>,
+    /// Per method name, what the calls by that name in the app's tests
+    /// pass. Those calls are callers too, and the unification reads only
+    /// the ones that reach a test helper, so `defaulted` reads them here.
+    test_call_arities: HashMap<Symbol, TestCalls>,
     /// (class, method) pairs an author wrote a signature for, as opposed
     /// to a `Fn` the registry stamped from the def itself. Only in the
     /// first is an `untyped` slot a statement rather than an inference
@@ -2317,7 +2316,7 @@ impl Analyzer {
                         let ty = if p.rest {
                             rest_element(inferred.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default())
                         } else {
-                            param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p.default.as_ref(), self.defaulted(&key, i))
+                            param_ty_with_default(inferred.and_then(|v| v.get(i)).cloned(), p.default.as_ref(), self.defaulted(&key, i, param_keyword(p)))
                                 .unwrap_or(Ty::Untyped)
                                 .subst_self(&owner_ty)
                         };
@@ -5252,7 +5251,7 @@ impl Analyzer {
                 let elem = rest_element(observed.map(|v| v.get(i..).unwrap_or_default()).unwrap_or_default());
                 Some(Ty::Array { elem: std::sync::Arc::new(elem) })
             } else {
-                param_ty_with_default(observed.and_then(|v| v.get(i)).cloned(), param.default.as_ref(), self.defaulted(&key, i))
+                param_ty_with_default(observed.and_then(|v| v.get(i)).cloned(), param.default.as_ref(), self.defaulted(&key, i, param_keyword(param)))
             };
             let ty = prefer_declared(
                 self.declared_param_ty(class_id, &method.name, positional, &param.name),
@@ -5426,7 +5425,7 @@ impl Analyzer {
                 continue;
             }
             let slot = required + j;
-            let defaulted = keys.iter().any(|k| self.defaulted(k, slot));
+            let defaulted = keys.iter().any(|k| self.defaulted(k, slot, None));
             if let Some(ty) = param_ty_with_default(observed(slot), Some(&*default), defaulted) {
                 ctx.local_bindings.insert(name.clone(), ty);
             }
@@ -8940,8 +8939,10 @@ impl Analyzer {
     /// A call in a test counts by its method's name alone: the
     /// production rounds decide this before any test is typed, and a
     /// test receiver left untyped would otherwise hide the call.
-    fn defaulted(&self, key: &ParamKey, i: usize) -> bool {
-        if self.test_call_arities.get(&key.1).is_some_and(|&passed| i >= passed) {
+    /// `keyword` names the slot when a call fills it by name: a test call
+    /// leaves it out by not naming it, not by its positional count.
+    fn defaulted(&self, key: &ParamKey, i: usize, keyword: Option<&Symbol>) -> bool {
+        if self.test_call_arities.get(&key.1).is_some_and(|calls| calls.leave(i, keyword)) {
             return true;
         }
         let defaulted = self.defaulted_param_slots.lock().unwrap_or_else(|e| e.into_inner());
@@ -10139,27 +10140,95 @@ fn prefer_declared(declared: Option<Ty>, observed: Option<Ty>) -> Option<Ty> {
     }
 }
 
-/// Per method name, the fewest positional arguments any call in the
-/// app's tests passes. A splat, or the name written as a symbol
-/// (`send(:add, …)`, `method(:add)`), counts as none passed. By name
-/// alone: a call whose receiver is another class only keeps a default
-/// that could have been dropped.
-fn test_call_arities(app: &App) -> HashMap<Symbol, usize> {
-    fn walk(e: &Expr, out: &mut HashMap<Symbol, usize>) {
-        let mut note = |name: &Symbol, passed: usize| {
-            let slot = out.entry(name.clone()).or_insert(passed);
-            *slot = (*slot).min(passed);
-        };
-        match &*e.node {
-            ExprNode::Send { method, args, .. } => {
-                let passed = if args.iter().any(|a| matches!(&*a.node, ExprNode::Splat { .. } | ExprNode::ForwardArgs)) {
-                    0
-                } else {
-                    args.iter().filter(|a| !matches!(&*a.node, ExprNode::Hash { kwargs: true, .. } | ExprNode::KeywordSplat { .. })).count()
-                };
-                note(method, passed);
+/// What the calls by one method name in the app's tests pass: the
+/// fewest positional arguments, and the keywords every one of them
+/// names. By name alone: a call whose receiver is another class only
+/// keeps a default that could have been dropped.
+#[derive(Debug)]
+struct TestCalls {
+    positional: usize,
+    keywords: crate::det::HashSet<Symbol>,
+}
+
+impl TestCalls {
+    /// Whether some call may leave slot `i` (named `keyword`, if a call
+    /// fills it by name) to its default.
+    fn leave(&self, i: usize, keyword: Option<&Symbol>) -> bool {
+        match keyword {
+            Some(name) => !self.keywords.contains(name),
+            None => i >= self.positional,
+        }
+    }
+}
+
+/// The name a call fills `param` by, if it is a keyword, or one ingest
+/// flattened into a positional (`Param::from_keyword`).
+fn param_keyword(param: &crate::dialect::Param) -> Option<&Symbol> {
+    (param.keyword || param.from_keyword).then_some(&param.name)
+}
+
+/// [`TestCalls`] per method name, from every test body. A splat, `...`,
+/// `**`, or the name written as a symbol (`send(:add, …)`,
+/// `method(:add)`) counts as passing no positional argument and naming
+/// no keyword.
+fn test_call_arities(app: &App) -> HashMap<Symbol, TestCalls> {
+    fn note(out: &mut HashMap<Symbol, TestCalls>, name: &Symbol, positional: usize, keywords: crate::det::HashSet<Symbol>) {
+        match out.get_mut(name) {
+            Some(calls) => {
+                calls.positional = calls.positional.min(positional);
+                calls.keywords.retain(|k| keywords.contains(k));
             }
-            ExprNode::Lit { value: Literal::Sym { value } } | ExprNode::MethodRef { name: value, .. } => note(value, 0),
+            None => {
+                out.insert(name.clone(), TestCalls { positional, keywords });
+            }
+        }
+    }
+    fn walk(e: &Expr, out: &mut HashMap<Symbol, TestCalls>) {
+        match &*e.node {
+            ExprNode::Send { recv, method, args, block, .. } => {
+                let opaque = args.iter().any(|a| matches!(&*a.node,
+                    ExprNode::Splat { .. } | ExprNode::ForwardArgs | ExprNode::ForwardKeywords
+                        | ExprNode::ForwardKeywordsWithPairs { .. } | ExprNode::KeywordSplat { .. }));
+                let mut positional = 0;
+                let mut keywords = crate::det::HashSet::default();
+                let mut named = true;
+                for arg in args {
+                    match &*arg.node {
+                        ExprNode::Hash { entries, kwargs: true } => {
+                            for (key, value) in entries {
+                                match &*key.node {
+                                    ExprNode::Lit { value: Literal::Sym { value: k } } => {
+                                        keywords.insert(k.clone());
+                                    }
+                                    _ => named = false,
+                                }
+                                // The key is the keyword, not a mention of a method.
+                                walk(value, out);
+                            }
+                        }
+                        ExprNode::KeywordSplat { .. } | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. } => walk(arg, out),
+                        _ => {
+                            positional += 1;
+                            walk(arg, out);
+                        }
+                    }
+                }
+                if opaque || !named {
+                    positional = if opaque { 0 } else { positional };
+                    keywords.clear();
+                }
+                note(out, method, positional, keywords);
+                if let Some(recv) = recv {
+                    walk(recv, out);
+                }
+                if let Some(block) = block {
+                    walk(block, out);
+                }
+                return;
+            }
+            ExprNode::Lit { value: Literal::Sym { value } } | ExprNode::MethodRef { name: value, .. } => {
+                note(out, value, 0, Default::default());
+            }
             _ => {}
         }
         e.node.for_each_child(&mut |c| walk(c, out));

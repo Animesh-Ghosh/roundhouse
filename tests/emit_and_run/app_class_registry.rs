@@ -21,6 +21,21 @@ fn an_app_class_registry_types_for_spinel() {
     assert!(errors.is_empty(), "{errors:#?}");
 }
 
+/// A test that passes `kind` by name leaves no slot to the default, so
+/// `Class.new` stays dead for Spinel.
+#[test]
+fn a_keyword_a_test_passes_by_name_types_for_spinel() {
+    let (_emitted, errors) = contract::model_keyword_method().emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+}
+
+#[test]
+fn a_keyword_registry_runs() {
+    let run = contract::model_keyword_method().run_ruby(contract::KEYWORD_SCRIPT);
+    run.assert_passes();
+    assert_eq!(run.stdout, contract::EXPECTED, "stderr:\n{}", run.stderr);
+}
+
 #[test]
 fn an_app_instance_registry_runs() {
     let run = contract::model_instance_methods().run_ruby(contract::REQUEST_SCRIPT);

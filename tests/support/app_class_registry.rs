@@ -75,6 +75,43 @@ const CLASS_REGISTRY: &str = r##"class KindRegistry
 end
 "##;
 
+/// `add` with `kind` a keyword, fed by an initializer, and a test that
+/// passes it by name. A call that names the keyword does not leave it
+/// to its default, however few positional arguments it passes, so
+/// `Class.new` stays dead.
+pub fn model_keyword_method() -> super::emit_and_run::Overlay {
+    with_kinds()
+        .write("app/models/kind_registry.rb", KEYWORD_REGISTRY)
+        .write(
+            "config/initializers/kind_registry.rb",
+            "KindRegistry.add(:plain, kind: PlainKind)\nKindRegistry.add(:fancy, kind: FancyKind)\n",
+        )
+        .write("test/models/kind_registry_test.rb", KEYWORD_TEST)
+}
+
+const KEYWORD_REGISTRY: &str = r##"class KindRegistry
+  def self.add(label, kind: nil)
+    kind ||= Class.new(KindBase)
+    raise "#{label} cannot run" unless kind.method_defined?(:run)
+    kind.new.run
+  end
+end
+"##;
+
+const KEYWORD_TEST: &str = r##"require "test_helper"
+
+class KindRegistryTest < ActiveSupport::TestCase
+  test "a kind passed by name runs" do
+    assert_equal "plain", KindRegistry.add(:plain, kind: PlainKind)
+  end
+end
+"##;
+
+pub const KEYWORD_SCRIPT: &str = r##"
+puts KindRegistry.add(:plain, kind: PlainKind)
+puts KindRegistry.add(:fancy, kind: FancyKind)
+"##;
+
 pub const CLASS_SCRIPT: &str = r##"
 puts KindRegistry.refresh(:plain)
 puts KindRegistry.refresh(:fancy)

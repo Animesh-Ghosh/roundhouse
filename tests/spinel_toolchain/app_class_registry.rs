@@ -26,3 +26,11 @@ fn a_controller_helper_registry_runs_natively() {
     run.assert_passes();
     assert_eq!(run.stdout, contract::ACTION_EXPECTED, "stderr:\n{}", run.stderr);
 }
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn a_keyword_registry_runs_natively() {
+    let run = contract::model_keyword_method().run_spinel(contract::KEYWORD_SCRIPT);
+    run.assert_passes();
+    assert_eq!(run.stdout, contract::EXPECTED, "stderr:\n{}", run.stderr);
+}
