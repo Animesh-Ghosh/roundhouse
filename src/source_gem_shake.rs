@@ -1805,16 +1805,27 @@ mod tests {
 }
 
 /// The gem classes defined only in files whose program requires, at its top, a feature no gem of the lockfile, no
-/// standard library and no framework part provides.
+/// standard library and no framework part provides. Conservative: any sign the feature loads counts as provided.
 fn unloadable_classes(app: &App, names: &HashSet<String>) -> HashSet<String> {
     let Some(lock) = app.gem_lock.as_ref() else { return HashSet::default() };
+    let carried = |feature: &str| {
+        // Not any file of the name: a require resolves against a load path, a gem's `lib/` (orm_adapter's own `adapters/mongoid.rb` is no `mongoid`).
+        let tail = format!("/lib/{feature}.rb");
+        app.sources.iter().any(|f| f.path.ends_with(&tail))
+    };
     let provided = |feature: &str| {
         let root = feature.split('/').next().unwrap_or(feature);
+        let stdlib = |name: &str| matches!(crate::gems::fate_of(name), crate::gems::GemFate::Stdlib);
+        // Not the gem name alone: a gem may provide a feature of another root (`concurrent-ruby`'s `concurrent`).
+        let gem_named = lock.specs.iter().any(|(gem, _)| {
+            let gem = gem.as_str();
+            gem == root || gem.replace('-', "_") == root || gem.replace('-', "") == root || gem.starts_with(&format!("{root}-")) || gem.starts_with(&format!("{root}_"))
+        });
         crate::project::is_framework_feature(feature)
-            || lock.has(root)
-            || lock.has(&root.replace('_', "-"))
-            || lock.has(&root.replace('_', ""))
-            || matches!(crate::gems::fate_of(root), crate::gems::GemFate::Stdlib)
+            || gem_named
+            || stdlib(root)
+            || stdlib(&feature.replace('/', "-"))
+            || carried(feature)
     };
     let missing: HashSet<String> = app
         .file_programs
@@ -1827,16 +1838,16 @@ fn unloadable_classes(app: &App, names: &HashSet<String>) -> HashSet<String> {
     if missing.is_empty() {
         return HashSet::default();
     }
-    let mut out = HashSet::default();
+    // Not one entry of a name: a class reopened in a file that loads exists, whatever another file of it requires.
+    let mut by_name: HashMap<&str, bool> = HashMap::default();
     for c in app.library_classes.iter().filter(|c| names.contains(c.name.0.as_str())) {
         let files: Vec<&str> = std::iter::once(c.parent_span.file)
             .chain(c.methods.iter().map(|m| m.body.span.file))
             .filter(|f| f.0 != 0)
             .filter_map(|f| app.source_path(f))
             .collect();
-        if !files.is_empty() && files.iter().all(|f| missing.contains(*f)) {
-            out.insert(c.name.0.to_string());
-        }
+        let only_missing = !files.is_empty() && files.iter().all(|f| missing.contains(*f));
+        by_name.entry(c.name.0.as_str()).and_modify(|all| *all &= only_missing).or_insert(only_missing);
     }
-    out
+    by_name.into_iter().filter(|(_, all)| *all).map(|(name, _)| name.to_string()).collect()
 }
