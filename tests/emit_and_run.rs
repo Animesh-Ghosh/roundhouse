@@ -25,6 +25,8 @@ mod controller_content_type_writer;
 mod time_change_usec_contract;
 #[path = "emit_and_run/time_change_usec.rs"]
 mod time_change_usec;
+#[path = "emit_and_run/controller_constant_rooting.rs"]
+mod controller_constant_rooting;
 #[path = "emit_and_run/rate_limits.rs"]
 mod rate_limits;
 #[path = "emit_and_run/config_for.rs"]
