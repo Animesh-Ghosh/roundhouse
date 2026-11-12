@@ -214,21 +214,46 @@ fn typescript_refuses_a_top_level_constant_a_test_constant_hides() {
     assert_eq!(refused.len(), 1, "{errors:#?}");
 }
 
+/// A test file that declares `Widget` at its top level, beside the test
+/// class, and reads it as `::Widget` from a test.
+fn helper_class_app() -> emit_and_run::Overlay {
+    app("").write(
+        "test/models/tally_test.rb",
+        "require \"test_helper\"\n\nclass Widget\n  def self.n\n    3\n  end\nend\n\nclass TallyTest < ActiveSupport::TestCase\n  test \"reads the helper\" do\n    assert_equal 3, ::Widget.n\n  end\nend\n",
+    )
+}
+
+/// The Ruby answer for [`helper_class_app`]'s test: `::Widget` is the
+/// file's own top-level class.
+#[test]
+fn a_top_level_helper_class_test_passes() {
+    helper_class_app().run_test("test/models/tally_test.rb").assert_passes();
+}
+
 /// A class declared at the test file's top level, beside the test class,
 /// is the top-level class `::Widget` names: TypeScript writes it at the
 /// same file scope, where a bare `Widget` still names it. The constant
 /// is written bare, not refused.
 #[test]
 fn typescript_writes_a_top_level_helper_class_bare() {
-    let (emitted, errors) = app("")
-        .write(
-            "test/models/tally_test.rb",
-            "require \"test_helper\"\n\nclass Widget\n  def self.n\n    3\n  end\nend\n\nclass TallyTest < ActiveSupport::TestCase\n  test \"reads the helper\" do\n    assert_equal 3, ::Widget.n\n  end\nend\n",
-        )
-        .emit(BuildTarget::Typescript);
-    assert!(!errors.iter().any(|e| e.contains("::Widget")), "{errors:#?}");
+    let (emitted, errors) = helper_class_app().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:#?}");
     let test = std::fs::read_to_string(emitted.join("test/tally.test.ts")).unwrap();
     assert!(test.contains("Widget.n()"), "{test}");
+}
+
+/// The same test, translated to TypeScript, run under the emitted
+/// project's own `npm test`.
+#[test]
+#[ignore = "requires Node; installs and runs an emitted app"]
+fn a_top_level_helper_class_test_runs_on_typescript() {
+    let (emitted, errors) = helper_class_app().emit(BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:#?}");
+    for args in [&["install", "--silent", "--no-audit", "--no-fund"][..], &["test"][..]] {
+        let output = std::process::Command::new("npm").args(args).current_dir(&*emitted).output().expect("run npm");
+        assert!(output.status.success(), "npm {args:?} in {}\n{}\n{}", emitted.display(),
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
 }
 
 /// A parameter default reads its constants where the method is
