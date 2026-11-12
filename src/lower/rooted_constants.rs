@@ -52,8 +52,6 @@ pub(crate) fn unroot_for_target(app: &mut App, target: BuildTarget) {
     if !drops_the_root(target) {
         return;
     }
-    let declared: Vec<String> = app.library_classes.iter().map(|c| c.name.0.as_str().to_string()).collect();
-    let declared: Vec<&str> = declared.iter().map(String::as_str).collect();
     // The classes TypeScript declares inside a namespace block; every
     // other class (a model, a controller) is a module-level declaration.
     let namespaced: Vec<String> = match target {
@@ -65,6 +63,10 @@ pub(crate) fn unroot_for_target(app: &mut App, target: BuildTarget) {
             .collect(),
         _ => Vec::new(),
     };
+    // What a bare name reaches first inside a namespace block: only the
+    // classes declared in one. A module or an origin-carrying class named
+    // under the namespace is emitted on its own, outside it.
+    let declared: Vec<&str> = namespaced.iter().map(String::as_str).collect();
     crate::lower::for_each_owned_hook_body(app, &mut |owner, expr| {
         let owner = owner.map(|o| o.0.as_str()).filter(|o| namespaced.iter().any(|n| n == o));
         unroot(expr, &mut |path, span| {
