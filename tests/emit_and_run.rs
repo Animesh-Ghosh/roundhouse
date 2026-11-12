@@ -424,6 +424,10 @@ mod class_side_default;
 mod hash_write_through_reader_contract;
 #[path = "emit_and_run/hash_write_through_reader.rs"]
 mod hash_write_through_reader;
+#[path = "support/app_class_registry.rs"]
+mod app_class_registry_contract;
+#[path = "emit_and_run/app_class_registry.rs"]
+mod app_class_registry;
 #[path = "emit_and_run/helper_anonymous_rest.rs"]
 mod helper_anonymous_rest;
 #[path = "emit_and_run/controller_response_body.rs"]
@@ -22162,3 +22166,5 @@ mod library_concern_included_include_contract;
 mod library_concern_included_include;
 #[path = "emit_and_run/param_default_constant_rooting.rs"]
 mod param_default_constant_rooting;
+#[path = "emit_and_run/serializable_resource_as_json.rs"]
+mod serializable_resource_as_json;
