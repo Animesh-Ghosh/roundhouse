@@ -293,3 +293,19 @@ fn typescript_refuses_a_hidden_top_level_constant_in_a_test_class_body() {
     let refused: Vec<&String> = errors.iter().filter(|e| e.contains("`::Article` in `TallyTest`")).collect();
     assert_eq!(refused.len(), 3, "{errors:#?}");
 }
+
+/// A module named under the namespace (`module Api::Article` beside the
+/// top-level `Article` model) isn't declared inside `export namespace
+/// Api`: TypeScript emits it in a file of its own. In `Api::Report` the
+/// bare `Article` reads the imported top-level model, so `::Article`
+/// there is written bare, not refused.
+#[test]
+fn typescript_writes_bare_a_constant_only_a_namespace_module_shares() {
+    let (emitted, errors) = app("")
+        .write("app/models/api/article.rb", "module Api\n  module Article\n    def self.label\n      \"api\"\n    end\n  end\nend\n")
+        .write("app/models/api/report.rb", "module Api\n  class Report\n    def self.total\n      ::Article.count\n    end\n  end\nend\n")
+        .emit(BuildTarget::Typescript);
+    assert!(!errors.iter().any(|e| e.contains("::Article")), "{errors:#?}");
+    let api = std::fs::read_to_string(emitted.join("app/models/api.ts")).unwrap();
+    assert!(api.contains("return Article.count();") && api.contains("import { Article } from \"./article.js\""), "{api}");
+}
