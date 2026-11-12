@@ -3554,6 +3554,11 @@ fn target_files_inner(
     for d in crate::lower::validations::acceptance_gaps_for_target(app, target) {
         emit::diagnostics::push(d);
     }
+    // `presence:` on a NOT NULL number with no default, which a strict
+    // target's zero-started field cannot see as unset.
+    for d in crate::lower::validations::presence_gaps_for_target(app, target) {
+        emit::diagnostics::push(d);
+    }
     for d in crate::lower::relation_residue::default_scope_gaps_for_target(app, target) {
         emit::diagnostics::push(d);
     }
