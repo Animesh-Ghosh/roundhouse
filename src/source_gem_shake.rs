@@ -1824,7 +1824,7 @@ fn unloadable_classes(app: &App, names: &HashSet<String>) -> HashSet<String> {
             let gem = gem.as_str();
             gem == root || gem.replace('-', "_") == root || gem.replace('-', "") == root || gem.starts_with(&format!("{root}-")) || gem.starts_with(&format!("{root}_"))
         });
-        crate::project::is_framework_feature(feature)
+        crate::gems::is_framework_feature(feature)
             || gem_named
             || stdlib(root)
             || stdlib(feature)
